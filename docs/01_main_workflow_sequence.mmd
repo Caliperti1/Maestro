@@ -1,0 +1,72 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant UI as Maestro Web UI / Mobile Browser
+    participant API as FastAPI Backend
+    participant Auth as Auth / Session Guard
+    participant Maestro as Maestro Orchestrator
+    participant Workflow as Maestro-Level Workflow<br/>(Daily Standup / Ideas / Status)
+    participant Registry as Agent Registry
+    participant Queue as Task Queue
+    participant Agent as Domain Agent Service
+    participant Tools as External Tools<br/>(Gmail, Calendar, GitHub, ClickUp, Web)
+    participant Mem as Memory Service<br/>(Global, Domain, Agent)
+    participant Curator as Memory Curator
+    participant DB as Postgres
+    participant Reports as Report Store
+
+    User->>UI: Submit request to Maestro or selected agent
+    UI->>API: POST /chat or /tasks
+    API->>Auth: Validate user/session/domain access
+    Auth-->>API: Authorized
+    API->>Maestro: Create intent envelope
+    Maestro->>Mem: Read relevant global + domain memory
+    Mem->>DB: Query memories, summaries, policies, recent tasks
+    DB-->>Mem: Context bundle
+    Mem-->>Maestro: Scoped context
+    Maestro->>Maestro: Decide direct answer, domain task, or Maestro-level workflow
+
+    alt Maestro-level workflow
+        Maestro->>Workflow: Start parent workflow task
+        Workflow->>Registry: Identify domain brief agents and tools
+        Registry-->>Workflow: Agent capabilities + tool permissions
+        Workflow->>Workflow: Plan subordinate domain task(s)
+    else Direct domain task
+        Maestro->>Registry: Identify candidate agents and tools
+        Registry-->>Maestro: Agent capabilities + tool permissions
+        Maestro->>Maestro: Plan task(s), decide agent routing
+    end
+
+    alt Single-agent task
+        Maestro->>Queue: Enqueue task for selected agent
+    else Multi-agent task
+        Maestro->>Queue: Enqueue tasks for multiple domain agents
+    end
+
+    Queue->>Agent: Dispatch task with scoped context
+    Agent->>Mem: Read domain + agent memory
+    Mem-->>Agent: Prior work, constraints, standing instructions
+    Agent->>Tools: Execute approved tool calls
+    Tools-->>Agent: Tool results
+    Agent->>Agent: Analyze and produce structured report
+    Agent->>Reports: Save report artifact
+    Agent->>Mem: Write agent log + memory proposal
+    Mem->>DB: Persist task log, report ref, memory proposal
+    Mem->>Curator: Submit memory proposal + source refs
+    Curator->>Curator: Classify impact and extract durable memory
+    alt Low-impact memory
+        Curator->>Mem: Write canonical memory
+        Mem->>DB: Persist canonical memory + provenance links
+    else Very high-impact memory
+        Curator->>DB: Queue approval request
+    end
+    Agent-->>Queue: Task complete
+
+    Queue-->>Maestro: Return agent report(s)
+    Maestro->>Maestro: Synthesize cross-agent result
+    Maestro->>Mem: Write synthesis log + memory proposal if needed
+    Mem->>Curator: Submit synthesis memory proposal
+    Maestro->>Reports: Save synthesis report
+    Maestro-->>API: Final answer + report references + task status
+    API-->>UI: Stream response/status updates
+    UI-->>User: Display answer, reports, agent activity

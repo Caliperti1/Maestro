@@ -1,0 +1,194 @@
+flowchart TB
+    User[User / Chris] --> Channels
+
+    subgraph Channels[Interaction Channels]
+        WebUI[Web UI]
+        Mobile[Mobile Browser]
+        CLI[CLI / Dev Console]
+        FutureVoice[Future Voice Interface]
+    end
+
+    Channels --> API[FastAPI Backend]
+    API --> Auth[Auth + Access Control]
+    API --> Maestro[Maestro Orchestrator]
+
+    subgraph Core[Core Maestro Runtime]
+        Maestro --> Router[Intent Router]
+        Maestro --> Workflows[Maestro-Level Workflows<br/>Daily Standup / Ideas / Status / Learning]
+        Router --> Planner[Task Planner]
+        Planner --> Registry[Agent Registry]
+        Planner --> Queue[Task Queue / Worker Runtime]
+        Maestro --> Synth[Synthesis Engine]
+    end
+
+    Registry --> PersonalAgents
+    Registry --> MaestroDevAgents
+    Registry --> PraxisAgents
+    Registry --> OphiAgents
+    Registry --> USMAAgents
+    Registry --> IRADAgents
+    Registry --> L3Agents
+
+    subgraph Personal[Personal Enclave]
+        PersonalMem[(Personal Domain Memory)]
+        PersonalAgents[Personal Agents]
+        EmailAgent[Email Summary Agent]
+        CalendarAgent[Calendar / Reminder Agent]
+        PersonalAgents --> EmailAgent
+        PersonalAgents --> CalendarAgent
+        EmailAgent --> EmailAgentMem[(Email Agent Memory)]
+        CalendarAgent --> CalendarAgentMem[(Calendar Agent Memory)]
+        PersonalAgents --> PersonalMem
+    end
+
+    subgraph MaestroDev[Maestro Development Enclave]
+        MaestroDevMem[(Maestro Development Memory)]
+        MaestroDevAgents[Maestro Development Agents]
+        SelfReflect[Self-Reflection Agent]
+        MaestroCTO[Maestro CTO / GitHub Agent]
+        CodexAgent[Codex Handoff Agent]
+        MaestroDevAgents --> SelfReflect
+        MaestroDevAgents --> MaestroCTO
+        MaestroDevAgents --> CodexAgent
+        SelfReflect --> SelfReflectMem[(Self-Reflection Agent Memory)]
+        MaestroCTO --> MaestroCTOMem[(Maestro CTO Agent Memory)]
+        CodexAgent --> CodexAgentMem[(Codex Handoff Agent Memory)]
+        MaestroDevAgents --> MaestroDevMem
+    end
+
+    subgraph Praxis[Praxis Enclave]
+        PraxisMem[(Praxis Domain Memory)]
+        PraxisAgents[Praxis Agents]
+        PraxisCTO[Praxis CTO / GitHub Agent]
+        PraxisCGO[Praxis CGO / CRM Agent]
+        PraxisMarket[Praxis Market Research Agent]
+        PraxisAgents --> PraxisCTO
+        PraxisAgents --> PraxisCGO
+        PraxisAgents --> PraxisMarket
+        PraxisCTO --> PraxisCTOMem[(Praxis CTO Agent Memory)]
+        PraxisCGO --> PraxisCGOMem[(Praxis CGO Agent Memory)]
+        PraxisMarket --> PraxisMarketMem[(Praxis Market Agent Memory)]
+        PraxisAgents --> PraxisMem
+    end
+
+    subgraph Ophi[Ophi Enclave]
+        OphiMem[(Ophi Domain Memory)]
+        OphiAgents[Ophi Agents]
+        OphiCTO[Ophi CTO / Product Agent]
+        OphiMarket[Ophi Market Research Agent]
+        OphiTech[Technical Research / SOTA Agent]
+        OphiAgents --> OphiCTO
+        OphiAgents --> OphiMarket
+        OphiAgents --> OphiTech
+        OphiCTO --> OphiCTOMem[(Ophi CTO Agent Memory)]
+        OphiMarket --> OphiMarketMem[(Ophi Market Agent Memory)]
+        OphiTech --> OphiTechMem[(Ophi Technical Research Agent Memory)]
+        OphiAgents --> OphiMem
+    end
+
+    subgraph USMA[USMA Enclave]
+        USMAMem[(USMA Domain Memory)]
+        USMAAgents[USMA Agents]
+        Teaching[Teaching / Course Prep Agent]
+        Admin[Admin / Calendar Agent]
+        USMAAgents --> Teaching
+        USMAAgents --> Admin
+        Teaching --> TeachingMem[(Teaching Agent Memory)]
+        Admin --> AdminMem[(Admin Agent Memory)]
+        USMAAgents --> USMAMem
+    end
+
+    subgraph IRAD[Personal IRAD Projects Enclave]
+        IRADMem[(Personal IRAD Domain Memory)]
+        IRADAgents[IRAD Agents]
+        ProjectAgent[Project Scaffolding Agent]
+        BuildPlanAgent[Build Plan Agent]
+        IRADAgents --> ProjectAgent
+        IRADAgents --> BuildPlanAgent
+        ProjectAgent --> ProjectAgentMem[(Project Agent Memory)]
+        BuildPlanAgent --> BuildPlanMem[(Build Plan Agent Memory)]
+        IRADAgents --> IRADMem
+    end
+
+    subgraph L3[L3 Enclave]
+        L3Mem[(L3 Domain Memory)]
+        L3Agents[L3 Agents]
+        L3General[L3 General Agent]
+        L3Agents --> L3General
+        L3General --> L3GeneralMem[(L3 Agent Memory)]
+        L3Agents --> L3Mem
+    end
+
+    Queue --> PersonalAgents
+    Queue --> MaestroDevAgents
+    Queue --> PraxisAgents
+    Queue --> OphiAgents
+    Queue --> USMAAgents
+    Queue --> IRADAgents
+    Queue --> L3Agents
+
+    subgraph Memory[Memory + Persistence]
+        GlobalMem[(Global Maestro Memory)]
+        MaestroSession[(Maestro Session Memory)]
+        DB[(Postgres)]
+        Vector[(Vector Index Optional)]
+        Artifacts[(Reports + Artifacts Store)]
+        Proposals[(Memory Proposals)]
+        Curator[Memory Curator]
+        Approvals[(High-Impact Approval Queue)]
+    end
+
+    Maestro --> GlobalMem
+    Maestro --> MaestroSession
+    Synth --> GlobalMem
+    Synth --> Proposals
+    Proposals --> Curator
+    Curator --> GlobalMem
+    Curator --> PersonalMem
+    Curator --> MaestroDevMem
+    Curator --> PraxisMem
+    Curator --> OphiMem
+    Curator --> USMAMem
+    Curator --> IRADMem
+    Curator --> L3Mem
+    Curator --> Approvals
+    PersonalMem --> DB
+    MaestroDevMem --> DB
+    PraxisMem --> DB
+    OphiMem --> DB
+    USMAMem --> DB
+    IRADMem --> DB
+    L3Mem --> DB
+    GlobalMem --> DB
+    MaestroSession --> DB
+    Proposals --> DB
+    Approvals --> DB
+    DB --> Vector
+    Reports[Report Service] --> Artifacts
+
+    subgraph Tools[External Tool Integrations]
+        Gmail[Gmail]
+        GCal[Google Calendar]
+        GitHub[GitHub]
+        Codex[Codex]
+        ClickUp[ClickUp CRM]
+        WebSearch[Web Search / Research APIs]
+        LocalFiles[Local File Library]
+    end
+
+    PersonalAgents --> Gmail
+    PersonalAgents --> GCal
+    MaestroDevAgents --> GitHub
+    MaestroDevAgents --> Codex
+    MaestroDevAgents --> WebSearch
+    PraxisCTO --> GitHub
+    PraxisCGO --> ClickUp
+    PraxisMarket --> WebSearch
+    OphiCTO --> GitHub
+    OphiMarket --> WebSearch
+    OphiTech --> WebSearch
+    USMAAgents --> GCal
+    USMAAgents --> LocalFiles
+    IRADAgents --> GitHub
+    IRADAgents --> Codex
+    L3Agents --> LocalFiles

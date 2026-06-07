@@ -1,0 +1,237 @@
+erDiagram
+    USERS {
+        uuid id PK
+        string email
+        string display_name
+        string role
+        boolean is_active
+        datetime created_at
+        datetime updated_at
+    }
+
+    DOMAINS {
+        uuid id PK
+        string key UK
+        string name
+        text description
+        boolean is_active
+        datetime created_at
+        datetime updated_at
+    }
+
+    AGENTS {
+        uuid id PK
+        uuid domain_id FK
+        string key UK
+        string name
+        string agent_type
+        text description
+        json capabilities
+        json tool_permissions
+        boolean is_active
+        datetime created_at
+        datetime updated_at
+    }
+
+    CONVERSATIONS {
+        uuid id PK
+        uuid user_id FK
+        uuid domain_id FK
+        uuid agent_id FK "nullable: direct agent chat"
+        string title
+        datetime created_at
+        datetime updated_at
+    }
+
+    MESSAGES {
+        uuid id PK
+        uuid conversation_id FK
+        string sender_type "user|maestro|agent|system|tool"
+        uuid agent_id FK "nullable"
+        text content
+        json metadata
+        datetime created_at
+    }
+
+    TASKS {
+        uuid id PK
+        uuid parent_task_id FK "nullable: workflow parent/child"
+        uuid conversation_id FK
+        uuid domain_id FK
+        uuid requested_by_user_id FK
+        uuid assigned_agent_id FK
+        string status "queued|running|complete|failed|cancelled"
+        string priority
+        string source_type "chat|schedule|workflow|system"
+        string workflow_key "nullable"
+        text objective
+        json input_payload
+        json output_payload
+        text error_message
+        datetime started_at
+        datetime completed_at
+        datetime created_at
+        datetime updated_at
+    }
+
+    REPORTS {
+        uuid id PK
+        uuid task_id FK
+        uuid domain_id FK
+        uuid agent_id FK
+        string title
+        string report_type
+        text summary
+        text body_markdown
+        json structured_data
+        datetime created_at
+        datetime updated_at
+    }
+
+    MEMORY_ITEMS {
+        uuid id PK
+        uuid domain_id FK "nullable for global memory"
+        uuid agent_id FK "nullable for domain/global memory"
+        uuid created_from_proposal_id FK
+        string scope "global|maestro_session|domain|agent"
+        string memory_type "profile|standing_instruction|fact|summary|decision|preference|entity|relationship|project|source_summary"
+        string title
+        text content
+        json metadata
+        float importance
+        string impact_level "low|medium|high|very_high"
+        datetime valid_from
+        datetime valid_until
+        datetime created_at
+        datetime updated_at
+    }
+
+    MEMORY_PROPOSALS {
+        uuid id PK
+        uuid domain_id FK "nullable for global/session memory"
+        uuid agent_id FK "nullable"
+        uuid task_id FK "nullable"
+        uuid report_id FK "nullable"
+        string scope "global|maestro_session|domain|agent"
+        string memory_type
+        string title
+        text content
+        text rationale
+        string impact_level "low|medium|high|very_high"
+        string status "proposed|auto_approved|needs_approval|approved|rejected|superseded"
+        json source_refs
+        json metadata
+        datetime reviewed_at
+        datetime created_at
+        datetime updated_at
+    }
+
+    MEMORY_LINKS {
+        uuid id PK
+        uuid source_memory_id FK
+        uuid target_memory_id FK
+        string relation_type
+        json metadata
+        datetime created_at
+    }
+
+    TOOL_CONNECTIONS {
+        uuid id PK
+        uuid domain_id FK
+        string tool_key
+        string display_name
+        string auth_type
+        json config
+        boolean is_active
+        datetime created_at
+        datetime updated_at
+    }
+
+    TOOL_CALLS {
+        uuid id PK
+        uuid task_id FK
+        uuid agent_id FK
+        uuid tool_connection_id FK
+        string tool_name
+        json input_payload
+        json output_payload
+        string status
+        text error_message
+        datetime started_at
+        datetime completed_at
+        datetime created_at
+    }
+
+    ARTIFACTS {
+        uuid id PK
+        uuid task_id FK
+        uuid report_id FK
+        uuid seed_package_id FK "nullable"
+        string artifact_type
+        string name
+        string uri
+        string mime_type
+        json metadata
+        datetime created_at
+    }
+
+    SEED_PACKAGES {
+        uuid id PK
+        uuid domain_id FK "nullable for cross-domain package"
+        string name
+        text description
+        string source_type "chat_export|deck|doc|notes|readout|mixed"
+        string status "uploaded|processing|processed|failed"
+        json metadata
+        datetime processed_at
+        datetime created_at
+        datetime updated_at
+    }
+
+    SCHEDULED_RUNS {
+        uuid id PK
+        uuid domain_id FK "nullable for Maestro-level workflow"
+        uuid agent_id FK "nullable"
+        string workflow_key "nullable"
+        string name
+        string cadence
+        boolean is_active
+        json config
+        datetime last_run_at
+        datetime next_run_at
+        datetime created_at
+        datetime updated_at
+    }
+
+    USERS ||--o{ CONVERSATIONS : starts
+    USERS ||--o{ TASKS : requests
+    DOMAINS ||--o{ AGENTS : contains
+    DOMAINS ||--o{ CONVERSATIONS : scopes
+    DOMAINS ||--o{ TASKS : scopes
+    DOMAINS ||--o{ REPORTS : owns
+    DOMAINS ||--o{ MEMORY_ITEMS : scopes
+    DOMAINS ||--o{ MEMORY_PROPOSALS : scopes
+    DOMAINS ||--o{ TOOL_CONNECTIONS : authorizes
+    DOMAINS ||--o{ SEED_PACKAGES : seeds
+    DOMAINS ||--o{ SCHEDULED_RUNS : schedules
+    AGENTS ||--o{ CONVERSATIONS : participates
+    AGENTS ||--o{ TASKS : executes
+    AGENTS ||--o{ REPORTS : produces
+    AGENTS ||--o{ MEMORY_ITEMS : owns
+    AGENTS ||--o{ MEMORY_PROPOSALS : proposes
+    AGENTS ||--o{ TOOL_CALLS : makes
+    AGENTS ||--o{ SCHEDULED_RUNS : runs
+    CONVERSATIONS ||--o{ MESSAGES : contains
+    CONVERSATIONS ||--o{ TASKS : creates
+    TASKS ||--o{ TASKS : contains
+    TASKS ||--o{ REPORTS : produces
+    TASKS ||--o{ TOOL_CALLS : includes
+    TASKS ||--o{ ARTIFACTS : creates
+    TASKS ||--o{ MEMORY_PROPOSALS : prompts
+    REPORTS ||--o{ ARTIFACTS : references
+    REPORTS ||--o{ MEMORY_PROPOSALS : sources
+    MEMORY_PROPOSALS ||--o{ MEMORY_ITEMS : creates
+    MEMORY_ITEMS ||--o{ MEMORY_LINKS : source
+    MEMORY_ITEMS ||--o{ MEMORY_LINKS : target
+    TOOL_CONNECTIONS ||--o{ TOOL_CALLS : used_by
+    SEED_PACKAGES ||--o{ ARTIFACTS : contains
