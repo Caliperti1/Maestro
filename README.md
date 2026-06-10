@@ -26,7 +26,7 @@ The first MVP should prove four things:
 - Backend: FastAPI
 - Database: Postgres
 - ORM/migrations: SQLAlchemy + Alembic
-- Frontend: React or a lightweight server-rendered UI, to be decided during implementation
+- Frontend: React + Vite
 - Local access: LAN first, Tailscale for secure phone/remote access
 
 ## Initial Repo Layout
@@ -46,6 +46,44 @@ docs/
 tests/
 ```
 
+## Local Development
+
+Create a virtual environment and install the backend:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+Start the backend:
+
+```bash
+uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+```
+
+Install and start the frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open the local UI:
+
+```text
+http://localhost:5173
+```
+
+Backend health check:
+
+```text
+http://localhost:8000/health
+```
+
+Phone access instructions live in [docs/PHONE_ACCESS.md](docs/PHONE_ACCESS.md).
+
 ## Development Status
 
-This repo is currently in planning and foundation setup. The next step is to turn [docs/BACKLOG.md](docs/BACKLOG.md) into GitHub issues and begin implementation from Milestone 0.
+This repo is currently implementing the local app skeleton and phone-accessible Maestro shell.

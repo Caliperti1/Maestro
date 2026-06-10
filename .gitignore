@@ -9,6 +9,7 @@ __pycache__/
 htmlcov/
 .venv/
 venv/
+*.egg-info/
 
 # Node / frontend
 node_modules/
@@ -17,6 +18,7 @@ build/
 .next/
 .vite/
 coverage/
+*.tsbuildinfo
 
 # Environment and secrets
 .env
