@@ -20,6 +20,7 @@ The first MVP should prove four things:
 - [Main workflow sequence](docs/01_main_workflow_sequence.mmd)
 - [System components](docs/02_system_components.mmd)
 - [Database design](docs/03_database_design.mmd)
+- [Postgres setup](docs/POSTGRES.md)
 
 ## Planned Stack
 
@@ -83,6 +84,15 @@ http://localhost:8000/health
 ```
 
 Phone access instructions live in [docs/PHONE_ACCESS.md](docs/PHONE_ACCESS.md).
+
+Start the local Postgres database and run migrations:
+
+```bash
+docker compose up -d postgres
+alembic upgrade head
+```
+
+Postgres setup and verification details live in [docs/POSTGRES.md](docs/POSTGRES.md).
 
 ## Development Status
 

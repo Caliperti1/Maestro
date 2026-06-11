@@ -1,1 +1,5 @@
-"""Database models, sessions, and repositories will live here."""
+"""Database models, sessions, and repositories."""
+
+from app.db.models import Base
+
+__all__ = ["Base"]

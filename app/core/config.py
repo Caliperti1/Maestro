@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     app_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     frontend_origin: str = "http://localhost:5173"
     cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    database_url: str = "postgresql+psycopg://maestro:maestro@localhost:55432/maestro"
 
     @property
     def cors_origins(self) -> list[str]:
