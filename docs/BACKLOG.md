@@ -155,6 +155,10 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Allow Maestro-level retrieval across all domains.
 - Add importance and recency filtering.
 - Add provenance metadata to retrieved context.
+- Make the Memory Manager service the only canonical memory write path.
+- Route low-impact writes directly to canonical memory.
+- Route medium/high-impact writes through auto-approved audit proposals.
+- Queue very-high-impact proposals for user approval before canonical write.
 
 ### 3.3 Memory proposals
 
@@ -168,6 +172,7 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 
 - Build Memory Curator agent/service.
 - Review agent outputs and artifacts.
+- Parse domain staging and raw staging inbox items into candidate memories.
 - Extract durable memory chunks.
 - Write approved canonical memory.
 - Queue high-impact approval requests.
@@ -180,6 +185,13 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Store seed packages as artifacts.
 - Run Memory Curator over seed packages.
 - Generate entities, facts, decisions, projects, relationships, preferences, and standing instructions.
+
+### 3.6 Memory hygiene
+
+- Detect duplicate, stale, contradicted, and low-value memories.
+- Propose merges, archival, correction, or importance decay.
+- Route hygiene changes through the Memory Manager proposal lifecycle.
+- Require approval for very-high-impact hygiene changes.
 
 ---
 

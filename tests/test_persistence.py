@@ -1,10 +1,5 @@
-from collections.abc import Iterator
+from sqlalchemy.orm import Session
 
-import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
-
-from app.db.models import Base
 from app.db.repositories import (
     AgentRepository,
     ArtifactRepository,
@@ -23,15 +18,6 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.db.seed import DEFAULT_DOMAINS, seed_default_domains
-
-
-@pytest.fixture()
-def session() -> Iterator[Session]:
-    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
-    Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
-    with SessionLocal() as db:
-        yield db
 
 
 def test_default_domain_seed_is_idempotent(session: Session) -> None:
