@@ -159,6 +159,20 @@ class MemoryService:
             query.order_by(MemoryProposal.created_at.desc()).limit(limit)
         ).all()
 
+    def list_pending_approvals(
+        self,
+        *,
+        domain_id: uuid.UUID | None = None,
+        agent_id: uuid.UUID | None = None,
+        limit: int = 100,
+    ) -> Sequence[MemoryProposal]:
+        return self.list_proposals(
+            status="pending_user_approval",
+            domain_id=domain_id,
+            agent_id=agent_id,
+            limit=limit,
+        )
+
     def retrieve_for_agent(
         self,
         *,
