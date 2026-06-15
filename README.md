@@ -21,6 +21,7 @@ The first MVP should prove four things:
 - [System components](docs/02_system_components.mmd)
 - [Database design](docs/03_database_design.mmd)
 - [Memory service](docs/MEMORY_SERVICE.md)
+- [Memory curator](docs/MEMORY_CURATOR.md)
 - [Postgres setup](docs/POSTGRES.md)
 
 ## Planned Stack

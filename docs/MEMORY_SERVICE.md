@@ -6,6 +6,7 @@ candidate memories to this service so scope, approval policy, and provenance are
 consistently.
 
 Flow diagram: [04_memory_service_flow.mmd](04_memory_service_flow.mmd)
+Curator details: [MEMORY_CURATOR.md](MEMORY_CURATOR.md)
 
 ## Normal Storage Flow
 
@@ -68,8 +69,12 @@ Agent memory requires both domain and agent.
 
 ### Memory Curator Agent
 
-Build the agent that reads staged artifacts, extracts durable candidate memories, classifies
-impact, and calls the Memory Manager service.
+The deterministic Memory Curator currently reads staged text with explicit memory markers,
+extracts durable candidate memories, classifies impact from those markers, and calls the
+Memory Manager service.
+
+Issue #16 adds the reusable LLM client and replaces marker-only extraction with an LLM-enabled
+curator path while preserving the same `MemoryCandidate` and `MemoryService` contract.
 
 ### Staging Ingestion
 

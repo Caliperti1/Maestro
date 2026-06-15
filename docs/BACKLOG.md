@@ -175,8 +175,9 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Parse domain staging and raw staging inbox items into candidate memories.
 - Extract durable memory chunks.
 - Write approved canonical memory.
-- Queue high-impact approval requests.
+- Queue very-high-impact approval requests.
 - Preserve source links for provenance.
+- Add reusable LLM integration and an LLM-enabled curator prompt after deterministic plumbing.
 
 ### 3.5 Seed package ingestion
 
