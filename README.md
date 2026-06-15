@@ -22,6 +22,7 @@ The first MVP should prove four things:
 - [Database design](docs/03_database_design.mmd)
 - [Memory service](docs/MEMORY_SERVICE.md)
 - [Memory curator](docs/MEMORY_CURATOR.md)
+- [Memory dropbox](docs/MEMORY_DROPBOX.md)
 - [Postgres setup](docs/POSTGRES.md)
 
 ## Planned Stack

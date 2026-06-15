@@ -1,6 +1,7 @@
 """Memory service API and future curator logic."""
 
 from app.memory.curator import CuratedMemoryBatch, MemoryCurator, StagedMemorySource
+from app.memory.llm_curator import LLMMemoryCurator, PreviewableMemoryBatch
 from app.memory.service import (
     MemoryAccessError,
     MemoryCandidate,
@@ -17,5 +18,7 @@ __all__ = [
     "MemoryCurator",
     "MemoryService",
     "MemoryWriteResult",
+    "LLMMemoryCurator",
+    "PreviewableMemoryBatch",
     "StagedMemorySource",
 ]
