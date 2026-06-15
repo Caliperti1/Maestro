@@ -1,0 +1,29 @@
+flowchart TD
+    Action["Action completes<br/>message, artifact, tool call, report"]
+    DomainStage["Domain staging<br/>raw action artifacts"]
+    DumpStage["Raw staging inbox<br/>files, links, notes, exports"]
+    Curator["Memory Curator agent<br/>parse sources into candidate memories"]
+    Service["Memory Manager service<br/>validate scope, policy, provenance"]
+    Canonical[("Canonical memory<br/>global, session, domain, agent")]
+    Proposal[("Memory proposals<br/>audit + approval queue")]
+    Approval["Human approval<br/>very-high impact only"]
+    Retrieval["Retrieval API<br/>agent or Maestro context bundle"]
+    Agent["Domain agent"]
+    Maestro["Maestro orchestrator"]
+    Hygiene["Memory hygiene jobs<br/>dedupe, decay, archive, conflict review"]
+
+    Action --> DomainStage
+    DumpStage --> Curator
+    DomainStage --> Curator
+    Curator --> Service
+    Service -->|"low impact"| Canonical
+    Service -->|"medium / high impact<br/>auto-approved audit"| Proposal
+    Proposal --> Canonical
+    Service -->|"very-high impact"| Proposal
+    Proposal --> Approval
+    Approval --> Canonical
+    Canonical --> Retrieval
+    Retrieval --> Agent
+    Retrieval --> Maestro
+    Canonical -. future .-> Hygiene
+    Hygiene -. future proposals .-> Service

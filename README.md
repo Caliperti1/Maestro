@@ -20,6 +20,7 @@ The first MVP should prove four things:
 - [Main workflow sequence](docs/01_main_workflow_sequence.mmd)
 - [System components](docs/02_system_components.mmd)
 - [Database design](docs/03_database_design.mmd)
+- [Memory service](docs/MEMORY_SERVICE.md)
 - [Postgres setup](docs/POSTGRES.md)
 
 ## Planned Stack
