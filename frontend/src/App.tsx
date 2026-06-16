@@ -98,6 +98,14 @@ const domainLabels: Record<string, string> = {
   l3: "L3",
 };
 
+const dropboxDomainDefaults: DropboxDomain[] = Object.keys(domainLabels).map((key) => ({
+  key,
+  inbox: 0,
+  processed: 0,
+  failed: 0,
+  previews: 0,
+}));
+
 const domains = [
   "Personal",
   "Maestro Development",
@@ -450,7 +458,7 @@ export function App() {
 }
 
 function MemoryWorkspace() {
-  const [domains, setDomains] = useState<DropboxDomain[]>([]);
+  const [domains, setDomains] = useState<DropboxDomain[]>(dropboxDomainDefaults);
   const [selectedDomain, setSelectedDomain] = useState("ophi");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previews, setPreviews] = useState<MemoryPreview[]>([]);
@@ -476,7 +484,13 @@ function MemoryWorkspace() {
   }, [selectedDomain]);
 
   useEffect(() => {
-    refreshMemory().catch((error) => setStatusMessage(error.message));
+    refreshMemory().catch((error) =>
+      setStatusMessage(
+        `Unable to reach the Memory API at ${API_BASE_URL}. ${
+          error instanceof Error ? error.message : "Check that the backend is running."
+        }`,
+      ),
+    );
   }, [refreshMemory]);
 
   const uploadFile = async () => {

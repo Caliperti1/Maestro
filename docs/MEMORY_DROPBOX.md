@@ -163,6 +163,16 @@ tab shows:
 Approving a queued proposal writes it to canonical memory. Rejecting it leaves the proposal
 record with a rejection reason for debugging.
 
+If the Memory tab shows an API connection error, confirm the app on `localhost:5173` is the
+Maestro frontend and that `localhost:8000` is serving this backend:
+
+```bash
+curl http://localhost:8000/memory/dropbox/status
+```
+
+That command should return the domain list. A `404` usually means an older backend is still
+occupying port `8000`.
+
 The command-line path is still useful when you want to test the processor directly.
 
 Create a small file in the Ophi inbox:
