@@ -95,11 +95,15 @@ and domain prompt registry for all agents.
 
 ## Setup
 
-Add your OpenAI API key to `.env`. Do not commit it.
+Add your OpenRouter API key to `.env`. Do not commit it.
 
 ```bash
-OPENAI_API_KEY=...
-LLM_MODEL=gpt-5.5
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_HTTP_REFERER=http://localhost:5173
+OPENROUTER_APP_TITLE=Maestro
+LLM_MODEL=openai/gpt-5.5
 MEMORY_DROPBOX_ROOT=maestro_dropbox
 ```
 

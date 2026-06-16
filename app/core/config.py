@@ -16,8 +16,13 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     database_url: str = "postgresql+psycopg://maestro:maestro@localhost:55432/maestro"
+    llm_provider: str = "openrouter"
     openai_api_key: str | None = None
-    llm_model: str = "gpt-5.5"
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_http_referer: str = "http://localhost:5173"
+    openrouter_app_title: str = "Maestro"
+    llm_model: str = "openai/gpt-5.5"
     memory_dropbox_root: str = "maestro_dropbox"
 
     @property
