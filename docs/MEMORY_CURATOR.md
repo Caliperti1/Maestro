@@ -76,10 +76,16 @@ the memory write.
 ## Next Story: LLM Curator
 
 Issue #16 adds the reusable LLM integration all agents should share, then uses it to build the
-LLM-enabled Memory Curator. That story should replace deterministic marker extraction with a
-prompted extraction path while preserving the same output contract:
+LLM-enabled Memory Curator. It preserves the same output contract:
 
 1. staged source in
 2. validated `MemoryCandidate` objects out
 3. all writes routed through `MemoryService`
 4. mocked model responses in tests
+
+## LLM Dropbox Path
+
+The LLM curator is used by the memory dropbox pipeline documented in
+[MEMORY_DROPBOX.md](MEMORY_DROPBOX.md). That pipeline reads files from domain inboxes, calls the
+LLM curator, writes a debug preview, routes candidates through `MemoryService`, and moves raw
+files into `processed` or `failed`.

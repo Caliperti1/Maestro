@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     database_url: str = "postgresql+psycopg://maestro:maestro@localhost:55432/maestro"
+    openai_api_key: str | None = None
+    llm_model: str = "gpt-5.5"
+    memory_dropbox_root: str = "maestro_dropbox"
 
     @property
     def cors_origins(self) -> list[str]:
