@@ -583,10 +583,10 @@ function MemoryWorkspace() {
           </label>
           <label className="file-drop">
             <HardDriveUpload size={20} />
-            <span>{selectedFile ? selectedFile.name : "Choose .md, .txt, or .json"}</span>
+            <span>{selectedFile ? selectedFile.name : "Choose PDF, DOCX, Markdown, text, or data"}</span>
             <input
               type="file"
-              accept=".md,.txt,.json"
+              accept=".pdf,.docx,.md,.txt,.json,.csv,.tsv,.html,.htm"
               onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
             />
           </label>

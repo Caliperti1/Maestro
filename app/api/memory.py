@@ -13,7 +13,8 @@ from app.db.models import MemoryItem, MemoryProposal
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
-from app.memory.dropbox import MemoryDropboxProcessor, SUPPORTED_DROPBOX_SUFFIXES
+from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
+from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.service import MemoryAccessError, MemoryService
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -43,7 +44,8 @@ async def upload_dropbox_file(
     if not filename:
         raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
     if Path(filename).suffix.lower() not in SUPPORTED_DROPBOX_SUFFIXES:
-        raise HTTPException(status_code=400, detail="Only .txt, .md, and .json files are supported.")
+        supported = ", ".join(sorted(SUPPORTED_DROPBOX_SUFFIXES))
+        raise HTTPException(status_code=400, detail=f"Supported file types: {supported}.")
 
     inbox = _dropbox_root() / domain_key / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)

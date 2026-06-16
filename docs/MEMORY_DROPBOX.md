@@ -58,14 +58,20 @@ is not domain-specific.
 
 ## Supported Files
 
-This first pass supports:
+This pass supports:
 
 - `.txt`
 - `.md`
 - `.json`
+- `.pdf`
+- `.docx`
+- `.html`
+- `.csv`
+- `.tsv`
 
-PDF, DOCX, PPTX, and richer extraction will come later. For now, convert those files to text or
-Markdown before dropping them into an inbox.
+PDF and DOCX files are converted to extracted text before they are sent to the memory curator.
+Scanned image-only PDFs will fail until OCR support is added. PPTX and richer extraction will
+come later; for now, export slide decks to PDF before dropping them into an inbox.
 
 ## Processing Flow
 
@@ -77,6 +83,18 @@ Markdown before dropping them into an inbox.
 6. Canonical memory is written or very-high-impact proposals are queued for approval.
 7. The raw file moves to `processed`.
 8. If processing fails, the raw file moves to `failed` with an `.error.json` file.
+
+## Candidate Persistence
+
+The current pipeline uses the curator prompt to avoid obvious duplicate candidates and routes
+all candidates through the memory manager's impact gates. Low-impact candidates write directly,
+medium/high candidates are auto-approved with a proposal record, and very-high-impact candidates
+wait for user approval.
+
+The memory manager does not yet perform semantic duplicate detection, contradiction checks, or
+candidate-to-existing-memory merging. Those belong in the memory hygiene layer. During seed
+ingestion, use the debug preview and approval queue as the calibration loop: add representative
+files, inspect the candidates, adjust prompts or rules, then increase volume.
 
 ## Current Curator Prompt
 

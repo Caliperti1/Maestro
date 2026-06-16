@@ -16,9 +16,9 @@ from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal
 from app.llm import LLMMemoryExtractor, OpenAILLMClient
 from app.memory import LLMMemoryCurator, StagedMemorySource
+from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES, extract_dropbox_text
 from app.memory.service import MemoryCandidate, MemoryWriteResult
 
-SUPPORTED_DROPBOX_SUFFIXES = {".txt", ".md", ".json"}
 DROPBOX_SUBDIRS = ("inbox", "processed", "failed", "previews")
 
 
@@ -80,8 +80,12 @@ class MemoryDropboxProcessor:
         seed_package: SeedPackage | None = None
         preview_path: Path | None = None
         try:
-            content = path.read_text(encoding="utf-8")
-            seed_package, artifact = self._record_source_artifact(path, domain)
+            content, extraction_metadata = extract_dropbox_text(path)
+            seed_package, artifact = self._record_source_artifact(
+                path,
+                domain,
+                extraction_metadata=extraction_metadata,
+            )
             source = StagedMemorySource(
                 source_type="artifact",
                 source_id=artifact.id,
@@ -94,6 +98,7 @@ class MemoryDropboxProcessor:
                     "seed_package_id": str(seed_package.id),
                     "artifact_id": str(artifact.id),
                     "original_path": str(path),
+                    **extraction_metadata,
                 },
             )
             curator = self._curator()
@@ -163,6 +168,8 @@ class MemoryDropboxProcessor:
         self,
         path: Path,
         domain: Domain | None,
+        *,
+        extraction_metadata: dict[str, Any],
     ) -> tuple[SeedPackage, Artifact]:
         seed_package = SeedPackage(
             domain_id=domain.id if domain is not None else None,
@@ -172,6 +179,7 @@ class MemoryDropboxProcessor:
             metadata_={
                 "original_path": str(path),
                 "suffix": path.suffix.lower(),
+                **extraction_metadata,
             },
         )
         self.session.add(seed_package)
@@ -186,6 +194,7 @@ class MemoryDropboxProcessor:
             metadata_={
                 "dropbox": True,
                 "original_path": str(path),
+                **extraction_metadata,
             },
         )
         self.session.add(artifact)
@@ -269,10 +278,21 @@ class MemoryDropboxProcessor:
         )
 
     def _mime_type(self, path: Path) -> str:
-        if path.suffix.lower() == ".md":
+        suffix = path.suffix.lower()
+        if suffix == ".md":
             return "text/markdown"
-        if path.suffix.lower() == ".json":
+        if suffix == ".json":
             return "application/json"
+        if suffix == ".csv":
+            return "text/csv"
+        if suffix == ".tsv":
+            return "text/tab-separated-values"
+        if suffix in {".html", ".htm"}:
+            return "text/html"
+        if suffix == ".pdf":
+            return "application/pdf"
+        if suffix == ".docx":
+            return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         return "text/plain"
 
 
