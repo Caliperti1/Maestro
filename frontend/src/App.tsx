@@ -210,6 +210,11 @@ function resultClass(result?: PreviewResult) {
   return "processed";
 }
 
+function previewTime(preview: MemoryPreview) {
+  const time = preview.generated_at ? Date.parse(preview.generated_at) : 0;
+  return Number.isFinite(time) ? time : 0;
+}
+
 async function apiJson<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, options);
   if (!response.ok) {
@@ -491,6 +496,7 @@ function MemoryWorkspace() {
   const [previews, setPreviews] = useState<MemoryPreview[]>([]);
   const [pending, setPending] = useState<PendingProposal[]>([]);
   const [items, setItems] = useState<MemoryItem[]>([]);
+  const [selectedPreviewFilename, setSelectedPreviewFilename] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [lastProcessSummary, setLastProcessSummary] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -503,7 +509,10 @@ function MemoryWorkspace() {
       apiJson<{ items: MemoryItem[] }>("/memory/items?limit=8"),
     ]);
     setDomains(status.domains);
-    setPreviews(previewResponse.previews.slice(0, 5));
+    const sortedPreviews = [...previewResponse.previews].sort(
+      (first, second) => previewTime(second) - previewTime(first),
+    );
+    setPreviews(sortedPreviews.slice(0, 10));
     setPending(pendingResponse.proposals);
     setItems(itemResponse.items);
     if (!status.domains.some((domain) => domain.key === selectedDomain)) {
@@ -583,7 +592,8 @@ function MemoryWorkspace() {
   };
 
   const selectedDomainStatus = domains.find((domain) => domain.key === selectedDomain);
-  const latestPreview = previews[0];
+  const latestPreview =
+    previews.find((preview) => preview.filename === selectedPreviewFilename) ?? previews[0];
 
   return (
     <div className="memory-grid">
@@ -705,6 +715,23 @@ function MemoryWorkspace() {
               <span>{latestPreview.written_count} written</span>
               <span>{latestPreview.pending_approval_count} pending approval</span>
             </div>
+            {previews.length > 1 && (
+              <div className="preview-picker" aria-label="Preview history">
+                {previews.map((preview) => (
+                  <button
+                    key={preview.filename}
+                    className={
+                      preview.filename === latestPreview.filename
+                        ? "preview-choice active"
+                        : "preview-choice"
+                    }
+                    onClick={() => setSelectedPreviewFilename(preview.filename)}
+                  >
+                    {preview.source_file ?? preview.filename}
+                  </button>
+                ))}
+              </div>
+            )}
             <h4>{latestPreview.source_file}</h4>
             <div className="candidate-list">
               {(latestPreview.payload.candidates ?? []).map((candidate, index) => (

@@ -111,6 +111,13 @@ class MemoryDropboxProcessor:
                 status="previewed",
             )
             batch = curator.write_candidates(source, preview.candidates)
+            destination = self._move_file(path, domain_key=domain_key, status="processed")
+            self._finalize_provenance(
+                seed_package=seed_package,
+                artifact=artifact,
+                results=batch.results,
+                processed_path=destination,
+            )
             preview_path = self._write_preview(
                 path,
                 domain_key=domain_key,
@@ -118,7 +125,6 @@ class MemoryDropboxProcessor:
                 results=batch.results,
                 status="written",
             )
-            destination = self._move_file(path, domain_key=domain_key, status="processed")
             seed_package.status = "processed"
             seed_package.processed_at = datetime.now(UTC)
             self.session.commit()
@@ -202,6 +208,83 @@ class MemoryDropboxProcessor:
         self.session.refresh(seed_package)
         self.session.refresh(artifact)
         return seed_package, artifact
+
+    def _finalize_provenance(
+        self,
+        *,
+        seed_package: SeedPackage,
+        artifact: Artifact,
+        results: list[MemoryWriteResult] | tuple[MemoryWriteResult, ...] | Any,
+        processed_path: Path,
+    ) -> None:
+        processed_path_text = str(processed_path)
+        artifact.uri = processed_path_text
+        artifact.metadata_ = {
+            **(artifact.metadata_ or {}),
+            "processed_path": processed_path_text,
+        }
+        seed_package.metadata_ = {
+            **(seed_package.metadata_ or {}),
+            "processed_path": processed_path_text,
+        }
+
+        for result in results:
+            if result.memory_item is not None:
+                result.memory_item.metadata_ = self._metadata_with_processed_path(
+                    result.memory_item.metadata_,
+                    artifact_id=str(artifact.id),
+                    processed_path=processed_path_text,
+                )
+            if result.proposal is not None:
+                result.proposal.metadata_ = self._metadata_with_processed_path(
+                    result.proposal.metadata_,
+                    artifact_id=str(artifact.id),
+                    processed_path=processed_path_text,
+                )
+                result.proposal.source_refs = self._source_refs_with_processed_path(
+                    result.proposal.source_refs,
+                    artifact_id=str(artifact.id),
+                    processed_path=processed_path_text,
+                )
+
+    def _metadata_with_processed_path(
+        self,
+        metadata: dict[str, Any] | None,
+        *,
+        artifact_id: str,
+        processed_path: str,
+    ) -> dict[str, Any]:
+        updated = dict(metadata or {})
+        updated["processed_path"] = processed_path
+        if updated.get("artifact_id") == artifact_id:
+            updated["artifact_uri"] = processed_path
+        if "source_refs" in updated:
+            updated["source_refs"] = self._source_refs_with_processed_path(
+                updated["source_refs"],
+                artifact_id=artifact_id,
+                processed_path=processed_path,
+            )
+        return updated
+
+    def _source_refs_with_processed_path(
+        self,
+        source_refs: list[dict[str, Any]] | Any,
+        *,
+        artifact_id: str,
+        processed_path: str,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(source_refs, list):
+            return []
+        updated_refs: list[dict[str, Any]] = []
+        for source_ref in source_refs:
+            if not isinstance(source_ref, dict):
+                continue
+            updated_ref = dict(source_ref)
+            if updated_ref.get("id") == artifact_id:
+                updated_ref["uri"] = processed_path
+                updated_ref["processed_path"] = processed_path
+            updated_refs.append(updated_ref)
+        return updated_refs
 
     def _write_preview(
         self,

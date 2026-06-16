@@ -112,8 +112,30 @@ def test_dropbox_processor_extracts_previews_writes_memory_and_moves_processed_f
     assert proposals[0].status == "pending_user_approval"
     assert len(seed_packages) == 1
     assert seed_packages[0].status == "processed"
+    assert seed_packages[0].metadata_["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
     assert len(artifacts) == 1
+    assert artifacts[0].uri == str(tmp_path / "ophi" / "processed" / "strategy.md")
+    assert artifacts[0].metadata_["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
     assert memories[0].metadata_["artifact_id"] == str(artifacts[0].id)
+    assert memories[0].metadata_["artifact_uri"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
+    assert memories[0].metadata_["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
+    assert memories[0].metadata_["source_refs"][0]["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
+    assert proposals[0].metadata_["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
+    assert proposals[0].source_refs[0]["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
 
 
 def test_dropbox_processor_extracts_pdf_text_for_curator(

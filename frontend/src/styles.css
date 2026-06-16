@@ -505,6 +505,7 @@ h4 {
 .approval-actions,
 .dropbox-stats,
 .preview-meta,
+.preview-picker,
 .activity-row {
   display: flex;
   gap: 8px;
@@ -620,6 +621,27 @@ h4 {
 .result-pill.preview-only {
   color: #45514c;
   background: #f4f6f3;
+}
+
+.preview-picker {
+  align-items: stretch;
+}
+
+.preview-choice {
+  min-height: 32px;
+  max-width: 100%;
+  padding: 6px 10px;
+  color: #304139;
+  background: #f6f7f4;
+  border: 1px solid #d9e1d9;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.preview-choice.active {
+  color: #ffffff;
+  background: #426b57;
+  border-color: #426b57;
 }
 
 .approval-actions button:last-child {
