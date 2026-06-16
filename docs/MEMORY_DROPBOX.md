@@ -78,6 +78,21 @@ Markdown before dropping them into an inbox.
 7. The raw file moves to `processed`.
 8. If processing fails, the raw file moves to `failed` with an `.error.json` file.
 
+## Current Curator Prompt
+
+For the first seed ingestion pass, the LLM Memory Curator prompt is intentionally hardened
+inside the extraction service. It includes:
+
+- Maestro system context
+- source-instruction isolation
+- scope selection rules
+- impact-level rules
+- seed-ingestion guidance for old notes, docs, and AI conversations
+- lightweight domain context based on the dropbox folder
+
+Issue #19 will replace this temporary embedded prompt context with a reusable prompt hierarchy
+and domain prompt registry for all agents.
+
 ## Setup
 
 Add your OpenAI API key to `.env`. Do not commit it.
