@@ -1,4 +1,5 @@
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from sqlalchemy.orm import Session
@@ -7,6 +8,8 @@ from app.db.models import Artifact, MemoryItem, MemoryProposal, SeedPackage
 from app.llm import LLMMemoryExtractor
 from app.llm.client import LLMClientError
 from app.memory import LLMMemoryCurator
+import app.memory.document_extract as document_extract
+from app.memory.document_extract import extract_dropbox_text
 from app.memory.dropbox import MemoryDropboxProcessor
 
 
@@ -109,8 +112,86 @@ def test_dropbox_processor_extracts_previews_writes_memory_and_moves_processed_f
     assert proposals[0].status == "pending_user_approval"
     assert len(seed_packages) == 1
     assert seed_packages[0].status == "processed"
+    assert seed_packages[0].metadata_["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
     assert len(artifacts) == 1
+    assert artifacts[0].uri == str(tmp_path / "ophi" / "processed" / "strategy.md")
+    assert artifacts[0].metadata_["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
     assert memories[0].metadata_["artifact_id"] == str(artifacts[0].id)
+    assert memories[0].metadata_["artifact_uri"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
+    assert memories[0].metadata_["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
+    assert memories[0].metadata_["source_refs"][0]["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
+    assert proposals[0].metadata_["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
+    assert proposals[0].source_refs[0]["processed_path"] == str(
+        tmp_path / "ophi" / "processed" / "strategy.md"
+    )
+
+
+def test_dropbox_processor_extracts_pdf_text_for_curator(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePage:
+        def extract_text(self) -> str:
+            return "PDF says Chris wants Ophi notes to become memory."
+
+    class FakePdfReader:
+        is_encrypted = False
+        pages = [FakePage()]
+
+        def __init__(self, _path: str) -> None:
+            pass
+
+    client = FakeLLMClient({"candidates": []})
+    curator = LLMMemoryCurator(session, LLMMemoryExtractor(client))
+    monkeypatch.setattr(document_extract, "PdfReader", FakePdfReader)
+
+    processor = MemoryDropboxProcessor(session, root=tmp_path, curator=curator)
+    processor.ensure_directories()
+    source_path = tmp_path / "ophi" / "inbox" / "research.pdf"
+    source_path.write_bytes(b"%PDF fake bytes")
+
+    results = processor.process_once()
+
+    assert results[0].status == "processed"
+    assert "PDF says Chris wants Ophi notes" in client.calls[0]["input_text"]
+    artifact = session.query(Artifact).one()
+    assert artifact.mime_type == "application/pdf"
+    assert artifact.metadata_["extraction_method"] == "pdf_text"
+
+
+def test_extract_dropbox_text_reads_docx(tmp_path: Path) -> None:
+    source_path = tmp_path / "seed.docx"
+    with ZipFile(source_path, "w") as docx:
+        docx.writestr(
+            "word/document.xml",
+            """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p><w:r><w:t>First memory paragraph.</w:t></w:r></w:p>
+                <w:p><w:r><w:t>Second memory paragraph.</w:t></w:r></w:p>
+              </w:body>
+            </w:document>
+            """,
+        )
+
+    text, metadata = extract_dropbox_text(source_path)
+
+    assert "First memory paragraph." in text
+    assert "Second memory paragraph." in text
+    assert metadata["extraction_method"] == "docx_text"
 
 
 def test_dropbox_processor_moves_failed_file_and_marks_seed_package_failed(

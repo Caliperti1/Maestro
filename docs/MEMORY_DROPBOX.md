@@ -58,14 +58,20 @@ is not domain-specific.
 
 ## Supported Files
 
-This first pass supports:
+This pass supports:
 
 - `.txt`
 - `.md`
 - `.json`
+- `.pdf`
+- `.docx`
+- `.html`
+- `.csv`
+- `.tsv`
 
-PDF, DOCX, PPTX, and richer extraction will come later. For now, convert those files to text or
-Markdown before dropping them into an inbox.
+PDF and DOCX files are converted to extracted text before they are sent to the memory curator.
+Scanned image-only PDFs will fail until OCR support is added. PPTX and richer extraction will
+come later; for now, export slide decks to PDF before dropping them into an inbox.
 
 ## Processing Flow
 
@@ -77,6 +83,18 @@ Markdown before dropping them into an inbox.
 6. Canonical memory is written or very-high-impact proposals are queued for approval.
 7. The raw file moves to `processed`.
 8. If processing fails, the raw file moves to `failed` with an `.error.json` file.
+
+## Candidate Persistence
+
+The current pipeline uses the curator prompt to avoid obvious duplicate candidates and routes
+all candidates through the memory manager's impact gates. Low-impact candidates write directly,
+medium/high candidates are auto-approved with a proposal record, and very-high-impact candidates
+wait for user approval.
+
+The memory manager does not yet perform semantic duplicate detection, contradiction checks, or
+candidate-to-existing-memory merging. Those belong in the memory hygiene layer. During seed
+ingestion, use the debug preview and approval queue as the calibration loop: add representative
+files, inspect the candidates, adjust prompts or rules, then increase volume.
 
 ## Current Curator Prompt
 
@@ -136,6 +154,49 @@ No supported files found in domain inboxes.
 ```
 
 ## Manual End-To-End Test
+
+You can run the same flow from the web app once the API and frontend are running:
+
+```bash
+uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+```
+
+In another terminal:
+
+```bash
+cd frontend
+npm run dev -- --host 0.0.0.0
+```
+
+Open `http://localhost:5173`, select **Memory** in the sidebar, choose a domain, pick a
+supported file, and select **Upload**. The file lands in that domain's `inbox`. Select
+**Process inbox** to invoke the LLM curator and memory manager. After processing, the Memory
+tab shows:
+
+- folder counts for the selected domain
+- the latest debug preview from `previews`
+- recent canonical memory writes
+- very-high-impact memories waiting for approval or rejection
+
+When a preview status is `written`, the processor has already sent the extracted candidates to
+the memory manager. Candidates labeled as written have canonical `memory_items` rows. Candidates
+that need approval have `memory_proposals` rows and must be approved from the Memory tab before
+they become canonical memory.
+
+Approving a queued proposal writes it to canonical memory. Rejecting it leaves the proposal
+record with a rejection reason for debugging.
+
+If the Memory tab shows an API connection error, confirm the app on `localhost:5173` is the
+Maestro frontend and that `localhost:8000` is serving this backend:
+
+```bash
+curl http://localhost:8000/memory/dropbox/status
+```
+
+That command should return the domain list. A `404` usually means an older backend is still
+occupying port `8000`.
+
+The command-line path is still useful when you want to test the processor directly.
 
 Create a small file in the Ophi inbox:
 

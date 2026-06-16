@@ -18,7 +18,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -276,6 +277,7 @@ h4 {
 
 .composer button,
 .planner-action,
+.approval-actions button,
 .timeline-controls button {
   min-height: 34px;
   padding: 7px 12px;
@@ -437,6 +439,236 @@ h4 {
   gap: 9px;
 }
 
+.memory-grid {
+  display: grid;
+  grid-template-columns: minmax(340px, 0.95fr) minmax(420px, 1.25fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.memory-panel {
+  min-width: 0;
+  padding: 16px;
+  background: #ffffff;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(39, 53, 47, 0.07);
+}
+
+.memory-upload-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.memory-controls {
+  display: grid;
+  gap: 12px;
+}
+
+.memory-controls label {
+  display: grid;
+  gap: 7px;
+  color: #35453e;
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.memory-controls select {
+  min-height: 40px;
+  padding: 8px 10px;
+  color: #22312b;
+  background: #f8faf7;
+  border: 1px solid #d7ded7;
+  border-radius: 8px;
+}
+
+.file-drop {
+  position: relative;
+  min-height: 96px;
+  padding: 16px;
+  place-items: center;
+  color: #3d5047;
+  background: #f5f8f5;
+  border: 1px dashed #9db3a6;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.file-drop input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.memory-actions,
+.approval-actions,
+.dropbox-stats,
+.preview-meta,
+.preview-picker,
+.activity-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.memory-actions button,
+.approval-actions button {
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+
+.dropbox-stats span,
+.preview-meta span,
+.count-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 9px;
+  color: #304139;
+  background: #eef4ef;
+  border: 1px solid #d9e1d9;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.memory-status,
+.empty-state {
+  color: #52605a;
+  line-height: 1.45;
+}
+
+.activity-row {
+  min-height: 36px;
+  padding: 8px 10px;
+  color: #224536;
+  background: #e4f4ea;
+  border: 1px solid #b8dac5;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.activity-dot {
+  width: 10px;
+  height: 10px;
+  background: #2f7d56;
+  border-radius: 999px;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.approval-list,
+.candidate-list,
+.memory-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.approval-card,
+.candidate-row,
+.memory-row {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+  background: #f9fbf8;
+}
+
+.approval-card span,
+.candidate-row span,
+.memory-row span {
+  color: #68736d;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.approval-card p,
+.candidate-row p,
+.memory-row p {
+  color: #52605a;
+  line-height: 1.45;
+}
+
+.result-pill {
+  justify-self: start;
+  min-height: 28px;
+  padding: 5px 8px;
+  color: #304139;
+  background: #eef4ef;
+  border: 1px solid #d9e1d9;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.result-pill.written {
+  color: #113b2b;
+  background: #d8efdf;
+  border-color: #aed8bd;
+}
+
+.result-pill.pending {
+  color: #59351d;
+  background: #f5e0bb;
+  border-color: #e7c98d;
+}
+
+.result-pill.preview-only {
+  color: #45514c;
+  background: #f4f6f3;
+}
+
+.preview-picker {
+  align-items: stretch;
+}
+
+.preview-choice {
+  min-height: 32px;
+  max-width: 100%;
+  padding: 6px 10px;
+  color: #304139;
+  background: #f6f7f4;
+  border: 1px solid #d9e1d9;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.preview-choice.active {
+  color: #ffffff;
+  background: #426b57;
+  border-color: #426b57;
+}
+
+.approval-actions button:last-child {
+  color: #5b2d25;
+  background: #f8e7df;
+  border-color: #e8c7b8;
+}
+
+.preview-shell {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.9);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
 @media (max-width: 980px) {
   .app-shell {
     grid-template-columns: 76px 1fr;
@@ -455,6 +687,10 @@ h4 {
   }
 
   .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-grid {
     grid-template-columns: 1fr;
   }
 
