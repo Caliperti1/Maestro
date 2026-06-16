@@ -195,6 +195,11 @@ def _preview_payload(path: Path, domain_key: str) -> dict[str, Any]:
         "written_count": sum(
             1 for result in payload.get("results", []) if result.get("memory_item_id")
         ),
+        "deduped_count": sum(
+            1
+            for result in payload.get("results", [])
+            if result.get("outcome") in {"duplicate_skipped", "reinforced"}
+        ),
         "pending_approval_count": sum(
             1
             for result in payload.get("results", [])

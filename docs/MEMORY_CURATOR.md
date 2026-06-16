@@ -54,12 +54,32 @@ VERY_HIGH: Approval policy - Let Maestro change external commitments without app
 
 For every extracted candidate, the curator calls `MemoryService.write_candidate`.
 
-- Low-impact candidates become canonical memory immediately.
-- Medium/high-impact candidates become approved audit proposals and canonical memory.
-- Very-high-impact candidates become `pending_user_approval` proposals.
+- Exact normalized duplicates are skipped before any LLM evaluation.
+- When configured, semantic evaluation compares candidates against nearby existing memories.
+- Candidates may become new canonical memory, reinforce existing memory, supersede old memory,
+  become conflict proposals for review, or be rejected.
+- Low-impact accepted candidates become canonical memory immediately.
+- Medium/high-impact accepted candidates become approved audit proposals and canonical memory.
+- Very-high-impact candidates and conflicts become `pending_user_approval` proposals.
 
 The curator also exposes helpers to list, approve, and reject pending approval proposals. These
 helpers delegate to `MemoryService`; the curator does not bypass the service policy boundary.
+
+## Semantic Dedupe And Merge
+
+The live LLM dropbox path wires a `LLMMemoryEvaluator` into `MemoryService`. For each candidate,
+the service first looks for deterministic exact duplicates in the same memory lane. If none is
+found, the evaluator can return:
+
+- `write_new`: persist the candidate through the normal impact gates
+- `duplicate`: skip the candidate
+- `reinforce`: append provenance/evidence to the existing memory metadata
+- `supersede`: write a new memory and link it to the old memory with `supersedes`
+- `conflict`: create a pending approval proposal tied to the related memory
+- `reject`: drop vague or non-durable candidates
+
+These decisions are written into preview results so the Memory tab can show what happened to
+each candidate.
 
 ## Provenance
 

@@ -84,17 +84,23 @@ come later; for now, export slide decks to PDF before dropping them into an inbo
 7. The raw file moves to `processed`.
 8. If processing fails, the raw file moves to `failed` with an `.error.json` file.
 
-## Candidate Persistence
+## Candidate Evaluation
 
-The current pipeline uses the curator prompt to avoid obvious duplicate candidates and routes
-all candidates through the memory manager's impact gates. Low-impact candidates write directly,
-medium/high candidates are auto-approved with a proposal record, and very-high-impact candidates
-wait for user approval.
+The current pipeline routes all candidates through the memory manager before anything becomes
+canonical memory. The manager:
 
-The memory manager does not yet perform semantic duplicate detection, contradiction checks, or
-candidate-to-existing-memory merging. Those belong in the memory hygiene layer. During seed
-ingestion, use the debug preview and approval queue as the calibration loop: add representative
-files, inspect the candidates, adjust prompts or rules, then increase volume.
+- skips exact normalized duplicates deterministically
+- can use semantic LLM evaluation against nearby existing memories
+- can write new memory, reinforce existing memory, supersede old memory, flag conflicts for
+  approval, or reject low-value candidates
+- preserves provenance and evaluator rationale in preview results and memory metadata
+
+Low-impact candidates write directly when accepted. Medium/high candidates become approved audit
+proposals and canonical memory. Very-high-impact candidates, conflicts, and authority-changing
+updates wait for user approval.
+
+During seed ingestion, use the debug preview and approval queue as the calibration loop: add
+representative files, inspect candidate outcomes, then increase volume.
 
 ## Current Curator Prompt
 

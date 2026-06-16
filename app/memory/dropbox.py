@@ -14,7 +14,7 @@ from app.db.models import Artifact, Domain, SeedPackage
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal
-from app.llm import LLMMemoryExtractor, OpenAILLMClient
+from app.llm import LLMMemoryEvaluator, LLMMemoryExtractor, OpenAILLMClient
 from app.memory import LLMMemoryCurator, StagedMemorySource
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES, extract_dropbox_text
 from app.memory.service import MemoryCandidate, MemoryWriteResult
@@ -164,9 +164,11 @@ class MemoryDropboxProcessor:
 
     def _curator(self) -> LLMMemoryCurator:
         if self.curator is None:
+            llm_client = OpenAILLMClient()
             self.curator = LLMMemoryCurator(
                 self.session,
-                LLMMemoryExtractor(OpenAILLMClient()),
+                LLMMemoryExtractor(llm_client),
+                semantic_evaluator=LLMMemoryEvaluator(llm_client),
             )
         return self.curator
 
@@ -331,6 +333,10 @@ class MemoryDropboxProcessor:
             ),
             "proposal_id": str(result.proposal.id) if result.proposal is not None else None,
             "proposal_status": result.proposal.status if result.proposal is not None else None,
+            "related_memory_id": (
+                str(result.related_memory.id) if result.related_memory is not None else None
+            ),
+            "evaluation": result.evaluation,
         }
 
     def _move_file(self, path: Path, *, domain_key: str, status: str) -> Path:

@@ -1,17 +1,33 @@
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from app.db.models import MemoryItem, MemoryProposal
+from app.db.models import MemoryItem, MemoryLink, MemoryProposal
 
 MemoryScope = Literal["global", "maestro_session", "domain", "agent"]
 ImpactLevel = Literal["low", "medium", "high", "very_high"]
-WriteOutcome = Literal["written", "auto_approved", "pending_user_approval"]
+EvaluationDecision = Literal[
+    "write_new",
+    "duplicate",
+    "reinforce",
+    "supersede",
+    "conflict",
+    "reject",
+]
+WriteOutcome = Literal[
+    "written",
+    "auto_approved",
+    "pending_user_approval",
+    "duplicate_skipped",
+    "reinforced",
+    "rejected",
+]
 
 AUTO_WRITE_IMPACTS: set[str] = {"low"}
 AUTO_APPROVE_IMPACTS: set[str] = {"medium", "high"}
@@ -41,6 +57,8 @@ class MemoryWriteResult:
     outcome: WriteOutcome
     memory_item: MemoryItem | None = None
     proposal: MemoryProposal | None = None
+    related_memory: MemoryItem | None = None
+    evaluation: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -55,18 +73,97 @@ class MemoryAccessError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class MemoryEvaluation:
+    decision: EvaluationDecision
+    related_memory_id: uuid.UUID | None = None
+    confidence: float = 0.0
+    rationale: str | None = None
+    proposed_title: str | None = None
+    proposed_content: str | None = None
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision,
+            "related_memory_id": str(self.related_memory_id) if self.related_memory_id else None,
+            "confidence": self.confidence,
+            "rationale": self.rationale,
+        }
+
+
+class MemorySemanticEvaluator(Protocol):
+    def evaluate(
+        self,
+        *,
+        candidate: MemoryCandidate,
+        existing_memories: Sequence[MemoryItem],
+    ) -> MemoryEvaluation:
+        pass
+
+
 class MemoryService:
-    def __init__(self, session: Session):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        semantic_evaluator: MemorySemanticEvaluator | None = None,
+    ):
         self.session = session
+        self.semantic_evaluator = semantic_evaluator
 
     def write_candidate(self, candidate: MemoryCandidate) -> MemoryWriteResult:
         self._validate_candidate(candidate)
+        evaluation, related_memory = self._evaluate_candidate(candidate)
+
+        if evaluation.decision == "duplicate":
+            return MemoryWriteResult(
+                outcome="duplicate_skipped",
+                related_memory=related_memory,
+                evaluation=evaluation.as_metadata(),
+            )
+
+        if evaluation.decision == "reinforce" and related_memory is not None:
+            self._reinforce_memory(related_memory, candidate, evaluation)
+            self.session.commit()
+            self.session.refresh(related_memory)
+            return MemoryWriteResult(
+                outcome="reinforced",
+                related_memory=related_memory,
+                evaluation=evaluation.as_metadata(),
+            )
+
+        if evaluation.decision == "reject":
+            return MemoryWriteResult(outcome="rejected", evaluation=evaluation.as_metadata())
+
+        if evaluation.decision == "conflict":
+            proposal = self._create_proposal(
+                self._candidate_with_evaluation(candidate, evaluation),
+                "pending_user_approval",
+            )
+            self.session.commit()
+            self.session.refresh(proposal)
+            return MemoryWriteResult(
+                outcome="pending_user_approval",
+                proposal=proposal,
+                related_memory=related_memory,
+                evaluation=evaluation.as_metadata(),
+            )
+
+        candidate = self._candidate_with_evaluation(candidate, evaluation)
+        if evaluation.decision == "supersede" and evaluation.proposed_title:
+            candidate = self._replace_candidate_text(candidate, evaluation)
 
         if candidate.impact_level in AUTO_WRITE_IMPACTS:
             memory_item = self._create_memory_item(candidate)
+            self._link_evaluated_memory(memory_item, evaluation)
             self.session.commit()
             self.session.refresh(memory_item)
-            return MemoryWriteResult(outcome="written", memory_item=memory_item)
+            return MemoryWriteResult(
+                outcome="written",
+                memory_item=memory_item,
+                related_memory=related_memory,
+                evaluation=evaluation.as_metadata(),
+            )
 
         proposal_status = "approved"
         if candidate.impact_level not in AUTO_APPROVE_IMPACTS:
@@ -76,9 +173,15 @@ class MemoryService:
         if candidate.impact_level == "very_high":
             self.session.commit()
             self.session.refresh(proposal)
-            return MemoryWriteResult(outcome="pending_user_approval", proposal=proposal)
+            return MemoryWriteResult(
+                outcome="pending_user_approval",
+                proposal=proposal,
+                related_memory=related_memory,
+                evaluation=evaluation.as_metadata(),
+            )
 
         memory_item = self._create_memory_item(candidate, proposal=proposal)
+        self._link_evaluated_memory(memory_item, evaluation)
         proposal.reviewed_at = datetime.now(UTC)
         self.session.commit()
         self.session.refresh(proposal)
@@ -87,6 +190,8 @@ class MemoryService:
             outcome="auto_approved",
             memory_item=memory_item,
             proposal=proposal,
+            related_memory=related_memory,
+            evaluation=evaluation.as_metadata(),
         )
 
     def propose_memory(self, candidate: MemoryCandidate) -> MemoryProposal:
@@ -110,6 +215,7 @@ class MemoryService:
 
         candidate = self._candidate_from_proposal(proposal)
         memory_item = self._create_memory_item(candidate, proposal=proposal)
+        self._link_evaluated_memory(memory_item, self._evaluation_from_metadata(candidate.metadata))
         proposal.status = "approved"
         proposal.reviewed_at = datetime.now(UTC)
         self.session.commit()
@@ -253,6 +359,191 @@ class MemoryService:
             query.order_by(MemoryItem.importance.desc(), MemoryItem.created_at.desc()).limit(limit)
         ).all()
 
+    def _evaluate_candidate(
+        self,
+        candidate: MemoryCandidate,
+    ) -> tuple[MemoryEvaluation, MemoryItem | None]:
+        comparable = self._comparable_memories(candidate, limit=16)
+        exact_duplicate = self._find_exact_duplicate(candidate, comparable)
+        if exact_duplicate is not None:
+            return (
+                MemoryEvaluation(
+                    decision="duplicate",
+                    related_memory_id=exact_duplicate.id,
+                    confidence=1.0,
+                    rationale="Exact normalized title/content duplicate in same memory lane.",
+                ),
+                exact_duplicate,
+            )
+
+        if self.semantic_evaluator is None or not comparable:
+            return MemoryEvaluation(decision="write_new", confidence=1.0), None
+
+        evaluation = self.semantic_evaluator.evaluate(
+            candidate=candidate,
+            existing_memories=comparable,
+        )
+        related_memory = (
+            self.session.get(MemoryItem, evaluation.related_memory_id)
+            if evaluation.related_memory_id is not None
+            else None
+        )
+        if evaluation.decision in {"duplicate", "reinforce", "supersede", "conflict"} and (
+            related_memory is None
+        ):
+            return (
+                MemoryEvaluation(
+                    decision="write_new",
+                    confidence=evaluation.confidence,
+                    rationale="Semantic evaluator did not identify a usable related memory.",
+                ),
+                None,
+            )
+        return evaluation, related_memory
+
+    def _comparable_memories(
+        self,
+        candidate: MemoryCandidate,
+        *,
+        limit: int,
+    ) -> Sequence[MemoryItem]:
+        query = self._base_active_memory_query(min_importance=None, memory_types=None)
+        query = query.where(MemoryItem.scope == candidate.scope)
+        if candidate.scope == "global":
+            query = query.where(MemoryItem.domain_id.is_(None), MemoryItem.agent_id.is_(None))
+        elif candidate.scope == "maestro_session":
+            if candidate.domain_id is None:
+                query = query.where(MemoryItem.domain_id.is_(None))
+            else:
+                query = query.where(MemoryItem.domain_id == candidate.domain_id)
+            query = query.where(MemoryItem.agent_id.is_(None))
+        elif candidate.scope == "domain":
+            query = query.where(
+                MemoryItem.domain_id == candidate.domain_id,
+                MemoryItem.agent_id.is_(None),
+            )
+        else:
+            query = query.where(
+                MemoryItem.domain_id == candidate.domain_id,
+                MemoryItem.agent_id == candidate.agent_id,
+            )
+        return self._ordered_memories(query, limit)
+
+    def _find_exact_duplicate(
+        self,
+        candidate: MemoryCandidate,
+        memories: Sequence[MemoryItem],
+    ) -> MemoryItem | None:
+        candidate_title = _normalize_memory_text(candidate.title)
+        candidate_content = _normalize_memory_text(candidate.content)
+        for memory in memories:
+            if (
+                _normalize_memory_text(memory.title) == candidate_title
+                and _normalize_memory_text(memory.content) == candidate_content
+            ):
+                return memory
+            if _normalize_memory_text(memory.content) == candidate_content:
+                return memory
+        return None
+
+    def _candidate_with_evaluation(
+        self,
+        candidate: MemoryCandidate,
+        evaluation: MemoryEvaluation,
+    ) -> MemoryCandidate:
+        metadata = dict(candidate.metadata)
+        metadata["memory_evaluation"] = evaluation.as_metadata()
+        return MemoryCandidate(
+            domain_id=candidate.domain_id,
+            agent_id=candidate.agent_id,
+            task_id=candidate.task_id,
+            report_id=candidate.report_id,
+            scope=candidate.scope,
+            memory_type=candidate.memory_type,
+            title=candidate.title,
+            content=candidate.content,
+            rationale=candidate.rationale,
+            impact_level=candidate.impact_level,
+            importance=candidate.importance,
+            source_refs=candidate.source_refs,
+            metadata=metadata,
+        )
+
+    def _replace_candidate_text(
+        self,
+        candidate: MemoryCandidate,
+        evaluation: MemoryEvaluation,
+    ) -> MemoryCandidate:
+        return MemoryCandidate(
+            domain_id=candidate.domain_id,
+            agent_id=candidate.agent_id,
+            task_id=candidate.task_id,
+            report_id=candidate.report_id,
+            scope=candidate.scope,
+            memory_type=candidate.memory_type,
+            title=evaluation.proposed_title or candidate.title,
+            content=evaluation.proposed_content or candidate.content,
+            rationale=candidate.rationale,
+            impact_level=candidate.impact_level,
+            importance=candidate.importance,
+            source_refs=candidate.source_refs,
+            metadata=candidate.metadata,
+        )
+
+    def _evaluation_from_metadata(self, metadata: dict[str, Any]) -> MemoryEvaluation:
+        payload = metadata.get("memory_evaluation") if isinstance(metadata, dict) else None
+        if not isinstance(payload, dict):
+            return MemoryEvaluation(decision="write_new", confidence=1.0)
+        related_memory_id = payload.get("related_memory_id")
+        return MemoryEvaluation(
+            decision=payload.get("decision", "write_new"),
+            related_memory_id=uuid.UUID(related_memory_id) if related_memory_id else None,
+            confidence=float(payload.get("confidence") or 0.0),
+            rationale=payload.get("rationale"),
+        )
+
+    def _link_evaluated_memory(
+        self,
+        memory_item: MemoryItem,
+        evaluation: MemoryEvaluation,
+    ) -> None:
+        if evaluation.related_memory_id is None:
+            return
+        relation_type = {
+            "supersede": "supersedes",
+            "write_new": "related_to",
+        }.get(evaluation.decision)
+        if relation_type is None:
+            return
+        self.session.add(
+            MemoryLink(
+                source_memory_id=memory_item.id,
+                target_memory_id=evaluation.related_memory_id,
+                relation_type=relation_type,
+                metadata_=evaluation.as_metadata(),
+            )
+        )
+
+    def _reinforce_memory(
+        self,
+        memory: MemoryItem,
+        candidate: MemoryCandidate,
+        evaluation: MemoryEvaluation,
+    ) -> None:
+        metadata = dict(memory.metadata_ or {})
+        reinforcements = list(metadata.get("reinforcements", []))
+        reinforcements.append(
+            {
+                "at": datetime.now(UTC).isoformat(),
+                "candidate_title": candidate.title,
+                "source_refs": candidate.source_refs,
+                "evaluation": evaluation.as_metadata(),
+            }
+        )
+        metadata["reinforcements"] = reinforcements
+        metadata["reinforcement_count"] = len(reinforcements)
+        memory.metadata_ = metadata
+
     def _create_proposal(self, candidate: MemoryCandidate, status: str) -> MemoryProposal:
         proposal = MemoryProposal(
             domain_id=candidate.domain_id,
@@ -342,3 +633,9 @@ class MemoryService:
             candidate.domain_id is None or candidate.agent_id is None
         ):
             raise MemoryAccessError("Agent memory requires both domain_id and agent_id.")
+
+
+def _normalize_memory_text(value: str) -> str:
+    lowered = value.casefold()
+    without_punctuation = re.sub(r"[^\w\s]", " ", lowered)
+    return " ".join(without_punctuation.split())

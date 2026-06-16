@@ -47,6 +47,7 @@ type MemoryPreview = {
   generated_at: string | null;
   candidate_count: number;
   written_count: number;
+  deduped_count: number;
   pending_approval_count: number;
   payload: {
     candidates?: Array<{
@@ -61,6 +62,13 @@ type MemoryPreview = {
       memory_item_id?: string | null;
       proposal_id?: string | null;
       proposal_status?: string | null;
+      related_memory_id?: string | null;
+      evaluation?: {
+        decision?: string;
+        confidence?: number;
+        rationale?: string | null;
+        related_memory_id?: string | null;
+      };
     }>;
   };
 };
@@ -198,6 +206,9 @@ function nextStatus(status: PlannerItem["status"]): PlannerItem["status"] {
 function resultLabel(result?: PreviewResult) {
   if (!result) return "Preview only";
   if (result.memory_item_id) return "Written to memory";
+  if (result.outcome === "duplicate_skipped") return "Duplicate skipped";
+  if (result.outcome === "reinforced") return "Reinforced existing memory";
+  if (result.outcome === "rejected") return "Rejected by memory manager";
   if (result.outcome === "pending_user_approval") return "Needs approval";
   if (result.proposal_status) return `Proposal ${result.proposal_status}`;
   return result.outcome ?? "Processed";
@@ -206,6 +217,8 @@ function resultLabel(result?: PreviewResult) {
 function resultClass(result?: PreviewResult) {
   if (!result) return "preview-only";
   if (result.memory_item_id) return "written";
+  if (result.outcome === "duplicate_skipped" || result.outcome === "reinforced") return "deduped";
+  if (result.outcome === "rejected") return "rejected";
   if (result.outcome === "pending_user_approval") return "pending";
   return "processed";
 }
@@ -713,6 +726,7 @@ function MemoryWorkspace() {
               <span>{latestPreview.status}</span>
               <span>{latestPreview.candidate_count} candidates</span>
               <span>{latestPreview.written_count} written</span>
+              <span>{latestPreview.deduped_count} deduped</span>
               <span>{latestPreview.pending_approval_count} pending approval</span>
             </div>
             {previews.length > 1 && (
@@ -746,6 +760,11 @@ function MemoryWorkspace() {
                   >
                     {resultLabel(latestPreview.payload.results?.[index])}
                   </div>
+                  {latestPreview.payload.results?.[index]?.evaluation?.rationale && (
+                    <p className="evaluation-note">
+                      {latestPreview.payload.results[index].evaluation?.rationale}
+                    </p>
+                  )}
                 </article>
               ))}
             </div>
