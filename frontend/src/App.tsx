@@ -46,6 +46,7 @@ type MemoryPreview = {
   status: string | null;
   generated_at: string | null;
   candidate_count: number;
+  written_count: number;
   pending_approval_count: number;
   payload: {
     candidates?: Array<{
@@ -57,10 +58,14 @@ type MemoryPreview = {
     }>;
     results?: Array<{
       outcome?: string;
+      memory_item_id?: string | null;
+      proposal_id?: string | null;
       proposal_status?: string | null;
     }>;
   };
 };
+
+type PreviewResult = NonNullable<MemoryPreview["payload"]["results"]>[number];
 
 type PendingProposal = {
   id: string;
@@ -190,6 +195,21 @@ function nextStatus(status: PlannerItem["status"]): PlannerItem["status"] {
   return "locked";
 }
 
+function resultLabel(result?: PreviewResult) {
+  if (!result) return "Preview only";
+  if (result.memory_item_id) return "Written to memory";
+  if (result.outcome === "pending_user_approval") return "Needs approval";
+  if (result.proposal_status) return `Proposal ${result.proposal_status}`;
+  return result.outcome ?? "Processed";
+}
+
+function resultClass(result?: PreviewResult) {
+  if (!result) return "preview-only";
+  if (result.memory_item_id) return "written";
+  if (result.outcome === "pending_user_approval") return "pending";
+  return "processed";
+}
+
 async function apiJson<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, options);
   if (!response.ok) {
@@ -298,10 +318,17 @@ export function App() {
               <ShieldCheck size={16} />
               Local
             </span>
-            <span>
-              <Clock3 size={16} />
-              {highPriorityCount} high priority
-            </span>
+            {activeSurface === "memory" ? (
+              <span>
+                <Database size={16} />
+                Memory pipeline
+              </span>
+            ) : (
+              <span>
+                <Clock3 size={16} />
+                {highPriorityCount} high priority
+              </span>
+            )}
           </div>
         </header>
 
@@ -465,6 +492,7 @@ function MemoryWorkspace() {
   const [pending, setPending] = useState<PendingProposal[]>([]);
   const [items, setItems] = useState<MemoryItem[]>([]);
   const [statusMessage, setStatusMessage] = useState("Ready");
+  const [lastProcessSummary, setLastProcessSummary] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const refreshMemory = useCallback(async () => {
@@ -522,7 +550,10 @@ function MemoryWorkspace() {
       const result = await apiJson<{ processed: number }>("/memory/dropbox/process", {
         method: "POST",
       });
-      setStatusMessage(`Processed ${result.processed} file${result.processed === 1 ? "" : "s"}.`);
+      setLastProcessSummary(
+        `Processed ${result.processed} file${result.processed === 1 ? "" : "s"}.`,
+      );
+      setStatusMessage("Processing complete. Review preview, recent writes, and approval queue.");
       await refreshMemory();
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Processing failed.");
@@ -599,9 +630,16 @@ function MemoryWorkspace() {
           </button>
           <button className="planner-action" onClick={processInbox} disabled={busy}>
             <Sparkles size={17} />
-            Process inbox
+            {busy ? "Working..." : "Process inbox"}
           </button>
         </div>
+
+        {busy && (
+          <div className="activity-row" role="status" aria-live="polite">
+            <span className="activity-dot" />
+            Processing memory pipeline
+          </div>
+        )}
 
         <div className="dropbox-stats">
           <span>Inbox {selectedDomainStatus?.inbox ?? 0}</span>
@@ -609,6 +647,7 @@ function MemoryWorkspace() {
           <span>Failed {selectedDomainStatus?.failed ?? 0}</span>
           <span>Previews {selectedDomainStatus?.previews ?? 0}</span>
         </div>
+        {lastProcessSummary && <p className="memory-status">{lastProcessSummary}</p>}
         <p className="memory-status">{statusMessage}</p>
       </section>
 
@@ -663,14 +702,23 @@ function MemoryWorkspace() {
               <span>{latestPreview.domain_key}</span>
               <span>{latestPreview.status}</span>
               <span>{latestPreview.candidate_count} candidates</span>
+              <span>{latestPreview.written_count} written</span>
+              <span>{latestPreview.pending_approval_count} pending approval</span>
             </div>
             <h4>{latestPreview.source_file}</h4>
             <div className="candidate-list">
-              {(latestPreview.payload.candidates ?? []).slice(0, 4).map((candidate, index) => (
+              {(latestPreview.payload.candidates ?? []).map((candidate, index) => (
                 <article className="candidate-row" key={`${candidate.title}-${index}`}>
-                  <span>{candidate.scope} / {candidate.impact_level}</span>
+                  <span>
+                    {candidate.scope} / {candidate.memory_type} / {candidate.impact_level}
+                  </span>
                   <h4>{candidate.title}</h4>
                   <p>{candidate.content}</p>
+                  <div
+                    className={`result-pill ${resultClass(latestPreview.payload.results?.[index])}`}
+                  >
+                    {resultLabel(latestPreview.payload.results?.[index])}
+                  </div>
                 </article>
               ))}
             </div>

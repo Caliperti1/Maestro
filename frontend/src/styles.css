@@ -504,7 +504,8 @@ h4 {
 .memory-actions,
 .approval-actions,
 .dropbox-stats,
-.preview-meta {
+.preview-meta,
+.activity-row {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
@@ -536,6 +537,25 @@ h4 {
 .empty-state {
   color: #52605a;
   line-height: 1.45;
+}
+
+.activity-row {
+  min-height: 36px;
+  padding: 8px 10px;
+  color: #224536;
+  background: #e4f4ea;
+  border: 1px solid #b8dac5;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.activity-dot {
+  width: 10px;
+  height: 10px;
+  background: #2f7d56;
+  border-radius: 999px;
+  animation: pulse 1s ease-in-out infinite;
 }
 
 .approval-list,
@@ -573,6 +593,35 @@ h4 {
   line-height: 1.45;
 }
 
+.result-pill {
+  justify-self: start;
+  min-height: 28px;
+  padding: 5px 8px;
+  color: #304139;
+  background: #eef4ef;
+  border: 1px solid #d9e1d9;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.result-pill.written {
+  color: #113b2b;
+  background: #d8efdf;
+  border-color: #aed8bd;
+}
+
+.result-pill.pending {
+  color: #59351d;
+  background: #f5e0bb;
+  border-color: #e7c98d;
+}
+
+.result-pill.preview-only {
+  color: #45514c;
+  background: #f4f6f3;
+}
+
 .approval-actions button:last-child {
   color: #5b2d25;
   background: #f8e7df;
@@ -583,6 +632,19 @@ h4 {
   display: grid;
   gap: 12px;
   margin-top: 14px;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.9);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
 }
 
 @media (max-width: 980px) {

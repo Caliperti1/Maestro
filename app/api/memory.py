@@ -90,7 +90,12 @@ def list_dropbox_previews(domain_key: str | None = None, db: Session = Depends(g
         preview_dir = root / key / "previews"
         if not preview_dir.exists():
             continue
-        for path in sorted(preview_dir.glob("*.preview.json"), reverse=True):
+        preview_paths = sorted(
+            preview_dir.glob("*.preview.json"),
+            key=lambda candidate: candidate.stat().st_mtime,
+            reverse=True,
+        )
+        for path in preview_paths:
             previews.append(_preview_payload(path, key))
     return {"previews": previews}
 
@@ -187,6 +192,9 @@ def _preview_payload(path: Path, domain_key: str) -> dict[str, Any]:
         "status": payload.get("status"),
         "generated_at": payload.get("generated_at"),
         "candidate_count": len(payload.get("candidates", [])),
+        "written_count": sum(
+            1 for result in payload.get("results", []) if result.get("memory_item_id")
+        ),
         "pending_approval_count": sum(
             1
             for result in payload.get("results", [])

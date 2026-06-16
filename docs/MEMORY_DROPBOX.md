@@ -178,6 +178,11 @@ tab shows:
 - recent canonical memory writes
 - very-high-impact memories waiting for approval or rejection
 
+When a preview status is `written`, the processor has already sent the extracted candidates to
+the memory manager. Candidates labeled as written have canonical `memory_items` rows. Candidates
+that need approval have `memory_proposals` rows and must be approved from the Memory tab before
+they become canonical memory.
+
 Approving a queued proposal writes it to canonical memory. Rejecting it leaves the proposal
 record with a rejection reason for debugging.
 

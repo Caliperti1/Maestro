@@ -47,7 +47,14 @@ def test_memory_preview_listing(session: Session, tmp_path: Path) -> None:
     preview_dir = tmp_path / "ophi" / "previews"
     preview_dir.mkdir(parents=True)
     (preview_dir / "note.preview.json").write_text(
-        '{"source_file":"note.md","status":"written","candidates":[{}],"results":[]}',
+        """
+        {
+          "source_file": "note.md",
+          "status": "written",
+          "candidates": [{}],
+          "results": [{"outcome": "written", "memory_item_id": "memory-1"}]
+        }
+        """,
         encoding="utf-8",
     )
 
@@ -58,6 +65,7 @@ def test_memory_preview_listing(session: Session, tmp_path: Path) -> None:
     assert len(previews) == 1
     assert previews[0]["source_file"] == "note.md"
     assert previews[0]["candidate_count"] == 1
+    assert previews[0]["written_count"] == 1
 
 
 def test_pending_approval_and_approve(session: Session, tmp_path: Path) -> None:
