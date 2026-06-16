@@ -137,6 +137,34 @@ No supported files found in domain inboxes.
 
 ## Manual End-To-End Test
 
+You can run the same flow from the web app once the API and frontend are running:
+
+```bash
+uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+```
+
+In another terminal:
+
+```bash
+cd frontend
+npm run dev -- --host 0.0.0.0
+```
+
+Open `http://localhost:5173`, select **Memory** in the sidebar, choose a domain, pick a
+supported file, and select **Upload**. The file lands in that domain's `inbox`. Select
+**Process inbox** to invoke the LLM curator and memory manager. After processing, the Memory
+tab shows:
+
+- folder counts for the selected domain
+- the latest debug preview from `previews`
+- recent canonical memory writes
+- very-high-impact memories waiting for approval or rejection
+
+Approving a queued proposal writes it to canonical memory. Rejecting it leaves the proposal
+record with a rejection reason for debugging.
+
+The command-line path is still useful when you want to test the processor directly.
+
 Create a small file in the Ophi inbox:
 
 ```bash
