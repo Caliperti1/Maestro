@@ -78,12 +78,17 @@ class MemoryDropboxProcessor:
         domain: Domain | None,
     ) -> DropboxProcessResult:
         seed_package: SeedPackage | None = None
+        artifact: Artifact | None = None
         preview_path: Path | None = None
         try:
-            content, extraction_metadata = extract_dropbox_text(path)
             seed_package, artifact = self._record_source_artifact(
                 path,
                 domain,
+            )
+            content, extraction_metadata = extract_dropbox_text(path)
+            self._update_source_artifact_extraction_metadata(
+                seed_package=seed_package,
+                artifact=artifact,
                 extraction_metadata=extraction_metadata,
             )
             source = StagedMemorySource(
@@ -139,14 +144,23 @@ class MemoryDropboxProcessor:
             )
         except Exception as exc:
             self.session.rollback()
+            destination = self._move_file(path, domain_key=domain_key, status="failed")
             if seed_package is not None:
                 seed_package.status = "failed"
+                seed_package.processed_at = datetime.now(UTC)
                 seed_package.metadata_ = {
                     **(seed_package.metadata_ or {}),
                     "error": str(exc),
+                    "failed_path": str(destination),
                 }
+                if artifact is not None:
+                    artifact.uri = str(destination)
+                    artifact.metadata_ = {
+                        **(artifact.metadata_ or {}),
+                        "error": str(exc),
+                        "failed_path": str(destination),
+                    }
                 self.session.commit()
-            destination = self._move_file(path, domain_key=domain_key, status="failed")
             self._write_failure(destination, str(exc))
             return DropboxProcessResult(
                 source_path=path,
@@ -177,8 +191,9 @@ class MemoryDropboxProcessor:
         path: Path,
         domain: Domain | None,
         *,
-        extraction_metadata: dict[str, Any],
+        extraction_metadata: dict[str, Any] | None = None,
     ) -> tuple[SeedPackage, Artifact]:
+        metadata = extraction_metadata or {}
         seed_package = SeedPackage(
             domain_id=domain.id if domain is not None else None,
             name=path.name,
@@ -187,7 +202,7 @@ class MemoryDropboxProcessor:
             metadata_={
                 "original_path": str(path),
                 "suffix": path.suffix.lower(),
-                **extraction_metadata,
+                **metadata,
             },
         )
         self.session.add(seed_package)
@@ -202,7 +217,7 @@ class MemoryDropboxProcessor:
             metadata_={
                 "dropbox": True,
                 "original_path": str(path),
-                **extraction_metadata,
+                **metadata,
             },
         )
         self.session.add(artifact)
@@ -210,6 +225,23 @@ class MemoryDropboxProcessor:
         self.session.refresh(seed_package)
         self.session.refresh(artifact)
         return seed_package, artifact
+
+    def _update_source_artifact_extraction_metadata(
+        self,
+        *,
+        seed_package: SeedPackage,
+        artifact: Artifact,
+        extraction_metadata: dict[str, Any],
+    ) -> None:
+        seed_package.metadata_ = {
+            **(seed_package.metadata_ or {}),
+            **extraction_metadata,
+        }
+        artifact.metadata_ = {
+            **(artifact.metadata_ or {}),
+            **extraction_metadata,
+        }
+        self.session.commit()
 
     def _finalize_provenance(
         self,

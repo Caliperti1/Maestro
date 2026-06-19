@@ -70,8 +70,11 @@ This pass supports:
 - `.tsv`
 
 PDF and DOCX files are converted to extracted text before they are sent to the memory curator.
-Scanned image-only PDFs will fail until OCR support is added. PPTX and richer extraction will
-come later; for now, export slide decks to PDF before dropping them into an inbox.
+PDFs with selectable text use direct text extraction. Image-only PDFs fall back to local
+Tesseract OCR when the `tesseract` binary is installed. OCR is useful for dense slide exports
+and scanned one-pagers, but it may need human review because layout-heavy files can produce
+imperfect text. PPTX and richer extraction will come later; for now, export slide decks to PDF
+before dropping them into an inbox.
 
 ## Processing Flow
 
@@ -82,7 +85,8 @@ come later; for now, export slide decks to PDF before dropping them into an inbo
 5. Candidates are routed through `MemoryService`.
 6. Canonical memory is written or very-high-impact proposals are queued for approval.
 7. The raw file moves to `processed`.
-8. If processing fails, the raw file moves to `failed` with an `.error.json` file.
+8. If processing fails, the raw file moves to `failed` with an `.error.json` file and the
+   source record is marked failed for provenance review.
 
 ## Candidate Evaluation
 
@@ -136,6 +140,12 @@ Install dependencies after pulling this change:
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
+```
+
+For image-only PDF ingestion, install Tesseract OCR on the machine running the processor:
+
+```bash
+brew install tesseract
 ```
 
 Start Postgres and apply migrations:
