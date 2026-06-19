@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 from zipfile import ZipFile
 
 import pytest
@@ -9,7 +10,8 @@ from app.llm import LLMMemoryExtractor
 from app.llm.client import LLMClientError
 from app.memory import LLMMemoryCurator
 import app.memory.document_extract as document_extract
-from app.memory.document_extract import extract_dropbox_text
+from app.memory.document_extract import DocumentExtractionError, extract_dropbox_text
+import app.memory.dropbox as dropbox
 from app.memory.dropbox import MemoryDropboxProcessor
 
 
@@ -172,6 +174,55 @@ def test_dropbox_processor_extracts_pdf_text_for_curator(
     assert artifact.metadata_["extraction_method"] == "pdf_text"
 
 
+def test_extract_dropbox_text_uses_ocr_for_image_only_pdf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeImage:
+        name = "scan.png"
+
+        @property
+        def image(self):
+            return self
+
+        def save(self, path: Path) -> None:
+            path.write_bytes(b"fake image")
+
+    class FakePage:
+        images = [FakeImage()]
+
+        def extract_text(self) -> str:
+            return ""
+
+    class FakePdfReader:
+        is_encrypted = False
+        pages = [FakePage()]
+
+        def __init__(self, _path: str) -> None:
+            pass
+
+    def fake_run(*_args, **_kwargs) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="OCR recovered Praxis mission text.",
+            stderr="",
+        )
+
+    monkeypatch.setattr(document_extract, "PdfReader", FakePdfReader)
+    monkeypatch.setattr(document_extract.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(document_extract.subprocess, "run", fake_run)
+    source_path = tmp_path / "scan.pdf"
+    source_path.write_bytes(b"%PDF fake bytes")
+
+    text, metadata = extract_dropbox_text(source_path)
+
+    assert "OCR recovered Praxis mission text." in text
+    assert metadata["extraction_method"] == "pdf_ocr"
+    assert metadata["ocr_engine"] == "tesseract"
+    assert metadata["ocr_image_count"] == 1
+
+
 def test_extract_dropbox_text_reads_docx(tmp_path: Path) -> None:
     source_path = tmp_path / "seed.docx"
     with ZipFile(source_path, "w") as docx:
@@ -215,6 +266,34 @@ def test_dropbox_processor_moves_failed_file_and_marks_seed_package_failed(
     assert failed_path.with_suffix(".txt.error.json").is_file()
     assert session.query(MemoryItem).count() == 0
     assert session.query(SeedPackage).one().status == "failed"
+
+
+def test_dropbox_processor_records_source_when_extraction_fails(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_extract(_path: Path) -> tuple[str, dict]:
+        raise DocumentExtractionError("No extractable text found in scan.pdf.")
+
+    monkeypatch.setattr(dropbox, "extract_dropbox_text", fake_extract)
+    processor = MemoryDropboxProcessor(session, root=tmp_path, curator=_curator(session, {}))
+    processor.ensure_directories()
+    source_path = tmp_path / "praxis" / "inbox" / "scan.pdf"
+    source_path.write_bytes(b"%PDF fake bytes")
+
+    results = processor.process_once()
+
+    assert results[0].status == "failed"
+    failed_path = tmp_path / "praxis" / "failed" / "scan.pdf"
+    assert failed_path.is_file()
+    seed_package = session.query(SeedPackage).one()
+    artifact = session.query(Artifact).one()
+    assert seed_package.status == "failed"
+    assert seed_package.metadata_["failed_path"] == str(failed_path)
+    assert seed_package.metadata_["error"] == "No extractable text found in scan.pdf."
+    assert artifact.uri == str(failed_path)
+    assert artifact.metadata_["failed_path"] == str(failed_path)
 
 
 def test_llm_extractor_rejects_invalid_model_output() -> None:

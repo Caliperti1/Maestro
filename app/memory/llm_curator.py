@@ -6,7 +6,13 @@ from sqlalchemy.orm import Session
 
 from app.llm.memory_extraction import LLMMemoryExtractor
 from app.memory.curator import CuratedMemoryBatch, StagedMemorySource
-from app.memory.service import MemoryCandidate, MemoryScope, MemoryService, MemoryWriteResult
+from app.memory.service import (
+    MemoryCandidate,
+    MemoryScope,
+    MemorySemanticEvaluator,
+    MemoryService,
+    MemoryWriteResult,
+)
 
 
 @dataclass(frozen=True)
@@ -16,8 +22,14 @@ class PreviewableMemoryBatch:
 
 
 class LLMMemoryCurator:
-    def __init__(self, session: Session, extractor: LLMMemoryExtractor):
-        self.memory_service = MemoryService(session)
+    def __init__(
+        self,
+        session: Session,
+        extractor: LLMMemoryExtractor,
+        *,
+        semantic_evaluator: MemorySemanticEvaluator | None = None,
+    ):
+        self.memory_service = MemoryService(session, semantic_evaluator=semantic_evaluator)
         self.extractor = extractor
 
     def extract_candidates(

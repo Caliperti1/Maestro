@@ -47,6 +47,7 @@ type MemoryPreview = {
   generated_at: string | null;
   candidate_count: number;
   written_count: number;
+  deduped_count: number;
   pending_approval_count: number;
   payload: {
     candidates?: Array<{
@@ -61,6 +62,13 @@ type MemoryPreview = {
       memory_item_id?: string | null;
       proposal_id?: string | null;
       proposal_status?: string | null;
+      related_memory_id?: string | null;
+      evaluation?: {
+        decision?: string;
+        confidence?: number;
+        rationale?: string | null;
+        related_memory_id?: string | null;
+      };
     }>;
   };
 };
@@ -88,6 +96,16 @@ type MemoryItem = {
   impact_level: string;
   importance: number;
   created_at: string | null;
+};
+
+type MemorySource = {
+  id: string;
+  name: string;
+  status: string;
+  domain_key: string;
+  memory_count: number;
+  proposal_count: number;
+  processed_at: string | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -198,6 +216,9 @@ function nextStatus(status: PlannerItem["status"]): PlannerItem["status"] {
 function resultLabel(result?: PreviewResult) {
   if (!result) return "Preview only";
   if (result.memory_item_id) return "Written to memory";
+  if (result.outcome === "duplicate_skipped") return "Duplicate skipped";
+  if (result.outcome === "reinforced") return "Reinforced existing memory";
+  if (result.outcome === "rejected") return "Rejected by memory manager";
   if (result.outcome === "pending_user_approval") return "Needs approval";
   if (result.proposal_status) return `Proposal ${result.proposal_status}`;
   return result.outcome ?? "Processed";
@@ -206,6 +227,8 @@ function resultLabel(result?: PreviewResult) {
 function resultClass(result?: PreviewResult) {
   if (!result) return "preview-only";
   if (result.memory_item_id) return "written";
+  if (result.outcome === "duplicate_skipped" || result.outcome === "reinforced") return "deduped";
+  if (result.outcome === "rejected") return "rejected";
   if (result.outcome === "pending_user_approval") return "pending";
   return "processed";
 }
@@ -496,17 +519,20 @@ function MemoryWorkspace() {
   const [previews, setPreviews] = useState<MemoryPreview[]>([]);
   const [pending, setPending] = useState<PendingProposal[]>([]);
   const [items, setItems] = useState<MemoryItem[]>([]);
+  const [sources, setSources] = useState<MemorySource[]>([]);
+  const [sourceTargetDomain, setSourceTargetDomain] = useState("personal");
   const [selectedPreviewFilename, setSelectedPreviewFilename] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [lastProcessSummary, setLastProcessSummary] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const refreshMemory = useCallback(async () => {
-    const [status, previewResponse, pendingResponse, itemResponse] = await Promise.all([
+    const [status, previewResponse, pendingResponse, itemResponse, sourceResponse] = await Promise.all([
       apiJson<{ domains: DropboxDomain[] }>("/memory/dropbox/status"),
       apiJson<{ previews: MemoryPreview[] }>("/memory/dropbox/previews"),
       apiJson<{ proposals: PendingProposal[] }>("/memory/proposals/pending"),
       apiJson<{ items: MemoryItem[] }>("/memory/items?limit=8"),
+      apiJson<{ sources: MemorySource[] }>("/memory/sources?limit=8"),
     ]);
     setDomains(status.domains);
     const sortedPreviews = [...previewResponse.previews].sort(
@@ -515,6 +541,7 @@ function MemoryWorkspace() {
     setPreviews(sortedPreviews.slice(0, 10));
     setPending(pendingResponse.proposals);
     setItems(itemResponse.items);
+    setSources(sourceResponse.sources);
     if (!status.domains.some((domain) => domain.key === selectedDomain)) {
       setSelectedDomain(status.domains[0]?.key ?? "global");
     }
@@ -586,6 +613,26 @@ function MemoryWorkspace() {
       await refreshMemory();
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Approval action failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reclassifySource = async (sourceId: string) => {
+    setBusy(true);
+    try {
+      await apiJson(`/memory/sources/${sourceId}/reclassify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_domain_key: sourceTargetDomain,
+          reason: "Corrected from Memory tab source review.",
+        }),
+      });
+      setStatusMessage(`Source reclassified to ${sourceTargetDomain}.`);
+      await refreshMemory();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Source reclassification failed.");
     } finally {
       setBusy(false);
     }
@@ -713,6 +760,7 @@ function MemoryWorkspace() {
               <span>{latestPreview.status}</span>
               <span>{latestPreview.candidate_count} candidates</span>
               <span>{latestPreview.written_count} written</span>
+              <span>{latestPreview.deduped_count} deduped</span>
               <span>{latestPreview.pending_approval_count} pending approval</span>
             </div>
             {previews.length > 1 && (
@@ -746,6 +794,11 @@ function MemoryWorkspace() {
                   >
                     {resultLabel(latestPreview.payload.results?.[index])}
                   </div>
+                  {latestPreview.payload.results?.[index]?.evaluation?.rationale && (
+                    <p className="evaluation-note">
+                      {latestPreview.payload.results[index].evaluation?.rationale}
+                    </p>
+                  )}
                 </article>
               ))}
             </div>
@@ -772,6 +825,54 @@ function MemoryWorkspace() {
             </article>
           ))}
           {items.length === 0 && <p className="empty-state">No memory has been written yet.</p>}
+        </div>
+      </section>
+
+      <section className="memory-panel" aria-labelledby="memory-sources-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Source review</p>
+            <h3 id="memory-sources-heading">Recent ingests</h3>
+          </div>
+          <Database size={18} />
+        </div>
+        <div className="source-controls">
+          <label>
+            Reclassify target
+            <select
+              value={sourceTargetDomain}
+              onChange={(event) => setSourceTargetDomain(event.target.value)}
+            >
+              {domains.map((domain) => (
+                <option key={domain.key} value={domain.key}>
+                  {domainLabels[domain.key] ?? domain.key}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="source-list">
+          {sources.map((source) => (
+            <article className="source-row" key={source.id}>
+              <div>
+                <span>
+                  {domainLabels[source.domain_key] ?? source.domain_key} / {source.status}
+                </span>
+                <h4>{source.name}</h4>
+                <p>
+                  {source.memory_count} memories / {source.proposal_count} proposals
+                </p>
+              </div>
+              <button
+                className="planner-action"
+                onClick={() => reclassifySource(source.id)}
+                disabled={busy || source.domain_key === sourceTargetDomain}
+              >
+                Reclassify
+              </button>
+            </article>
+          ))}
+          {sources.length === 0 && <p className="empty-state">No ingested sources yet.</p>}
         </div>
       </section>
     </div>

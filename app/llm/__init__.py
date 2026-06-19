@@ -6,6 +6,7 @@ from app.llm.memory_extraction import (
     ExtractedMemoryResponse,
     LLMMemoryExtractor,
 )
+from app.llm.memory_evaluation import LLMMemoryEvaluator, MemoryEvaluationResponse
 
 __all__ = [
     "ExtractedMemoryCandidate",
@@ -13,5 +14,7 @@ __all__ = [
     "LLMClient",
     "LLMClientError",
     "LLMMemoryExtractor",
+    "LLMMemoryEvaluator",
+    "MemoryEvaluationResponse",
     "OpenAILLMClient",
 ]

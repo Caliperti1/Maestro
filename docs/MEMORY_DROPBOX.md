@@ -70,8 +70,11 @@ This pass supports:
 - `.tsv`
 
 PDF and DOCX files are converted to extracted text before they are sent to the memory curator.
-Scanned image-only PDFs will fail until OCR support is added. PPTX and richer extraction will
-come later; for now, export slide decks to PDF before dropping them into an inbox.
+PDFs with selectable text use direct text extraction. Image-only PDFs fall back to local
+Tesseract OCR when the `tesseract` binary is installed. OCR is useful for dense slide exports
+and scanned one-pagers, but it may need human review because layout-heavy files can produce
+imperfect text. PPTX and richer extraction will come later; for now, export slide decks to PDF
+before dropping them into an inbox.
 
 ## Processing Flow
 
@@ -82,19 +85,26 @@ come later; for now, export slide decks to PDF before dropping them into an inbo
 5. Candidates are routed through `MemoryService`.
 6. Canonical memory is written or very-high-impact proposals are queued for approval.
 7. The raw file moves to `processed`.
-8. If processing fails, the raw file moves to `failed` with an `.error.json` file.
+8. If processing fails, the raw file moves to `failed` with an `.error.json` file and the
+   source record is marked failed for provenance review.
 
-## Candidate Persistence
+## Candidate Evaluation
 
-The current pipeline uses the curator prompt to avoid obvious duplicate candidates and routes
-all candidates through the memory manager's impact gates. Low-impact candidates write directly,
-medium/high candidates are auto-approved with a proposal record, and very-high-impact candidates
-wait for user approval.
+The current pipeline routes all candidates through the memory manager before anything becomes
+canonical memory. The manager:
 
-The memory manager does not yet perform semantic duplicate detection, contradiction checks, or
-candidate-to-existing-memory merging. Those belong in the memory hygiene layer. During seed
-ingestion, use the debug preview and approval queue as the calibration loop: add representative
-files, inspect the candidates, adjust prompts or rules, then increase volume.
+- skips exact normalized duplicates deterministically
+- can use semantic LLM evaluation against nearby existing memories
+- can write new memory, reinforce existing memory, supersede old memory, flag conflicts for
+  approval, or reject low-value candidates
+- preserves provenance and evaluator rationale in preview results and memory metadata
+
+Low-impact candidates write directly when accepted. Medium/high candidates become approved audit
+proposals and canonical memory. Very-high-impact candidates, conflicts, and authority-changing
+updates wait for user approval.
+
+During seed ingestion, use the debug preview and approval queue as the calibration loop: add
+representative files, inspect candidate outcomes, then increase volume.
 
 ## Current Curator Prompt
 
@@ -130,6 +140,12 @@ Install dependencies after pulling this change:
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
+```
+
+For image-only PDF ingestion, install Tesseract OCR on the machine running the processor:
+
+```bash
+brew install tesseract
 ```
 
 Start Postgres and apply migrations:
@@ -182,6 +198,11 @@ When a preview status is `written`, the processor has already sent the extracted
 the memory manager. Candidates labeled as written have canonical `memory_items` rows. Candidates
 that need approval have `memory_proposals` rows and must be approved from the Memory tab before
 they become canonical memory.
+
+The Memory tab also includes **Recent ingests** under Source Review. Use it when a file was
+staged into the wrong domain or a seed package needs source-level cleanup. Reclassifying a source
+updates the generated memories, generated proposals, seed package metadata, and keeps a
+reclassification history instead of deleting rows.
 
 Approving a queued proposal writes it to canonical memory. Rejecting it leaves the proposal
 record with a rejection reason for debugging.

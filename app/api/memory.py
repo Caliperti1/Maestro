@@ -1,5 +1,6 @@
 import json
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import MemoryItem, MemoryProposal
+from app.db.models import MemoryItem, MemoryProposal, SeedPackage
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
@@ -21,6 +22,11 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 
 
 class RejectProposalRequest(BaseModel):
+    reason: str | None = None
+
+
+class ReclassifySourceRequest(BaseModel):
+    target_domain_key: str
     reason: str | None = None
 
 
@@ -135,6 +141,84 @@ def list_memory_items(limit: int = 20, db: Session = Depends(get_db)) -> dict[st
     return {"items": [_memory_item_payload(item) for item in items]}
 
 
+@router.get("/sources")
+def list_memory_sources(limit: int = 20, db: Session = Depends(get_db)) -> dict[str, Any]:
+    query = select(SeedPackage).order_by(SeedPackage.created_at.desc()).limit(limit)
+    seed_packages = db.scalars(query).all()
+    return {"sources": [_source_payload(db, seed_package, include_generated=False) for seed_package in seed_packages]}
+
+
+@router.get("/sources/{source_id}")
+def get_memory_source(source_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    seed_package = db.get(SeedPackage, source_id)
+    if seed_package is None:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} was not found.")
+    return {"source": _source_payload(db, seed_package, include_generated=True)}
+
+
+@router.post("/sources/{source_id}/reclassify")
+def reclassify_memory_source(
+    source_id: uuid.UUID,
+    request: ReclassifySourceRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    seed_package = db.get(SeedPackage, source_id)
+    if seed_package is None:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} was not found.")
+
+    target_domain = None
+    target_scope = "global"
+    if request.target_domain_key != "global":
+        _validate_domain_key(db, request.target_domain_key)
+        target_domain = DomainRepository(db).get_by_key(request.target_domain_key)
+        if target_domain is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown memory domain: {request.target_domain_key}",
+            )
+        target_scope = "domain"
+
+    generated_memories = _items_for_seed_package(db, seed_package.id)
+    generated_proposals = _proposals_for_seed_package(db, seed_package.id)
+    reclassification = {
+        "at": datetime.now(UTC).isoformat(),
+        "target_domain_key": request.target_domain_key,
+        "target_scope": target_scope,
+        "reason": request.reason,
+    }
+
+    seed_package.domain_id = target_domain.id if target_domain is not None else None
+    seed_package.metadata_ = _metadata_reclassified(
+        seed_package.metadata_,
+        reclassification=reclassification,
+        target_domain_key=request.target_domain_key,
+    )
+
+    for item in generated_memories:
+        item.scope = target_scope
+        item.domain_id = target_domain.id if target_domain is not None else None
+        item.agent_id = None
+        item.metadata_ = _metadata_reclassified(
+            item.metadata_,
+            reclassification=reclassification,
+            target_domain_key=request.target_domain_key,
+        )
+
+    for proposal in generated_proposals:
+        proposal.scope = target_scope
+        proposal.domain_id = target_domain.id if target_domain is not None else None
+        proposal.agent_id = None
+        proposal.metadata_ = _metadata_reclassified(
+            proposal.metadata_,
+            reclassification=reclassification,
+            target_domain_key=request.target_domain_key,
+        )
+
+    db.commit()
+    db.refresh(seed_package)
+    return {"source": _source_payload(db, seed_package, include_generated=True)}
+
+
 def _dropbox_root() -> Path:
     return Path(get_settings().memory_dropbox_root)
 
@@ -195,6 +279,11 @@ def _preview_payload(path: Path, domain_key: str) -> dict[str, Any]:
         "written_count": sum(
             1 for result in payload.get("results", []) if result.get("memory_item_id")
         ),
+        "deduped_count": sum(
+            1
+            for result in payload.get("results", [])
+            if result.get("outcome") in {"duplicate_skipped", "reinforced"}
+        ),
         "pending_approval_count": sum(
             1
             for result in payload.get("results", [])
@@ -232,3 +321,68 @@ def _memory_item_payload(item: MemoryItem) -> dict[str, Any]:
         "metadata": item.metadata_,
         "created_at": item.created_at.isoformat() if item.created_at else None,
     }
+
+
+def _source_payload(
+    db: Session,
+    seed_package: SeedPackage,
+    *,
+    include_generated: bool,
+) -> dict[str, Any]:
+    memories = _items_for_seed_package(db, seed_package.id)
+    proposals = _proposals_for_seed_package(db, seed_package.id)
+    payload = {
+        "id": str(seed_package.id),
+        "name": seed_package.name,
+        "source_type": seed_package.source_type,
+        "status": seed_package.status,
+        "domain_key": _domain_key_for_id(db, seed_package.domain_id),
+        "metadata": seed_package.metadata_,
+        "memory_count": len(memories),
+        "proposal_count": len(proposals),
+        "created_at": seed_package.created_at.isoformat() if seed_package.created_at else None,
+        "processed_at": seed_package.processed_at.isoformat() if seed_package.processed_at else None,
+    }
+    if include_generated:
+        payload["memories"] = [_memory_item_payload(item) for item in memories]
+        payload["proposals"] = [_proposal_payload(proposal) for proposal in proposals]
+    return payload
+
+
+def _items_for_seed_package(db: Session, seed_package_id: uuid.UUID) -> list[MemoryItem]:
+    items = db.scalars(select(MemoryItem).order_by(MemoryItem.created_at.desc())).all()
+    return [
+        item
+        for item in items
+        if item.metadata_.get("seed_package_id") == str(seed_package_id)
+    ]
+
+
+def _proposals_for_seed_package(db: Session, seed_package_id: uuid.UUID) -> list[MemoryProposal]:
+    proposals = db.scalars(select(MemoryProposal).order_by(MemoryProposal.created_at.desc())).all()
+    return [
+        proposal
+        for proposal in proposals
+        if proposal.metadata_.get("seed_package_id") == str(seed_package_id)
+    ]
+
+
+def _domain_key_for_id(db: Session, domain_id: uuid.UUID | None) -> str:
+    if domain_id is None:
+        return "global"
+    domain = DomainRepository(db).get(domain_id)
+    return domain.key if domain is not None else "unknown"
+
+
+def _metadata_reclassified(
+    metadata: dict[str, Any] | None,
+    *,
+    reclassification: dict[str, Any],
+    target_domain_key: str,
+) -> dict[str, Any]:
+    updated = dict(metadata or {})
+    history = list(updated.get("reclassification_history", []))
+    history.append(reclassification)
+    updated["reclassification_history"] = history
+    updated["dropbox_domain"] = target_domain_key
+    return updated
