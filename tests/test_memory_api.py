@@ -188,3 +188,56 @@ def test_source_listing_and_reclassification(session: Session, tmp_path: Path) -
     session.refresh(proposal)
     assert memory_item.domain_id == personal.id
     assert proposal.domain_id == personal.id
+
+
+def test_memory_retrieval_endpoint_returns_scored_context(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    ophi = DomainRepository(session).get_by_key("ophi")
+    assert praxis is not None
+    assert ophi is not None
+    praxis_memory = MemoryItem(
+        scope="domain",
+        domain_id=praxis.id,
+        memory_type="fact",
+        title="Praxis training model",
+        content="Praxis trains Tactical Innovation Officers.",
+        impact_level="medium",
+        importance=0.8,
+        metadata_={"source_refs": [{"type": "artifact", "id": "artifact-1"}]},
+    )
+    ophi_memory = MemoryItem(
+        scope="domain",
+        domain_id=ophi.id,
+        memory_type="fact",
+        title="Ophi research model",
+        content="Ophi memory should not appear in Praxis-scoped retrieval.",
+        impact_level="low",
+        importance=1.0,
+        metadata_={},
+    )
+    session.add_all([praxis_memory, ophi_memory])
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.get(
+        "/memory/retrieve",
+        params={
+            "audience": "maestro",
+            "domain_key": "praxis",
+            "query_text": "tactical innovation training",
+            "limit": 5,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["query"]["domain_key"] == "praxis"
+    assert payload["results"][0]["title"] == "Praxis training model"
+    assert payload["results"][0]["domain_key"] == "praxis"
+    assert payload["results"][0]["score"] > 0
+    assert payload["results"][0]["provenance"]["source_refs"][0]["id"] == "artifact-1"
+    assert all(result["domain_key"] != "ophi" for result in payload["results"])

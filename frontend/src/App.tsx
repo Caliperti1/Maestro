@@ -15,6 +15,7 @@ import {
   PanelLeftClose,
   Plus,
   RefreshCw,
+  Search,
   Settings,
   ShieldCheck,
   Sparkles,
@@ -106,6 +107,30 @@ type MemorySource = {
   memory_count: number;
   proposal_count: number;
   processed_at: string | null;
+};
+
+type RetrievedMemory = MemoryItem & {
+  domain_key: string;
+  agent_id: string | null;
+  score: number;
+  score_reasons: string[];
+  provenance: {
+    source_refs: Array<Record<string, unknown>>;
+    seed_package: { id: string; name: string; source_type: string; status: string } | null;
+    artifact: {
+      id: string;
+      name: string;
+      artifact_type: string;
+      uri: string;
+      mime_type: string | null;
+    } | null;
+    processed_path: string | null;
+  };
+  links: Array<{
+    relation_type: string;
+    direction: string;
+    memory: MemoryItem & { domain_key: string };
+  }>;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -522,6 +547,10 @@ function MemoryWorkspace() {
   const [sources, setSources] = useState<MemorySource[]>([]);
   const [sourceTargetDomain, setSourceTargetDomain] = useState("personal");
   const [selectedPreviewFilename, setSelectedPreviewFilename] = useState<string | null>(null);
+  const [retrievalDomain, setRetrievalDomain] = useState("praxis");
+  const [retrievalQuery, setRetrievalQuery] = useState("");
+  const [retrievalResults, setRetrievalResults] = useState<RetrievedMemory[]>([]);
+  const [retrievalTotal, setRetrievalTotal] = useState(0);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [lastProcessSummary, setLastProcessSummary] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -633,6 +662,31 @@ function MemoryWorkspace() {
       await refreshMemory();
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Source reclassification failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runRetrieval = async () => {
+    setBusy(true);
+    try {
+      const params = new URLSearchParams({
+        audience: "maestro",
+        domain_key: retrievalDomain,
+        limit: "8",
+      });
+      if (retrievalQuery.trim()) {
+        params.set("query_text", retrievalQuery.trim());
+      }
+      const response = await apiJson<{
+        total_visible: number;
+        results: RetrievedMemory[];
+      }>(`/memory/retrieve?${params.toString()}`);
+      setRetrievalResults(response.results);
+      setRetrievalTotal(response.total_visible);
+      setStatusMessage(`Retrieved ${response.results.length} memories.`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Retrieval failed.");
     } finally {
       setBusy(false);
     }
@@ -825,6 +879,67 @@ function MemoryWorkspace() {
             </article>
           ))}
           {items.length === 0 && <p className="empty-state">No memory has been written yet.</p>}
+        </div>
+      </section>
+
+      <section className="memory-panel" aria-labelledby="memory-retrieval-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Retrieval debug</p>
+            <h3 id="memory-retrieval-heading">Context search</h3>
+          </div>
+          <Search size={18} />
+        </div>
+        <div className="retrieval-controls">
+          <label>
+            Domain
+            <select
+              value={retrievalDomain}
+              onChange={(event) => setRetrievalDomain(event.target.value)}
+            >
+              {domains.map((domain) => (
+                <option key={domain.key} value={domain.key}>
+                  {domainLabels[domain.key] ?? domain.key}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Query
+            <input
+              value={retrievalQuery}
+              onChange={(event) => setRetrievalQuery(event.target.value)}
+              placeholder="Search task context..."
+            />
+          </label>
+          <button className="planner-action" onClick={runRetrieval} disabled={busy}>
+            <Search size={17} />
+            Retrieve
+          </button>
+        </div>
+        <div className="retrieval-list">
+          {retrievalResults.map((item) => (
+            <article className="memory-row" key={item.id}>
+              <span>
+                {item.domain_key} / {item.scope} / score {item.score.toFixed(2)}
+              </span>
+              <h4>{item.title}</h4>
+              <p>{item.content}</p>
+              <p className="evaluation-note">{item.score_reasons.join(" | ")}</p>
+              <div className="preview-meta">
+                <span>{item.provenance.source_refs.length} source refs</span>
+                <span>{item.provenance.artifact ? "artifact" : "no artifact"}</span>
+                <span>{item.links.length} links</span>
+              </div>
+            </article>
+          ))}
+          {retrievalResults.length === 0 ? (
+            <p className="empty-state">
+              Run retrieval to inspect ranked context. {retrievalTotal} visible memories.
+            </p>
+          ) : (
+            <p className="memory-status">{retrievalTotal} visible memories before ranking.</p>
+          )}
         </div>
       </section>
 

@@ -29,8 +29,29 @@ The retrieval side is the service other agents and Maestro call when they need c
 - Domain agents can retrieve global memory, their own domain memory, and their own agent memory.
 - Domain agents do not retrieve unrelated domain or unrelated agent memory.
 - Maestro can retrieve global memory, Maestro session memory, and cross-domain memory.
-- Retrieval supports importance and memory-type filters.
-- Returned memories preserve metadata and source references for provenance.
+- Retrieval supports query text, importance, memory-type, domain, and audience filters.
+- Returned memories include score reasons, source provenance, artifact references, and visible
+  one-hop memory links.
+
+The MVP retrieval service stays in Postgres. It ranks with deterministic structured signals:
+importance, recency, impact level, domain/agent match, global context, and lightweight lexical
+overlap with the task query. This is intentionally explainable so we can debug early agent
+behavior. A later semantic retrieval story should add pgvector embeddings and blend vector
+similarity into the same result payload.
+
+API:
+
+```text
+GET /memory/retrieve?audience=maestro&domain_key=praxis&query_text=tactical+innovation&limit=8
+```
+
+Primary response shape:
+
+- `total_visible`: count before ranking/limit.
+- `results[].score`: deterministic ranking score.
+- `results[].score_reasons`: explainable factors behind the score.
+- `results[].provenance`: source refs, seed package, artifact, and processed path.
+- `results[].links`: visible one-hop linked memories and relation types.
 
 ## Impact Policy
 
@@ -64,6 +85,10 @@ Agent memory requires both domain and agent.
 - proposal listing filters
 - scoped retrieval for agents
 - cross-domain retrieval for Maestro
+- `MemoryRetrievalService`
+- `/memory/retrieve` debug/API endpoint
+- Memory tab retrieval debugger
+- provenance and one-hop link context in retrieval payloads
 
 ## Follow-On Stories
 
