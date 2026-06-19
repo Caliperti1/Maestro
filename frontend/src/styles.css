@@ -561,7 +561,8 @@ h4 {
 
 .approval-list,
 .candidate-list,
-.memory-list {
+.memory-list,
+.source-list {
   display: grid;
   gap: 10px;
   margin-top: 14px;
@@ -569,7 +570,8 @@ h4 {
 
 .approval-card,
 .candidate-row,
-.memory-row {
+.memory-row,
+.source-row {
   display: grid;
   gap: 8px;
   padding: 12px;
@@ -580,7 +582,8 @@ h4 {
 
 .approval-card span,
 .candidate-row span,
-.memory-row span {
+.memory-row span,
+.source-row span {
   color: #68736d;
   font-size: 0.76rem;
   font-weight: 800;
@@ -589,9 +592,38 @@ h4 {
 
 .approval-card p,
 .candidate-row p,
-.memory-row p {
+.memory-row p,
+.source-row p {
   color: #52605a;
   line-height: 1.45;
+}
+
+.source-controls {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.source-controls label {
+  display: grid;
+  gap: 7px;
+  color: #35453e;
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.source-controls select {
+  min-height: 40px;
+  padding: 8px 10px;
+  color: #22312b;
+  background: #f8faf7;
+  border: 1px solid #d7ded7;
+  border-radius: 8px;
+}
+
+.source-row {
+  grid-template-columns: 1fr auto;
+  align-items: center;
 }
 
 .result-pill {

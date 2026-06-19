@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import MemoryProposal
+from app.db.models import MemoryItem, MemoryProposal, SeedPackage
+from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 
@@ -121,3 +122,69 @@ def test_reject_pending_memory(session: Session, tmp_path: Path) -> None:
     assert rejected.status_code == 200
     assert rejected.json()["status"] == "rejected"
     assert rejected.json()["proposal"]["metadata"]["rejection_reason"] == "Not appropriate."
+
+
+def test_source_listing_and_reclassification(session: Session, tmp_path: Path) -> None:
+    seed_default_domains(session)
+    personal = DomainRepository(session).get_by_key("personal")
+    assert personal is not None
+    seed_package = SeedPackage(
+        name="resume.pdf",
+        source_type="dropbox_file",
+        status="processed",
+        metadata_={"seed": True},
+    )
+    session.add(seed_package)
+    session.flush()
+    memory_item = MemoryItem(
+        scope="global",
+        memory_type="fact",
+        title="Resume fact",
+        content="Chris has a resume.",
+        impact_level="medium",
+        importance=0.7,
+        metadata_={"seed_package_id": str(seed_package.id), "dropbox_domain": "global"},
+    )
+    proposal = MemoryProposal(
+        scope="global",
+        memory_type="preference",
+        title="Resume preference",
+        content="Chris prefers durable context.",
+        impact_level="medium",
+        status="approved",
+        source_refs=[],
+        metadata_={"seed_package_id": str(seed_package.id), "dropbox_domain": "global"},
+    )
+    session.add_all([memory_item, proposal])
+    session.commit()
+    client = _client(session, tmp_path)
+
+    sources = client.get("/memory/sources")
+
+    assert sources.status_code == 200
+    assert sources.json()["sources"][0]["name"] == "resume.pdf"
+    assert sources.json()["sources"][0]["memory_count"] == 1
+    assert sources.json()["sources"][0]["proposal_count"] == 1
+
+    details = client.get(f"/memory/sources/{seed_package.id}")
+
+    assert details.status_code == 200
+    assert details.json()["source"]["memories"][0]["title"] == "Resume fact"
+
+    reclassified = client.post(
+        f"/memory/sources/{seed_package.id}/reclassify",
+        json={"target_domain_key": "personal", "reason": "Resume belongs in Personal."},
+    )
+
+    assert reclassified.status_code == 200
+    payload = reclassified.json()["source"]
+    assert payload["domain_key"] == "personal"
+    assert payload["memories"][0]["scope"] == "domain"
+    assert payload["memories"][0]["metadata"]["dropbox_domain"] == "personal"
+    assert payload["memories"][0]["metadata"]["reclassification_history"][0]["reason"] == (
+        "Resume belongs in Personal."
+    )
+    session.refresh(memory_item)
+    session.refresh(proposal)
+    assert memory_item.domain_id == personal.id
+    assert proposal.domain_id == personal.id

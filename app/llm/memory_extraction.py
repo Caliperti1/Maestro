@@ -31,8 +31,11 @@ relationship, project, and source_summary.
 
 Scope policy:
 - Use domain scope by default for files dropped into a domain folder.
-- Use global only for cross-Maestro operating principles, user preferences, or facts that
-  apply across domains.
+- Use global only for cross-Maestro operating principles, Maestro behavior preferences, or facts
+  that every domain agent should know to behave correctly.
+- Biographical facts, resumes, career history, family context, personal goals, and personal
+  preferences about the user belong in the personal domain unless they explicitly govern how
+  Maestro should behave across all domains.
 - Use maestro_session only for transient cross-domain session context.
 - Use agent only when the source clearly gives an instruction or context for a specific agent.
 
@@ -53,8 +56,14 @@ Seed ingestion guidance:
 """
 
 DOMAIN_CONTEXTS = {
-    "global": "Cross-domain Maestro context. Use for system-wide preferences and principles.",
-    "personal": "Personal domain covering user life admin, planning, reminders, and priorities.",
+    "global": (
+        "Cross-domain Maestro operating context. Use only for system-wide behavior preferences, "
+        "approval rules, and principles that every domain agent must apply."
+    ),
+    "personal": (
+        "Personal domain covering Chris's biography, resume, career history, personal goals, "
+        "life admin, planning, reminders, priorities, and personal preferences."
+    ),
     "maestro-development": (
         "Maestro Development domain covering the Maestro product, architecture, backlog, "
         "repo work, Codex handoffs, and self-improvement."
