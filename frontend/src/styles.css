@@ -562,6 +562,7 @@ h4 {
 .approval-list,
 .candidate-list,
 .memory-list,
+.retrieval-list,
 .source-list {
   display: grid;
   gap: 10px;
@@ -598,13 +599,15 @@ h4 {
   line-height: 1.45;
 }
 
-.source-controls {
+.source-controls,
+.retrieval-controls {
   display: grid;
   gap: 8px;
   margin-top: 14px;
 }
 
-.source-controls label {
+.source-controls label,
+.retrieval-controls label {
   display: grid;
   gap: 7px;
   color: #35453e;
@@ -612,7 +615,9 @@ h4 {
   font-weight: 800;
 }
 
-.source-controls select {
+.source-controls select,
+.retrieval-controls select,
+.retrieval-controls input {
   min-height: 40px;
   padding: 8px 10px;
   color: #22312b;

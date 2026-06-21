@@ -7,7 +7,9 @@ flowchart TD
     Canonical[("Canonical memory<br/>global, session, domain, agent")]
     Proposal[("Memory proposals<br/>audit + approval queue")]
     Approval["Human approval<br/>very-high impact only"]
-    Retrieval["Retrieval API<br/>agent or Maestro context bundle"]
+    Retrieval["MemoryRetrievalService<br/>filters, ranking, provenance"]
+    Links["Memory links<br/>one-hop relation context"]
+    Debug["Memory tab<br/>retrieval debugger"]
     Agent["Domain agent"]
     Maestro["Maestro orchestrator"]
     Hygiene["Memory hygiene jobs<br/>dedupe, decay, archive, conflict review"]
@@ -22,7 +24,10 @@ flowchart TD
     Service -->|"very-high impact"| Proposal
     Proposal --> Approval
     Approval --> Canonical
+    Canonical --> Links
+    Links --> Retrieval
     Canonical --> Retrieval
+    Retrieval --> Debug
     Retrieval --> Agent
     Retrieval --> Maestro
     Canonical -. future .-> Hygiene

@@ -29,8 +29,45 @@ The retrieval side is the service other agents and Maestro call when they need c
 - Domain agents can retrieve global memory, their own domain memory, and their own agent memory.
 - Domain agents do not retrieve unrelated domain or unrelated agent memory.
 - Maestro can retrieve global memory, Maestro session memory, and cross-domain memory.
-- Retrieval supports importance and memory-type filters.
-- Returned memories preserve metadata and source references for provenance.
+- Retrieval supports query text, importance, memory-type, domain, and audience filters.
+- Returned memories include score reasons, source provenance, artifact references, and visible
+  one-hop memory links.
+
+The MVP retrieval service stays in Postgres. It ranks with deterministic structured signals:
+importance, recency, impact level, domain/agent match, global context, and lightweight query
+relevance from lexical overlap with the task query. This is intentionally explainable so we can
+debug early agent behavior. A later semantic retrieval story should add pgvector embeddings and
+blend vector similarity into the same result payload.
+
+Importance and query relevance are separate:
+
+- `importance`: durable value assigned when memory is written.
+- `query_relevance`: task-specific lexical match for this retrieval request.
+- `score`: blended rank used to order returned context.
+
+When `query_text` is present, retrieval has three modes:
+
+- `balanced` default: filters zero-match noise unless the memory is exceptional global/session
+  context.
+- `strict`: requires stronger query relevance for focused task prompts.
+- `broad`: keeps all visible memories for exploratory/debug retrieval while still ranking
+  query matches first.
+
+API:
+
+```text
+GET /memory/retrieve?audience=maestro&domain_key=praxis&query_text=tactical+innovation&mode=balanced&limit=8
+```
+
+Primary response shape:
+
+- `total_visible`: count before ranking/limit.
+- `filtered_count`: count removed by the retrieval mode.
+- `results[].score`: deterministic ranking score.
+- `results[].query_relevance`: query-specific lexical relevance before semantic retrieval exists.
+- `results[].score_reasons`: explainable factors behind the score.
+- `results[].provenance`: source refs, seed package, artifact, and processed path.
+- `results[].links`: visible one-hop linked memories and relation types.
 
 ## Impact Policy
 
@@ -64,6 +101,10 @@ Agent memory requires both domain and agent.
 - proposal listing filters
 - scoped retrieval for agents
 - cross-domain retrieval for Maestro
+- `MemoryRetrievalService`
+- `/memory/retrieve` debug/API endpoint
+- Memory tab retrieval debugger
+- provenance and one-hop link context in retrieval payloads
 
 ## Follow-On Stories
 

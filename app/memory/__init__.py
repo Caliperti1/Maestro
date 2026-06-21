@@ -2,6 +2,7 @@
 
 from app.memory.curator import CuratedMemoryBatch, MemoryCurator, StagedMemorySource
 from app.memory.llm_curator import LLMMemoryCurator, PreviewableMemoryBatch
+from app.memory.retrieval import MemoryRetrievalQuery, MemoryRetrievalService
 from app.memory.service import (
     MemoryAccessError,
     MemoryCandidate,
@@ -16,6 +17,8 @@ __all__ = [
     "MemoryCandidate",
     "MemoryContext",
     "MemoryCurator",
+    "MemoryRetrievalQuery",
+    "MemoryRetrievalService",
     "MemoryService",
     "MemoryWriteResult",
     "LLMMemoryCurator",

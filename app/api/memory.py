@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,6 +16,13 @@ from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
 from app.memory.dropbox import MemoryDropboxProcessor
+from app.memory.retrieval import (
+    MemoryRetrievalError,
+    MemoryRetrievalQuery,
+    MemoryRetrievalService,
+    RetrievedMemory,
+    RetrievedMemoryLink,
+)
 from app.memory.service import MemoryAccessError, MemoryService
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -139,6 +146,62 @@ def list_memory_items(limit: int = 20, db: Session = Depends(get_db)) -> dict[st
     query = select(MemoryItem).order_by(MemoryItem.created_at.desc()).limit(limit)
     items = db.scalars(query).all()
     return {"items": [_memory_item_payload(item) for item in items]}
+
+
+@router.get("/retrieve")
+def retrieve_memory(
+    audience: str = "maestro",
+    domain_key: str | None = None,
+    agent_id: uuid.UUID | None = None,
+    query_text: str | None = None,
+    memory_type: list[str] | None = Query(default=None),
+    min_importance: float | None = None,
+    include_agent_memory: bool = False,
+    include_session_memory: bool = True,
+    include_links: bool = True,
+    mode: str = "balanced",
+    limit: int = 12,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if audience not in {"maestro", "agent"}:
+        raise HTTPException(status_code=400, detail="audience must be maestro or agent.")
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    try:
+        result = MemoryRetrievalService(db).retrieve(
+            MemoryRetrievalQuery(
+                audience=audience,  # type: ignore[arg-type]
+                domain_id=domain_id,
+                agent_id=agent_id,
+                query_text=query_text,
+                memory_types=set(memory_type) if memory_type else None,
+                min_importance=min_importance,
+                include_agent_memory=include_agent_memory,
+                include_session_memory=include_session_memory,
+                include_links=include_links,
+                mode=mode,  # type: ignore[arg-type]
+                limit=limit,
+            )
+        )
+    except MemoryRetrievalError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "query": {
+            "audience": audience,
+            "domain_key": domain_key,
+            "agent_id": str(agent_id) if agent_id else None,
+            "query_text": query_text,
+            "memory_type": memory_type or [],
+            "min_importance": min_importance,
+            "include_agent_memory": include_agent_memory,
+            "include_session_memory": include_session_memory,
+            "include_links": include_links,
+            "mode": mode,
+            "limit": limit,
+        },
+        "total_visible": result.total_visible,
+        "filtered_count": result.filtered_count,
+        "results": [_retrieved_memory_payload(db, retrieved) for retrieved in result.results],
+    }
 
 
 @router.get("/sources")
@@ -372,6 +435,45 @@ def _domain_key_for_id(db: Session, domain_id: uuid.UUID | None) -> str:
         return "global"
     domain = DomainRepository(db).get(domain_id)
     return domain.key if domain is not None else "unknown"
+
+
+def _domain_id_for_key(db: Session, domain_key: str | None) -> uuid.UUID | None:
+    if domain_key is None or domain_key == "global":
+        return None
+    _validate_domain_key(db, domain_key)
+    domain = DomainRepository(db).get_by_key(domain_key)
+    if domain is None:
+        raise HTTPException(status_code=404, detail=f"Unknown memory domain: {domain_key}")
+    return domain.id
+
+
+def _retrieved_memory_payload(db: Session, retrieved: RetrievedMemory) -> dict[str, Any]:
+    payload = _memory_item_payload(retrieved.memory)
+    payload["domain_key"] = _domain_key_for_id(db, retrieved.memory.domain_id)
+    payload["agent_id"] = str(retrieved.memory.agent_id) if retrieved.memory.agent_id else None
+    payload["score"] = retrieved.score
+    payload["query_relevance"] = retrieved.query_relevance
+    payload["score_reasons"] = retrieved.score_reasons
+    payload["provenance"] = {
+        "source_refs": retrieved.provenance.source_refs,
+        "seed_package": retrieved.provenance.seed_package,
+        "artifact": retrieved.provenance.artifact,
+        "processed_path": retrieved.provenance.processed_path,
+    }
+    payload["links"] = [_retrieved_link_payload(db, link) for link in retrieved.links]
+    return payload
+
+
+def _retrieved_link_payload(db: Session, link: RetrievedMemoryLink) -> dict[str, Any]:
+    return {
+        "relation_type": link.relation_type,
+        "direction": link.direction,
+        "metadata": link.metadata,
+        "memory": {
+            **_memory_item_payload(link.memory),
+            "domain_key": _domain_key_for_id(db, link.memory.domain_id),
+        },
+    }
 
 
 def _metadata_reclassified(
