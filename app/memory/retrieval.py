@@ -8,7 +8,9 @@ from typing import Any, Literal
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.db.models import Artifact, MemoryItem, MemoryLink, SeedPackage
+from app.core.config import get_settings
+from app.db.models import Artifact, MemoryEmbedding, MemoryItem, MemoryLink, SeedPackage
+from app.memory.embeddings import EmbeddingClient, build_embedding_client
 
 RetrievalAudience = Literal["maestro", "agent"]
 RetrievalMode = Literal["broad", "balanced", "strict"]
@@ -25,6 +27,7 @@ class MemoryRetrievalQuery:
     include_agent_memory: bool = False
     include_session_memory: bool = True
     include_links: bool = True
+    use_semantic: bool = True
     mode: RetrievalMode = "balanced"
     limit: int = 12
 
@@ -50,6 +53,7 @@ class RetrievedMemory:
     memory: MemoryItem
     score: float
     query_relevance: float
+    semantic_similarity: float | None
     score_reasons: list[str]
     provenance: MemoryProvenance
     links: list[RetrievedMemoryLink] = field(default_factory=list)
@@ -61,6 +65,7 @@ class MemoryRetrievalResult:
     results: list[RetrievedMemory]
     total_visible: int
     filtered_count: int
+    semantic_status: str
 
 
 class MemoryRetrievalError(ValueError):
@@ -68,13 +73,18 @@ class MemoryRetrievalError(ValueError):
 
 
 class MemoryRetrievalService:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, embedding_client: EmbeddingClient | None = None):
         self.session = session
+        self.embedding_client = embedding_client
 
     def retrieve(self, query: MemoryRetrievalQuery) -> MemoryRetrievalResult:
         self._validate_query(query)
         visible_memories = self._visible_memories(query)
-        scored = [self._score_memory(memory, query) for memory in visible_memories]
+        semantic_scores, semantic_status = self._semantic_scores(visible_memories, query)
+        scored = [
+            self._score_memory(memory, query, semantic_scores.get(memory.id))
+            for memory in visible_memories
+        ]
         filtered = [result for result in scored if self._passes_query_gate(result, query)]
         filtered.sort(key=lambda result: (result.score, result.memory.created_at), reverse=True)
         limited = filtered[: max(0, query.limit)]
@@ -85,6 +95,7 @@ class MemoryRetrievalService:
             results=limited,
             total_visible=len(visible_memories),
             filtered_count=len(scored) - len(filtered),
+            semantic_status=semantic_status,
         )
 
     def _validate_query(self, query: MemoryRetrievalQuery) -> None:
@@ -138,12 +149,19 @@ class MemoryRetrievalService:
             )
         return predicate
 
-    def _score_memory(self, memory: MemoryItem, query: MemoryRetrievalQuery) -> RetrievedMemory:
+    def _score_memory(
+        self,
+        memory: MemoryItem,
+        query: MemoryRetrievalQuery,
+        semantic_similarity: float | None,
+    ) -> RetrievedMemory:
         reasons: list[str] = []
         query_relevance = 0.0
         importance_score = max(0.0, min(1.0, memory.importance or 0.0))
         has_query = bool(query.query_text and _tokens(query.query_text))
-        score = importance_score * (0.25 if has_query else 0.55)
+        semantic_weight = 0.45 if semantic_similarity is not None else 0.0
+        lexical_weight = 0.25 if semantic_similarity is not None else 0.55
+        score = importance_score * (0.18 if has_query else 0.55)
         reasons.append(f"importance {importance_score:.2f}")
 
         recency_score = self._recency_score(memory.created_at)
@@ -156,8 +174,11 @@ class MemoryRetrievalService:
 
         if has_query and query.query_text:
             query_relevance = self._lexical_score(memory, query.query_text)
-            score += query_relevance * 0.55
+            score += query_relevance * lexical_weight
             reasons.append(f"query relevance {query_relevance:.2f}")
+        if semantic_similarity is not None:
+            score += semantic_similarity * semantic_weight
+            reasons.append(f"semantic similarity {semantic_similarity:.2f}")
 
         if query.domain_id is not None and memory.domain_id == query.domain_id:
             score += 0.08
@@ -173,6 +194,9 @@ class MemoryRetrievalService:
             memory=memory,
             score=round(score, 4),
             query_relevance=round(query_relevance, 4),
+            semantic_similarity=None
+            if semantic_similarity is None
+            else round(semantic_similarity, 4),
             score_reasons=reasons,
             provenance=self._provenance(memory),
         )
@@ -184,9 +208,41 @@ class MemoryRetrievalService:
             return True
         if query.mode == "strict":
             return result.query_relevance >= 0.5
-        if result.query_relevance > 0:
+        if result.query_relevance > 0 or (result.semantic_similarity or 0) >= 0.45:
             return True
         return self._is_exceptional_context(result.memory)
+
+    def _semantic_scores(
+        self,
+        memories: list[MemoryItem],
+        query: MemoryRetrievalQuery,
+    ) -> tuple[dict[uuid.UUID, float], str]:
+        if not query.use_semantic:
+            return {}, "disabled"
+        if not query.query_text or not query.query_text.strip() or not memories:
+            return {}, "not_requested"
+
+        settings = get_settings()
+        try:
+            client = self.embedding_client or build_embedding_client()
+            query_embedding = client.embed(query.query_text)
+        except Exception as exc:
+            return {}, f"failed: {exc}"
+
+        memory_ids = [memory.id for memory in memories]
+        embeddings = self.session.scalars(
+            select(MemoryEmbedding).where(
+                MemoryEmbedding.memory_item_id.in_(memory_ids),
+                MemoryEmbedding.provider == client.provider,
+                MemoryEmbedding.model == client.model,
+            )
+        ).all()
+        if not embeddings:
+            return {}, f"unavailable: no embeddings for {settings.embedding_provider}/{settings.embedding_model}"
+        return {
+            embedding.memory_item_id: _cosine_similarity(query_embedding, embedding.embedding)
+            for embedding in embeddings
+        }, "enabled"
 
     def _is_exceptional_context(self, memory: MemoryItem) -> bool:
         return (
@@ -310,6 +366,7 @@ class MemoryRetrievalService:
                 memory=result.memory,
                 score=result.score,
                 query_relevance=result.query_relevance,
+                semantic_similarity=result.semantic_similarity,
                 score_reasons=result.score_reasons,
                 provenance=result.provenance,
                 links=links_by_memory.get(result.memory.id, []),
@@ -336,3 +393,15 @@ def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _cosine_similarity(left: list[float], right) -> float:
+    right_values = [float(value) for value in right]
+    if not left or not right_values or len(left) != len(right_values):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right_values, strict=True))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right_values))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return max(0.0, min(1.0, dot / (left_norm * right_norm)))

@@ -3,7 +3,7 @@ import uuid
 import pytest
 from sqlalchemy.orm import Session
 
-from app.db.models import Artifact, MemoryItem, MemoryLink, SeedPackage
+from app.db.models import Artifact, MemoryEmbedding, MemoryItem, MemoryLink, SeedPackage
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.memory.retrieval import (
@@ -11,6 +11,20 @@ from app.memory.retrieval import (
     MemoryRetrievalQuery,
     MemoryRetrievalService,
 )
+
+
+class FakeEmbeddingClient:
+    provider = "test"
+    model = "fake-embeddings"
+
+    def __init__(self, vectors: dict[str, list[float]]):
+        self.vectors = vectors
+
+    def embed(self, text: str) -> list[float]:
+        for key, vector in self.vectors.items():
+            if key in text:
+                return vector
+        return [0.0, 1.0, 0.0]
 
 
 def _domain_ids(session: Session):
@@ -96,6 +110,7 @@ def test_retrieval_isolates_agent_visibility_and_ranks_query_matches(session: Se
             domain_id=praxis_id,
             agent_id=praxis_agent_id,
             query_text="Praxis tactical innovation",
+            use_semantic=False,
             limit=5,
         )
     )
@@ -175,7 +190,12 @@ def test_retrieval_returns_provenance_and_visible_links(session: Session) -> Non
     session.commit()
 
     result = MemoryRetrievalService(session).retrieve(
-        MemoryRetrievalQuery(audience="maestro", domain_id=praxis_id, query_text="mission")
+        MemoryRetrievalQuery(
+            audience="maestro",
+            domain_id=praxis_id,
+            query_text="mission",
+            use_semantic=False,
+        )
     )
     retrieved_source = next(item for item in result.results if item.memory.id == source.id)
 
@@ -220,6 +240,7 @@ def test_balanced_query_retrieval_filters_zero_match_noise(session: Session) -> 
             audience="maestro",
             domain_id=praxis_id,
             query_text="tactical innovation",
+            use_semantic=False,
             mode="balanced",
         )
     )
@@ -255,6 +276,7 @@ def test_broad_query_retrieval_keeps_zero_match_results_but_ranks_matches_first(
             audience="maestro",
             domain_id=praxis_id,
             query_text="tactical innovation",
+            use_semantic=False,
             mode="broad",
         )
     )
@@ -286,9 +308,69 @@ def test_strict_query_retrieval_requires_stronger_match(session: Session) -> Non
             audience="maestro",
             domain_id=praxis_id,
             query_text="tactical innovation training",
+            use_semantic=False,
             mode="strict",
         )
     )
 
     assert [item.memory.id for item in result.results] == [strong.id]
     assert partial.id not in [item.memory.id for item in result.results]
+
+
+def test_semantic_retrieval_can_surface_non_lexical_matches(session: Session) -> None:
+    praxis_id, _ = _domain_ids(session)
+    partner_memory = _memory(
+        session,
+        domain_id=praxis_id,
+        title="THI relationship",
+        content="THI is a strategic collaborator for Praxis programs.",
+        importance=0.7,
+    )
+    unrelated = _memory(
+        session,
+        domain_id=praxis_id,
+        title="Invoice process",
+        content="Invoices should be reviewed monthly.",
+        importance=0.95,
+    )
+    session.add_all(
+        [
+            MemoryEmbedding(
+                memory_item_id=partner_memory.id,
+                provider="test",
+                model="fake-embeddings",
+                dimensions=3,
+                source_text_hash="partner",
+                embedding=[1.0, 0.0, 0.0],
+                metadata_={},
+            ),
+            MemoryEmbedding(
+                memory_item_id=unrelated.id,
+                provider="test",
+                model="fake-embeddings",
+                dimensions=3,
+                source_text_hash="invoice",
+                embedding=[0.0, 1.0, 0.0],
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+
+    result = MemoryRetrievalService(
+        session,
+        embedding_client=FakeEmbeddingClient({"partner call": [1.0, 0.0, 0.0]}),
+    ).retrieve(
+        MemoryRetrievalQuery(
+            audience="maestro",
+            domain_id=praxis_id,
+            query_text="partner call",
+            mode="balanced",
+        )
+    )
+
+    assert result.semantic_status == "enabled"
+    assert [item.memory.id for item in result.results] == [partner_memory.id]
+    assert result.results[0].query_relevance == 0
+    assert result.results[0].semantic_similarity == 1.0
+    assert "semantic similarity 1.00" in result.results[0].score_reasons

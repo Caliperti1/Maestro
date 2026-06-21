@@ -53,18 +53,49 @@ When `query_text` is present, retrieval has three modes:
 - `broad`: keeps all visible memories for exploratory/debug retrieval while still ranking
   query matches first.
 
+Semantic retrieval adds embeddings to the same pipeline. Each canonical memory gets a vector
+representation in `memory_embeddings`; query text gets embedded at retrieval time; semantic
+similarity is blended into the final score after visibility filtering. This lets Maestro find
+memories that are meaningfully related even when they do not share exact words.
+
+Local MVP default:
+
+- `EMBEDDING_PROVIDER=ollama`
+- `EMBEDDING_MODEL=nomic-embed-text`
+- `EMBEDDING_BASE_URL=http://localhost:11434`
+
+Install the local embedding model:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+Backfill existing canonical memory:
+
+```bash
+python -m app.memory.embed backfill
+```
+
+Check embedding coverage:
+
+```bash
+python -m app.memory.embed status
+```
+
 API:
 
 ```text
-GET /memory/retrieve?audience=maestro&domain_key=praxis&query_text=tactical+innovation&mode=balanced&limit=8
+GET /memory/retrieve?audience=maestro&domain_key=praxis&query_text=tactical+innovation&mode=balanced&use_semantic=true&limit=8
 ```
 
 Primary response shape:
 
 - `total_visible`: count before ranking/limit.
 - `filtered_count`: count removed by the retrieval mode.
+- `semantic_status`: whether semantic retrieval was enabled, disabled, unavailable, or failed.
 - `results[].score`: deterministic ranking score.
 - `results[].query_relevance`: query-specific lexical relevance before semantic retrieval exists.
+- `results[].semantic_similarity`: vector similarity when embeddings are available.
 - `results[].score_reasons`: explainable factors behind the score.
 - `results[].provenance`: source refs, seed package, artifact, and processed path.
 - `results[].links`: visible one-hop linked memories and relation types.

@@ -1,6 +1,8 @@
 # Postgres Persistence
 
 Maestro uses Postgres as the local development database from the beginning because memory, provenance, and structured retrieval are core product concerns.
+The local service uses the `pgvector/pgvector:pg16` image so semantic memory retrieval can store
+and compare embedding vectors inside Postgres.
 
 ## Start Local Postgres
 
@@ -8,6 +10,13 @@ The included Docker Compose service maps Postgres to host port `55432` to avoid 
 
 ```bash
 docker compose up -d postgres
+```
+
+After pulling changes that switch the image to `pgvector/pgvector:pg16`, recreate the container
+so the extension is available. This does not delete the named volume:
+
+```bash
+docker compose up -d --force-recreate postgres
 ```
 
 Check health:
@@ -48,7 +57,7 @@ alembic current
 Expected output includes:
 
 ```text
-0001_initial_maestro_schema (head)
+0002_memory_embeddings (head)
 ```
 
 ## Verify Seeded Domains
@@ -91,6 +100,7 @@ This persistence layer includes tables and ORM models for:
 - memory items
 - memory proposals
 - memory links
+- memory embeddings
 - tool connections
 - tool calls
 - artifacts

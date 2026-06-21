@@ -28,8 +28,13 @@ class LLMMemoryCurator:
         extractor: LLMMemoryExtractor,
         *,
         semantic_evaluator: MemorySemanticEvaluator | None = None,
+        embedding_service=None,
     ):
-        self.memory_service = MemoryService(session, semantic_evaluator=semantic_evaluator)
+        self.memory_service = MemoryService(
+            session,
+            semantic_evaluator=semantic_evaluator,
+            embedding_service=embedding_service,
+        )
         self.extractor = extractor
 
     def extract_candidates(

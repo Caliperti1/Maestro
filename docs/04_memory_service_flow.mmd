@@ -5,6 +5,7 @@ flowchart TD
     Curator["Memory Curator agent<br/>parse sources into candidate memories"]
     Service["Memory Manager service<br/>validate scope, policy, provenance"]
     Canonical[("Canonical memory<br/>global, session, domain, agent")]
+    Embeddings[("Memory embeddings<br/>pgvector semantic recall")]
     Proposal[("Memory proposals<br/>audit + approval queue")]
     Approval["Human approval<br/>very-high impact only"]
     Retrieval["MemoryRetrievalService<br/>filters, ranking, provenance"]
@@ -24,7 +25,9 @@ flowchart TD
     Service -->|"very-high impact"| Proposal
     Proposal --> Approval
     Approval --> Canonical
+    Canonical --> Embeddings
     Canonical --> Links
+    Embeddings --> Retrieval
     Links --> Retrieval
     Canonical --> Retrieval
     Retrieval --> Debug
