@@ -101,15 +101,22 @@ class MemorySemanticEvaluator(Protocol):
         pass
 
 
+class MemoryEmbeddingWriter(Protocol):
+    def upsert_memory_embedding(self, memory_item: MemoryItem):
+        pass
+
+
 class MemoryService:
     def __init__(
         self,
         session: Session,
         *,
         semantic_evaluator: MemorySemanticEvaluator | None = None,
+        embedding_service: MemoryEmbeddingWriter | None = None,
     ):
         self.session = session
         self.semantic_evaluator = semantic_evaluator
+        self.embedding_service = embedding_service
 
     def write_candidate(self, candidate: MemoryCandidate) -> MemoryWriteResult:
         self._validate_candidate(candidate)
@@ -124,6 +131,7 @@ class MemoryService:
 
         if evaluation.decision == "reinforce" and related_memory is not None:
             self._reinforce_memory(related_memory, candidate, evaluation)
+            self._embed_memory(related_memory)
             self.session.commit()
             self.session.refresh(related_memory)
             return MemoryWriteResult(
@@ -156,6 +164,7 @@ class MemoryService:
         if candidate.impact_level in AUTO_WRITE_IMPACTS:
             memory_item = self._create_memory_item(candidate)
             self._link_evaluated_memory(memory_item, evaluation)
+            self._embed_memory(memory_item)
             self.session.commit()
             self.session.refresh(memory_item)
             return MemoryWriteResult(
@@ -182,6 +191,7 @@ class MemoryService:
 
         memory_item = self._create_memory_item(candidate, proposal=proposal)
         self._link_evaluated_memory(memory_item, evaluation)
+        self._embed_memory(memory_item)
         proposal.reviewed_at = datetime.now(UTC)
         self.session.commit()
         self.session.refresh(proposal)
@@ -216,6 +226,7 @@ class MemoryService:
         candidate = self._candidate_from_proposal(proposal)
         memory_item = self._create_memory_item(candidate, proposal=proposal)
         self._link_evaluated_memory(memory_item, self._evaluation_from_metadata(candidate.metadata))
+        self._embed_memory(memory_item)
         proposal.status = "approved"
         proposal.reviewed_at = datetime.now(UTC)
         self.session.commit()
@@ -589,6 +600,20 @@ class MemoryService:
         self.session.add(memory_item)
         self.session.flush()
         return memory_item
+
+    def _embed_memory(self, memory_item: MemoryItem) -> None:
+        if self.embedding_service is None:
+            return
+        result = self.embedding_service.upsert_memory_embedding(memory_item)
+        if getattr(result, "status", None) == "failed":
+            metadata = dict(memory_item.metadata_ or {})
+            metadata["embedding_status"] = "failed"
+            metadata["embedding_error"] = getattr(result, "error", None)
+            memory_item.metadata_ = metadata
+        elif getattr(result, "status", None) in {"written", "current"}:
+            metadata = dict(memory_item.metadata_ or {})
+            metadata["embedding_status"] = getattr(result, "status")
+            memory_item.metadata_ = metadata
 
     def _candidate_from_proposal(self, proposal: MemoryProposal) -> MemoryCandidate:
         return MemoryCandidate(

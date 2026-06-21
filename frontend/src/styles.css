@@ -626,6 +626,19 @@ h4 {
   border-radius: 8px;
 }
 
+.toggle-row {
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 8px !important;
+  min-height: 40px;
+}
+
+.toggle-row input {
+  width: 18px;
+  height: 18px;
+}
+
 .source-row {
   grid-template-columns: 1fr auto;
   align-items: center;

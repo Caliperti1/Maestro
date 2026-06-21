@@ -6,6 +6,7 @@ from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, Uniqu
 from sqlalchemy import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import Uuid
+from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
@@ -210,6 +211,24 @@ class MemoryLink(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class MemoryEmbedding(TimestampMixin, Base):
+    __tablename__ = "memory_embeddings"
+    __table_args__ = (
+        UniqueConstraint("memory_item_id", "provider", "model", name="uq_memory_embeddings_model"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    memory_item_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("memory_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(160), nullable=False)
+    dimensions: Mapped[int] = mapped_column(nullable=False)
+    source_text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(), nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
 class ToolConnection(TimestampMixin, Base):

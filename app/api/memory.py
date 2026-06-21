@@ -16,6 +16,7 @@ from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
 from app.memory.dropbox import MemoryDropboxProcessor
+from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.retrieval import (
     MemoryRetrievalError,
     MemoryRetrievalQuery,
@@ -122,7 +123,10 @@ def list_pending_proposals(db: Session = Depends(get_db)) -> dict[str, Any]:
 @router.post("/proposals/{proposal_id}/approve")
 def approve_proposal(proposal_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
-        memory_item = MemoryService(db).approve_proposal(proposal_id)
+        memory_item = MemoryService(
+            db,
+            embedding_service=MemoryEmbeddingService(db),
+        ).approve_proposal(proposal_id)
     except MemoryAccessError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "approved", "memory_item": _memory_item_payload(memory_item)}
@@ -159,6 +163,7 @@ def retrieve_memory(
     include_agent_memory: bool = False,
     include_session_memory: bool = True,
     include_links: bool = True,
+    use_semantic: bool = True,
     mode: str = "balanced",
     limit: int = 12,
     db: Session = Depends(get_db),
@@ -178,6 +183,7 @@ def retrieve_memory(
                 include_agent_memory=include_agent_memory,
                 include_session_memory=include_session_memory,
                 include_links=include_links,
+                use_semantic=use_semantic,
                 mode=mode,  # type: ignore[arg-type]
                 limit=limit,
             )
@@ -195,11 +201,13 @@ def retrieve_memory(
             "include_agent_memory": include_agent_memory,
             "include_session_memory": include_session_memory,
             "include_links": include_links,
+            "use_semantic": use_semantic,
             "mode": mode,
             "limit": limit,
         },
         "total_visible": result.total_visible,
         "filtered_count": result.filtered_count,
+        "semantic_status": result.semantic_status,
         "results": [_retrieved_memory_payload(db, retrieved) for retrieved in result.results],
     }
 
@@ -453,6 +461,7 @@ def _retrieved_memory_payload(db: Session, retrieved: RetrievedMemory) -> dict[s
     payload["agent_id"] = str(retrieved.memory.agent_id) if retrieved.memory.agent_id else None
     payload["score"] = retrieved.score
     payload["query_relevance"] = retrieved.query_relevance
+    payload["semantic_similarity"] = retrieved.semantic_similarity
     payload["score_reasons"] = retrieved.score_reasons
     payload["provenance"] = {
         "source_refs": retrieved.provenance.source_refs,

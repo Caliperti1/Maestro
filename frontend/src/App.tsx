@@ -114,6 +114,7 @@ type RetrievedMemory = MemoryItem & {
   agent_id: string | null;
   score: number;
   query_relevance: number;
+  semantic_similarity: number | null;
   score_reasons: string[];
   provenance: {
     source_refs: Array<Record<string, unknown>>;
@@ -551,9 +552,11 @@ function MemoryWorkspace() {
   const [retrievalDomain, setRetrievalDomain] = useState("praxis");
   const [retrievalQuery, setRetrievalQuery] = useState("");
   const [retrievalMode, setRetrievalMode] = useState<"balanced" | "strict" | "broad">("balanced");
+  const [semanticRetrieval, setSemanticRetrieval] = useState(true);
   const [retrievalResults, setRetrievalResults] = useState<RetrievedMemory[]>([]);
   const [retrievalTotal, setRetrievalTotal] = useState(0);
   const [retrievalFiltered, setRetrievalFiltered] = useState(0);
+  const [semanticStatus, setSemanticStatus] = useState("not requested");
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [lastProcessSummary, setLastProcessSummary] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -677,6 +680,7 @@ function MemoryWorkspace() {
         audience: "maestro",
         domain_key: retrievalDomain,
         mode: retrievalMode,
+        use_semantic: semanticRetrieval ? "true" : "false",
         limit: "8",
       });
       if (retrievalQuery.trim()) {
@@ -685,11 +689,13 @@ function MemoryWorkspace() {
       const response = await apiJson<{
         total_visible: number;
         filtered_count: number;
+        semantic_status: string;
         results: RetrievedMemory[];
       }>(`/memory/retrieve?${params.toString()}`);
       setRetrievalResults(response.results);
       setRetrievalTotal(response.total_visible);
       setRetrievalFiltered(response.filtered_count);
+      setSemanticStatus(response.semantic_status);
       setStatusMessage(`Retrieved ${response.results.length} memories.`);
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Retrieval failed.");
@@ -931,6 +937,14 @@ function MemoryWorkspace() {
               <option value="broad">Broad</option>
             </select>
           </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={semanticRetrieval}
+              onChange={(event) => setSemanticRetrieval(event.target.checked)}
+            />
+            Semantic
+          </label>
           <button className="planner-action" onClick={runRetrieval} disabled={busy}>
             <Search size={17} />
             Retrieve
@@ -946,6 +960,12 @@ function MemoryWorkspace() {
               <p>{item.content}</p>
               <div className="preview-meta">
                 <span>relevance {(item.query_relevance * 100).toFixed(0)}%</span>
+                <span>
+                  semantic{" "}
+                  {item.semantic_similarity === null
+                    ? "n/a"
+                    : `${(item.semantic_similarity * 100).toFixed(0)}%`}
+                </span>
                 <span>importance {(item.importance * 100).toFixed(0)}%</span>
               </div>
               <p className="evaluation-note">{item.score_reasons.join(" | ")}</p>
@@ -963,6 +983,7 @@ function MemoryWorkspace() {
           ) : (
             <p className="memory-status">
               {retrievalTotal} visible memories. {retrievalFiltered} filtered by retrieval mode.
+              {" "}Semantic: {semanticStatus}.
             </p>
           )}
         </div>

@@ -17,6 +17,7 @@ from app.db.session import SessionLocal
 from app.llm import LLMMemoryEvaluator, LLMMemoryExtractor, OpenAILLMClient
 from app.memory import LLMMemoryCurator, StagedMemorySource
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES, extract_dropbox_text
+from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.service import MemoryCandidate, MemoryWriteResult
 
 DROPBOX_SUBDIRS = ("inbox", "processed", "failed", "previews")
@@ -183,6 +184,7 @@ class MemoryDropboxProcessor:
                 self.session,
                 LLMMemoryExtractor(llm_client),
                 semantic_evaluator=LLMMemoryEvaluator(llm_client),
+                embedding_service=MemoryEmbeddingService(self.session),
             )
         return self.curator
 

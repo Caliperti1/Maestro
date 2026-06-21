@@ -229,6 +229,7 @@ def test_memory_retrieval_endpoint_returns_scored_context(
             "audience": "maestro",
             "domain_key": "praxis",
             "query_text": "tactical innovation training",
+            "use_semantic": "false",
             "limit": 5,
         },
     )
@@ -237,10 +238,13 @@ def test_memory_retrieval_endpoint_returns_scored_context(
     payload = response.json()
     assert payload["query"]["domain_key"] == "praxis"
     assert payload["query"]["mode"] == "balanced"
+    assert payload["query"]["use_semantic"] is False
+    assert payload["semantic_status"] == "disabled"
     assert payload["filtered_count"] == 0
     assert payload["results"][0]["title"] == "Praxis training model"
     assert payload["results"][0]["domain_key"] == "praxis"
     assert payload["results"][0]["score"] > 0
     assert payload["results"][0]["query_relevance"] > 0
+    assert payload["results"][0]["semantic_similarity"] is None
     assert payload["results"][0]["provenance"]["source_refs"][0]["id"] == "artifact-1"
     assert all(result["domain_key"] != "ophi" for result in payload["results"])
