@@ -18,6 +18,10 @@ from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.retrieval import (
+    MemoryContextBundle,
+    MemoryContextBundleRequest,
+    MemoryContextSection,
+    MemoryContextSnippet,
     MemoryRetrievalError,
     MemoryRetrievalQuery,
     MemoryRetrievalService,
@@ -210,6 +214,43 @@ def retrieve_memory(
         "semantic_status": result.semantic_status,
         "results": [_retrieved_memory_payload(db, retrieved) for retrieved in result.results],
     }
+
+
+@router.get("/context-bundle")
+def build_memory_context_bundle(
+    profile: str = "agent_prompt",
+    audience: str = "agent",
+    domain_key: str | None = None,
+    agent_id: uuid.UUID | None = None,
+    query_text: str | None = None,
+    memory_type: list[str] | None = Query(default=None),
+    min_importance: float | None = None,
+    use_semantic: bool = True,
+    max_items: int = 12,
+    max_chars: int = 4000,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if audience not in {"maestro", "agent"}:
+        raise HTTPException(status_code=400, detail="audience must be maestro or agent.")
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    try:
+        bundle = MemoryRetrievalService(db).build_context_bundle(
+            MemoryContextBundleRequest(
+                profile=profile,  # type: ignore[arg-type]
+                audience=audience,  # type: ignore[arg-type]
+                domain_id=domain_id,
+                agent_id=agent_id,
+                query_text=query_text,
+                memory_types=set(memory_type) if memory_type else None,
+                min_importance=min_importance,
+                use_semantic=use_semantic,
+                max_items=max_items,
+                max_chars=max_chars,
+            )
+        )
+    except MemoryRetrievalError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _context_bundle_payload(db, bundle, domain_key=domain_key)
 
 
 @router.get("/sources")
@@ -482,6 +523,70 @@ def _retrieved_link_payload(db: Session, link: RetrievedMemoryLink) -> dict[str,
             **_memory_item_payload(link.memory),
             "domain_key": _domain_key_for_id(db, link.memory.domain_id),
         },
+    }
+
+
+def _context_bundle_payload(
+    db: Session,
+    bundle: MemoryContextBundle,
+    *,
+    domain_key: str | None,
+) -> dict[str, Any]:
+    request = bundle.request
+    return {
+        "profile": request.profile,
+        "audience": request.audience,
+        "domain_key": domain_key,
+        "agent_id": str(request.agent_id) if request.agent_id else None,
+        "query_text": request.query_text,
+        "memory_type": sorted(request.memory_types or []),
+        "min_importance": request.min_importance,
+        "use_semantic": request.use_semantic,
+        "semantic_status": bundle.semantic_status,
+        "max_items": request.max_items,
+        "max_chars": bundle.max_chars,
+        "used_chars": bundle.used_chars,
+        "total_visible": bundle.total_visible,
+        "filtered_count": bundle.filtered_count,
+        "retrieved_count": bundle.retrieved_count,
+        "included_count": bundle.included_count,
+        "dropped_count": bundle.dropped_count,
+        "retrieval_query": {
+            "mode": bundle.retrieval_query.mode,
+            "limit": bundle.retrieval_query.limit,
+            "include_agent_memory": bundle.retrieval_query.include_agent_memory,
+            "include_session_memory": bundle.retrieval_query.include_session_memory,
+            "include_links": bundle.retrieval_query.include_links,
+        },
+        "sections": [_context_section_payload(db, section) for section in bundle.sections],
+        "rendered_text": bundle.rendered_text,
+    }
+
+
+def _context_section_payload(db: Session, section: MemoryContextSection) -> dict[str, Any]:
+    return {
+        "key": section.key,
+        "label": section.label,
+        "used_chars": section.used_chars,
+        "memories": [_context_snippet_payload(db, snippet) for snippet in section.snippets],
+    }
+
+
+def _context_snippet_payload(db: Session, snippet: MemoryContextSnippet) -> dict[str, Any]:
+    return {
+        **_retrieved_memory_payload(
+            db,
+            RetrievedMemory(
+                memory=snippet.memory,
+                score=snippet.score,
+                query_relevance=snippet.query_relevance,
+                semantic_similarity=snippet.semantic_similarity,
+                score_reasons=snippet.score_reasons,
+                provenance=snippet.provenance,
+                links=snippet.links,
+            ),
+        ),
+        "excerpt": snippet.excerpt,
     }
 
 
