@@ -7,6 +7,7 @@ from app.db.models import Artifact, MemoryEmbedding, MemoryItem, MemoryLink, See
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.memory.retrieval import (
+    MemoryContextBundleRequest,
     MemoryRetrievalError,
     MemoryRetrievalQuery,
     MemoryRetrievalService,
@@ -374,3 +375,101 @@ def test_semantic_retrieval_can_surface_non_lexical_matches(session: Session) ->
     assert result.results[0].query_relevance == 0
     assert result.results[0].semantic_similarity == 1.0
     assert "semantic similarity 1.00" in result.results[0].score_reasons
+
+
+def test_agent_context_bundle_groups_visible_memory_without_cross_domain_leaks(
+    session: Session,
+) -> None:
+    praxis_id, ophi_id = _domain_ids(session)
+    praxis_agent_id = uuid.uuid4()
+    _memory(
+        session,
+        scope="global",
+        title="Communication preference",
+        content="Chris prefers concise operational context.",
+        importance=0.9,
+    )
+    _memory(
+        session,
+        scope="maestro_session",
+        title="Current session focus",
+        content="The current sprint is focused on hardening memory retrieval.",
+        importance=0.8,
+    )
+    praxis_memory = _memory(
+        session,
+        domain_id=praxis_id,
+        title="Praxis partner call",
+        content="Praxis partner calls should connect training, transitions, and stakeholder needs.",
+        importance=0.8,
+    )
+    _memory(
+        session,
+        scope="agent",
+        domain_id=praxis_id,
+        agent_id=praxis_agent_id,
+        title="Praxis agent habit",
+        content="The Praxis agent should retrieve scoped memory before drafting recommendations.",
+        importance=0.7,
+    )
+    _memory(
+        session,
+        domain_id=ophi_id,
+        title="Ophi private context",
+        content="This Ophi memory must not appear in a Praxis agent bundle.",
+        importance=1.0,
+    )
+
+    bundle = MemoryRetrievalService(session).build_context_bundle(
+        MemoryContextBundleRequest(
+            profile="agent_prompt",
+            audience="agent",
+            domain_id=praxis_id,
+            agent_id=praxis_agent_id,
+            query_text="Praxis partner call",
+            use_semantic=False,
+            max_items=8,
+            max_chars=2500,
+        )
+    )
+
+    assert bundle.semantic_status == "disabled"
+    assert [section.key for section in bundle.sections] == [
+        "global",
+        "domain",
+        "agent",
+    ]
+    assert bundle.included_count == 3
+    assert "Ophi private context" not in bundle.rendered_text
+    assert str(praxis_memory.id) in bundle.rendered_text
+    assert bundle.rendered_text.startswith("[Global Memory]")
+
+
+def test_context_bundle_respects_item_and_character_budgets(session: Session) -> None:
+    praxis_id, _ = _domain_ids(session)
+    for index in range(6):
+        _memory(
+            session,
+            domain_id=praxis_id,
+            title=f"Praxis note {index}",
+            content="Praxis memory " + ("long detail " * 80),
+            importance=0.9 - (index * 0.05),
+        )
+
+    bundle = MemoryRetrievalService(session).build_context_bundle(
+        MemoryContextBundleRequest(
+            profile="memory_debug",
+            audience="maestro",
+            domain_id=praxis_id,
+            query_text="Praxis memory",
+            use_semantic=False,
+            max_items=2,
+            max_chars=600,
+        )
+    )
+
+    snippets = [snippet for section in bundle.sections for snippet in section.snippets]
+    assert bundle.included_count <= 2
+    assert bundle.used_chars <= bundle.max_chars
+    assert bundle.dropped_count > 0
+    assert all(len(snippet.excerpt) < len(snippet.memory.content) for snippet in snippets)

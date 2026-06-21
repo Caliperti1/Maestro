@@ -248,3 +248,64 @@ def test_memory_retrieval_endpoint_returns_scored_context(
     assert payload["results"][0]["semantic_similarity"] is None
     assert payload["results"][0]["provenance"]["source_refs"][0]["id"] == "artifact-1"
     assert all(result["domain_key"] != "ophi" for result in payload["results"])
+
+
+def test_memory_context_bundle_endpoint_returns_grouped_prompt_context(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    global_memory = MemoryItem(
+        scope="global",
+        memory_type="preference",
+        title="Briefing preference",
+        content="Chris prefers brief, decision-oriented context.",
+        impact_level="medium",
+        importance=0.9,
+        metadata_={},
+    )
+    praxis_memory = MemoryItem(
+        scope="domain",
+        domain_id=praxis.id,
+        memory_type="fact",
+        title="Praxis training model",
+        content="Praxis trains Tactical Innovation Officers.",
+        impact_level="medium",
+        importance=0.8,
+        metadata_={"source_refs": [{"type": "artifact", "id": "artifact-2"}]},
+    )
+    session.add_all([global_memory, praxis_memory])
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.get(
+        "/memory/context-bundle",
+        params={
+            "profile": "agent_prompt",
+            "audience": "agent",
+            "domain_key": "praxis",
+            "query_text": "tactical innovation training",
+            "use_semantic": "false",
+            "max_items": 6,
+            "max_chars": 2000,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["profile"] == "agent_prompt"
+    assert payload["audience"] == "agent"
+    assert payload["semantic_status"] == "disabled"
+    assert payload["retrieval_query"]["mode"] == "broad"
+    assert [section["key"] for section in payload["sections"]] == ["global", "domain"]
+    assert payload["sections"][1]["memories"][0]["title"] == "Praxis training model"
+    assert payload["sections"][1]["memories"][0]["excerpt"] == (
+        "Praxis trains Tactical Innovation Officers."
+    )
+    assert payload["sections"][1]["memories"][0]["provenance"]["source_refs"][0]["id"] == (
+        "artifact-2"
+    )
+    assert "[Global Memory]" in payload["rendered_text"]
+    assert str(praxis_memory.id) in payload["rendered_text"]

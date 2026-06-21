@@ -100,6 +100,47 @@ Primary response shape:
 - `results[].provenance`: source refs, seed package, artifact, and processed path.
 - `results[].links`: visible one-hop linked memories and relation types.
 
+## Context Bundles
+
+Agents should prefer context bundles over raw retrieval rows. A context bundle is the clean,
+schematized retrieval artifact that a future prompt aggregator can combine with global system
+context, domain context, role prompts, and tool access.
+
+The bundle builder uses the same `MemoryRetrievalService` visibility, semantic scoring,
+provenance, and link logic, then packages selected memories into stable sections:
+
+- `global`: shared Maestro memory.
+- `maestro_session`: current session memory for Maestro-level workflows.
+- `domain`: memory for the requested operating domain.
+- `agent`: memory for the requested domain agent.
+
+The current profiles are:
+
+- `agent_prompt`: default context package for a domain agent task.
+- `daily_standup`: broader package for cross-domain standup synthesis.
+- `direct_user_question`: Maestro/user-facing retrieval without agent-private memory by default.
+- `curator_context`: memory curator support for duplicate checks and source interpretation.
+- `memory_debug`: broad developer-facing bundle for inspection.
+
+API:
+
+```text
+GET /memory/context-bundle?profile=agent_prompt&audience=agent&domain_key=praxis&query_text=partner+call&max_items=12&max_chars=4000
+```
+
+Primary response shape:
+
+- `sections[]`: grouped memory snippets with IDs, scores, provenance, links, and excerpts.
+- `rendered_text`: prompt-ready text block for early agents and debugging.
+- `total_visible`, `filtered_count`, `retrieved_count`, `included_count`, `dropped_count`:
+  explain how much memory was available and how much fit inside the bundle budget.
+- `used_chars` and `max_chars`: approximate prompt budget accounting.
+- `retrieval_query`: the profile-expanded retrieval settings used to produce the bundle.
+
+The bundle is intentionally a boundary object, not a final prompt. The future prompt aggregator
+should treat it as one input alongside global operating instructions, domain instructions, role
+instructions, tool manifests, task payloads, and response-format requirements.
+
 ## Impact Policy
 
 - `low`: write directly to canonical memory.
@@ -134,7 +175,9 @@ Agent memory requires both domain and agent.
 - cross-domain retrieval for Maestro
 - `MemoryRetrievalService`
 - `/memory/retrieve` debug/API endpoint
+- `/memory/context-bundle` agent context endpoint
 - Memory tab retrieval debugger
+- semantic retrieval with local-first embeddings
 - provenance and one-hop link context in retrieval payloads
 
 ## Follow-On Stories
