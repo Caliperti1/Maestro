@@ -113,6 +113,7 @@ type RetrievedMemory = MemoryItem & {
   domain_key: string;
   agent_id: string | null;
   score: number;
+  query_relevance: number;
   score_reasons: string[];
   provenance: {
     source_refs: Array<Record<string, unknown>>;
@@ -549,8 +550,10 @@ function MemoryWorkspace() {
   const [selectedPreviewFilename, setSelectedPreviewFilename] = useState<string | null>(null);
   const [retrievalDomain, setRetrievalDomain] = useState("praxis");
   const [retrievalQuery, setRetrievalQuery] = useState("");
+  const [retrievalMode, setRetrievalMode] = useState<"balanced" | "strict" | "broad">("balanced");
   const [retrievalResults, setRetrievalResults] = useState<RetrievedMemory[]>([]);
   const [retrievalTotal, setRetrievalTotal] = useState(0);
+  const [retrievalFiltered, setRetrievalFiltered] = useState(0);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [lastProcessSummary, setLastProcessSummary] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -673,6 +676,7 @@ function MemoryWorkspace() {
       const params = new URLSearchParams({
         audience: "maestro",
         domain_key: retrievalDomain,
+        mode: retrievalMode,
         limit: "8",
       });
       if (retrievalQuery.trim()) {
@@ -680,10 +684,12 @@ function MemoryWorkspace() {
       }
       const response = await apiJson<{
         total_visible: number;
+        filtered_count: number;
         results: RetrievedMemory[];
       }>(`/memory/retrieve?${params.toString()}`);
       setRetrievalResults(response.results);
       setRetrievalTotal(response.total_visible);
+      setRetrievalFiltered(response.filtered_count);
       setStatusMessage(`Retrieved ${response.results.length} memories.`);
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Retrieval failed.");
@@ -912,6 +918,19 @@ function MemoryWorkspace() {
               placeholder="Search task context..."
             />
           </label>
+          <label>
+            Mode
+            <select
+              value={retrievalMode}
+              onChange={(event) =>
+                setRetrievalMode(event.target.value as "balanced" | "strict" | "broad")
+              }
+            >
+              <option value="balanced">Balanced</option>
+              <option value="strict">Strict</option>
+              <option value="broad">Broad</option>
+            </select>
+          </label>
           <button className="planner-action" onClick={runRetrieval} disabled={busy}>
             <Search size={17} />
             Retrieve
@@ -925,6 +944,10 @@ function MemoryWorkspace() {
               </span>
               <h4>{item.title}</h4>
               <p>{item.content}</p>
+              <div className="preview-meta">
+                <span>relevance {(item.query_relevance * 100).toFixed(0)}%</span>
+                <span>importance {(item.importance * 100).toFixed(0)}%</span>
+              </div>
               <p className="evaluation-note">{item.score_reasons.join(" | ")}</p>
               <div className="preview-meta">
                 <span>{item.provenance.source_refs.length} source refs</span>
@@ -938,7 +961,9 @@ function MemoryWorkspace() {
               Run retrieval to inspect ranked context. {retrievalTotal} visible memories.
             </p>
           ) : (
-            <p className="memory-status">{retrievalTotal} visible memories before ranking.</p>
+            <p className="memory-status">
+              {retrievalTotal} visible memories. {retrievalFiltered} filtered by retrieval mode.
+            </p>
           )}
         </div>
       </section>

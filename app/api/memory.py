@@ -159,6 +159,7 @@ def retrieve_memory(
     include_agent_memory: bool = False,
     include_session_memory: bool = True,
     include_links: bool = True,
+    mode: str = "balanced",
     limit: int = 12,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -177,6 +178,7 @@ def retrieve_memory(
                 include_agent_memory=include_agent_memory,
                 include_session_memory=include_session_memory,
                 include_links=include_links,
+                mode=mode,  # type: ignore[arg-type]
                 limit=limit,
             )
         )
@@ -193,9 +195,11 @@ def retrieve_memory(
             "include_agent_memory": include_agent_memory,
             "include_session_memory": include_session_memory,
             "include_links": include_links,
+            "mode": mode,
             "limit": limit,
         },
         "total_visible": result.total_visible,
+        "filtered_count": result.filtered_count,
         "results": [_retrieved_memory_payload(db, retrieved) for retrieved in result.results],
     }
 
@@ -448,6 +452,7 @@ def _retrieved_memory_payload(db: Session, retrieved: RetrievedMemory) -> dict[s
     payload["domain_key"] = _domain_key_for_id(db, retrieved.memory.domain_id)
     payload["agent_id"] = str(retrieved.memory.agent_id) if retrieved.memory.agent_id else None
     payload["score"] = retrieved.score
+    payload["query_relevance"] = retrieved.query_relevance
     payload["score_reasons"] = retrieved.score_reasons
     payload["provenance"] = {
         "source_refs": retrieved.provenance.source_refs,

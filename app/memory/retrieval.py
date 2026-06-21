@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Artifact, MemoryItem, MemoryLink, SeedPackage
 
 RetrievalAudience = Literal["maestro", "agent"]
+RetrievalMode = Literal["broad", "balanced", "strict"]
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class MemoryRetrievalQuery:
     include_agent_memory: bool = False
     include_session_memory: bool = True
     include_links: bool = True
+    mode: RetrievalMode = "balanced"
     limit: int = 12
 
 
@@ -47,6 +49,7 @@ class RetrievedMemoryLink:
 class RetrievedMemory:
     memory: MemoryItem
     score: float
+    query_relevance: float
     score_reasons: list[str]
     provenance: MemoryProvenance
     links: list[RetrievedMemoryLink] = field(default_factory=list)
@@ -57,6 +60,7 @@ class MemoryRetrievalResult:
     query: MemoryRetrievalQuery
     results: list[RetrievedMemory]
     total_visible: int
+    filtered_count: int
 
 
 class MemoryRetrievalError(ValueError):
@@ -71,14 +75,16 @@ class MemoryRetrievalService:
         self._validate_query(query)
         visible_memories = self._visible_memories(query)
         scored = [self._score_memory(memory, query) for memory in visible_memories]
-        scored.sort(key=lambda result: (result.score, result.memory.created_at), reverse=True)
-        limited = scored[: max(0, query.limit)]
+        filtered = [result for result in scored if self._passes_query_gate(result, query)]
+        filtered.sort(key=lambda result: (result.score, result.memory.created_at), reverse=True)
+        limited = filtered[: max(0, query.limit)]
         if query.include_links and limited:
             limited = self._with_links(limited, query)
         return MemoryRetrievalResult(
             query=query,
             results=limited,
             total_visible=len(visible_memories),
+            filtered_count=len(scored) - len(filtered),
         )
 
     def _validate_query(self, query: MemoryRetrievalQuery) -> None:
@@ -86,6 +92,8 @@ class MemoryRetrievalService:
             raise MemoryRetrievalError("Agent retrieval requires a domain_id.")
         if query.limit < 1:
             raise MemoryRetrievalError("Retrieval limit must be at least 1.")
+        if query.mode not in {"broad", "balanced", "strict"}:
+            raise MemoryRetrievalError("Retrieval mode must be broad, balanced, or strict.")
 
     def _visible_memories(self, query: MemoryRetrievalQuery) -> list[MemoryItem]:
         statement = select(MemoryItem).where(*self._active_predicates())
@@ -132,22 +140,24 @@ class MemoryRetrievalService:
 
     def _score_memory(self, memory: MemoryItem, query: MemoryRetrievalQuery) -> RetrievedMemory:
         reasons: list[str] = []
+        query_relevance = 0.0
         importance_score = max(0.0, min(1.0, memory.importance or 0.0))
-        score = importance_score * 0.55
+        has_query = bool(query.query_text and _tokens(query.query_text))
+        score = importance_score * (0.25 if has_query else 0.55)
         reasons.append(f"importance {importance_score:.2f}")
 
         recency_score = self._recency_score(memory.created_at)
-        score += recency_score * 0.15
+        score += recency_score * (0.08 if has_query else 0.15)
         reasons.append(f"recency {recency_score:.2f}")
 
         impact_score = self._impact_score(memory.impact_level)
-        score += impact_score * 0.10
+        score += impact_score * (0.07 if has_query else 0.10)
         reasons.append(f"impact {memory.impact_level}")
 
-        if query.query_text:
-            lexical_score = self._lexical_score(memory, query.query_text)
-            score += lexical_score * 0.35
-            reasons.append(f"lexical match {lexical_score:.2f}")
+        if has_query and query.query_text:
+            query_relevance = self._lexical_score(memory, query.query_text)
+            score += query_relevance * 0.55
+            reasons.append(f"query relevance {query_relevance:.2f}")
 
         if query.domain_id is not None and memory.domain_id == query.domain_id:
             score += 0.08
@@ -162,8 +172,27 @@ class MemoryRetrievalService:
         return RetrievedMemory(
             memory=memory,
             score=round(score, 4),
+            query_relevance=round(query_relevance, 4),
             score_reasons=reasons,
             provenance=self._provenance(memory),
+        )
+
+    def _passes_query_gate(self, result: RetrievedMemory, query: MemoryRetrievalQuery) -> bool:
+        if not query.query_text or not _tokens(query.query_text):
+            return True
+        if query.mode == "broad":
+            return True
+        if query.mode == "strict":
+            return result.query_relevance >= 0.5
+        if result.query_relevance > 0:
+            return True
+        return self._is_exceptional_context(result.memory)
+
+    def _is_exceptional_context(self, memory: MemoryItem) -> bool:
+        return (
+            memory.scope in {"global", "maestro_session"}
+            and (memory.importance or 0.0) >= 0.9
+            and memory.impact_level in {"high", "very_high"}
         )
 
     def _recency_score(self, created_at: datetime | None) -> float:
@@ -187,11 +216,18 @@ class MemoryRetrievalService:
         query_terms = set(_tokens(query_text))
         if not query_terms:
             return 0.0
+        title_terms = set(_tokens(memory.title))
         memory_terms = set(_tokens(f"{memory.title} {memory.content} {memory.memory_type}"))
         if not memory_terms:
             return 0.0
         overlap = query_terms & memory_terms
-        return len(overlap) / len(query_terms)
+        if not overlap:
+            return 0.0
+        title_overlap = query_terms & title_terms
+        base_score = len(overlap) / len(query_terms)
+        title_bonus = 0.25 * (len(title_overlap) / len(query_terms))
+        phrase_bonus = 0.15 if query_text.lower().strip() in f"{memory.title} {memory.content}".lower() else 0
+        return min(1.0, base_score + title_bonus + phrase_bonus)
 
     def _provenance(self, memory: MemoryItem) -> MemoryProvenance:
         metadata = memory.metadata_ or {}
@@ -273,6 +309,7 @@ class MemoryRetrievalService:
             RetrievedMemory(
                 memory=result.memory,
                 score=result.score,
+                query_relevance=result.query_relevance,
                 score_reasons=result.score_reasons,
                 provenance=result.provenance,
                 links=links_by_memory.get(result.memory.id, []),

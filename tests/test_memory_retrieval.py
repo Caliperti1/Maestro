@@ -57,7 +57,7 @@ def test_retrieval_isolates_agent_visibility_and_ranks_query_matches(session: Se
     praxis_id, ophi_id = _domain_ids(session)
     praxis_agent_id = uuid.uuid4()
     ophi_agent_id = uuid.uuid4()
-    global_memory = _memory(
+    _memory(
         session,
         scope="global",
         title="Concise reports",
@@ -103,9 +103,8 @@ def test_retrieval_isolates_agent_visibility_and_ranks_query_matches(session: Se
     ids = [retrieved.memory.id for retrieved in result.results]
     assert ids[0] == praxis_match.id
     assert praxis_agent_memory.id in ids
-    assert global_memory.id in ids
     assert all("Ophi hidden" not in retrieved.memory.title for retrieved in result.results)
-    assert "lexical match" in " ".join(result.results[0].score_reasons)
+    assert "query relevance" in " ".join(result.results[0].score_reasons)
 
 
 def test_retrieval_returns_provenance_and_visible_links(session: Session) -> None:
@@ -196,3 +195,100 @@ def test_retrieval_returns_provenance_and_visible_links(session: Session) -> Non
 def test_agent_retrieval_requires_domain(session: Session) -> None:
     with pytest.raises(MemoryRetrievalError):
         MemoryRetrievalService(session).retrieve(MemoryRetrievalQuery(audience="agent"))
+
+
+def test_balanced_query_retrieval_filters_zero_match_noise(session: Session) -> None:
+    praxis_id, _ = _domain_ids(session)
+    relevant = _memory(
+        session,
+        domain_id=praxis_id,
+        title="Praxis training model",
+        content="Praxis trains Tactical Innovation Officers.",
+        importance=0.6,
+    )
+    zero_match = _memory(
+        session,
+        domain_id=praxis_id,
+        title="Contracting reminder",
+        content="Review unrelated vendor paperwork.",
+        importance=1.0,
+        impact_level="high",
+    )
+
+    result = MemoryRetrievalService(session).retrieve(
+        MemoryRetrievalQuery(
+            audience="maestro",
+            domain_id=praxis_id,
+            query_text="tactical innovation",
+            mode="balanced",
+        )
+    )
+
+    assert [item.memory.id for item in result.results] == [relevant.id]
+    assert result.results[0].query_relevance > 0
+    assert result.filtered_count == 1
+    assert zero_match.id not in [item.memory.id for item in result.results]
+
+
+def test_broad_query_retrieval_keeps_zero_match_results_but_ranks_matches_first(
+    session: Session,
+) -> None:
+    praxis_id, _ = _domain_ids(session)
+    relevant = _memory(
+        session,
+        domain_id=praxis_id,
+        title="Praxis Tactical Innovation",
+        content="Praxis trains innovation officers.",
+        importance=0.5,
+    )
+    zero_match = _memory(
+        session,
+        domain_id=praxis_id,
+        title="High importance unrelated memory",
+        content="This item should be visible only in broad retrieval.",
+        importance=1.0,
+        impact_level="high",
+    )
+
+    result = MemoryRetrievalService(session).retrieve(
+        MemoryRetrievalQuery(
+            audience="maestro",
+            domain_id=praxis_id,
+            query_text="tactical innovation",
+            mode="broad",
+        )
+    )
+
+    assert [item.memory.id for item in result.results] == [relevant.id, zero_match.id]
+    assert result.results[0].query_relevance > result.results[1].query_relevance
+    assert result.filtered_count == 0
+
+
+def test_strict_query_retrieval_requires_stronger_match(session: Session) -> None:
+    praxis_id, _ = _domain_ids(session)
+    partial = _memory(
+        session,
+        domain_id=praxis_id,
+        title="Praxis training",
+        content="Training notes mention only one query term.",
+        importance=0.9,
+    )
+    strong = _memory(
+        session,
+        domain_id=praxis_id,
+        title="Praxis Tactical Innovation training",
+        content="Tactical Innovation training is central to Praxis.",
+        importance=0.7,
+    )
+
+    result = MemoryRetrievalService(session).retrieve(
+        MemoryRetrievalQuery(
+            audience="maestro",
+            domain_id=praxis_id,
+            query_text="tactical innovation training",
+            mode="strict",
+        )
+    )
+
+    assert [item.memory.id for item in result.results] == [strong.id]
+    assert partial.id not in [item.memory.id for item in result.results]

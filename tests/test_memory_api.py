@@ -236,8 +236,11 @@ def test_memory_retrieval_endpoint_returns_scored_context(
     assert response.status_code == 200
     payload = response.json()
     assert payload["query"]["domain_key"] == "praxis"
+    assert payload["query"]["mode"] == "balanced"
+    assert payload["filtered_count"] == 0
     assert payload["results"][0]["title"] == "Praxis training model"
     assert payload["results"][0]["domain_key"] == "praxis"
     assert payload["results"][0]["score"] > 0
+    assert payload["results"][0]["query_relevance"] > 0
     assert payload["results"][0]["provenance"]["source_refs"][0]["id"] == "artifact-1"
     assert all(result["domain_key"] != "ophi" for result in payload["results"])
