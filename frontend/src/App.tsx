@@ -209,6 +209,16 @@ type AgentRun = {
   run_id: string;
   status: string;
   execution_note: string;
+  output_text: string | null;
+  task_id: string | null;
+  report_id: string | null;
+  error_message: string | null;
+  tool_calls: Array<{
+    id: string;
+    tool_name: string;
+    status: string;
+    error_message: string | null;
+  }>;
   scheduler: {
     status: string;
     reason: string;
@@ -865,6 +875,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
           query_text: promptTask,
           use_semantic: true,
           stage_interaction: stageRunArtifact,
+          execute_llm: true,
         }),
       });
       setRunPreview(response.run);
@@ -1094,10 +1105,19 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
           <div className="run-preview">
             <span>{runPreview.status}</span>
             <p>{runPreview.execution_note}</p>
+            {runPreview.task_id && <p>Task: {runPreview.task_id}</p>}
+            {runPreview.report_id && <p>Report: {runPreview.report_id}</p>}
             <p>Scheduler: {runPreview.scheduler.status}</p>
+            {runPreview.tool_calls.map((toolCall) => (
+              <p key={toolCall.id}>
+                {toolCall.tool_name}: {toolCall.status}
+              </p>
+            ))}
+            {runPreview.error_message && <p>{runPreview.error_message}</p>}
             {runPreview.staged_artifact_path && (
               <p>Staged artifact: {runPreview.staged_artifact_path}</p>
             )}
+            {runPreview.output_text && <pre>{runPreview.output_text}</pre>}
           </div>
         )}
         {promptPreview && (

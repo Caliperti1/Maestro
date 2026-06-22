@@ -1,8 +1,9 @@
 # Agent Runtime Foundation
 
-This layer is the bridge between Maestro memory and working domain agents. It does not run
-autonomous agents yet. It defines the contracts that future agents will use so every agent does
-not invent its own prompt glue, tool permissions, or session artifact format.
+This layer is the bridge between Maestro memory and working domain agents. It can run a one-off
+agent through the LLM gateway, while recurring/autonomous scheduling is still deliberately
+separate. It defines the contracts that future agents will use so every agent does not invent its
+own prompt glue, tool permissions, or session artifact format.
 
 ## Pieces
 
@@ -111,9 +112,10 @@ Expected:
 
 ### Run Once
 
-Manual run once is the first execution envelope. It intentionally does not call the LLM or schedule
-work yet. It proves that Maestro can select an agent, assemble the prompt package, retrieve scoped
-memory, resolve tool access, and optionally stage an interaction artifact for curation.
+Manual run once is the first execution envelope. It selects an agent, assembles the prompt package,
+retrieves scoped memory, resolves tool access, calls the LLM gateway, records task/tool/report
+provenance, and optionally stages an interaction artifact for memory curation. Set
+`execute_llm: false` to prepare/debug the package without making a provider call.
 
 API:
 
@@ -130,20 +132,44 @@ curl -s http://localhost:8000/agents/praxis-planning-agent/run-once \
     "task_instruction": "Prepare a Praxis partner brief.",
     "query_text": "Praxis partner brief",
     "use_semantic": true,
-    "stage_interaction": true
+    "stage_interaction": true,
+    "execute_llm": true
   }'
 ```
 
 Expected:
 
-- response status is `prepared`
+- response status is `completed` when the LLM call succeeds, `failed` when the provider call fails,
+  or `prepared` when `execute_llm` is false
 - `prompt_package` matches the prompt aggregation contract
+- `task_id` is set for the manual run
+- `tool_calls` includes the `llm.gateway` call when `execute_llm` is true
+- `report_id` and `output_text` are set when execution succeeds
 - `scheduler.status` is `stubbed`
 - if `stage_interaction` is true, a package lands in `maestro_dropbox/<domain>/inbox`
+
+The resulting interaction artifact contains the agent output, task ID, tool call summary, generated
+report reference, run ID, and execution status. The memory curator can process that artifact just
+like a manually dropped file.
 
 The scheduler is deliberately separate. Maestro will need a master scheduler service that can
 coordinate recurring work, resource locks, exclusive tools, queue priority, and user approvals
 without individual agents fighting over the same capabilities.
+
+### Tool Execution Contract
+
+Tool calls should use a consistent envelope:
+
+- `tool_name`: stable shared tool key, such as `llm.gateway` or `gmail.read`
+- `input_payload`: redacted/request-safe input summary
+- `output_payload`: redacted/result-safe output summary
+- `status`: `running`, `complete`, or `failed`
+- `error_message`: failure reason, if any
+- `started_at` / `completed_at`: timing/provenance
+
+Domain credentials are resolved through `tool_connections`; agent permissions do not store or own
+credentials. A future hardened credential service should provide the actual secret material to tool
+adapters at execution time without exposing it to prompts or ordinary API responses.
 
 ### Interaction Artifact Packager
 

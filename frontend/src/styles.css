@@ -559,6 +559,18 @@ h4 {
   text-transform: uppercase;
 }
 
+.run-preview pre {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  background: #ffffff;
+  border: 1px solid #d8e5da;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
 .admin-form textarea,
 .admin-panel textarea {
   min-height: 120px;

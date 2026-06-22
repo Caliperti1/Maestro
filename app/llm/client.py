@@ -9,6 +9,9 @@ class LLMClientError(RuntimeError):
 
 
 class LLMClient(Protocol):
+    model: str
+    provider: str
+
     def structured_response(
         self,
         *,
@@ -17,6 +20,14 @@ class LLMClient(Protocol):
         schema_name: str,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
+        pass
+
+    def text_response(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+    ) -> str:
         pass
 
 
@@ -95,6 +106,44 @@ class OpenAILLMClient:
             return json.loads(response.output_text)
         except json.JSONDecodeError as exc:
             raise LLMClientError("LLM returned non-JSON output.") from exc
+
+    def text_response(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+    ) -> str:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise LLMClientError("Install the `openai` package to use live LLM calls.") from exc
+
+        client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            default_headers=self.default_headers or None,
+        )
+        if self.provider == "openrouter":
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": input_text},
+                ],
+            )
+            content = response.choices[0].message.content
+            if not content:
+                raise LLMClientError("LLM returned an empty response.")
+            return content
+
+        response = client.responses.create(
+            model=self.model,
+            instructions=instructions,
+            input=input_text,
+        )
+        if not response.output_text:
+            raise LLMClientError("LLM returned an empty response.")
+        return response.output_text
 
     def _openrouter_structured_response(
         self,

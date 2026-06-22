@@ -10,9 +10,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Agent, Artifact, Domain, RuntimeSetting, ToolConnection
+from app.db.models import (
+    Agent,
+    Artifact,
+    Domain,
+    Report,
+    RuntimeSetting,
+    Task,
+    ToolCall,
+    ToolConnection,
+)
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
+from app.llm.client import LLMClient, LLMClientError, OpenAILLMClient
 from app.memory.retrieval import (
     MemoryContextBundle,
     MemoryContextBundleRequest,
@@ -146,8 +156,13 @@ class AgentRunResult:
     prompt_package: PromptPackage
     scheduler: dict[str, Any]
     execution_note: str
+    output_text: str | None = None
+    task_id: str | None = None
+    report_id: str | None = None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
     staged_artifact_path: str | None = None
     artifact_id: str | None = None
+    error_message: str | None = None
 
 
 class AgentRuntimeError(ValueError):
@@ -534,9 +549,10 @@ class AgentRegistryService:
 
 
 class PromptAggregationService:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, llm_client: LLMClient | None = None):
         self.session = session
         self.registry = AgentRegistryService(session)
+        self.llm_client = llm_client
 
     def build_prompt_package(self, request: PromptPackageRequest) -> PromptPackage:
         spec = self.registry.get_spec(request.agent_key)
@@ -618,13 +634,153 @@ class PromptAggregationService:
         request: PromptPackageRequest,
         *,
         stage_interaction: bool = False,
+        execute_llm: bool = True,
     ) -> AgentRunResult:
         package = self.build_prompt_package(request)
         run_id = str(uuid.uuid4())
-        execution_note = (
-            "Manual run prepared. The scheduler and autonomous LLM execution are intentionally "
-            "stubbed; this verifies prompt, scoped memory, tool manifest, and artifact packaging."
+        domain = DomainRepository(self.session).get_by_key(package.agent.domain_key)
+        if domain is None:
+            raise AgentRuntimeError(f"Unknown domain: {package.agent.domain_key}")
+        task = Task(
+            domain_id=domain.id,
+            assigned_agent_id=package.agent.id,
+            status="running" if execute_llm else "prepared",
+            priority="normal",
+            source_type="manual_run_once",
+            workflow_key="agent.run_once",
+            objective=request.task_instruction,
+            input_payload={
+                "run_id": run_id,
+                "caller": request.caller,
+                "query_text": request.query_text,
+                "execute_llm": execute_llm,
+                "stage_interaction": stage_interaction,
+            },
+            started_at=datetime.now(UTC) if execute_llm else None,
         )
+        self.session.add(task)
+        self.session.commit()
+        self.session.refresh(task)
+
+        execution_note = "Manual run prepared."
+        output_text: str | None = None
+        error_message: str | None = None
+        tool_call_payloads: list[dict[str, Any]] = []
+        report_id: str | None = None
+        status = "prepared"
+
+        if execute_llm:
+            llm_client = self.llm_client
+            tool_call = ToolCall(
+                task_id=task.id,
+                agent_id=package.agent.id,
+                tool_name="llm.gateway",
+                input_payload={
+                    "provider": getattr(llm_client, "provider", "configured"),
+                    "model": package.agent.model_profile,
+                    "prompt_chars": len(package.assembled_prompt),
+                },
+                status="running",
+                started_at=datetime.now(UTC),
+            )
+            self.session.add(tool_call)
+            self.session.commit()
+            self.session.refresh(tool_call)
+            try:
+                if llm_client is None:
+                    llm_client = OpenAILLMClient(
+                        model=(
+                            package.agent.model_profile
+                            if package.agent.model_profile != "default"
+                            else None
+                        )
+                    )
+                tool_call.input_payload = {
+                    **tool_call.input_payload,
+                    "provider": getattr(llm_client, "provider", "unknown"),
+                    "model": getattr(llm_client, "model", package.agent.model_profile),
+                }
+                output_text = llm_client.text_response(
+                    instructions=(
+                        "You are executing as a Maestro domain agent. Follow the provided "
+                        "assembled prompt exactly, stay within your domain, respect the tool "
+                        "manifest, and produce the requested structured output."
+                    ),
+                    input_text=package.assembled_prompt,
+                )
+                tool_call.status = "complete"
+                tool_call.output_payload = {
+                    "output_chars": len(output_text),
+                    "output_preview": output_text[:500],
+                }
+                tool_call.completed_at = datetime.now(UTC)
+                report = Report(
+                    task_id=task.id,
+                    domain_id=domain.id,
+                    agent_id=package.agent.id,
+                    title=f"{package.agent.name} run",
+                    report_type="agent_run_once",
+                    summary=output_text[:500],
+                    body_markdown=output_text,
+                    structured_data={
+                        "run_id": run_id,
+                        "prompt_created_at": package.created_at,
+                        "memory_included_count": package.memory_context.included_count,
+                        "semantic_status": package.memory_context.semantic_status,
+                    },
+                )
+                self.session.add(report)
+                self.session.flush()
+                task.status = "completed"
+                task.output_payload = {
+                    "run_id": run_id,
+                    "report_id": str(report.id),
+                    "output_preview": output_text[:500],
+                }
+                task.completed_at = datetime.now(UTC)
+                execution_note = "Manual run completed through the LLM gateway."
+                status = "completed"
+                self.session.commit()
+                self.session.refresh(report)
+                self.session.refresh(tool_call)
+                self.session.refresh(task)
+                report_id = str(report.id)
+            except LLMClientError as exc:
+                error_message = str(exc)
+                tool_call.status = "failed"
+                tool_call.error_message = error_message
+                tool_call.completed_at = datetime.now(UTC)
+                task.status = "failed"
+                task.error_message = error_message
+                task.completed_at = datetime.now(UTC)
+                self.session.commit()
+                self.session.refresh(tool_call)
+                self.session.refresh(task)
+                execution_note = "Manual run failed while calling the LLM gateway."
+                status = "failed"
+
+            tool_call_payloads.append(
+                {
+                    "id": str(tool_call.id),
+                    "tool_name": tool_call.tool_name,
+                    "status": tool_call.status,
+                    "error_message": tool_call.error_message,
+                    "input_payload": tool_call.input_payload,
+                    "output_payload": tool_call.output_payload,
+                }
+            )
+        else:
+            task.output_payload = {
+                "run_id": run_id,
+                "prepared_prompt_chars": len(package.assembled_prompt),
+            }
+            self.session.commit()
+            self.session.refresh(task)
+            execution_note = (
+                "Manual run prepared without an LLM call. The scheduler is stubbed, but prompt, "
+                "scoped memory, tool manifest, and artifact packaging are verified."
+            )
+
         staged_path: str | None = None
         artifact_id: str | None = None
         if stage_interaction:
@@ -633,25 +789,35 @@ class PromptAggregationService:
                     domain_key=package.agent.domain_key,
                     agent_key=package.agent.key,
                     maestro_tasking=request.task_instruction,
-                    agent_output=execution_note,
-                    tool_calls=[
+                    agent_output=output_text or execution_note,
+                    tool_calls=tool_call_payloads
+                    or [
                         {
-                            "tool_name": "prompt_aggregation.run_once_stub",
-                            "status": "prepared",
+                            "tool_name": "prompt_aggregation.run_once",
+                            "status": status,
                         }
                     ],
-                    generated_artifacts=[],
-                    open_questions=[
-                        "Connect this run envelope to the reusable LLM gateway.",
-                        "Route future scheduled runs through the master scheduler service.",
-                    ],
+                    generated_artifacts=[
+                        {
+                            "name": f"{package.agent.key}-{run_id}.md",
+                            "type": "agent_run_report",
+                            "report_id": report_id,
+                        }
+                    ]
+                    if report_id
+                    else [],
+                    open_questions=[]
+                    if status == "completed"
+                    else ["Review failed or prepared run before retrying."],
                     next_steps=[
-                        "Review assembled prompt package.",
-                        "Use this contract for the first real agent execution loop.",
+                        "Review the agent output.",
+                        "Let the memory curator process this interaction artifact.",
                     ],
+                    task_id=str(task.id),
                     provenance={
                         "run_id": run_id,
-                        "execution_mode": "manual_run_once_stub",
+                        "execution_mode": "manual_run_once",
+                        "status": status,
                     },
                 )
             )
@@ -659,7 +825,7 @@ class PromptAggregationService:
             artifact_id = staged.artifact_id
         return AgentRunResult(
             run_id=run_id,
-            status="prepared",
+            status=status,
             agent=package.agent,
             prompt_package=package,
             scheduler={
@@ -670,8 +836,13 @@ class PromptAggregationService:
                 ),
             },
             execution_note=execution_note,
+            output_text=output_text,
+            task_id=str(task.id),
+            report_id=report_id,
+            tool_calls=tool_call_payloads,
             staged_artifact_path=staged_path,
             artifact_id=artifact_id,
+            error_message=error_message,
         )
 
 

@@ -57,6 +57,19 @@ def _seed_memory(session: Session) -> None:
     session.commit()
 
 
+class FakeAgentLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def structured_response(self, **kwargs):
+        raise AssertionError("Agent run should use text_response.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "Maestro domain agent" in instructions
+        assert "Praxis partner run" in input_text
+        return "## Summary\nPraxis partner run completed.\n\n## Next Steps\nSend the brief."
+
+
 def test_seed_agent_registry_returns_domain_scoped_specs(session: Session) -> None:
     specs = AgentRegistryService(session).list_specs()
 
@@ -185,11 +198,42 @@ def test_run_agent_once_prepares_prompt_and_optional_staged_artifact(
             use_semantic=False,
         ),
         stage_interaction=True,
+        execute_llm=False,
     )
 
     assert result.status == "prepared"
     assert result.scheduler["status"] == "stubbed"
     assert result.prompt_package.agent.key == "praxis-planning-agent"
+    assert result.staged_artifact_path is not None
+    assert Path(result.staged_artifact_path).is_file()
+
+
+def test_run_agent_once_executes_llm_and_records_task_report_and_tool_call(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    _seed_memory(session)
+
+    result = PromptAggregationService(session, llm_client=FakeAgentLLMClient()).run_agent_once(
+        PromptPackageRequest(
+            agent_key="praxis-planning-agent",
+            task_instruction="Prepare a Praxis partner run.",
+            use_semantic=False,
+        ),
+        stage_interaction=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    assert result.output_text is not None
+    assert "Praxis partner run completed" in result.output_text
+    assert result.task_id is not None
+    assert result.report_id is not None
+    assert result.tool_calls[0]["tool_name"] == "llm.gateway"
+    assert result.tool_calls[0]["status"] == "complete"
     assert result.staged_artifact_path is not None
     assert Path(result.staged_artifact_path).is_file()
 

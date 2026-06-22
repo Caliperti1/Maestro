@@ -71,6 +71,7 @@ class ToolConnectionBody(BaseModel):
 
 class AgentRunOnceBody(PromptPackageBody):
     stage_interaction: bool = False
+    execute_llm: bool = True
 
 
 class InteractionArtifactBody(BaseModel):
@@ -289,6 +290,7 @@ def run_agent_once(
                 use_semantic=body.use_semantic,
             ),
             stage_interaction=body.stage_interaction,
+            execute_llm=body.execute_llm,
         )
     except AgentRuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -300,8 +302,13 @@ def run_agent_once(
             "prompt_package": _prompt_package_payload(result.prompt_package),
             "scheduler": result.scheduler,
             "execution_note": result.execution_note,
+            "output_text": result.output_text,
+            "task_id": result.task_id,
+            "report_id": result.report_id,
+            "tool_calls": result.tool_calls,
             "staged_artifact_path": result.staged_artifact_path,
             "artifact_id": result.artifact_id,
+            "error_message": result.error_message,
         }
     }
 

@@ -239,6 +239,7 @@ def test_run_once_endpoint_prepares_stubbed_run(
             "query_text": "Praxis brief",
             "use_semantic": False,
             "stage_interaction": True,
+            "execute_llm": False,
         },
     )
 
@@ -247,6 +248,8 @@ def test_run_once_endpoint_prepares_stubbed_run(
     assert payload["status"] == "prepared"
     assert payload["scheduler"]["status"] == "stubbed"
     assert payload["prompt_package"]["agent"]["key"] == "praxis-planning-agent"
+    assert payload["task_id"] is not None
+    assert payload["output_text"] is None
     assert payload["staged_artifact_path"] is not None
 
 
