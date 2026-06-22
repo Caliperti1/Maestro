@@ -44,7 +44,9 @@ def test_dropbox_processor_creates_domain_folders(session: Session, tmp_path: Pa
     processor.ensure_directories()
 
     assert (tmp_path / "global" / "inbox").is_dir()
+    assert (tmp_path / "global" / "processing").is_dir()
     assert (tmp_path / "ophi" / "inbox").is_dir()
+    assert (tmp_path / "ophi" / "processing").is_dir()
     assert (tmp_path / "maestro-development" / "previews").is_dir()
 
 
@@ -99,6 +101,7 @@ def test_dropbox_processor_extracts_previews_writes_memory_and_moves_processed_f
     assert result.written_count == 1
     assert result.pending_approval_count == 1
     assert not source_path.exists()
+    assert not (tmp_path / "ophi" / "processing" / "strategy.md").exists()
     assert (tmp_path / "ophi" / "processed" / "strategy.md").is_file()
     assert (tmp_path / "ophi" / "previews" / "strategy.preview.json").is_file()
 

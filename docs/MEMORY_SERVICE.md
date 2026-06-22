@@ -163,6 +163,30 @@ durable strategy.
 Global memory cannot be tied to a domain or agent. Domain memory requires a domain.
 Agent memory requires both domain and agent.
 
+## Session Memory
+
+Most work in this sprint has focused on durable memory: facts, preferences, decisions, source
+summaries, workflows, and domain knowledge that should survive across sessions. Maestro also
+needs session memory, but it has a different job.
+
+Session memory should capture short-lived orchestration context such as:
+
+- what the user asked Maestro to do in the current session
+- which agents were tasked and why
+- tool calls, artifacts, and external actions completed during the session
+- temporary assumptions, open questions, blockers, and next steps
+- brief summaries of what changed since the last user-visible response
+
+The intended flow is that an interaction artifact packager summarizes session activity into a
+structured artifact, stages that artifact, and lets the same curator/service pipeline decide
+what becomes durable memory. Transient context can remain `maestro_session`; durable lessons,
+preferences, decisions, or domain facts should be promoted into `global`, `domain`, or `agent`
+memory through normal candidate evaluation.
+
+The prompt aggregator should retrieve session memory through context bundles when the caller is
+Maestro-level or when an agent task needs recent orchestration context. Domain agents should
+still only receive session memory that the aggregator intentionally includes for their task.
+
 ## What This Issue Implements
 
 - `MemoryService.write_candidate`

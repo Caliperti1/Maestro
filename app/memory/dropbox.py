@@ -20,7 +20,7 @@ from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES, extract_drop
 from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.service import MemoryCandidate, MemoryWriteResult
 
-DROPBOX_SUBDIRS = ("inbox", "processed", "failed", "previews")
+DROPBOX_SUBDIRS = ("inbox", "processing", "processed", "failed", "previews")
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,15 @@ class MemoryDropboxProcessor:
             for path in sorted(inbox.iterdir()):
                 if not self._is_supported_file(path):
                     continue
-                results.append(self.process_file(path, domain_key=domain_key, domain=domain))
+                processing_path = self._move_file(path, domain_key=domain_key, status="processing")
+                results.append(
+                    self.process_file(
+                        processing_path,
+                        domain_key=domain_key,
+                        domain=domain,
+                        original_path=path,
+                    )
+                )
         return results
 
     def process_file(
@@ -77,14 +85,17 @@ class MemoryDropboxProcessor:
         *,
         domain_key: str,
         domain: Domain | None,
+        original_path: Path | None = None,
     ) -> DropboxProcessResult:
         seed_package: SeedPackage | None = None
         artifact: Artifact | None = None
         preview_path: Path | None = None
+        original_path = original_path or path
         try:
             seed_package, artifact = self._record_source_artifact(
                 path,
                 domain,
+                original_path=original_path,
             )
             content, extraction_metadata = extract_dropbox_text(path)
             self._update_source_artifact_extraction_metadata(
@@ -110,11 +121,11 @@ class MemoryDropboxProcessor:
             curator = self._curator()
             preview = curator.preview_source(source, domain_key=domain_key)
             preview_path = self._write_preview(
-                path,
+                original_path,
                 domain_key=domain_key,
                 candidates=preview.candidates,
                 results=None,
-                status="previewed",
+                status="writing",
             )
             batch = curator.write_candidates(source, preview.candidates)
             destination = self._move_file(path, domain_key=domain_key, status="processed")
@@ -125,7 +136,7 @@ class MemoryDropboxProcessor:
                 processed_path=destination,
             )
             preview_path = self._write_preview(
-                path,
+                original_path,
                 domain_key=domain_key,
                 candidates=batch.candidates,
                 results=batch.results,
@@ -193,16 +204,19 @@ class MemoryDropboxProcessor:
         path: Path,
         domain: Domain | None,
         *,
+        original_path: Path | None = None,
         extraction_metadata: dict[str, Any] | None = None,
     ) -> tuple[SeedPackage, Artifact]:
         metadata = extraction_metadata or {}
+        original_path = original_path or path
         seed_package = SeedPackage(
             domain_id=domain.id if domain is not None else None,
             name=path.name,
             source_type="dropbox_file",
             status="processing",
             metadata_={
-                "original_path": str(path),
+                "original_path": str(original_path),
+                "processing_path": str(path),
                 "suffix": path.suffix.lower(),
                 **metadata,
             },
@@ -218,7 +232,8 @@ class MemoryDropboxProcessor:
             mime_type=self._mime_type(path),
             metadata_={
                 "dropbox": True,
-                "original_path": str(path),
+                "original_path": str(original_path),
+                "processing_path": str(path),
                 **metadata,
             },
         )

@@ -349,6 +349,7 @@ def _domain_status(root: Path, domain_key: str) -> dict[str, Any]:
     return {
         "key": domain_key,
         "inbox": _folder_count(root / domain_key / "inbox", supported_only=True),
+        "processing": _folder_count(root / domain_key / "processing", supported_only=True),
         "processed": _folder_count(root / domain_key / "processed"),
         "failed": _folder_count(root / domain_key / "failed"),
         "previews": _folder_count(root / domain_key / "previews", pattern="*.preview.json"),
@@ -380,27 +381,34 @@ def _preview_payload(path: Path, domain_key: str) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         payload = {"status": "invalid", "candidates": [], "results": []}
+    candidates = payload.get("candidates", [])
+    results = payload.get("results", [])
+    candidate_count = len(candidates)
+    result_count = len(results)
+    written_count = sum(1 for result in results if result.get("memory_item_id"))
+    deduped_count = sum(
+        1
+        for result in results
+        if result.get("outcome") in {"duplicate_skipped", "reinforced"}
+    )
+    pending_approval_count = sum(
+        1 for result in results if result.get("outcome") == "pending_user_approval"
+    )
     return {
         "domain_key": domain_key,
         "filename": path.name,
         "path": str(path),
         "source_file": payload.get("source_file"),
         "status": payload.get("status"),
+        "is_processing": payload.get("status") in {"writing"},
         "generated_at": payload.get("generated_at"),
-        "candidate_count": len(payload.get("candidates", [])),
-        "written_count": sum(
-            1 for result in payload.get("results", []) if result.get("memory_item_id")
-        ),
-        "deduped_count": sum(
-            1
-            for result in payload.get("results", [])
-            if result.get("outcome") in {"duplicate_skipped", "reinforced"}
-        ),
-        "pending_approval_count": sum(
-            1
-            for result in payload.get("results", [])
-            if result.get("outcome") == "pending_user_approval"
-        ),
+        "candidate_count": candidate_count,
+        "result_count": result_count,
+        "written_count": written_count,
+        "deduped_count": deduped_count,
+        "pending_approval_count": pending_approval_count,
+        "progress_count": result_count,
+        "progress_total": candidate_count,
         "payload": payload,
     }
 

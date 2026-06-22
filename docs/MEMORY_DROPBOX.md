@@ -13,41 +13,49 @@ The processor creates folders under `MEMORY_DROPBOX_ROOT`, which defaults to
 maestro_dropbox/
   global/
     inbox/
+    processing/
     processed/
     failed/
     previews/
   personal/
     inbox/
+    processing/
     processed/
     failed/
     previews/
   maestro-development/
     inbox/
+    processing/
     processed/
     failed/
     previews/
   praxis/
     inbox/
+    processing/
     processed/
     failed/
     previews/
   ophi/
     inbox/
+    processing/
     processed/
     failed/
     previews/
   usma/
     inbox/
+    processing/
     processed/
     failed/
     previews/
   personal-irad-projects/
     inbox/
+    processing/
     processed/
     failed/
     previews/
   l3/
     inbox/
+    processing/
     processed/
     failed/
     previews/
@@ -79,14 +87,20 @@ before dropping them into an inbox.
 ## Processing Flow
 
 1. You drop a file into a domain `inbox`.
-2. The processor records a `seed_packages` row and a raw-file `artifacts` row.
-3. The LLM-backed curator extracts structured memory candidates.
-4. A debug preview is written to the domain `previews` folder.
-5. Candidates are routed through `MemoryService`.
-6. Canonical memory is written or very-high-impact proposals are queued for approval.
-7. The raw file moves to `processed`.
-8. If processing fails, the raw file moves to `failed` with an `.error.json` file and the
+2. The processor claims the file by moving it to the domain `processing` folder.
+3. The processor records a `seed_packages` row and a raw-file `artifacts` row.
+4. The LLM-backed curator extracts structured memory candidates.
+5. A live debug preview is written to the domain `previews` folder with `status: writing`.
+6. Candidates are routed through `MemoryService`.
+7. Canonical memory is written or very-high-impact proposals are queued for approval.
+8. The raw file moves to `processed` and the preview is rewritten with `status: written`.
+9. If processing fails, the raw file moves to `failed` with an `.error.json` file and the
    source record is marked failed for provenance review.
+
+The preview is a progress artifact, not just a final report. While `status` is `writing`,
+`candidate_count` may be greater than `written_count` because candidate evaluation and memory
+writes happen one at a time. The Memory tab shows progress as `processed / total` so a long
+LLM-backed ingest does not look like a failed write.
 
 ## Candidate Evaluation
 
