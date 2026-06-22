@@ -599,6 +599,20 @@ h4 {
   border-radius: 8px;
 }
 
+.selectable {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.selectable:hover,
+.selectable.active {
+  border-color: #a7c3ad;
+  background: #f1f7f2;
+}
+
 .tool-registry-row span {
   color: #68736d;
   font-size: 0.76rem;

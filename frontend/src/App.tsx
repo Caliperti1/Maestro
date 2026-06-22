@@ -1117,12 +1117,21 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
 function ToolsWorkspace() {
   const [tools, setTools] = useState<ToolRegistryItem[]>([]);
   const [connections, setConnections] = useState<ToolConnection[]>([]);
+  const [selectedToolKey, setSelectedToolKey] = useState("memory.context_bundle");
   const [connectionDomain, setConnectionDomain] = useState("praxis");
-  const [connectionTool, setConnectionTool] = useState("memory.context_bundle");
   const [connectionName, setConnectionName] = useState("Praxis memory retrieval");
   const [connectionAuthType, setConnectionAuthType] = useState("service");
   const [connectionConfig, setConnectionConfig] = useState("{}");
   const [statusMessage, setStatusMessage] = useState("Ready");
+
+  const selectedTool = tools.find((tool) => tool.key === selectedToolKey) ?? tools[0] ?? null;
+  const selectedToolConnections = connections.filter(
+    (connection) => connection.tool_key === selectedTool?.key,
+  );
+  const selectedToolAgents = selectedTool?.authorized_agents ?? [];
+  const selectedConnection = selectedToolConnections.find(
+    (connection) => connection.domain_key === connectionDomain,
+  );
 
   const refreshTools = useCallback(async () => {
     const [toolResponse, connectionResponse] = await Promise.all([
@@ -1131,7 +1140,36 @@ function ToolsWorkspace() {
     ]);
     setTools(toolResponse.tools);
     setConnections(connectionResponse.connections);
-  }, []);
+    if (!toolResponse.tools.some((tool) => tool.key === selectedToolKey)) {
+      setSelectedToolKey(toolResponse.tools[0]?.key ?? "memory.context_bundle");
+    }
+  }, [selectedToolKey]);
+
+  useEffect(() => {
+    if (!selectedTool) return;
+    const existing = connections.find(
+      (connection) =>
+        connection.tool_key === selectedTool.key && connection.domain_key === connectionDomain,
+    );
+    if (existing) {
+      setConnectionName(existing.display_name);
+      setConnectionAuthType(existing.auth_type);
+      setConnectionConfig(JSON.stringify(existing.config, null, 2));
+      return;
+    }
+    setConnectionName(`${domainLabels[connectionDomain] ?? connectionDomain} ${selectedTool.name}`);
+    setConnectionAuthType("service");
+    setConnectionConfig("{}");
+  }, [connectionDomain, connections, selectedTool?.key]);
+
+  useEffect(() => {
+    if (!selectedTool) return;
+    setConnectionDomain(selectedToolConnections[0]?.domain_key ?? "praxis");
+  }, [selectedTool?.key]);
+
+  const selectConnection = (domainKey: string) => {
+    setConnectionDomain(domainKey);
+  };
 
   useEffect(() => {
     refreshTools().catch((error) =>
@@ -1147,7 +1185,7 @@ function ToolsWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           domain_key: connectionDomain,
-          tool_key: connectionTool,
+          tool_key: selectedTool?.key,
           display_name: connectionName,
           auth_type: connectionAuthType,
           config,
@@ -1163,11 +1201,11 @@ function ToolsWorkspace() {
 
   return (
     <div className="admin-grid">
-      <section className="memory-panel wide-panel" aria-labelledby="tools-heading">
+      <section className="memory-panel admin-panel" aria-labelledby="tools-heading">
         <div className="section-heading">
           <div>
             <p className="eyebrow">Shared tool suite</p>
-            <h3 id="tools-heading">Available tools</h3>
+            <h3 id="tools-heading">Tools</h3>
           </div>
           <button className="icon-button" onClick={refreshTools} title="Refresh tools">
             <RefreshCw size={18} />
@@ -1175,7 +1213,15 @@ function ToolsWorkspace() {
         </div>
         <div className="tool-registry-list">
           {tools.map((tool) => (
-            <article className="tool-registry-row" key={tool.key}>
+            <button
+              className={
+                tool.key === selectedTool?.key
+                  ? "tool-registry-row selectable active"
+                  : "tool-registry-row selectable"
+              }
+              key={tool.key}
+              onClick={() => setSelectedToolKey(tool.key)}
+            >
               <div>
                 <span>{tool.exclusive ? "Exclusive / queued" : "Shared"}</span>
                 <h4>{tool.name}</h4>
@@ -1185,98 +1231,120 @@ function ToolsWorkspace() {
                 <span>{tool.connected_domains.length} connected domains</span>
                 <span>{tool.authorized_agents.length} authorized agents</span>
               </div>
-              <div className="agent-chip-list">
-                {tool.authorized_agents.map((agent) => (
-                  <span key={`${tool.key}-${agent.agent_key}`} className="agent-chip">
-                    {domainLabels[agent.domain_key] ?? agent.domain_key}: {agent.agent_name} (
-                    {agent.permission})
-                  </span>
-                ))}
-              </div>
-            </article>
+            </button>
           ))}
           {tools.length === 0 && <p className="empty-state">No tools registered yet.</p>}
         </div>
         <p className="memory-status">{statusMessage}</p>
       </section>
 
-      <section className="memory-panel admin-panel" aria-labelledby="tool-connection-heading">
+      <section className="memory-panel admin-panel" aria-labelledby="tool-detail-heading">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">Domain credentials</p>
-            <h3 id="tool-connection-heading">Tool connections</h3>
+            <p className="eyebrow">Selected tool</p>
+            <h3 id="tool-detail-heading">{selectedTool?.name ?? "No tool selected"}</h3>
           </div>
           <ShieldCheck size={18} />
         </div>
-        <div className="admin-form">
-          <label>
-            Domain
-            <select
-              value={connectionDomain}
-              onChange={(event) => setConnectionDomain(event.target.value)}
-            >
+        {selectedTool ? (
+          <>
+            <p className="empty-state">{selectedTool.description}</p>
+            <div className="connection-list">
               {Object.entries(domainLabels)
                 .filter(([key]) => key !== "global")
-                .map(([key, label]) => (
-                  <option key={key} value={key}>
-                    {label}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <label>
-            Tool
-            <select value={connectionTool} onChange={(event) => setConnectionTool(event.target.value)}>
-              {tools.map((tool) => (
-                <option key={tool.key} value={tool.key}>
-                  {tool.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Display name
-            <input
-              value={connectionName}
-              onChange={(event) => setConnectionName(event.target.value)}
-            />
-          </label>
-          <label>
-            Auth type
-            <select
-              value={connectionAuthType}
-              onChange={(event) => setConnectionAuthType(event.target.value)}
-            >
-              <option value="service">Service</option>
-              <option value="api_key">API key</option>
-              <option value="oauth">OAuth</option>
-              <option value="manual">Manual</option>
-            </select>
-          </label>
-          <label>
-            Config JSON
-            <textarea
-              value={connectionConfig}
-              onChange={(event) => setConnectionConfig(event.target.value)}
-            />
-          </label>
-          <button className="planner-action" onClick={saveConnection}>
-            Save connection
-          </button>
-        </div>
-        <div className="connection-list">
-          {connections.map((connection) => (
-            <div className="connection-row" key={connection.id}>
-              <span>{domainLabels[connection.domain_key] ?? connection.domain_key}</span>
-              <strong>{connection.display_name}</strong>
-              <span>{connection.tool_key}</span>
-              <span>{connection.auth_type}</span>
+                .map(([domainKey, label]) => {
+                  const connection = selectedToolConnections.find(
+                    (item) => item.domain_key === domainKey,
+                  );
+                  const domainAgents = selectedToolAgents.filter(
+                    (agent) => agent.domain_key === domainKey,
+                  );
+                  return (
+                    <button
+                      className={
+                        domainKey === connectionDomain
+                          ? "connection-row selectable active"
+                          : "connection-row selectable"
+                      }
+                      key={domainKey}
+                      onClick={() => selectConnection(domainKey)}
+                    >
+                      <span>{label}</span>
+                      <strong>{connection?.display_name ?? "No credentials stored"}</strong>
+                      <span>{connection?.auth_type ?? "not connected"}</span>
+                      <span>{domainAgents.length} agents</span>
+                    </button>
+                  );
+                })}
             </div>
-          ))}
-          {connections.length === 0 && (
-            <p className="empty-state">No domain tool connections yet.</p>
-          )}
-        </div>
+            <div className="agent-chip-list">
+              {selectedToolAgents.map((agent) => (
+                <span key={`${selectedTool.key}-${agent.agent_key}`} className="agent-chip">
+                  {domainLabels[agent.domain_key] ?? agent.domain_key}: {agent.agent_name} (
+                  {agent.permission})
+                </span>
+              ))}
+              {selectedToolAgents.length === 0 && (
+                <p className="empty-state">No agents currently have access to this tool.</p>
+              )}
+            </div>
+            <div className="admin-form">
+              <label>
+                Domain
+                <select
+                  value={connectionDomain}
+                  onChange={(event) => setConnectionDomain(event.target.value)}
+                >
+                  {Object.entries(domainLabels)
+                    .filter(([key]) => key !== "global")
+                    .map(([key, label]) => (
+                      <option key={key} value={key}>
+                        {label}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label>
+                Display name
+                <input
+                  value={connectionName}
+                  onChange={(event) => setConnectionName(event.target.value)}
+                />
+              </label>
+              <label>
+                Auth type
+                <select
+                  value={connectionAuthType}
+                  onChange={(event) => setConnectionAuthType(event.target.value)}
+                >
+                  <option value="service">Service</option>
+                  <option value="api_key">API key</option>
+                  <option value="oauth">OAuth</option>
+                  <option value="login_password">Login + password</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </label>
+              <label>
+                Credential/config JSON
+                <textarea
+                  value={connectionConfig}
+                  onChange={(event) => setConnectionConfig(event.target.value)}
+                  placeholder='{"username":"praxis@example.com","password":"..."}'
+                />
+              </label>
+              {selectedConnection && (
+                <p className="memory-status">
+                  Existing secret-like values are redacted. Replace them here to update.
+                </p>
+              )}
+              <button className="planner-action" onClick={saveConnection}>
+                Save {domainLabels[connectionDomain] ?? connectionDomain} credentials
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="empty-state">Select a tool to inspect domain credentials.</p>
+        )}
       </section>
     </div>
   );

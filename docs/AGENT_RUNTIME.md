@@ -16,8 +16,9 @@ The web app now keeps pace with the runtime foundation:
   prompt package.
 - Each domain tab can create a new domain-scoped agent with default memory, artifact, and LLM
   gateway permissions.
-- The Tools tab shows the shared tool registry, whether tools are shared or exclusive, connected
-  domains, which agents can access each tool, and a domain tool-connection editor.
+- The Tools tab is tool-centric: select a shared tool, inspect which domains have credentials
+  configured, see which agents have access, and edit the selected domain's credential/config
+  payload for that tool.
 - The Memory tab remains the staging, approval, retrieval, and source-review surface.
 
 The domain and agent editors are intentionally admin/debug controls for MVP. They write through
@@ -56,11 +57,13 @@ GET /agents/tools/connections
 PUT /agents/tools/connections
 ```
 
-Tool connections are domain-scoped. Agents receive permission to use a tool, then the runtime
-resolves the matching domain tool connection when it builds the tool manifest. Secret-like config
-keys such as `api_key`, `token`, `secret`, and `password` are redacted in API responses. This is
-still an MVP scaffold; a hardened local secret store or keychain integration should replace raw
-database storage before sensitive production credentials are added.
+Tool connections are domain-scoped. Agents receive permission to use a shared tool, then the
+runtime resolves the matching domain tool connection when it builds the tool manifest. For example,
+the Gmail read tool should be one shared capability, while Praxis, Ophi, and Personal each have
+their own Gmail credential/config connection. Secret-like config keys such as `api_key`, `token`,
+`secret`, and `password` are redacted in API responses. This is still an MVP scaffold; a hardened
+local secret store or keychain integration should replace raw database storage before sensitive
+production credentials are added.
 
 ### Prompt Aggregation
 
