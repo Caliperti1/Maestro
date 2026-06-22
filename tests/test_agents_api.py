@@ -92,6 +92,66 @@ def test_prompt_package_endpoint_returns_scoped_prompt(session: Session, tmp_pat
     assert payload["memory_context"]["included_count"] >= 1
 
 
+def test_domain_context_update_changes_prompt_package(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    update = client.patch(
+        "/agents/domains/praxis",
+        json={"context": "Praxis UI-edited context for agent prompts."},
+    )
+    prompt = client.post(
+        "/agents/praxis-planning-agent/prompt-package",
+        json={
+            "task_instruction": "Prepare a Praxis brief.",
+            "use_semantic": False,
+        },
+    )
+
+    assert update.status_code == 200
+    assert update.json()["domain"]["context"] == "Praxis UI-edited context for agent prompts."
+    assert prompt.status_code == 200
+    assert "Praxis UI-edited context" in prompt.json()["prompt_package"]["assembled_prompt"]
+
+
+def test_agent_update_and_tool_registry_endpoint(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    update = client.patch(
+        "/agents/praxis-planning-agent",
+        json={
+            "role_summary": "Updated Praxis planning role.",
+            "current_action": "Drafting partner-call prep.",
+            "tool_permissions": {
+                "memory.context_bundle": {
+                    "permission": "read",
+                    "description": "Read Praxis memory.",
+                }
+            },
+        },
+    )
+    tools = client.get("/agents/tools")
+
+    assert update.status_code == 200
+    agent = update.json()["agent"]
+    assert agent["role_summary"] == "Updated Praxis planning role."
+    assert agent["current_action"] == "Drafting partner-call prep."
+    assert [tool["key"] for tool in agent["allowed_tools"]] == ["memory.context_bundle"]
+    assert tools.status_code == 200
+    memory_tool = next(
+        tool for tool in tools.json()["tools"] if tool["key"] == "memory.context_bundle"
+    )
+    assert any(
+        authorized["agent_key"] == "praxis-planning-agent"
+        for authorized in memory_tool["authorized_agents"]
+    )
+
+
 def test_interaction_artifact_endpoint_can_stage_package(
     session: Session,
     tmp_path: Path,

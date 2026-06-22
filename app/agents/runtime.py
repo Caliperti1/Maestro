@@ -50,6 +50,25 @@ class AgentSpec:
 
 
 @dataclass(frozen=True)
+class DomainContextSpec:
+    id: uuid.UUID
+    key: str
+    name: str
+    context: str
+    is_active: bool
+
+
+@dataclass(frozen=True)
+class ToolRegistryItem:
+    key: str
+    name: str
+    description: str
+    exclusive: bool
+    connected_domains: list[str]
+    authorized_agents: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
 class PromptPackageRequest:
     agent_key: str
     task_instruction: str
@@ -157,6 +176,36 @@ class AgentRegistryService:
             if domains_by_id.get(agent.domain_id) is not None
         ]
 
+    def list_domain_contexts(self) -> list[DomainContextSpec]:
+        seed_default_domains(self.session)
+        domains = DomainRepository(self.session).list_active()
+        return [
+            DomainContextSpec(
+                id=domain.id,
+                key=domain.key,
+                name=domain.name,
+                context=domain.description or _DOMAIN_CONTEXTS.get(domain.key, ""),
+                is_active=domain.is_active,
+            )
+            for domain in domains
+        ]
+
+    def update_domain_context(self, domain_key: str, context: str) -> DomainContextSpec:
+        seed_default_domains(self.session)
+        domain = DomainRepository(self.session).get_by_key(domain_key)
+        if domain is None:
+            raise AgentRuntimeError(f"Unknown domain: {domain_key}")
+        domain.description = context
+        self.session.commit()
+        self.session.refresh(domain)
+        return DomainContextSpec(
+            id=domain.id,
+            key=domain.key,
+            name=domain.name,
+            context=domain.description or "",
+            is_active=domain.is_active,
+        )
+
     def get_spec(self, agent_key: str) -> AgentSpec:
         self.ensure_seed_agents()
         agent = AgentRepository(self.session).get_by_key(agent_key)
@@ -166,6 +215,93 @@ class AgentRegistryService:
         if domain is None:
             raise AgentRuntimeError(f"Agent {agent_key} has no active domain.")
         return self._spec_for_agent(agent, domain=domain)
+
+    def update_agent_spec(
+        self,
+        agent_key: str,
+        *,
+        role_summary: str | None = None,
+        role_prompt: str | None = None,
+        memory_profile: str | None = None,
+        model_profile: str | None = None,
+        tool_permissions: dict[str, Any] | None = None,
+        current_action: str | None = None,
+        scheduled_actions: list[dict[str, Any]] | None = None,
+        is_active: bool | None = None,
+    ) -> AgentSpec:
+        self.ensure_seed_agents()
+        agent = AgentRepository(self.session).get_by_key(agent_key)
+        if agent is None:
+            raise AgentRuntimeError(f"Unknown agent: {agent_key}")
+        capabilities = dict(agent.capabilities or {})
+        if role_summary is not None:
+            agent.description = role_summary
+            capabilities["role_summary"] = role_summary
+        if role_prompt is not None:
+            capabilities["role_prompt"] = role_prompt
+        if memory_profile is not None:
+            capabilities["memory_profile"] = memory_profile
+        if model_profile is not None:
+            capabilities["model_profile"] = model_profile
+        if current_action is not None:
+            capabilities["current_action"] = current_action or None
+        if scheduled_actions is not None:
+            capabilities["scheduled_actions"] = scheduled_actions
+        if tool_permissions is not None:
+            agent.tool_permissions = tool_permissions
+        if is_active is not None:
+            agent.is_active = is_active
+        agent.capabilities = capabilities
+        self.session.commit()
+        self.session.refresh(agent)
+        return self.get_spec(agent.key)
+
+    def list_tools(self) -> list[ToolRegistryItem]:
+        self.ensure_seed_agents()
+        domains_by_id = {
+            domain.id: domain for domain in DomainRepository(self.session).list_active()
+        }
+        connections = self.session.scalars(
+            select(ToolConnection).where(ToolConnection.is_active.is_(True))
+        ).all()
+        connected_domains: dict[str, set[str]] = {}
+        for connection in connections:
+            domain = domains_by_id.get(connection.domain_id)
+            if domain is None:
+                continue
+            connected_domains.setdefault(connection.tool_key, set()).add(domain.key)
+
+        authorized_agents: dict[str, list[dict[str, str]]] = {}
+        for agent in self.session.scalars(select(Agent).where(Agent.is_active.is_(True))).all():
+            domain = domains_by_id.get(agent.domain_id)
+            if domain is None:
+                continue
+            for tool_key, value in (agent.tool_permissions or {}).items():
+                permission = value if isinstance(value, str) else value.get("permission", "use")
+                authorized_agents.setdefault(tool_key, []).append(
+                    {
+                        "agent_key": agent.key,
+                        "agent_name": agent.name,
+                        "domain_key": domain.key,
+                        "permission": str(permission),
+                    }
+                )
+
+        known_tool_keys = set(_TOOL_DESCRIPTIONS) | set(connected_domains) | set(authorized_agents)
+        return [
+            ToolRegistryItem(
+                key=tool_key,
+                name=_TOOL_DESCRIPTIONS.get(tool_key, {}).get("name", tool_key),
+                description=_TOOL_DESCRIPTIONS.get(tool_key, {}).get("description", ""),
+                exclusive=bool(_TOOL_DESCRIPTIONS.get(tool_key, {}).get("exclusive", False)),
+                connected_domains=sorted(connected_domains.get(tool_key, set())),
+                authorized_agents=sorted(
+                    authorized_agents.get(tool_key, []),
+                    key=lambda item: (item["domain_key"], item["agent_key"]),
+                ),
+            )
+            for tool_key in sorted(known_tool_keys)
+        ]
 
     def _spec_for_agent(self, agent: Agent, *, domain: Domain | None) -> AgentSpec:
         if domain is None:
@@ -252,7 +388,7 @@ class PromptAggregationService:
             task_instruction=request.task_instruction,
             caller=request.caller,
             global_context=_GLOBAL_MAESTRO_CONTEXT,
-            domain_context=_DOMAIN_CONTEXTS.get(spec.domain_key, domain.description or ""),
+            domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
             role_prompt=spec.role_prompt,
             user_context=request.user_context,
             memory_context=memory_context,
@@ -260,7 +396,7 @@ class PromptAggregationService:
             output_contract=output_contract,
             assembled_prompt=self._render_prompt(
                 global_context=_GLOBAL_MAESTRO_CONTEXT,
-                domain_context=_DOMAIN_CONTEXTS.get(spec.domain_key, domain.description or ""),
+                domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
                 role_prompt=spec.role_prompt,
                 task_instruction=request.task_instruction,
                 user_context=request.user_context,

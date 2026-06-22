@@ -416,6 +416,12 @@ h4 {
   text-align: left;
 }
 
+.agent-row.active {
+  color: #113b2b;
+  background: #d8efdf;
+  border-color: #aed8bd;
+}
+
 .agent-row span {
   display: inline-flex;
   align-items: center;
@@ -437,6 +443,117 @@ h4 {
   display: flex;
   align-items: center;
   gap: 9px;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: minmax(330px, 0.9fr) minmax(420px, 1.3fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.admin-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.wide-panel {
+  grid-column: 1 / -1;
+}
+
+.admin-form {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-form label,
+.admin-panel label {
+  display: grid;
+  gap: 7px;
+  color: #35453e;
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.admin-form input,
+.admin-form textarea,
+.admin-panel textarea {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 10px;
+  color: #22312b;
+  background: #f8faf7;
+  border: 1px solid #d7ded7;
+  border-radius: 8px;
+}
+
+.admin-form textarea,
+.admin-panel textarea {
+  min-height: 120px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.prompt-preview {
+  display: grid;
+  gap: 10px;
+}
+
+.prompt-preview pre {
+  max-height: 520px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  color: #26352f;
+  background: #f7f9f6;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.tool-registry-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.tool-registry-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: #f9fbf8;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
+.tool-registry-row span {
+  color: #68736d;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.tool-registry-row p {
+  color: #52605a;
+  line-height: 1.45;
+}
+
+.agent-chip-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agent-chip {
+  min-height: 28px;
+  padding: 5px 8px;
+  color: #304139 !important;
+  background: #eef4ef;
+  border: 1px solid #d9e1d9;
+  border-radius: 8px;
+  font-size: 0.78rem !important;
+  text-transform: none !important;
 }
 
 .memory-grid {

@@ -82,11 +82,28 @@ def test_prompt_aggregation_includes_scoped_memory_and_tools(session: Session) -
     )
 
     assert package.agent.domain_key == "praxis"
-    assert "Praxis domain" in package.domain_context
+    assert "Praxis Defense" in package.domain_context
     assert "Praxis partner follow-up" in package.assembled_prompt
     assert "Ophi private roadmap" not in package.assembled_prompt
     assert "memory.context_bundle" in package.assembled_prompt
     assert package.memory_context.included_count >= 1
+
+
+def test_updated_domain_context_flows_into_prompt_package(session: Session) -> None:
+    _seed_memory(session)
+    registry = AgentRegistryService(session)
+    registry.update_domain_context("praxis", "Praxis edited UI context for partner work.")
+
+    package = PromptAggregationService(session).build_prompt_package(
+        PromptPackageRequest(
+            agent_key="praxis-planning-agent",
+            task_instruction="Prepare a partner call brief.",
+            use_semantic=False,
+        )
+    )
+
+    assert package.domain_context == "Praxis edited UI context for partner work."
+    assert "Praxis edited UI context for partner work." in package.assembled_prompt
 
 
 def test_tool_manifest_can_attach_domain_connections(session: Session) -> None:

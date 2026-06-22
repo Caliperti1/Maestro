@@ -28,6 +28,21 @@ class PromptPackageBody(BaseModel):
     use_semantic: bool = True
 
 
+class DomainContextBody(BaseModel):
+    context: str
+
+
+class AgentUpdateBody(BaseModel):
+    role_summary: str | None = None
+    role_prompt: str | None = None
+    memory_profile: str | None = None
+    model_profile: str | None = None
+    tool_permissions: dict[str, Any] | None = None
+    current_action: str | None = None
+    scheduled_actions: list[dict[str, Any]] | None = None
+    is_active: bool | None = None
+
+
 class InteractionArtifactBody(BaseModel):
     domain_key: str
     agent_key: str | None = None
@@ -50,10 +65,89 @@ def list_agents(db: Session = Depends(get_db)) -> dict[str, Any]:
     return {"agents": [_agent_payload(spec) for spec in specs]}
 
 
+@router.get("/domains")
+def list_domain_contexts(db: Session = Depends(get_db)) -> dict[str, Any]:
+    domains = AgentRegistryService(db).list_domain_contexts()
+    return {
+        "domains": [
+            {
+                "id": str(domain.id),
+                "key": domain.key,
+                "name": domain.name,
+                "context": domain.context,
+                "is_active": domain.is_active,
+            }
+            for domain in domains
+        ]
+    }
+
+
+@router.patch("/domains/{domain_key}")
+def update_domain_context(
+    domain_key: str,
+    body: DomainContextBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        domain = AgentRegistryService(db).update_domain_context(domain_key, body.context)
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "domain": {
+            "id": str(domain.id),
+            "key": domain.key,
+            "name": domain.name,
+            "context": domain.context,
+            "is_active": domain.is_active,
+        }
+    }
+
+
+@router.get("/tools")
+def list_tools(db: Session = Depends(get_db)) -> dict[str, Any]:
+    tools = AgentRegistryService(db).list_tools()
+    return {
+        "tools": [
+            {
+                "key": tool.key,
+                "name": tool.name,
+                "description": tool.description,
+                "exclusive": tool.exclusive,
+                "connected_domains": tool.connected_domains,
+                "authorized_agents": tool.authorized_agents,
+            }
+            for tool in tools
+        ]
+    }
+
+
 @router.get("/{agent_key}")
 def get_agent(agent_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         spec = AgentRegistryService(db).get_spec(agent_key)
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"agent": _agent_payload(spec)}
+
+
+@router.patch("/{agent_key}")
+def update_agent(
+    agent_key: str,
+    body: AgentUpdateBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        spec = AgentRegistryService(db).update_agent_spec(
+            agent_key,
+            role_summary=body.role_summary,
+            role_prompt=body.role_prompt,
+            memory_profile=body.memory_profile,
+            model_profile=body.model_profile,
+            tool_permissions=body.tool_permissions,
+            current_action=body.current_action,
+            scheduled_actions=body.scheduled_actions,
+            is_active=body.is_active,
+        )
     except AgentRuntimeError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"agent": _agent_payload(spec)}

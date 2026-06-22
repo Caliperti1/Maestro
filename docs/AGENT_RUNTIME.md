@@ -6,6 +6,19 @@ not invent its own prompt glue, tool permissions, or session artifact format.
 
 ## Pieces
 
+## UI
+
+The web app now keeps pace with the runtime foundation:
+
+- Domain tabs show an editable domain context, active agents, agent role/tasking fields, tool
+  access JSON, and a prompt-package debug panel.
+- The Tools tab shows the shared tool registry, whether tools are shared or exclusive, connected
+  domains, and which agents can access each tool.
+- The Memory tab remains the staging, approval, retrieval, and source-review surface.
+
+The domain and agent editors are intentionally admin/debug controls for MVP. They write through
+the `/agents` API so edits affect future prompt-package assembly.
+
 ### Agent Registry
 
 Agents are domain-scoped. An agent spec includes:
@@ -28,6 +41,10 @@ API:
 ```text
 GET /agents
 GET /agents/{agent_key}
+PATCH /agents/{agent_key}
+GET /agents/domains
+PATCH /agents/domains/{domain_key}
+GET /agents/tools
 ```
 
 ### Prompt Aggregation

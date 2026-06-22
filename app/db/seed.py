@@ -61,7 +61,7 @@ def seed_default_domains(session: Session) -> list[Domain]:
             session.add(domain)
         else:
             domain.name = domain_seed.name
-            domain.description = domain_seed.description
+            domain.description = domain.description or domain_seed.description
         seeded.append(domain)
     session.commit()
     for domain in seeded:

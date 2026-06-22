@@ -140,6 +140,61 @@ type RetrievedMemory = MemoryItem & {
   }>;
 };
 
+type AgentTool = {
+  key: string;
+  name: string;
+  permission: string;
+  description: string;
+  connection_id: string | null;
+  auth_type: string | null;
+};
+
+type AgentSpec = {
+  id: string;
+  key: string;
+  name: string;
+  domain_key: string;
+  agent_type: string;
+  role_summary: string;
+  role_prompt: string;
+  memory_profile: string;
+  model_profile: string;
+  allowed_tools: AgentTool[];
+  is_active: boolean;
+  current_action: string | null;
+  scheduled_actions: Array<Record<string, unknown>>;
+};
+
+type DomainContext = {
+  id: string;
+  key: string;
+  name: string;
+  context: string;
+  is_active: boolean;
+};
+
+type ToolRegistryItem = {
+  key: string;
+  name: string;
+  description: string;
+  exclusive: boolean;
+  connected_domains: string[];
+  authorized_agents: Array<{
+    agent_key: string;
+    agent_name: string;
+    domain_key: string;
+    permission: string;
+  }>;
+};
+
+type PromptPackage = {
+  assembled_prompt: string;
+  memory_context: {
+    included_count: number;
+    semantic_status: string;
+  };
+};
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
 const domainLabels: Record<string, string> = {
@@ -171,6 +226,10 @@ const domains = [
   "Personal IRAD",
   "L3",
 ];
+
+const domainKeysByLabel: Record<string, string> = Object.fromEntries(
+  Object.entries(domainLabels).map(([key, label]) => [label, key]),
+);
 
 const initialPlannerItems: PlannerItem[] = [
   {
@@ -297,7 +356,9 @@ async function apiJson<T>(path: string, options?: RequestInit): Promise<T> {
 export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeDomain, setActiveDomain] = useState("Maestro");
-  const [activeSurface, setActiveSurface] = useState<"dashboard" | "memory">("dashboard");
+  const [activeSurface, setActiveSurface] = useState<"dashboard" | "domain" | "memory" | "tools">(
+    "dashboard",
+  );
   const [plannerItems, setPlannerItems] = useState(initialPlannerItems);
   const [draftMessage, setDraftMessage] = useState("");
 
@@ -359,13 +420,20 @@ export function App() {
             <Database size={17} />
             <span>Memory</span>
           </button>
+          <button
+            className={activeSurface === "tools" ? "domain-button active" : "domain-button"}
+            onClick={() => setActiveSurface("tools")}
+          >
+            <Wrench size={17} />
+            <span>Tools</span>
+          </button>
           {domains.map((domain) => (
             <button
               key={domain}
               className={activeDomain === domain ? "domain-button active" : "domain-button"}
               onClick={() => {
                 setActiveDomain(domain);
-                setActiveSurface("dashboard");
+                setActiveSurface("domain");
               }}
             >
               <ChevronRight size={16} />
@@ -386,7 +454,13 @@ export function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">Active surface</p>
-            <h2>{activeSurface === "memory" ? "Memory" : activeDomain}</h2>
+            <h2>
+              {activeSurface === "memory"
+                ? "Memory"
+                : activeSurface === "tools"
+                  ? "Tools"
+                  : activeDomain}
+            </h2>
           </div>
           <div className="status-strip" aria-label="Runtime status">
             <span>
@@ -397,6 +471,11 @@ export function App() {
               <span>
                 <Database size={16} />
                 Memory pipeline
+              </span>
+            ) : activeSurface === "tools" ? (
+              <span>
+                <Wrench size={16} />
+                Shared tool suite
               </span>
             ) : (
               <span>
@@ -409,6 +488,10 @@ export function App() {
 
         {activeSurface === "memory" ? (
           <MemoryWorkspace />
+        ) : activeSurface === "tools" ? (
+          <ToolsWorkspace />
+        ) : activeSurface === "domain" ? (
+          <DomainWorkspace domainLabel={activeDomain} />
         ) : (
           <div className="workspace-grid">
             <section className="chat-panel" aria-labelledby="chat-heading">
@@ -559,6 +642,319 @@ export function App() {
   );
 }
 
+function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
+  const domainKey = domainKeysByLabel[domainLabel] ?? "maestro-development";
+  const [domains, setDomains] = useState<DomainContext[]>([]);
+  const [agents, setAgents] = useState<AgentSpec[]>([]);
+  const [domainContext, setDomainContext] = useState("");
+  const [selectedAgentKey, setSelectedAgentKey] = useState<string | null>(null);
+  const [roleSummary, setRoleSummary] = useState("");
+  const [rolePrompt, setRolePrompt] = useState("");
+  const [currentAction, setCurrentAction] = useState("");
+  const [toolPermissionsText, setToolPermissionsText] = useState("{}");
+  const [promptTask, setPromptTask] = useState("Prepare a concise domain brief.");
+  const [promptPreview, setPromptPreview] = useState<PromptPackage | null>(null);
+  const [statusMessage, setStatusMessage] = useState("Ready");
+  const [busy, setBusy] = useState(false);
+
+  const domainAgents = agents.filter((agent) => agent.domain_key === domainKey);
+  const selectedAgent =
+    domainAgents.find((agent) => agent.key === selectedAgentKey) ?? domainAgents[0] ?? null;
+
+  const refreshAgents = useCallback(async () => {
+    const [domainResponse, agentResponse] = await Promise.all([
+      apiJson<{ domains: DomainContext[] }>("/agents/domains"),
+      apiJson<{ agents: AgentSpec[] }>("/agents"),
+    ]);
+    setDomains(domainResponse.domains);
+    setAgents(agentResponse.agents);
+    const activeDomain = domainResponse.domains.find((domain) => domain.key === domainKey);
+    setDomainContext(activeDomain?.context ?? "");
+  }, [domainKey]);
+
+  useEffect(() => {
+    refreshAgents().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : "Unable to load agents."),
+    );
+  }, [refreshAgents]);
+
+  useEffect(() => {
+    if (!selectedAgent) return;
+    setSelectedAgentKey(selectedAgent.key);
+    setRoleSummary(selectedAgent.role_summary);
+    setRolePrompt(selectedAgent.role_prompt);
+    setCurrentAction(selectedAgent.current_action ?? "");
+    const permissions = Object.fromEntries(
+      selectedAgent.allowed_tools.map((tool) => [
+        tool.key,
+        { permission: tool.permission, description: tool.description },
+      ]),
+    );
+    setToolPermissionsText(JSON.stringify(permissions, null, 2));
+  }, [selectedAgent?.key]);
+
+  const saveDomainContext = async () => {
+    setBusy(true);
+    try {
+      await apiJson(`/agents/domains/${domainKey}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context: domainContext }),
+      });
+      setStatusMessage("Domain context saved.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Domain save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveAgent = async () => {
+    if (!selectedAgent) return;
+    setBusy(true);
+    try {
+      const toolPermissions = JSON.parse(toolPermissionsText) as Record<string, unknown>;
+      await apiJson(`/agents/${selectedAgent.key}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role_summary: roleSummary,
+          role_prompt: rolePrompt,
+          current_action: currentAction,
+          tool_permissions: toolPermissions,
+        }),
+      });
+      setStatusMessage("Agent settings saved.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(
+        error instanceof Error ? error.message : "Agent save failed. Check tool JSON.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const generatePrompt = async () => {
+    if (!selectedAgent) return;
+    setBusy(true);
+    try {
+      const response = await apiJson<{ prompt_package: PromptPackage }>(
+        `/agents/${selectedAgent.key}/prompt-package`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            task_instruction: promptTask,
+            query_text: promptTask,
+            use_semantic: true,
+          }),
+        },
+      );
+      setPromptPreview(response.prompt_package);
+      setStatusMessage("Prompt package generated.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Prompt generation failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="admin-grid">
+      <section className="memory-panel admin-panel" aria-labelledby="domain-context-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Domain context</p>
+            <h3 id="domain-context-heading">{domainLabel}</h3>
+          </div>
+          <button className="icon-button" onClick={refreshAgents} title="Refresh agents">
+            <RefreshCw size={18} />
+          </button>
+        </div>
+        <textarea
+          value={domainContext}
+          onChange={(event) => setDomainContext(event.target.value)}
+          aria-label="Domain context"
+        />
+        <button className="planner-action" onClick={saveDomainContext} disabled={busy}>
+          Save domain context
+        </button>
+        <p className="memory-status">{statusMessage}</p>
+      </section>
+
+      <section className="memory-panel admin-panel" aria-labelledby="domain-agent-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Active agents</p>
+            <h3 id="domain-agent-heading">Registry</h3>
+          </div>
+          <span className="count-badge">{domainAgents.length}</span>
+        </div>
+        <div className="agent-list">
+          {domainAgents.map((agent) => (
+            <button
+              className={agent.key === selectedAgent?.key ? "agent-row active" : "agent-row"}
+              key={agent.key}
+              onClick={() => setSelectedAgentKey(agent.key)}
+            >
+              <span>
+                <Bot size={17} />
+                {agent.name}
+              </span>
+              <CheckCircle2 size={17} />
+            </button>
+          ))}
+          {domainAgents.length === 0 && (
+            <p className="empty-state">No agents in this domain yet.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="memory-panel admin-panel wide-panel" aria-labelledby="agent-edit-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Agent settings</p>
+            <h3 id="agent-edit-heading">{selectedAgent?.name ?? "No agent selected"}</h3>
+          </div>
+          <Bot size={18} />
+        </div>
+        {selectedAgent ? (
+          <div className="admin-form">
+            <label>
+              Role summary
+              <textarea
+                value={roleSummary}
+                onChange={(event) => setRoleSummary(event.target.value)}
+              />
+            </label>
+            <label>
+              Role prompt
+              <textarea
+                value={rolePrompt}
+                onChange={(event) => setRolePrompt(event.target.value)}
+              />
+            </label>
+            <label>
+              Current tasking
+              <input
+                value={currentAction}
+                onChange={(event) => setCurrentAction(event.target.value)}
+                placeholder="What this agent is currently working on..."
+              />
+            </label>
+            <label>
+              Tool access JSON
+              <textarea
+                value={toolPermissionsText}
+                onChange={(event) => setToolPermissionsText(event.target.value)}
+              />
+            </label>
+            <button className="planner-action" onClick={saveAgent} disabled={busy}>
+              Save agent
+            </button>
+          </div>
+        ) : (
+          <p className="empty-state">Select an agent to edit role, tasking, and tools.</p>
+        )}
+      </section>
+
+      <section
+        className="memory-panel admin-panel wide-panel"
+        aria-labelledby="prompt-debug-heading"
+      >
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Prompt package</p>
+            <h3 id="prompt-debug-heading">Debug assembly</h3>
+          </div>
+          <Sparkles size={18} />
+        </div>
+        <div className="admin-form">
+          <label>
+            Task instruction
+            <input value={promptTask} onChange={(event) => setPromptTask(event.target.value)} />
+          </label>
+          <button
+            className="planner-action"
+            onClick={generatePrompt}
+            disabled={busy || !selectedAgent}
+          >
+            Generate prompt package
+          </button>
+        </div>
+        {promptPreview && (
+          <div className="prompt-preview">
+            <div className="preview-meta">
+              <span>{promptPreview.memory_context.included_count} memories</span>
+              <span>semantic {promptPreview.memory_context.semantic_status}</span>
+            </div>
+            <pre>{promptPreview.assembled_prompt}</pre>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ToolsWorkspace() {
+  const [tools, setTools] = useState<ToolRegistryItem[]>([]);
+  const [statusMessage, setStatusMessage] = useState("Ready");
+
+  const refreshTools = useCallback(async () => {
+    const response = await apiJson<{ tools: ToolRegistryItem[] }>("/agents/tools");
+    setTools(response.tools);
+  }, []);
+
+  useEffect(() => {
+    refreshTools().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : "Unable to load tools."),
+    );
+  }, [refreshTools]);
+
+  return (
+    <div className="admin-grid">
+      <section className="memory-panel wide-panel" aria-labelledby="tools-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Shared tool suite</p>
+            <h3 id="tools-heading">Available tools</h3>
+          </div>
+          <button className="icon-button" onClick={refreshTools} title="Refresh tools">
+            <RefreshCw size={18} />
+          </button>
+        </div>
+        <div className="tool-registry-list">
+          {tools.map((tool) => (
+            <article className="tool-registry-row" key={tool.key}>
+              <div>
+                <span>{tool.exclusive ? "Exclusive / queued" : "Shared"}</span>
+                <h4>{tool.name}</h4>
+                <p>{tool.description}</p>
+              </div>
+              <div className="preview-meta">
+                <span>{tool.connected_domains.length} connected domains</span>
+                <span>{tool.authorized_agents.length} authorized agents</span>
+              </div>
+              <div className="agent-chip-list">
+                {tool.authorized_agents.map((agent) => (
+                  <span key={`${tool.key}-${agent.agent_key}`} className="agent-chip">
+                    {domainLabels[agent.domain_key] ?? agent.domain_key}: {agent.agent_name} (
+                    {agent.permission})
+                  </span>
+                ))}
+              </div>
+            </article>
+          ))}
+          {tools.length === 0 && <p className="empty-state">No tools registered yet.</p>}
+        </div>
+        <p className="memory-status">{statusMessage}</p>
+      </section>
+    </div>
+  );
+}
+
 function MemoryWorkspace() {
   const [domains, setDomains] = useState<DropboxDomain[]>(dropboxDomainDefaults);
   const [selectedDomain, setSelectedDomain] = useState("ophi");
@@ -582,13 +978,14 @@ function MemoryWorkspace() {
   const [busy, setBusy] = useState(false);
 
   const refreshMemory = useCallback(async () => {
-    const [status, previewResponse, pendingResponse, itemResponse, sourceResponse] = await Promise.all([
+    const [status, previewResponse, pendingResponse, itemResponse, sourceResponse] =
+      await Promise.all([
       apiJson<{ domains: DropboxDomain[] }>("/memory/dropbox/status"),
       apiJson<{ previews: MemoryPreview[] }>("/memory/dropbox/previews"),
       apiJson<{ proposals: PendingProposal[] }>("/memory/proposals/pending"),
       apiJson<{ items: MemoryItem[] }>("/memory/items?limit=8"),
       apiJson<{ sources: MemorySource[] }>("/memory/sources?limit=8"),
-    ]);
+      ]);
     setDomains(status.domains);
     const sortedPreviews = [...previewResponse.previews].sort(
       (first, second) => previewTime(second) - previewTime(first),
@@ -757,7 +1154,9 @@ function MemoryWorkspace() {
           </label>
           <label className="file-drop">
             <HardDriveUpload size={20} />
-            <span>{selectedFile ? selectedFile.name : "Choose PDF, DOCX, Markdown, text, or data"}</span>
+            <span>
+              {selectedFile ? selectedFile.name : "Choose PDF, DOCX, Markdown, text, or data"}
+            </span>
             <input
               type="file"
               accept=".pdf,.docx,.md,.txt,.json,.csv,.tsv,.html,.htm"
