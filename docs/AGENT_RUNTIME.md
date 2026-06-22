@@ -11,9 +11,13 @@ not invent its own prompt glue, tool permissions, or session artifact format.
 The web app now keeps pace with the runtime foundation:
 
 - Domain tabs show an editable domain context, active agents, agent role/tasking fields, tool
-  access JSON, and a prompt-package debug panel.
+  access selectors, and a prompt-package debug panel.
+- The Maestro Development domain exposes the editable global Maestro context used by every
+  prompt package.
+- Each domain tab can create a new domain-scoped agent with default memory, artifact, and LLM
+  gateway permissions.
 - The Tools tab shows the shared tool registry, whether tools are shared or exclusive, connected
-  domains, and which agents can access each tool.
+  domains, which agents can access each tool, and a domain tool-connection editor.
 - The Memory tab remains the staging, approval, retrieval, and source-review surface.
 
 The domain and agent editors are intentionally admin/debug controls for MVP. They write through
@@ -40,12 +44,23 @@ API:
 
 ```text
 GET /agents
+POST /agents
 GET /agents/{agent_key}
 PATCH /agents/{agent_key}
+GET /agents/global-context
+PATCH /agents/global-context
 GET /agents/domains
 PATCH /agents/domains/{domain_key}
 GET /agents/tools
+GET /agents/tools/connections
+PUT /agents/tools/connections
 ```
+
+Tool connections are domain-scoped. Agents receive permission to use a tool, then the runtime
+resolves the matching domain tool connection when it builds the tool manifest. Secret-like config
+keys such as `api_key`, `token`, `secret`, and `password` are redacted in API responses. This is
+still an MVP scaffold; a hardened local secret store or keychain integration should replace raw
+database storage before sensitive production credentials are added.
 
 ### Prompt Aggregation
 
@@ -90,6 +105,42 @@ Expected:
 - memory context is scoped to Praxis
 - unrelated Ophi/L3 domain context is absent
 - tool manifest only includes tools allowed for the agent
+
+### Run Once
+
+Manual run once is the first execution envelope. It intentionally does not call the LLM or schedule
+work yet. It proves that Maestro can select an agent, assemble the prompt package, retrieve scoped
+memory, resolve tool access, and optionally stage an interaction artifact for curation.
+
+API:
+
+```text
+POST /agents/{agent_key}/run-once
+```
+
+Example:
+
+```bash
+curl -s http://localhost:8000/agents/praxis-planning-agent/run-once \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_instruction": "Prepare a Praxis partner brief.",
+    "query_text": "Praxis partner brief",
+    "use_semantic": true,
+    "stage_interaction": true
+  }'
+```
+
+Expected:
+
+- response status is `prepared`
+- `prompt_package` matches the prompt aggregation contract
+- `scheduler.status` is `stubbed`
+- if `stage_interaction` is true, a package lands in `maestro_dropbox/<domain>/inbox`
+
+The scheduler is deliberately separate. Maestro will need a master scheduler service that can
+coordinate recurring work, resource locks, exclusive tools, queue priority, and user approvals
+without individual agents fighting over the same capabilities.
 
 ### Interaction Artifact Packager
 

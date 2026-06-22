@@ -466,6 +466,11 @@ h4 {
   gap: 12px;
 }
 
+.inline-form {
+  display: grid;
+  gap: 8px;
+}
+
 .admin-form label,
 .admin-panel label {
   display: grid;
@@ -477,6 +482,9 @@ h4 {
 
 .admin-form input,
 .admin-form textarea,
+.admin-form select,
+.admin-panel input,
+.admin-panel select,
 .admin-panel textarea {
   width: 100%;
   min-height: 42px;
@@ -485,6 +493,70 @@ h4 {
   background: #f8faf7;
   border: 1px solid #d7ded7;
   border-radius: 8px;
+}
+
+.checkbox-line {
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 8px !important;
+}
+
+.checkbox-line input {
+  width: 16px;
+  min-height: 16px;
+}
+
+.tool-picker {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  gap: 10px;
+  align-items: center;
+  padding: 9px;
+  background: #f7f9f6;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
+.tool-picker-row label {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tool-picker-row input {
+  width: 16px;
+  min-height: 16px;
+}
+
+.tool-picker-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-preview {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  color: #32423b;
+  background: #f1f7f2;
+  border: 1px solid #d8e5da;
+  border-radius: 8px;
+}
+
+.run-preview span {
+  color: #285c3d;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
 }
 
 .admin-form textarea,
@@ -554,6 +626,28 @@ h4 {
   border-radius: 8px;
   font-size: 0.78rem !important;
   text-transform: none !important;
+}
+
+.connection-list {
+  display: grid;
+  gap: 8px;
+}
+
+.connection-row {
+  display: grid;
+  grid-template-columns: 0.8fr 1.1fr 1fr 0.7fr;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  color: #46554f;
+  background: #f9fbf8;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+  font-size: 0.82rem;
+}
+
+.connection-row strong {
+  color: #26352f;
 }
 
 .memory-grid {

@@ -106,6 +106,46 @@ def test_updated_domain_context_flows_into_prompt_package(session: Session) -> N
     assert "Praxis edited UI context for partner work." in package.assembled_prompt
 
 
+def test_updated_global_context_flows_into_prompt_package(session: Session) -> None:
+    _seed_memory(session)
+    registry = AgentRegistryService(session)
+    registry.update_global_context("Maestro edited global context.")
+
+    package = PromptAggregationService(session).build_prompt_package(
+        PromptPackageRequest(
+            agent_key="praxis-planning-agent",
+            task_instruction="Prepare a partner call brief.",
+            use_semantic=False,
+        )
+    )
+
+    assert package.global_context == "Maestro edited global context."
+    assert "Maestro edited global context." in package.assembled_prompt
+
+
+def test_create_agent_and_tool_connection_redacts_secret_config(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    agent = registry.create_agent_spec(
+        domain_key="praxis",
+        key="Praxis Email Agent",
+        name="Praxis Email Agent",
+        role_summary="Triages Praxis email.",
+        tool_permissions={"gmail.read": {"permission": "read"}},
+    )
+    connection = registry.upsert_tool_connection(
+        domain_key="praxis",
+        tool_key="gmail.read",
+        display_name="Praxis Gmail",
+        auth_type="api_key",
+        config={"api_key": "secret-value", "label": "praxis"},
+    )
+
+    assert agent.key == "praxis-email-agent"
+    assert connection.config["api_key"] == "********"
+    assert connection.config["label"] == "praxis"
+    assert registry.get_spec("praxis-email-agent").allowed_tools[0].connection_id is not None
+
+
 def test_tool_manifest_can_attach_domain_connections(session: Session) -> None:
     seed_default_domains(session)
     praxis = DomainRepository(session).get_by_key("praxis")
@@ -127,6 +167,31 @@ def test_tool_manifest_can_attach_domain_connections(session: Session) -> None:
     memory_tool = next(tool for tool in spec.allowed_tools if tool.key == "memory.context_bundle")
     assert memory_tool.connection_id is not None
     assert memory_tool.auth_type == "service"
+
+
+def test_run_agent_once_prepares_prompt_and_optional_staged_artifact(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    _seed_memory(session)
+
+    result = PromptAggregationService(session).run_agent_once(
+        PromptPackageRequest(
+            agent_key="praxis-planning-agent",
+            task_instruction="Prepare a Praxis partner run.",
+            use_semantic=False,
+        ),
+        stage_interaction=True,
+    )
+
+    assert result.status == "prepared"
+    assert result.scheduler["status"] == "stubbed"
+    assert result.prompt_package.agent.key == "praxis-planning-agent"
+    assert result.staged_artifact_path is not None
+    assert Path(result.staged_artifact_path).is_file()
 
 
 def test_interaction_artifact_packager_stages_package_for_curation(

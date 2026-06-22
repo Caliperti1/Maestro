@@ -246,6 +246,13 @@ class ToolConnection(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
+class RuntimeSetting(TimestampMixin, Base):
+    __tablename__ = "runtime_settings"
+
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class ToolCall(Base):
     __tablename__ = "tool_calls"
 

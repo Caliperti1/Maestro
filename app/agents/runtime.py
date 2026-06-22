@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Agent, Artifact, Domain, ToolConnection
+from app.db.models import Agent, Artifact, Domain, RuntimeSetting, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
 from app.memory.retrieval import (
@@ -69,6 +69,22 @@ class ToolRegistryItem:
 
 
 @dataclass(frozen=True)
+class GlobalContextSpec:
+    context: str
+
+
+@dataclass(frozen=True)
+class ToolConnectionSpec:
+    id: uuid.UUID
+    domain_key: str
+    tool_key: str
+    display_name: str
+    auth_type: str
+    config: dict[str, Any]
+    is_active: bool
+
+
+@dataclass(frozen=True)
 class PromptPackageRequest:
     agent_key: str
     task_instruction: str
@@ -119,6 +135,18 @@ class InteractionArtifactPackage:
 class StagedInteractionArtifact:
     package: InteractionArtifactPackage
     path: str | None = None
+    artifact_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentRunResult:
+    run_id: str
+    status: str
+    agent: AgentSpec
+    prompt_package: PromptPackage
+    scheduler: dict[str, Any]
+    execution_note: str
+    staged_artifact_path: str | None = None
     artifact_id: str | None = None
 
 
@@ -190,6 +218,30 @@ class AgentRegistryService:
             for domain in domains
         ]
 
+    def get_global_context(self) -> GlobalContextSpec:
+        setting = self.session.get(RuntimeSetting, _GLOBAL_CONTEXT_SETTING_KEY)
+        if setting is None:
+            return GlobalContextSpec(context=_GLOBAL_MAESTRO_CONTEXT)
+        return GlobalContextSpec(
+            context=str(setting.value.get("context") or _GLOBAL_MAESTRO_CONTEXT)
+        )
+
+    def update_global_context(self, context: str) -> GlobalContextSpec:
+        cleaned = context.strip()
+        if not cleaned:
+            raise AgentRuntimeError("Global Maestro context cannot be blank.")
+        setting = self.session.get(RuntimeSetting, _GLOBAL_CONTEXT_SETTING_KEY)
+        if setting is None:
+            setting = RuntimeSetting(
+                key=_GLOBAL_CONTEXT_SETTING_KEY,
+                value={"context": cleaned},
+            )
+            self.session.add(setting)
+        else:
+            setting.value = {"context": cleaned}
+        self.session.commit()
+        return GlobalContextSpec(context=cleaned)
+
     def update_domain_context(self, domain_key: str, context: str) -> DomainContextSpec:
         seed_default_domains(self.session)
         domain = DomainRepository(self.session).get_by_key(domain_key)
@@ -214,6 +266,52 @@ class AgentRegistryService:
         domain = DomainRepository(self.session).get(agent.domain_id)
         if domain is None:
             raise AgentRuntimeError(f"Agent {agent_key} has no active domain.")
+        return self._spec_for_agent(agent, domain=domain)
+
+    def create_agent_spec(
+        self,
+        *,
+        domain_key: str,
+        key: str,
+        name: str,
+        agent_type: str = "domain_agent",
+        role_summary: str = "",
+        role_prompt: str = "",
+        memory_profile: str = "agent_prompt",
+        model_profile: str = "default",
+        tool_permissions: dict[str, Any] | None = None,
+        current_action: str | None = None,
+    ) -> AgentSpec:
+        self.ensure_seed_agents()
+        domain = DomainRepository(self.session).get_by_key(domain_key)
+        if domain is None:
+            raise AgentRuntimeError(f"Unknown domain: {domain_key}")
+        cleaned_key = _slug(key)
+        if not cleaned_key:
+            raise AgentRuntimeError("Agent key cannot be blank.")
+        if AgentRepository(self.session).get_by_key(cleaned_key) is not None:
+            raise AgentRuntimeError(f"Agent key already exists: {cleaned_key}")
+        cleaned_name = name.strip()
+        if not cleaned_name:
+            raise AgentRuntimeError("Agent name cannot be blank.")
+        capabilities = {
+            "role_summary": role_summary.strip(),
+            "role_prompt": role_prompt.strip(),
+            "memory_profile": memory_profile.strip() or "agent_prompt",
+            "model_profile": model_profile.strip() or "default",
+            "current_action": current_action.strip() if current_action else None,
+            "scheduled_actions": [],
+            "output_contract": _DEFAULT_OUTPUT_CONTRACT,
+        }
+        agent = AgentRepository(self.session).create(
+            domain_id=domain.id,
+            key=cleaned_key,
+            name=cleaned_name,
+            agent_type=agent_type.strip() or "domain_agent",
+            description=capabilities["role_summary"],
+            capabilities=capabilities,
+            tool_permissions=tool_permissions or {},
+        )
         return self._spec_for_agent(agent, domain=domain)
 
     def update_agent_spec(
@@ -303,6 +401,83 @@ class AgentRegistryService:
             for tool_key in sorted(known_tool_keys)
         ]
 
+    def list_tool_connections(self) -> list[ToolConnectionSpec]:
+        seed_default_domains(self.session)
+        domains_by_id = {
+            domain.id: domain for domain in DomainRepository(self.session).list_active()
+        }
+        connections = self.session.scalars(
+            select(ToolConnection).order_by(ToolConnection.tool_key, ToolConnection.display_name)
+        ).all()
+        specs: list[ToolConnectionSpec] = []
+        for connection in connections:
+            domain = domains_by_id.get(connection.domain_id)
+            if domain is None:
+                continue
+            specs.append(
+                ToolConnectionSpec(
+                    id=connection.id,
+                    domain_key=domain.key,
+                    tool_key=connection.tool_key,
+                    display_name=connection.display_name,
+                    auth_type=connection.auth_type,
+                    config=_redact_config(connection.config or {}),
+                    is_active=connection.is_active,
+                )
+            )
+        return specs
+
+    def upsert_tool_connection(
+        self,
+        *,
+        domain_key: str,
+        tool_key: str,
+        display_name: str,
+        auth_type: str,
+        config: dict[str, Any] | None = None,
+        is_active: bool = True,
+    ) -> ToolConnectionSpec:
+        seed_default_domains(self.session)
+        domain = DomainRepository(self.session).get_by_key(domain_key)
+        if domain is None:
+            raise AgentRuntimeError(f"Unknown domain: {domain_key}")
+        cleaned_tool_key = tool_key.strip()
+        if not cleaned_tool_key:
+            raise AgentRuntimeError("Tool key cannot be blank.")
+        existing = self.session.scalar(
+            select(ToolConnection).where(
+                ToolConnection.domain_id == domain.id,
+                ToolConnection.tool_key == cleaned_tool_key,
+            )
+        )
+        merged_config = _merge_secret_config(existing.config if existing else {}, config or {})
+        if existing is None:
+            existing = ToolConnection(
+                domain_id=domain.id,
+                tool_key=cleaned_tool_key,
+                display_name=display_name.strip() or cleaned_tool_key,
+                auth_type=auth_type.strip() or "manual",
+                config=merged_config,
+                is_active=is_active,
+            )
+            self.session.add(existing)
+        else:
+            existing.display_name = display_name.strip() or existing.display_name
+            existing.auth_type = auth_type.strip() or existing.auth_type
+            existing.config = merged_config
+            existing.is_active = is_active
+        self.session.commit()
+        self.session.refresh(existing)
+        return ToolConnectionSpec(
+            id=existing.id,
+            domain_key=domain.key,
+            tool_key=existing.tool_key,
+            display_name=existing.display_name,
+            auth_type=existing.auth_type,
+            config=_redact_config(existing.config or {}),
+            is_active=existing.is_active,
+        )
+
     def _spec_for_agent(self, agent: Agent, *, domain: Domain | None) -> AgentSpec:
         if domain is None:
             raise AgentRuntimeError(f"Agent {agent.key} has no domain.")
@@ -382,12 +557,13 @@ class PromptAggregationService:
                 max_chars=request.max_memory_chars,
             )
         )
+        global_context = self.registry.get_global_context().context
         output_contract = _DEFAULT_OUTPUT_CONTRACT
         return PromptPackage(
             agent=spec,
             task_instruction=request.task_instruction,
             caller=request.caller,
-            global_context=_GLOBAL_MAESTRO_CONTEXT,
+            global_context=global_context,
             domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
             role_prompt=spec.role_prompt,
             user_context=request.user_context,
@@ -395,7 +571,7 @@ class PromptAggregationService:
             tool_manifest=spec.allowed_tools,
             output_contract=output_contract,
             assembled_prompt=self._render_prompt(
-                global_context=_GLOBAL_MAESTRO_CONTEXT,
+                global_context=global_context,
                 domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
                 role_prompt=spec.role_prompt,
                 task_instruction=request.task_instruction,
@@ -436,6 +612,67 @@ class PromptAggregationService:
         sections.append(("Authorized Tools", tools_text))
         sections.append(("Output Contract", json.dumps(output_contract, indent=2)))
         return "\n\n".join(f"## {title}\n{body}".strip() for title, body in sections)
+
+    def run_agent_once(
+        self,
+        request: PromptPackageRequest,
+        *,
+        stage_interaction: bool = False,
+    ) -> AgentRunResult:
+        package = self.build_prompt_package(request)
+        run_id = str(uuid.uuid4())
+        execution_note = (
+            "Manual run prepared. The scheduler and autonomous LLM execution are intentionally "
+            "stubbed; this verifies prompt, scoped memory, tool manifest, and artifact packaging."
+        )
+        staged_path: str | None = None
+        artifact_id: str | None = None
+        if stage_interaction:
+            staged = InteractionArtifactPackager(self.session).stage_package(
+                InteractionArtifactPackager(self.session).build_package(
+                    domain_key=package.agent.domain_key,
+                    agent_key=package.agent.key,
+                    maestro_tasking=request.task_instruction,
+                    agent_output=execution_note,
+                    tool_calls=[
+                        {
+                            "tool_name": "prompt_aggregation.run_once_stub",
+                            "status": "prepared",
+                        }
+                    ],
+                    generated_artifacts=[],
+                    open_questions=[
+                        "Connect this run envelope to the reusable LLM gateway.",
+                        "Route future scheduled runs through the master scheduler service.",
+                    ],
+                    next_steps=[
+                        "Review assembled prompt package.",
+                        "Use this contract for the first real agent execution loop.",
+                    ],
+                    provenance={
+                        "run_id": run_id,
+                        "execution_mode": "manual_run_once_stub",
+                    },
+                )
+            )
+            staged_path = staged.path
+            artifact_id = staged.artifact_id
+        return AgentRunResult(
+            run_id=run_id,
+            status="prepared",
+            agent=package.agent,
+            prompt_package=package,
+            scheduler={
+                "status": "stubbed",
+                "reason": (
+                    "Master scheduler/resource-conflict policy is planned "
+                    "but not implemented."
+                ),
+            },
+            execution_note=execution_note,
+            staged_artifact_path=staged_path,
+            artifact_id=artifact_id,
+        )
 
 
 class InteractionArtifactPackager:
@@ -522,6 +759,36 @@ class InteractionArtifactPackager:
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug or "interaction"
+
+
+def _redact_config(config: dict[str, Any]) -> dict[str, Any]:
+    redacted: dict[str, Any] = {}
+    for key, value in config.items():
+        if _is_secret_key(key):
+            redacted[key] = "********" if value else ""
+        else:
+            redacted[key] = value
+    return redacted
+
+
+def _merge_secret_config(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if _is_secret_key(key) and isinstance(value, str) and set(value) == {"*"}:
+            continue
+        merged[key] = value
+    return merged
+
+
+def _is_secret_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(token in lowered for token in ("secret", "token", "api_key", "apikey", "password"))
+
+
+_GLOBAL_CONTEXT_SETTING_KEY = "global_maestro_context"
 
 
 _GLOBAL_MAESTRO_CONTEXT = (

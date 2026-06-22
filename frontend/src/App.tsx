@@ -187,12 +187,34 @@ type ToolRegistryItem = {
   }>;
 };
 
+type ToolConnection = {
+  id: string;
+  domain_key: string;
+  tool_key: string;
+  display_name: string;
+  auth_type: string;
+  config: Record<string, unknown>;
+  is_active: boolean;
+};
+
 type PromptPackage = {
   assembled_prompt: string;
   memory_context: {
     included_count: number;
     semantic_status: string;
   };
+};
+
+type AgentRun = {
+  run_id: string;
+  status: string;
+  execution_note: string;
+  scheduler: {
+    status: string;
+    reason: string;
+  };
+  prompt_package: PromptPackage;
+  staged_artifact_path: string | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -646,14 +668,20 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
   const domainKey = domainKeysByLabel[domainLabel] ?? "maestro-development";
   const [domains, setDomains] = useState<DomainContext[]>([]);
   const [agents, setAgents] = useState<AgentSpec[]>([]);
+  const [tools, setTools] = useState<ToolRegistryItem[]>([]);
+  const [globalContext, setGlobalContext] = useState("");
   const [domainContext, setDomainContext] = useState("");
   const [selectedAgentKey, setSelectedAgentKey] = useState<string | null>(null);
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentRole, setNewAgentRole] = useState("");
   const [roleSummary, setRoleSummary] = useState("");
   const [rolePrompt, setRolePrompt] = useState("");
   const [currentAction, setCurrentAction] = useState("");
-  const [toolPermissionsText, setToolPermissionsText] = useState("{}");
+  const [toolPermissions, setToolPermissions] = useState<Record<string, string>>({});
   const [promptTask, setPromptTask] = useState("Prepare a concise domain brief.");
   const [promptPreview, setPromptPreview] = useState<PromptPackage | null>(null);
+  const [runPreview, setRunPreview] = useState<AgentRun | null>(null);
+  const [stageRunArtifact, setStageRunArtifact] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [busy, setBusy] = useState(false);
 
@@ -662,12 +690,16 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     domainAgents.find((agent) => agent.key === selectedAgentKey) ?? domainAgents[0] ?? null;
 
   const refreshAgents = useCallback(async () => {
-    const [domainResponse, agentResponse] = await Promise.all([
+    const [globalResponse, domainResponse, agentResponse, toolResponse] = await Promise.all([
+      apiJson<{ global_context: { context: string } }>("/agents/global-context"),
       apiJson<{ domains: DomainContext[] }>("/agents/domains"),
       apiJson<{ agents: AgentSpec[] }>("/agents"),
+      apiJson<{ tools: ToolRegistryItem[] }>("/agents/tools"),
     ]);
+    setGlobalContext(globalResponse.global_context.context);
     setDomains(domainResponse.domains);
     setAgents(agentResponse.agents);
+    setTools(toolResponse.tools);
     const activeDomain = domainResponse.domains.find((domain) => domain.key === domainKey);
     setDomainContext(activeDomain?.context ?? "");
   }, [domainKey]);
@@ -684,14 +716,27 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     setRoleSummary(selectedAgent.role_summary);
     setRolePrompt(selectedAgent.role_prompt);
     setCurrentAction(selectedAgent.current_action ?? "");
-    const permissions = Object.fromEntries(
-      selectedAgent.allowed_tools.map((tool) => [
-        tool.key,
-        { permission: tool.permission, description: tool.description },
-      ]),
+    setToolPermissions(
+      Object.fromEntries(selectedAgent.allowed_tools.map((tool) => [tool.key, tool.permission])),
     );
-    setToolPermissionsText(JSON.stringify(permissions, null, 2));
   }, [selectedAgent?.key]);
+
+  const saveGlobalContext = async () => {
+    setBusy(true);
+    try {
+      await apiJson("/agents/global-context", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context: globalContext }),
+      });
+      setStatusMessage("Global Maestro context saved.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Global context save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const saveDomainContext = async () => {
     setBusy(true);
@@ -714,7 +759,6 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     if (!selectedAgent) return;
     setBusy(true);
     try {
-      const toolPermissions = JSON.parse(toolPermissionsText) as Record<string, unknown>;
       await apiJson(`/agents/${selectedAgent.key}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -722,15 +766,62 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
           role_summary: roleSummary,
           role_prompt: rolePrompt,
           current_action: currentAction,
-          tool_permissions: toolPermissions,
+          tool_permissions: Object.fromEntries(
+            Object.entries(toolPermissions).map(([key, permission]) => [
+              key,
+              {
+                permission,
+                description: tools.find((tool) => tool.key === key)?.description ?? "",
+              },
+            ]),
+          ),
         }),
       });
       setStatusMessage("Agent settings saved.");
       await refreshAgents();
     } catch (error) {
-      setStatusMessage(
-        error instanceof Error ? error.message : "Agent save failed. Check tool JSON.",
-      );
+      setStatusMessage(error instanceof Error ? error.message : "Agent save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createAgent = async () => {
+    setBusy(true);
+    try {
+      const response = await apiJson<{ agent: AgentSpec }>("/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          domain_key: domainKey,
+          key: newAgentName,
+          name: newAgentName,
+          role_summary: newAgentRole,
+          role_prompt:
+            newAgentRole || `You are ${newAgentName}. Work only inside the ${domainLabel} domain.`,
+          tool_permissions: {
+            "memory.context_bundle": {
+              permission: "read",
+              description: "Retrieve scoped memory bundles.",
+            },
+            "artifact.stage_interaction": {
+              permission: "write",
+              description: "Stage interaction artifacts for memory curation.",
+            },
+            "llm.gateway": {
+              permission: "use",
+              description: "Use Maestro's shared LLM gateway.",
+            },
+          },
+        }),
+      });
+      setNewAgentName("");
+      setNewAgentRole("");
+      setSelectedAgentKey(response.agent.key);
+      setStatusMessage("Agent created.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Agent creation failed.");
     } finally {
       setBusy(false);
     }
@@ -753,6 +844,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
         },
       );
       setPromptPreview(response.prompt_package);
+      setRunPreview(null);
       setStatusMessage("Prompt package generated.");
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Prompt generation failed.");
@@ -761,8 +853,61 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     }
   };
 
+  const runAgentOnce = async () => {
+    if (!selectedAgent) return;
+    setBusy(true);
+    try {
+      const response = await apiJson<{ run: AgentRun }>(`/agents/${selectedAgent.key}/run-once`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task_instruction: promptTask,
+          query_text: promptTask,
+          use_semantic: true,
+          stage_interaction: stageRunArtifact,
+        }),
+      });
+      setRunPreview(response.run);
+      setPromptPreview(response.run.prompt_package);
+      setStatusMessage("Manual run prepared.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Manual run failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleTool = (toolKey: string, checked: boolean) => {
+    setToolPermissions((current) => {
+      const next = { ...current };
+      if (checked) next[toolKey] = next[toolKey] ?? "use";
+      else delete next[toolKey];
+      return next;
+    });
+  };
+
   return (
     <div className="admin-grid">
+      {domainKey === "maestro-development" && (
+        <section className="memory-panel admin-panel wide-panel" aria-labelledby="global-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Global context</p>
+              <h3 id="global-heading">Maestro base prompt</h3>
+            </div>
+            <Settings size={18} />
+          </div>
+          <textarea
+            value={globalContext}
+            onChange={(event) => setGlobalContext(event.target.value)}
+            aria-label="Global Maestro context"
+          />
+          <button className="planner-action" onClick={saveGlobalContext} disabled={busy}>
+            Save global context
+          </button>
+        </section>
+      )}
+
       <section className="memory-panel admin-panel" aria-labelledby="domain-context-heading">
         <div className="section-heading">
           <div>
@@ -791,6 +936,26 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
             <h3 id="domain-agent-heading">Registry</h3>
           </div>
           <span className="count-badge">{domainAgents.length}</span>
+        </div>
+        <div className="inline-form">
+          <input
+            value={newAgentName}
+            onChange={(event) => setNewAgentName(event.target.value)}
+            placeholder="New agent name"
+          />
+          <input
+            value={newAgentRole}
+            onChange={(event) => setNewAgentRole(event.target.value)}
+            placeholder="Role summary"
+          />
+          <button
+            className="planner-action"
+            onClick={createAgent}
+            disabled={busy || !newAgentName.trim()}
+          >
+            <Plus size={16} />
+            Add agent
+          </button>
         </div>
         <div className="agent-list">
           {domainAgents.map((agent) => (
@@ -845,11 +1010,36 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
               />
             </label>
             <label>
-              Tool access JSON
-              <textarea
-                value={toolPermissionsText}
-                onChange={(event) => setToolPermissionsText(event.target.value)}
-              />
+              Tool access
+              <div className="tool-picker">
+                {tools.map((tool) => (
+                  <div className="tool-picker-row" key={tool.key}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={tool.key in toolPermissions}
+                        onChange={(event) => toggleTool(tool.key, event.target.checked)}
+                      />
+                      <span>{tool.name}</span>
+                    </label>
+                    <select
+                      value={toolPermissions[tool.key] ?? "use"}
+                      disabled={!(tool.key in toolPermissions)}
+                      onChange={(event) =>
+                        setToolPermissions((current) => ({
+                          ...current,
+                          [tool.key]: event.target.value,
+                        }))
+                      }
+                    >
+                      <option value="use">Use</option>
+                      <option value="read">Read</option>
+                      <option value="write">Write</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                ))}
+              </div>
             </label>
             <button className="planner-action" onClick={saveAgent} disabled={busy}>
               Save agent
@@ -883,7 +1073,33 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
           >
             Generate prompt package
           </button>
+          <label className="checkbox-line">
+            <input
+              type="checkbox"
+              checked={stageRunArtifact}
+              onChange={(event) => setStageRunArtifact(event.target.checked)}
+            />
+            Stage run artifact for memory curation
+          </label>
+          <button
+            className="planner-action"
+            onClick={runAgentOnce}
+            disabled={busy || !selectedAgent}
+          >
+            <Sparkles size={16} />
+            Run once
+          </button>
         </div>
+        {runPreview && (
+          <div className="run-preview">
+            <span>{runPreview.status}</span>
+            <p>{runPreview.execution_note}</p>
+            <p>Scheduler: {runPreview.scheduler.status}</p>
+            {runPreview.staged_artifact_path && (
+              <p>Staged artifact: {runPreview.staged_artifact_path}</p>
+            )}
+          </div>
+        )}
         {promptPreview && (
           <div className="prompt-preview">
             <div className="preview-meta">
@@ -900,11 +1116,21 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
 
 function ToolsWorkspace() {
   const [tools, setTools] = useState<ToolRegistryItem[]>([]);
+  const [connections, setConnections] = useState<ToolConnection[]>([]);
+  const [connectionDomain, setConnectionDomain] = useState("praxis");
+  const [connectionTool, setConnectionTool] = useState("memory.context_bundle");
+  const [connectionName, setConnectionName] = useState("Praxis memory retrieval");
+  const [connectionAuthType, setConnectionAuthType] = useState("service");
+  const [connectionConfig, setConnectionConfig] = useState("{}");
   const [statusMessage, setStatusMessage] = useState("Ready");
 
   const refreshTools = useCallback(async () => {
-    const response = await apiJson<{ tools: ToolRegistryItem[] }>("/agents/tools");
-    setTools(response.tools);
+    const [toolResponse, connectionResponse] = await Promise.all([
+      apiJson<{ tools: ToolRegistryItem[] }>("/agents/tools"),
+      apiJson<{ connections: ToolConnection[] }>("/agents/tools/connections"),
+    ]);
+    setTools(toolResponse.tools);
+    setConnections(connectionResponse.connections);
   }, []);
 
   useEffect(() => {
@@ -912,6 +1138,28 @@ function ToolsWorkspace() {
       setStatusMessage(error instanceof Error ? error.message : "Unable to load tools."),
     );
   }, [refreshTools]);
+
+  const saveConnection = async () => {
+    try {
+      const config = JSON.parse(connectionConfig) as Record<string, unknown>;
+      await apiJson("/agents/tools/connections", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          domain_key: connectionDomain,
+          tool_key: connectionTool,
+          display_name: connectionName,
+          auth_type: connectionAuthType,
+          config,
+          is_active: true,
+        }),
+      });
+      setStatusMessage("Tool connection saved.");
+      await refreshTools();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Tool connection save failed.");
+    }
+  };
 
   return (
     <div className="admin-grid">
@@ -950,6 +1198,85 @@ function ToolsWorkspace() {
           {tools.length === 0 && <p className="empty-state">No tools registered yet.</p>}
         </div>
         <p className="memory-status">{statusMessage}</p>
+      </section>
+
+      <section className="memory-panel admin-panel" aria-labelledby="tool-connection-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Domain credentials</p>
+            <h3 id="tool-connection-heading">Tool connections</h3>
+          </div>
+          <ShieldCheck size={18} />
+        </div>
+        <div className="admin-form">
+          <label>
+            Domain
+            <select
+              value={connectionDomain}
+              onChange={(event) => setConnectionDomain(event.target.value)}
+            >
+              {Object.entries(domainLabels)
+                .filter(([key]) => key !== "global")
+                .map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            Tool
+            <select value={connectionTool} onChange={(event) => setConnectionTool(event.target.value)}>
+              {tools.map((tool) => (
+                <option key={tool.key} value={tool.key}>
+                  {tool.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Display name
+            <input
+              value={connectionName}
+              onChange={(event) => setConnectionName(event.target.value)}
+            />
+          </label>
+          <label>
+            Auth type
+            <select
+              value={connectionAuthType}
+              onChange={(event) => setConnectionAuthType(event.target.value)}
+            >
+              <option value="service">Service</option>
+              <option value="api_key">API key</option>
+              <option value="oauth">OAuth</option>
+              <option value="manual">Manual</option>
+            </select>
+          </label>
+          <label>
+            Config JSON
+            <textarea
+              value={connectionConfig}
+              onChange={(event) => setConnectionConfig(event.target.value)}
+            />
+          </label>
+          <button className="planner-action" onClick={saveConnection}>
+            Save connection
+          </button>
+        </div>
+        <div className="connection-list">
+          {connections.map((connection) => (
+            <div className="connection-row" key={connection.id}>
+              <span>{domainLabels[connection.domain_key] ?? connection.domain_key}</span>
+              <strong>{connection.display_name}</strong>
+              <span>{connection.tool_key}</span>
+              <span>{connection.auth_type}</span>
+            </div>
+          ))}
+          {connections.length === 0 && (
+            <p className="empty-state">No domain tool connections yet.</p>
+          )}
+        </div>
       </section>
     </div>
   );

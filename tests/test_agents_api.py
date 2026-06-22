@@ -116,6 +116,55 @@ def test_domain_context_update_changes_prompt_package(
     assert "Praxis UI-edited context" in prompt.json()["prompt_package"]["assembled_prompt"]
 
 
+def test_global_context_update_changes_prompt_package(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    update = client.patch(
+        "/agents/global-context",
+        json={"context": "Global context edited through UI."},
+    )
+    prompt = client.post(
+        "/agents/praxis-planning-agent/prompt-package",
+        json={
+            "task_instruction": "Prepare a Praxis brief.",
+            "use_semantic": False,
+        },
+    )
+
+    assert update.status_code == 200
+    assert update.json()["global_context"]["context"] == "Global context edited through UI."
+    assert prompt.status_code == 200
+    assembled_prompt = prompt.json()["prompt_package"]["assembled_prompt"]
+    assert "Global context edited through UI." in assembled_prompt
+
+
+def test_create_agent_endpoint_adds_domain_agent(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/agents",
+        json={
+            "domain_key": "praxis",
+            "key": "Praxis Email Agent",
+            "name": "Praxis Email Agent",
+            "role_summary": "Triages Praxis inbox.",
+            "tool_permissions": {"gmail.read": {"permission": "read"}},
+        },
+    )
+
+    assert response.status_code == 200
+    agent = response.json()["agent"]
+    assert agent["key"] == "praxis-email-agent"
+    assert agent["domain_key"] == "praxis"
+    assert agent["allowed_tools"][0]["key"] == "gmail.read"
+
+
 def test_agent_update_and_tool_registry_endpoint(
     session: Session,
     tmp_path: Path,
@@ -150,6 +199,55 @@ def test_agent_update_and_tool_registry_endpoint(
         authorized["agent_key"] == "praxis-planning-agent"
         for authorized in memory_tool["authorized_agents"]
     )
+
+
+def test_tool_connection_endpoint_redacts_config(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    update = client.put(
+        "/agents/tools/connections",
+        json={
+            "domain_key": "praxis",
+            "tool_key": "gmail.read",
+            "display_name": "Praxis Gmail",
+            "auth_type": "api_key",
+            "config": {"api_key": "secret-value", "label": "praxis"},
+            "is_active": True,
+        },
+    )
+    connections = client.get("/agents/tools/connections")
+
+    assert update.status_code == 200
+    assert update.json()["connection"]["config"]["api_key"] == "********"
+    assert connections.status_code == 200
+    assert connections.json()["connections"][0]["display_name"] == "Praxis Gmail"
+
+
+def test_run_once_endpoint_prepares_stubbed_run(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/agents/praxis-planning-agent/run-once",
+        json={
+            "task_instruction": "Prepare a Praxis brief.",
+            "query_text": "Praxis brief",
+            "use_semantic": False,
+            "stage_interaction": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["run"]
+    assert payload["status"] == "prepared"
+    assert payload["scheduler"]["status"] == "stubbed"
+    assert payload["prompt_package"]["agent"]["key"] == "praxis-planning-agent"
+    assert payload["staged_artifact_path"] is not None
 
 
 def test_interaction_artifact_endpoint_can_stage_package(

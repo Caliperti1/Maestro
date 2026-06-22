@@ -32,6 +32,23 @@ class DomainContextBody(BaseModel):
     context: str
 
 
+class GlobalContextBody(BaseModel):
+    context: str
+
+
+class AgentCreateBody(BaseModel):
+    domain_key: str
+    key: str
+    name: str
+    agent_type: str = "domain_agent"
+    role_summary: str = ""
+    role_prompt: str = ""
+    memory_profile: str = "agent_prompt"
+    model_profile: str = "default"
+    tool_permissions: dict[str, Any] = Field(default_factory=dict)
+    current_action: str | None = None
+
+
 class AgentUpdateBody(BaseModel):
     role_summary: str | None = None
     role_prompt: str | None = None
@@ -41,6 +58,19 @@ class AgentUpdateBody(BaseModel):
     current_action: str | None = None
     scheduled_actions: list[dict[str, Any]] | None = None
     is_active: bool | None = None
+
+
+class ToolConnectionBody(BaseModel):
+    domain_key: str
+    tool_key: str
+    display_name: str
+    auth_type: str = "manual"
+    config: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool = True
+
+
+class AgentRunOnceBody(PromptPackageBody):
+    stage_interaction: bool = False
 
 
 class InteractionArtifactBody(BaseModel):
@@ -63,6 +93,44 @@ class InteractionArtifactBody(BaseModel):
 def list_agents(db: Session = Depends(get_db)) -> dict[str, Any]:
     specs = AgentRegistryService(db).list_specs()
     return {"agents": [_agent_payload(spec) for spec in specs]}
+
+
+@router.post("")
+def create_agent(body: AgentCreateBody, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        spec = AgentRegistryService(db).create_agent_spec(
+            domain_key=body.domain_key,
+            key=body.key,
+            name=body.name,
+            agent_type=body.agent_type,
+            role_summary=body.role_summary,
+            role_prompt=body.role_prompt,
+            memory_profile=body.memory_profile,
+            model_profile=body.model_profile,
+            tool_permissions=body.tool_permissions,
+            current_action=body.current_action,
+        )
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"agent": _agent_payload(spec)}
+
+
+@router.get("/global-context")
+def get_global_context(db: Session = Depends(get_db)) -> dict[str, Any]:
+    context = AgentRegistryService(db).get_global_context()
+    return {"global_context": {"context": context.context}}
+
+
+@router.patch("/global-context")
+def update_global_context(
+    body: GlobalContextBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        context = AgentRegistryService(db).update_global_context(body.context)
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"global_context": {"context": context.context}}
 
 
 @router.get("/domains")
@@ -121,6 +189,31 @@ def list_tools(db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
 
+@router.get("/tools/connections")
+def list_tool_connections(db: Session = Depends(get_db)) -> dict[str, Any]:
+    connections = AgentRegistryService(db).list_tool_connections()
+    return {"connections": [_tool_connection_payload(connection) for connection in connections]}
+
+
+@router.put("/tools/connections")
+def upsert_tool_connection(
+    body: ToolConnectionBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        connection = AgentRegistryService(db).upsert_tool_connection(
+            domain_key=body.domain_key,
+            tool_key=body.tool_key,
+            display_name=body.display_name,
+            auth_type=body.auth_type,
+            config=body.config,
+            is_active=body.is_active,
+        )
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"connection": _tool_connection_payload(connection)}
+
+
 @router.get("/{agent_key}")
 def get_agent(agent_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -175,6 +268,42 @@ def build_prompt_package(
     except AgentRuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"prompt_package": _prompt_package_payload(package)}
+
+
+@router.post("/{agent_key}/run-once")
+def run_agent_once(
+    agent_key: str,
+    body: AgentRunOnceBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = PromptAggregationService(db).run_agent_once(
+            PromptPackageRequest(
+                agent_key=agent_key,
+                task_instruction=body.task_instruction,
+                caller=body.caller,  # type: ignore[arg-type]
+                user_context=body.user_context,
+                query_text=body.query_text,
+                max_memory_items=body.max_memory_items,
+                max_memory_chars=body.max_memory_chars,
+                use_semantic=body.use_semantic,
+            ),
+            stage_interaction=body.stage_interaction,
+        )
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "run": {
+            "run_id": result.run_id,
+            "status": result.status,
+            "agent": _agent_payload(result.agent),
+            "prompt_package": _prompt_package_payload(result.prompt_package),
+            "scheduler": result.scheduler,
+            "execution_note": result.execution_note,
+            "staged_artifact_path": result.staged_artifact_path,
+            "artifact_id": result.artifact_id,
+        }
+    }
 
 
 @router.post("/interaction-artifacts")
@@ -234,6 +363,18 @@ def _tool_payload(tool: ToolManifestItem) -> dict[str, Any]:
         "description": tool.description,
         "connection_id": tool.connection_id,
         "auth_type": tool.auth_type,
+    }
+
+
+def _tool_connection_payload(connection) -> dict[str, Any]:
+    return {
+        "id": str(connection.id),
+        "domain_key": connection.domain_key,
+        "tool_key": connection.tool_key,
+        "display_name": connection.display_name,
+        "auth_type": connection.auth_type,
+        "config": connection.config,
+        "is_active": connection.is_active,
     }
 
 
