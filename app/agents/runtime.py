@@ -1,0 +1,518 @@
+import json
+import re
+import uuid
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.config import get_settings
+from app.db.models import Agent, Artifact, Domain, ToolConnection
+from app.db.repositories import AgentRepository, DomainRepository
+from app.db.seed import seed_default_domains
+from app.memory.retrieval import (
+    MemoryContextBundle,
+    MemoryContextBundleRequest,
+    MemoryRetrievalService,
+)
+
+PromptCaller = Literal["maestro", "user", "system"]
+
+
+@dataclass(frozen=True)
+class ToolManifestItem:
+    key: str
+    name: str
+    permission: str
+    description: str
+    connection_id: str | None = None
+    auth_type: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentSpec:
+    id: uuid.UUID
+    key: str
+    name: str
+    domain_key: str
+    agent_type: str
+    role_summary: str
+    role_prompt: str
+    memory_profile: str
+    model_profile: str
+    allowed_tools: list[ToolManifestItem]
+    is_active: bool
+    current_action: str | None = None
+    scheduled_actions: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PromptPackageRequest:
+    agent_key: str
+    task_instruction: str
+    caller: PromptCaller = "maestro"
+    user_context: str | None = None
+    query_text: str | None = None
+    max_memory_items: int = 10
+    max_memory_chars: int = 3500
+    use_semantic: bool = True
+
+
+@dataclass(frozen=True)
+class PromptPackage:
+    agent: AgentSpec
+    task_instruction: str
+    caller: PromptCaller
+    global_context: str
+    domain_context: str
+    role_prompt: str
+    user_context: str | None
+    memory_context: MemoryContextBundle
+    tool_manifest: list[ToolManifestItem]
+    output_contract: dict[str, Any]
+    assembled_prompt: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class InteractionArtifactPackage:
+    schema_version: str
+    package_id: str
+    created_at: str
+    domain_key: str
+    agent_key: str | None
+    task_id: str | None
+    conversation_id: str | None
+    user_input: str | None
+    maestro_tasking: str | None
+    agent_output: str | None
+    tool_calls: list[dict[str, Any]]
+    generated_artifacts: list[dict[str, Any]]
+    open_questions: list[str]
+    next_steps: list[str]
+    provenance: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StagedInteractionArtifact:
+    package: InteractionArtifactPackage
+    path: str | None = None
+    artifact_id: str | None = None
+
+
+class AgentRuntimeError(ValueError):
+    pass
+
+
+class AgentRegistryService:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def ensure_seed_agents(self) -> list[Agent]:
+        seed_default_domains(self.session)
+        created_or_existing: list[Agent] = []
+        repo = AgentRepository(self.session)
+        domain_repo = DomainRepository(self.session)
+        for seed in _SEED_AGENTS:
+            existing = repo.get_by_key(seed["key"])
+            if existing is not None:
+                created_or_existing.append(existing)
+                continue
+            domain = domain_repo.get_by_key(seed["domain_key"])
+            if domain is None:
+                continue
+            created_or_existing.append(
+                repo.create(
+                    domain_id=domain.id,
+                    key=seed["key"],
+                    name=seed["name"],
+                    agent_type=seed["agent_type"],
+                    description=seed["role_summary"],
+                    capabilities={
+                        "role_summary": seed["role_summary"],
+                        "role_prompt": seed["role_prompt"],
+                        "memory_profile": seed["memory_profile"],
+                        "model_profile": seed["model_profile"],
+                        "current_action": None,
+                        "scheduled_actions": [],
+                        "output_contract": _DEFAULT_OUTPUT_CONTRACT,
+                    },
+                    tool_permissions=seed["tool_permissions"],
+                )
+            )
+        return created_or_existing
+
+    def list_specs(self) -> list[AgentSpec]:
+        self.ensure_seed_agents()
+        domains_by_id = {
+            domain.id: domain for domain in DomainRepository(self.session).list_active()
+        }
+        agents = self.session.scalars(select(Agent).order_by(Agent.key)).all()
+        return [
+            self._spec_for_agent(agent, domain=domains_by_id.get(agent.domain_id))
+            for agent in agents
+            if domains_by_id.get(agent.domain_id) is not None
+        ]
+
+    def get_spec(self, agent_key: str) -> AgentSpec:
+        self.ensure_seed_agents()
+        agent = AgentRepository(self.session).get_by_key(agent_key)
+        if agent is None:
+            raise AgentRuntimeError(f"Unknown agent: {agent_key}")
+        domain = DomainRepository(self.session).get(agent.domain_id)
+        if domain is None:
+            raise AgentRuntimeError(f"Agent {agent_key} has no active domain.")
+        return self._spec_for_agent(agent, domain=domain)
+
+    def _spec_for_agent(self, agent: Agent, *, domain: Domain | None) -> AgentSpec:
+        if domain is None:
+            raise AgentRuntimeError(f"Agent {agent.key} has no domain.")
+        capabilities = agent.capabilities or {}
+        return AgentSpec(
+            id=agent.id,
+            key=agent.key,
+            name=agent.name,
+            domain_key=domain.key,
+            agent_type=agent.agent_type,
+            role_summary=capabilities.get("role_summary") or agent.description or "",
+            role_prompt=capabilities.get("role_prompt") or "",
+            memory_profile=capabilities.get("memory_profile") or "agent_prompt",
+            model_profile=capabilities.get("model_profile") or "default",
+            allowed_tools=self._tool_manifest(agent, domain=domain),
+            is_active=agent.is_active,
+            current_action=capabilities.get("current_action"),
+            scheduled_actions=list(capabilities.get("scheduled_actions") or []),
+        )
+
+    def _tool_manifest(self, agent: Agent, *, domain: Domain) -> list[ToolManifestItem]:
+        permissions = agent.tool_permissions or {}
+        connections = {
+            connection.tool_key: connection
+            for connection in self.session.scalars(
+                select(ToolConnection).where(
+                    ToolConnection.domain_id == domain.id,
+                    ToolConnection.is_active.is_(True),
+                )
+            ).all()
+        }
+        manifest: list[ToolManifestItem] = []
+        for key, value in sorted(permissions.items()):
+            permission = "use"
+            description = ""
+            if isinstance(value, str):
+                permission = value
+            elif isinstance(value, dict):
+                permission = str(value.get("permission") or "use")
+                description = str(value.get("description") or "")
+            connection = connections.get(key)
+            manifest.append(
+                ToolManifestItem(
+                    key=key,
+                    name=_TOOL_DESCRIPTIONS.get(key, {}).get("name", key),
+                    permission=permission,
+                    description=description
+                    or _TOOL_DESCRIPTIONS.get(key, {}).get("description", ""),
+                    connection_id=str(connection.id) if connection is not None else None,
+                    auth_type=connection.auth_type if connection is not None else None,
+                )
+            )
+        return manifest
+
+
+class PromptAggregationService:
+    def __init__(self, session: Session):
+        self.session = session
+        self.registry = AgentRegistryService(session)
+
+    def build_prompt_package(self, request: PromptPackageRequest) -> PromptPackage:
+        spec = self.registry.get_spec(request.agent_key)
+        domain = DomainRepository(self.session).get_by_key(spec.domain_key)
+        if domain is None:
+            raise AgentRuntimeError(f"Unknown domain for agent: {spec.domain_key}")
+
+        query_text = request.query_text or request.task_instruction
+        memory_context = MemoryRetrievalService(self.session).build_context_bundle(
+            MemoryContextBundleRequest(
+                profile=spec.memory_profile,  # type: ignore[arg-type]
+                audience="agent",
+                domain_id=domain.id,
+                agent_id=spec.id,
+                query_text=query_text,
+                use_semantic=request.use_semantic,
+                max_items=request.max_memory_items,
+                max_chars=request.max_memory_chars,
+            )
+        )
+        output_contract = _DEFAULT_OUTPUT_CONTRACT
+        return PromptPackage(
+            agent=spec,
+            task_instruction=request.task_instruction,
+            caller=request.caller,
+            global_context=_GLOBAL_MAESTRO_CONTEXT,
+            domain_context=_DOMAIN_CONTEXTS.get(spec.domain_key, domain.description or ""),
+            role_prompt=spec.role_prompt,
+            user_context=request.user_context,
+            memory_context=memory_context,
+            tool_manifest=spec.allowed_tools,
+            output_contract=output_contract,
+            assembled_prompt=self._render_prompt(
+                global_context=_GLOBAL_MAESTRO_CONTEXT,
+                domain_context=_DOMAIN_CONTEXTS.get(spec.domain_key, domain.description or ""),
+                role_prompt=spec.role_prompt,
+                task_instruction=request.task_instruction,
+                user_context=request.user_context,
+                memory_text=memory_context.rendered_text,
+                tools=spec.allowed_tools,
+                output_contract=output_contract,
+            ),
+            created_at=datetime.now(UTC).isoformat(),
+        )
+
+    def _render_prompt(
+        self,
+        *,
+        global_context: str,
+        domain_context: str,
+        role_prompt: str,
+        task_instruction: str,
+        user_context: str | None,
+        memory_text: str,
+        tools: list[ToolManifestItem],
+        output_contract: dict[str, Any],
+    ) -> str:
+        sections = [
+            ("Global Maestro Context", global_context),
+            ("Domain Context", domain_context),
+            ("Agent Role", role_prompt),
+            ("Task", task_instruction),
+        ]
+        if user_context:
+            sections.append(("User Context", user_context))
+        if memory_text:
+            sections.append(("Retrieved Memory", memory_text))
+        tools_text = "\n".join(
+            f"- {tool.key} ({tool.permission}): {tool.description or tool.name}"
+            for tool in tools
+        ) or "- No external tools are currently authorized for this agent."
+        sections.append(("Authorized Tools", tools_text))
+        sections.append(("Output Contract", json.dumps(output_contract, indent=2)))
+        return "\n\n".join(f"## {title}\n{body}".strip() for title, body in sections)
+
+
+class InteractionArtifactPackager:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def build_package(
+        self,
+        *,
+        domain_key: str,
+        agent_key: str | None = None,
+        user_input: str | None = None,
+        maestro_tasking: str | None = None,
+        agent_output: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        generated_artifacts: list[dict[str, Any]] | None = None,
+        open_questions: list[str] | None = None,
+        next_steps: list[str] | None = None,
+        task_id: str | None = None,
+        conversation_id: str | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> InteractionArtifactPackage:
+        seed_default_domains(self.session)
+        DomainRepository(self.session).get_by_key(domain_key) or self._raise_unknown_domain(
+            domain_key
+        )
+        if agent_key is not None:
+            AgentRegistryService(self.session).get_spec(agent_key)
+        return InteractionArtifactPackage(
+            schema_version="maestro.interaction_artifact.v1",
+            package_id=str(uuid.uuid4()),
+            created_at=datetime.now(UTC).isoformat(),
+            domain_key=domain_key,
+            agent_key=agent_key,
+            task_id=task_id,
+            conversation_id=conversation_id,
+            user_input=user_input,
+            maestro_tasking=maestro_tasking,
+            agent_output=agent_output,
+            tool_calls=tool_calls or [],
+            generated_artifacts=generated_artifacts or [],
+            open_questions=open_questions or [],
+            next_steps=next_steps or [],
+            provenance={
+                "packaged_by": "interaction_artifact_packager",
+                **(provenance or {}),
+            },
+        )
+
+    def stage_package(self, package: InteractionArtifactPackage) -> StagedInteractionArtifact:
+        root = Path(get_settings().memory_dropbox_root)
+        inbox = root / package.domain_key / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        filename = f"{_slug(package.agent_key or 'maestro-session')}-{package.package_id}.json"
+        path = inbox / filename
+        path.write_text(json.dumps(asdict(package), indent=2, sort_keys=True), encoding="utf-8")
+
+        artifact = Artifact(
+            artifact_type="interaction_package",
+            name=filename,
+            uri=str(path),
+            mime_type="application/json",
+            metadata_={
+                "schema_version": package.schema_version,
+                "package_id": package.package_id,
+                "domain_key": package.domain_key,
+                "agent_key": package.agent_key,
+                "staged_for_curation": True,
+            },
+        )
+        self.session.add(artifact)
+        self.session.commit()
+        self.session.refresh(artifact)
+        return StagedInteractionArtifact(
+            package=package,
+            path=str(path),
+            artifact_id=str(artifact.id),
+        )
+
+    def _raise_unknown_domain(self, domain_key: str):
+        raise AgentRuntimeError(f"Unknown domain: {domain_key}")
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "interaction"
+
+
+_GLOBAL_MAESTRO_CONTEXT = (
+    "Maestro is Chris Aliperti's cross-domain chief-of-staff system. It coordinates "
+    "domain-scoped agents, preserves provenance, retrieves relevant memory through the "
+    "Memory service, stages raw artifacts for curation, and keeps the human in control "
+    "of high-impact actions."
+)
+
+_DOMAIN_CONTEXTS = {
+    "personal": (
+        "Personal domain for Chris's life operations, preferences, calendar, tasks, "
+        "and household context."
+    ),
+    "maestro-development": (
+        "Maestro Development domain for designing, building, testing, and improving "
+        "Maestro itself."
+    ),
+    "praxis": (
+        "Praxis domain for Tactical Innovation, partner engagement, training, transition "
+        "planning, and program development."
+    ),
+    "ophi": (
+        "Ophi domain for product strategy, research loops, market learning, and "
+        "operational experiments."
+    ),
+    "usma": (
+        "USMA domain for teaching, cadet support, academic prep, and institutional obligations."
+    ),
+    "personal-irad-projects": (
+        "Personal IRAD domain for independent research and development projects."
+    ),
+    "l3": "L3 domain for professional obligations and L3-related work context.",
+}
+
+_DEFAULT_OUTPUT_CONTRACT = {
+    "format": "structured_report",
+    "required_sections": ["summary", "findings", "open_questions", "next_steps", "artifact_refs"],
+    "provenance_required": True,
+}
+
+_TOOL_DESCRIPTIONS = {
+    "memory.context_bundle": {
+        "name": "Memory Context Bundle",
+        "description": "Retrieve scoped, prompt-ready memory through the Memory Retrieval service.",
+    },
+    "artifact.stage_interaction": {
+        "name": "Stage Interaction Artifact",
+        "description": "Package interaction outputs for curator processing.",
+    },
+    "llm.gateway": {
+        "name": "LLM Gateway",
+        "description": "Call the configured LLM provider through Maestro's shared gateway.",
+    },
+    "github.read": {
+        "name": "GitHub Read",
+        "description": (
+            "Read repository issues, pull requests, files, and CI context when authorized."
+        ),
+    },
+}
+
+_SEED_AGENTS = [
+    {
+        "domain_key": "praxis",
+        "key": "praxis-planning-agent",
+        "name": "Praxis Planning Agent",
+        "agent_type": "domain_agent",
+        "role_summary": (
+            "Prepares Praxis planning context, partner follow-ups, and tactical innovation "
+            "recommendations."
+        ),
+        "role_prompt": (
+            "You are the Praxis Planning Agent. Work only inside the Praxis domain. "
+            "Use retrieved memory to ground recommendations in Praxis strategy, partner context, "
+            "training design, and transition priorities. Produce practical next steps and cite "
+            "memory or artifact references when available."
+        ),
+        "memory_profile": "agent_prompt",
+        "model_profile": "default",
+        "tool_permissions": {
+            "memory.context_bundle": {
+                "permission": "read",
+                "description": "Retrieve Praxis-scoped memory bundles.",
+            },
+            "artifact.stage_interaction": {
+                "permission": "write",
+                "description": "Stage Praxis interaction packages.",
+            },
+            "llm.gateway": {
+                "permission": "use",
+                "description": "Use Maestro's shared LLM gateway.",
+            },
+        },
+    },
+    {
+        "domain_key": "maestro-development",
+        "key": "maestro-introspection-agent",
+        "name": "Maestro Introspection Agent",
+        "agent_type": "domain_agent",
+        "role_summary": (
+            "Reviews Maestro behavior, identifies system gaps, and proposes improvements."
+        ),
+        "role_prompt": (
+            "You are the Maestro Introspection Agent. Work only inside the Maestro Development "
+            "domain. Evaluate what is working, what is brittle, and what should be improved next. "
+            "Prefer concrete implementation proposals with clear risks and validation steps."
+        ),
+        "memory_profile": "agent_prompt",
+        "model_profile": "default",
+        "tool_permissions": {
+            "memory.context_bundle": {
+                "permission": "read",
+                "description": "Retrieve Maestro-development memory bundles.",
+            },
+            "artifact.stage_interaction": {
+                "permission": "write",
+                "description": "Stage introspection reports for curation.",
+            },
+            "llm.gateway": {
+                "permission": "use",
+                "description": "Use Maestro's shared LLM gateway.",
+            },
+            "github.read": {
+                "permission": "read",
+                "description": "Inspect Maestro GitHub context when authorized.",
+            },
+        },
+    },
+]
