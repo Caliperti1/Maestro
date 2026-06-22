@@ -9,6 +9,7 @@ flowchart TD
     Proposal[("Memory proposals<br/>audit + approval queue")]
     Approval["Human approval<br/>very-high impact only"]
     Retrieval["MemoryRetrievalService<br/>filters, ranking, provenance"]
+    Bundle["Context bundles<br/>sectioned prompt-ready memory"]
     Links["Memory links<br/>one-hop relation context"]
     Debug["Memory tab<br/>retrieval debugger"]
     Agent["Domain agent"]
@@ -31,7 +32,8 @@ flowchart TD
     Links --> Retrieval
     Canonical --> Retrieval
     Retrieval --> Debug
-    Retrieval --> Agent
-    Retrieval --> Maestro
+    Retrieval --> Bundle
+    Bundle --> Agent
+    Bundle --> Maestro
     Canonical -. future .-> Hygiene
     Hygiene -. future proposals .-> Service

@@ -14,6 +14,13 @@ from app.memory.embeddings import EmbeddingClient, build_embedding_client
 
 RetrievalAudience = Literal["maestro", "agent"]
 RetrievalMode = Literal["broad", "balanced", "strict"]
+MemoryContextProfile = Literal[
+    "agent_prompt",
+    "daily_standup",
+    "direct_user_question",
+    "curator_context",
+    "memory_debug",
+]
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,56 @@ class MemoryRetrievalResult:
     semantic_status: str
 
 
+@dataclass(frozen=True)
+class MemoryContextBundleRequest:
+    profile: MemoryContextProfile = "agent_prompt"
+    audience: RetrievalAudience = "agent"
+    domain_id: uuid.UUID | None = None
+    agent_id: uuid.UUID | None = None
+    query_text: str | None = None
+    memory_types: set[str] | None = None
+    min_importance: float | None = None
+    use_semantic: bool = True
+    max_items: int = 12
+    max_chars: int = 4000
+
+
+@dataclass(frozen=True)
+class MemoryContextSnippet:
+    memory: MemoryItem
+    excerpt: str
+    score: float
+    query_relevance: float
+    semantic_similarity: float | None
+    score_reasons: list[str]
+    provenance: MemoryProvenance
+    links: list[RetrievedMemoryLink] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MemoryContextSection:
+    key: str
+    label: str
+    snippets: list[MemoryContextSnippet]
+    used_chars: int
+
+
+@dataclass(frozen=True)
+class MemoryContextBundle:
+    request: MemoryContextBundleRequest
+    retrieval_query: MemoryRetrievalQuery
+    sections: list[MemoryContextSection]
+    rendered_text: str
+    total_visible: int
+    filtered_count: int
+    retrieved_count: int
+    included_count: int
+    dropped_count: int
+    used_chars: int
+    max_chars: int
+    semantic_status: str
+
+
 class MemoryRetrievalError(ValueError):
     pass
 
@@ -98,6 +155,33 @@ class MemoryRetrievalService:
             semantic_status=semantic_status,
         )
 
+    def build_context_bundle(
+        self,
+        request: MemoryContextBundleRequest,
+    ) -> MemoryContextBundle:
+        self._validate_context_bundle_request(request)
+        retrieval_query = self._context_retrieval_query(request)
+        result = self.retrieve(retrieval_query)
+        selected = self._select_context_memories(result.results, request)
+        sections = self._context_sections(selected)
+        rendered_text = self._render_context_sections(sections)
+        used_chars = sum(section.used_chars for section in sections)
+        included_count = sum(len(section.snippets) for section in sections)
+        return MemoryContextBundle(
+            request=request,
+            retrieval_query=retrieval_query,
+            sections=sections,
+            rendered_text=rendered_text,
+            total_visible=result.total_visible,
+            filtered_count=result.filtered_count,
+            retrieved_count=len(result.results),
+            included_count=included_count,
+            dropped_count=max(0, len(result.results) - included_count),
+            used_chars=used_chars,
+            max_chars=request.max_chars,
+            semantic_status=result.semantic_status,
+        )
+
     def _validate_query(self, query: MemoryRetrievalQuery) -> None:
         if query.audience == "agent" and query.domain_id is None:
             raise MemoryRetrievalError("Agent retrieval requires a domain_id.")
@@ -105,6 +189,135 @@ class MemoryRetrievalService:
             raise MemoryRetrievalError("Retrieval limit must be at least 1.")
         if query.mode not in {"broad", "balanced", "strict"}:
             raise MemoryRetrievalError("Retrieval mode must be broad, balanced, or strict.")
+
+    def _validate_context_bundle_request(self, request: MemoryContextBundleRequest) -> None:
+        if request.profile not in _CONTEXT_PROFILES:
+            raise MemoryRetrievalError(
+                "Context profile must be agent_prompt, daily_standup, "
+                "direct_user_question, curator_context, or memory_debug."
+            )
+        if request.audience == "agent" and request.domain_id is None:
+            raise MemoryRetrievalError("Agent context bundles require a domain_id.")
+        if request.max_items < 1:
+            raise MemoryRetrievalError("Context bundle max_items must be at least 1.")
+        if request.max_chars < 200:
+            raise MemoryRetrievalError("Context bundle max_chars must be at least 200.")
+
+    def _context_retrieval_query(
+        self,
+        request: MemoryContextBundleRequest,
+    ) -> MemoryRetrievalQuery:
+        profile = _CONTEXT_PROFILES[request.profile]
+        memory_types = request.memory_types
+        if memory_types is None and profile["memory_types"] is not None:
+            memory_types = set(profile["memory_types"])
+        return MemoryRetrievalQuery(
+            audience=request.audience,
+            domain_id=request.domain_id,
+            agent_id=request.agent_id,
+            query_text=request.query_text,
+            memory_types=memory_types,
+            min_importance=request.min_importance,
+            include_agent_memory=bool(profile["include_agent_memory"]),
+            include_session_memory=bool(profile["include_session_memory"]),
+            include_links=bool(profile["include_links"]),
+            use_semantic=request.use_semantic,
+            mode=profile["mode"],  # type: ignore[arg-type]
+            limit=max(request.max_items * 4, request.max_items),
+        )
+
+    def _select_context_memories(
+        self,
+        results: list[RetrievedMemory],
+        request: MemoryContextBundleRequest,
+    ) -> list[MemoryContextSnippet]:
+        selected_by_id: dict[uuid.UUID, MemoryContextSnippet] = {}
+        remaining_chars = request.max_chars
+
+        def add_result(result: RetrievedMemory) -> None:
+            nonlocal remaining_chars
+            if len(selected_by_id) >= request.max_items or result.memory.id in selected_by_id:
+                return
+            max_excerpt_chars = min(900, remaining_chars - len(result.memory.title) - 120)
+            if max_excerpt_chars <= 20:
+                return
+            excerpt = _truncate(result.memory.content, max_excerpt_chars)
+            snippet = MemoryContextSnippet(
+                memory=result.memory,
+                excerpt=excerpt,
+                score=result.score,
+                query_relevance=result.query_relevance,
+                semantic_similarity=result.semantic_similarity,
+                score_reasons=result.score_reasons,
+                provenance=result.provenance,
+                links=result.links,
+            )
+            cost = _snippet_cost(snippet)
+            if cost > remaining_chars:
+                return
+            selected_by_id[result.memory.id] = snippet
+            remaining_chars -= min(cost, remaining_chars)
+
+        by_scope: dict[str, list[RetrievedMemory]] = {}
+        for result in results:
+            by_scope.setdefault(result.memory.scope, []).append(result)
+
+        for scope in _SECTION_ORDER:
+            for result in by_scope.get(scope, [])[:1]:
+                add_result(result)
+
+        for result in results:
+            add_result(result)
+
+        selected_order = {memory_id: index for index, memory_id in enumerate(selected_by_id)}
+        return sorted(
+            selected_by_id.values(),
+            key=lambda snippet: (
+                _SECTION_ORDER_INDEX.get(snippet.memory.scope, 99),
+                selected_order[snippet.memory.id],
+            ),
+        )
+
+    def _context_sections(
+        self,
+        snippets: list[MemoryContextSnippet],
+    ) -> list[MemoryContextSection]:
+        grouped: dict[str, list[MemoryContextSnippet]] = {}
+        for snippet in snippets:
+            grouped.setdefault(snippet.memory.scope, []).append(snippet)
+        sections: list[MemoryContextSection] = []
+        for key in _SECTION_ORDER:
+            section_snippets = grouped.get(key, [])
+            if not section_snippets:
+                continue
+            sections.append(
+                MemoryContextSection(
+                    key=key,
+                    label=_SECTION_LABELS.get(key, key.replace("_", " ").title()),
+                    snippets=section_snippets,
+                    used_chars=sum(_snippet_cost(snippet) for snippet in section_snippets),
+                )
+            )
+        return sections
+
+    def _render_context_sections(self, sections: list[MemoryContextSection]) -> str:
+        lines: list[str] = []
+        for section in sections:
+            lines.append(f"[{section.label}]")
+            for snippet in section.snippets:
+                memory = snippet.memory
+                source = snippet.provenance.processed_path
+                source_text = f" source={source}" if source else ""
+                lines.append(
+                    "- "
+                    f"{memory.title} "
+                    f"(id={memory.id}, type={memory.memory_type}, "
+                    f"importance={memory.importance:.2f}, impact={memory.impact_level}, "
+                    f"score={snippet.score:.2f}{source_text}): "
+                    f"{snippet.excerpt}"
+                )
+            lines.append("")
+        return "\n".join(lines).strip()
 
     def _visible_memories(self, query: MemoryRetrievalQuery) -> list[MemoryItem]:
         statement = select(MemoryItem).where(*self._active_predicates())
@@ -377,6 +590,65 @@ class MemoryRetrievalService:
 
 def _tokens(text: str) -> list[str]:
     return [token for token in re.findall(r"[a-z0-9]+", text.lower()) if len(token) > 2]
+
+
+_CONTEXT_PROFILES: dict[str, dict[str, Any]] = {
+    "agent_prompt": {
+        "mode": "broad",
+        "memory_types": None,
+        "include_agent_memory": True,
+        "include_session_memory": True,
+        "include_links": True,
+    },
+    "daily_standup": {
+        "mode": "broad",
+        "memory_types": {"decision", "fact", "preference", "task", "workflow"},
+        "include_agent_memory": True,
+        "include_session_memory": True,
+        "include_links": True,
+    },
+    "direct_user_question": {
+        "mode": "balanced",
+        "memory_types": None,
+        "include_agent_memory": False,
+        "include_session_memory": True,
+        "include_links": True,
+    },
+    "curator_context": {
+        "mode": "broad",
+        "memory_types": {"fact", "preference", "decision", "workflow", "relationship"},
+        "include_agent_memory": False,
+        "include_session_memory": False,
+        "include_links": True,
+    },
+    "memory_debug": {
+        "mode": "broad",
+        "memory_types": None,
+        "include_agent_memory": True,
+        "include_session_memory": True,
+        "include_links": True,
+    },
+}
+
+_SECTION_ORDER = ("global", "maestro_session", "domain", "agent")
+_SECTION_ORDER_INDEX = {scope: index for index, scope in enumerate(_SECTION_ORDER)}
+_SECTION_LABELS = {
+    "global": "Global Memory",
+    "maestro_session": "Maestro Session Memory",
+    "domain": "Domain Memory",
+    "agent": "Agent Memory",
+}
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[: max(0, max_chars - 3)].rstrip()}..."
+
+
+def _snippet_cost(snippet: MemoryContextSnippet) -> int:
+    return len(snippet.memory.title) + len(snippet.excerpt) + 120
 
 
 def _uuid_from_metadata(metadata: dict[str, Any], key: str) -> uuid.UUID | None:

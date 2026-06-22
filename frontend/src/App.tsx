@@ -35,6 +35,7 @@ type PlannerItem = {
 type DropboxDomain = {
   key: string;
   inbox: number;
+  processing: number;
   processed: number;
   failed: number;
   previews: number;
@@ -45,11 +46,15 @@ type MemoryPreview = {
   filename: string;
   source_file: string | null;
   status: string | null;
+  is_processing: boolean;
   generated_at: string | null;
   candidate_count: number;
+  result_count: number;
   written_count: number;
   deduped_count: number;
   pending_approval_count: number;
+  progress_count: number;
+  progress_total: number;
   payload: {
     candidates?: Array<{
       title?: string;
@@ -151,6 +156,7 @@ const domainLabels: Record<string, string> = {
 const dropboxDomainDefaults: DropboxDomain[] = Object.keys(domainLabels).map((key) => ({
   key,
   inbox: 0,
+  processing: 0,
   processed: 0,
   failed: 0,
   previews: 0,
@@ -258,6 +264,20 @@ function resultClass(result?: PreviewResult) {
   if (result.outcome === "rejected") return "rejected";
   if (result.outcome === "pending_user_approval") return "pending";
   return "processed";
+}
+
+function candidateResultLabel(preview: MemoryPreview, index: number) {
+  const result = preview.payload.results?.[index];
+  if (result) return resultLabel(result);
+  if (preview.is_processing) return "Queued for write";
+  return "Preview only";
+}
+
+function candidateResultClass(preview: MemoryPreview, index: number) {
+  const result = preview.payload.results?.[index];
+  if (result) return resultClass(result);
+  if (preview.is_processing) return "processing";
+  return "preview-only";
 }
 
 function previewTime(preview: MemoryPreview) {
@@ -766,6 +786,7 @@ function MemoryWorkspace() {
 
         <div className="dropbox-stats">
           <span>Inbox {selectedDomainStatus?.inbox ?? 0}</span>
+          <span>Processing {selectedDomainStatus?.processing ?? 0}</span>
           <span>Processed {selectedDomainStatus?.processed ?? 0}</span>
           <span>Failed {selectedDomainStatus?.failed ?? 0}</span>
           <span>Previews {selectedDomainStatus?.previews ?? 0}</span>
@@ -825,6 +846,9 @@ function MemoryWorkspace() {
               <span>{latestPreview.domain_key}</span>
               <span>{latestPreview.status}</span>
               <span>{latestPreview.candidate_count} candidates</span>
+              <span>
+                {latestPreview.progress_count}/{latestPreview.progress_total} processed
+              </span>
               <span>{latestPreview.written_count} written</span>
               <span>{latestPreview.deduped_count} deduped</span>
               <span>{latestPreview.pending_approval_count} pending approval</span>
@@ -855,10 +879,8 @@ function MemoryWorkspace() {
                   </span>
                   <h4>{candidate.title}</h4>
                   <p>{candidate.content}</p>
-                  <div
-                    className={`result-pill ${resultClass(latestPreview.payload.results?.[index])}`}
-                  >
-                    {resultLabel(latestPreview.payload.results?.[index])}
+                  <div className={`result-pill ${candidateResultClass(latestPreview, index)}`}>
+                    {candidateResultLabel(latestPreview, index)}
                   </div>
                   {latestPreview.payload.results?.[index]?.evaluation?.rationale && (
                     <p className="evaluation-note">

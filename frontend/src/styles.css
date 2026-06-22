@@ -685,6 +685,12 @@ h4 {
   background: #f4f6f3;
 }
 
+.result-pill.processing {
+  color: #4b3d12;
+  background: #f7edc7;
+  border-color: #e2ce82;
+}
+
 .evaluation-note {
   color: #66736d;
   font-size: 0.86rem;

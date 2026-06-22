@@ -32,6 +32,9 @@ def test_memory_status_and_upload(session: Session, tmp_path: Path) -> None:
     assert status.status_code == 200
     assert status.json()["root"] == str(tmp_path)
     assert any(domain["key"] == "ophi" for domain in status.json()["domains"])
+    assert next(domain for domain in status.json()["domains"] if domain["key"] == "ophi")[
+        "processing"
+    ] == 0
 
     upload = client.post(
         "/memory/dropbox/ophi/upload",
@@ -66,7 +69,41 @@ def test_memory_preview_listing(session: Session, tmp_path: Path) -> None:
     assert len(previews) == 1
     assert previews[0]["source_file"] == "note.md"
     assert previews[0]["candidate_count"] == 1
+    assert previews[0]["result_count"] == 1
+    assert previews[0]["progress_count"] == 1
+    assert previews[0]["progress_total"] == 1
+    assert previews[0]["is_processing"] is False
     assert previews[0]["written_count"] == 1
+
+
+def test_memory_preview_listing_marks_in_progress_writes(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    preview_dir = tmp_path / "ophi" / "previews"
+    preview_dir.mkdir(parents=True)
+    (preview_dir / "note.preview.json").write_text(
+        """
+        {
+          "source_file": "note.md",
+          "status": "writing",
+          "candidates": [{}, {}, {}],
+          "results": [{"outcome": "written", "memory_item_id": "memory-1"}]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    response = client.get("/memory/dropbox/previews?domain_key=ophi")
+
+    assert response.status_code == 200
+    preview = response.json()["previews"][0]
+    assert preview["is_processing"] is True
+    assert preview["candidate_count"] == 3
+    assert preview["result_count"] == 1
+    assert preview["progress_count"] == 1
+    assert preview["progress_total"] == 3
 
 
 def test_pending_approval_and_approve(session: Session, tmp_path: Path) -> None:
@@ -248,3 +285,64 @@ def test_memory_retrieval_endpoint_returns_scored_context(
     assert payload["results"][0]["semantic_similarity"] is None
     assert payload["results"][0]["provenance"]["source_refs"][0]["id"] == "artifact-1"
     assert all(result["domain_key"] != "ophi" for result in payload["results"])
+
+
+def test_memory_context_bundle_endpoint_returns_grouped_prompt_context(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    global_memory = MemoryItem(
+        scope="global",
+        memory_type="preference",
+        title="Briefing preference",
+        content="Chris prefers brief, decision-oriented context.",
+        impact_level="medium",
+        importance=0.9,
+        metadata_={},
+    )
+    praxis_memory = MemoryItem(
+        scope="domain",
+        domain_id=praxis.id,
+        memory_type="fact",
+        title="Praxis training model",
+        content="Praxis trains Tactical Innovation Officers.",
+        impact_level="medium",
+        importance=0.8,
+        metadata_={"source_refs": [{"type": "artifact", "id": "artifact-2"}]},
+    )
+    session.add_all([global_memory, praxis_memory])
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.get(
+        "/memory/context-bundle",
+        params={
+            "profile": "agent_prompt",
+            "audience": "agent",
+            "domain_key": "praxis",
+            "query_text": "tactical innovation training",
+            "use_semantic": "false",
+            "max_items": 6,
+            "max_chars": 2000,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["profile"] == "agent_prompt"
+    assert payload["audience"] == "agent"
+    assert payload["semantic_status"] == "disabled"
+    assert payload["retrieval_query"]["mode"] == "broad"
+    assert [section["key"] for section in payload["sections"]] == ["global", "domain"]
+    assert payload["sections"][1]["memories"][0]["title"] == "Praxis training model"
+    assert payload["sections"][1]["memories"][0]["excerpt"] == (
+        "Praxis trains Tactical Innovation Officers."
+    )
+    assert payload["sections"][1]["memories"][0]["provenance"]["source_refs"][0]["id"] == (
+        "artifact-2"
+    )
+    assert "[Global Memory]" in payload["rendered_text"]
+    assert str(praxis_memory.id) in payload["rendered_text"]
