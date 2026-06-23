@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import MemoryItem, MemoryProposal, SeedPackage
+from app.db.models import MemoryItem, MemoryProposal, RoutedItem, SeedPackage
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
@@ -89,6 +89,7 @@ def process_dropbox(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "preview_path": str(result.preview_path) if result.preview_path else None,
                 "status": result.status,
                 "candidate_count": result.candidate_count,
+                "routed_count": result.routed_count,
                 "written_count": result.written_count,
                 "pending_approval_count": result.pending_approval_count,
                 "error": result.error,
@@ -122,6 +123,26 @@ def list_dropbox_previews(domain_key: str | None = None, db: Session = Depends(g
 def list_pending_proposals(db: Session = Depends(get_db)) -> dict[str, Any]:
     proposals = MemoryService(db).list_pending_approvals()
     return {"proposals": [_proposal_payload(proposal) for proposal in proposals]}
+
+
+@router.get("/routed-items")
+def list_routed_items(
+    domain_key: str | None = None,
+    route_type: str | None = None,
+    status: str | None = "open",
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    query = select(RoutedItem)
+    if domain_id is not None:
+        query = query.where(RoutedItem.domain_id == domain_id)
+    if route_type is not None:
+        query = query.where(RoutedItem.route_type == route_type)
+    if status is not None:
+        query = query.where(RoutedItem.status == status)
+    items = db.scalars(query.order_by(RoutedItem.created_at.desc()).limit(limit)).all()
+    return {"items": [_routed_item_payload(db, item) for item in items]}
 
 
 @router.post("/proposals/{proposal_id}/approve")
@@ -382,6 +403,7 @@ def _preview_payload(path: Path, domain_key: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         payload = {"status": "invalid", "candidates": [], "results": []}
     candidates = payload.get("candidates", [])
+    routed_items = payload.get("routed_items", [])
     results = payload.get("results", [])
     candidate_count = len(candidates)
     result_count = len(results)
@@ -403,6 +425,7 @@ def _preview_payload(path: Path, domain_key: str) -> dict[str, Any]:
         "is_processing": payload.get("status") in {"writing"},
         "generated_at": payload.get("generated_at"),
         "candidate_count": candidate_count,
+        "routed_count": len(routed_items),
         "result_count": result_count,
         "written_count": written_count,
         "deduped_count": deduped_count,
@@ -426,6 +449,26 @@ def _proposal_payload(proposal: MemoryProposal) -> dict[str, Any]:
         "source_refs": proposal.source_refs,
         "metadata": proposal.metadata_,
         "created_at": proposal.created_at.isoformat() if proposal.created_at else None,
+    }
+
+
+def _routed_item_payload(db: Session, item: RoutedItem) -> dict[str, Any]:
+    return {
+        "id": str(item.id),
+        "domain_key": _domain_key_for_id(db, item.domain_id),
+        "agent_id": str(item.agent_id) if item.agent_id else None,
+        "task_id": str(item.task_id) if item.task_id else None,
+        "report_id": str(item.report_id) if item.report_id else None,
+        "seed_package_id": str(item.seed_package_id) if item.seed_package_id else None,
+        "artifact_id": str(item.artifact_id) if item.artifact_id else None,
+        "route_type": item.route_type,
+        "title": item.title,
+        "content": item.content,
+        "priority": item.priority,
+        "status": item.status,
+        "source_refs": item.source_refs,
+        "metadata": item.metadata_,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
     }
 
 

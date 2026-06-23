@@ -56,6 +56,7 @@ type MemoryPreview = {
   pending_approval_count: number;
   progress_count: number;
   progress_total: number;
+  routed_count: number;
   payload: {
     candidates?: Array<{
       title?: string;
@@ -76,6 +77,13 @@ type MemoryPreview = {
         rationale?: string | null;
         related_memory_id?: string | null;
       };
+    }>;
+    routed_items?: Array<{
+      route_type?: string;
+      title?: string;
+      content?: string;
+      priority?: string;
+      status?: string;
     }>;
   };
 };
@@ -1729,6 +1737,7 @@ function MemoryWorkspace() {
               <span>{latestPreview.domain_key}</span>
               <span>{latestPreview.status}</span>
               <span>{latestPreview.candidate_count} candidates</span>
+              <span>{latestPreview.routed_count} routed</span>
               <span>
                 {latestPreview.progress_count}/{latestPreview.progress_total} processed
               </span>
@@ -1773,6 +1782,22 @@ function MemoryWorkspace() {
                 </article>
               ))}
             </div>
+            {(latestPreview.payload.routed_items ?? []).length > 0 && (
+              <>
+                <h4>Routed items</h4>
+                <div className="candidate-list">
+                  {(latestPreview.payload.routed_items ?? []).map((item, index) => (
+                    <article className="candidate-row routed" key={`${item.title}-${index}`}>
+                      <span>
+                        {item.route_type} / {item.priority} / {item.status}
+                      </span>
+                      <h4>{item.title}</h4>
+                      <p>{item.content}</p>
+                    </article>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <p className="empty-state">Process a file to see extracted candidates.</p>

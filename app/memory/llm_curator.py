@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.llm.memory_extraction import LLMMemoryExtractor
+from app.db.models import RoutedItem
 from app.memory.curator import CuratedMemoryBatch, StagedMemorySource
 from app.memory.service import (
     MemoryCandidate,
@@ -19,6 +20,7 @@ from app.memory.service import (
 class PreviewableMemoryBatch:
     source: StagedMemorySource
     candidates: Sequence[MemoryCandidate]
+    routed_items: Sequence[RoutedItem]
 
 
 class LLMMemoryCurator:
@@ -77,28 +79,128 @@ class LLMMemoryCurator:
             )
         return candidates
 
+    def extract_routed_items(
+        self,
+        source: StagedMemorySource,
+        *,
+        domain_key: str,
+    ) -> list[RoutedItem]:
+        extracted = self.extractor.extract(
+            source_title=source.title or "Untitled staged source",
+            source_text=source.content,
+            domain_key=domain_key,
+        )
+        return self._routed_items_from_extraction(source, extracted.routed_items)
+
+    def extract_source(
+        self,
+        source: StagedMemorySource,
+        *,
+        domain_key: str,
+    ) -> tuple[list[MemoryCandidate], list[RoutedItem]]:
+        extracted = self.extractor.extract(
+            source_title=source.title or "Untitled staged source",
+            source_text=source.content,
+            domain_key=domain_key,
+        )
+        candidates: list[MemoryCandidate] = []
+        for extracted_candidate in extracted.candidates:
+            scope = extracted_candidate.scope
+            domain_id, agent_id = self._ids_for_scope(source, scope)
+            metadata = {
+                "curator": "llm",
+                "source_title": source.title,
+                "llm_confidence": extracted_candidate.confidence,
+                "route_type": "memory",
+                **source.metadata,
+            }
+            candidates.append(
+                MemoryCandidate(
+                    domain_id=domain_id,
+                    agent_id=agent_id,
+                    task_id=source.task_id,
+                    report_id=source.report_id,
+                    scope=scope,
+                    memory_type=extracted_candidate.memory_type,
+                    title=extracted_candidate.title,
+                    content=extracted_candidate.content,
+                    rationale=extracted_candidate.rationale,
+                    impact_level=extracted_candidate.impact_level,
+                    importance=extracted_candidate.importance,
+                    source_refs=[self._source_ref(source)],
+                    metadata=metadata,
+                )
+            )
+        return candidates, self._routed_items_from_extraction(source, extracted.routed_items)
+
     def preview_source(
         self,
         source: StagedMemorySource,
         *,
         domain_key: str,
     ) -> PreviewableMemoryBatch:
+        candidates, routed_items = self.extract_source(source, domain_key=domain_key)
         return PreviewableMemoryBatch(
             source=source,
-            candidates=self.extract_candidates(source, domain_key=domain_key),
+            candidates=candidates,
+            routed_items=routed_items,
         )
 
     def write_candidates(
         self,
         source: StagedMemorySource,
         candidates: Sequence[MemoryCandidate],
+        routed_items: Sequence[RoutedItem] = (),
     ) -> CuratedMemoryBatch:
+        self._write_routed_items(routed_items)
         results = [self.memory_service.write_candidate(candidate) for candidate in candidates]
         return CuratedMemoryBatch(source=source, candidates=candidates, results=results)
 
     def process_source(self, source: StagedMemorySource, *, domain_key: str) -> CuratedMemoryBatch:
-        candidates = self.extract_candidates(source, domain_key=domain_key)
-        return self.write_candidates(source, candidates)
+        candidates, routed_items = self.extract_source(source, domain_key=domain_key)
+        return self.write_candidates(source, candidates, routed_items)
+
+    def _routed_items_from_extraction(
+        self,
+        source: StagedMemorySource,
+        extracted_items,
+    ) -> list[RoutedItem]:
+        items: list[RoutedItem] = []
+        seed_package_id = _uuid_or_none(source.metadata.get("seed_package_id"))
+        artifact_id = _uuid_or_none(source.metadata.get("artifact_id"))
+        for extracted_item in extracted_items:
+            if extracted_item.route_type == "ignore":
+                continue
+            items.append(
+                RoutedItem(
+                    domain_id=source.domain_id,
+                    agent_id=source.agent_id,
+                    task_id=source.task_id,
+                    report_id=source.report_id,
+                    seed_package_id=seed_package_id,
+                    artifact_id=artifact_id,
+                    route_type=extracted_item.route_type,
+                    title=extracted_item.title,
+                    content=extracted_item.content,
+                    priority=extracted_item.priority,
+                    status=extracted_item.status or "open",
+                    source_refs=[self._source_ref(source)],
+                    metadata_={
+                        "curator": "llm",
+                        "source_title": source.title,
+                        "rationale": extracted_item.rationale,
+                        "llm_confidence": extracted_item.confidence,
+                        **source.metadata,
+                    },
+                )
+            )
+        return items
+
+    def _write_routed_items(self, routed_items: Sequence[RoutedItem]) -> None:
+        for item in routed_items:
+            self.memory_service.session.add(item)
+        if routed_items:
+            self.memory_service.session.commit()
 
     def _ids_for_scope(
         self,
@@ -122,3 +224,12 @@ class LLMMemoryCurator:
         if source.uri is not None:
             source_ref["uri"] = source.uri
         return source_ref
+
+
+def _uuid_or_none(value: object) -> uuid.UUID | None:
+    if value is None:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        return None

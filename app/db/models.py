@@ -253,6 +253,35 @@ class RuntimeSetting(TimestampMixin, Base):
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class RoutedItem(TimestampMixin, Base):
+    __tablename__ = "routed_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("agents.id", ondelete="SET NULL"), index=True
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("tasks.id", ondelete="SET NULL"))
+    report_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("reports.id", ondelete="SET NULL")
+    )
+    seed_package_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("seed_packages.id", ondelete="SET NULL")
+    )
+    artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    route_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    priority: Mapped[str] = mapped_column(String(40), default="normal", nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="open", nullable=False, index=True)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
 class ToolCall(Base):
     __tablename__ = "tool_calls"
 

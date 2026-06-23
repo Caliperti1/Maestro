@@ -22,6 +22,44 @@ There is also a raw staging inbox for files, links, notes, document exports, and
 conversations. Items dropped there should trigger the same curator-to-service workflow.
 That path will support initial seeding once seed package ingestion is implemented.
 
+## Curation Routing
+
+The curator has two output lanes:
+
+- durable memory candidates, which flow through `MemoryService` into `memory_items` or
+  `memory_proposals`
+- routed operational items, which flow into `routed_items`
+
+This keeps agent run history, RFIs, due-outs, contacts, and calendar-like details from polluting
+prompt memory retrieval.
+
+Routed item categories:
+
+- `task`: due-outs, action items, follow-ups, or work requests
+- `human_input`: RFIs, approvals, missing answers, or decisions needed from Chris
+- `event`: meetings, deadlines, reminders, or scheduled blocks
+- `contact`: people, organizations, roles, relationship details, or contact facts
+- `think_tank`: brainstorms and immature ideas
+- `decision_log`: approvals, denials, decision records, and rationale
+- `project`: initiatives that group work and artifacts
+- `artifact_history`: raw run output, transcripts, reports, or tool results kept as provenance
+- `integration_note`: non-secret notes about tool/integration setup
+- `ignore`: duplicates or transient content that should not be written
+
+All routed items are domain-scoped when the source comes from a domain dropbox. The Maestro
+orchestrator can query across all domains; domain agents should only see operational items for
+their own domain unless Maestro explicitly delegates cross-domain work.
+
+Endpoint:
+
+```text
+GET /memory/routed-items?domain_key=praxis&route_type=human_input&status=open
+```
+
+The extractor is aware of this downstream router. It should split source material into atomic
+durable memories and separate routed items instead of embedding RFIs, tasks, contacts, or events
+inside broad memory summaries.
+
 ## Retrieval Flow
 
 The retrieval side is the service other agents and Maestro call when they need context.
@@ -200,6 +238,7 @@ still only receive session memory that the aggregator intentionally includes for
 - `MemoryRetrievalService`
 - `/memory/retrieve` debug/API endpoint
 - `/memory/context-bundle` agent context endpoint
+- `/memory/routed-items` operational routing endpoint
 - Memory tab retrieval debugger
 - semantic retrieval with local-first embeddings
 - provenance and one-hop link context in retrieval payloads

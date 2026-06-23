@@ -867,6 +867,11 @@ h4 {
   background: #f9fbf8;
 }
 
+.candidate-row.routed {
+  background: #f8f7fb;
+  border-color: #ded8ea;
+}
+
 .approval-card span,
 .candidate-row span,
 .memory-row span,
