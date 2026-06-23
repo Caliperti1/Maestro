@@ -201,6 +201,31 @@ def test_agent_update_and_tool_registry_endpoint(
     )
 
 
+def test_delete_agent_archives_agent_and_removes_from_list(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    create = client.post(
+        "/agents",
+        json={
+            "domain_key": "praxis",
+            "key": "Temporary Praxis Agent",
+            "name": "Temporary Praxis Agent",
+        },
+    )
+
+    delete = client.delete("/agents/temporary-praxis-agent")
+    agents = client.get("/agents")
+
+    assert create.status_code == 200
+    assert delete.status_code == 200
+    assert delete.json()["deleted"] is True
+    assert all(
+        agent["key"] != "temporary-praxis-agent" for agent in agents.json()["agents"]
+    )
+
+
 def test_tool_connection_endpoint_redacts_config(
     session: Session,
     tmp_path: Path,
@@ -251,6 +276,27 @@ def test_run_once_endpoint_prepares_stubbed_run(
     assert payload["task_id"] is not None
     assert payload["output_text"] is None
     assert payload["staged_artifact_path"] is not None
+
+
+def test_agent_tasks_endpoint_lists_run_once_tasks(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    run = client.post(
+        "/agents/praxis-planning-agent/run-once",
+        json={
+            "task_instruction": "Prepare a Praxis queued task.",
+            "use_semantic": False,
+            "execute_llm": False,
+        },
+    )
+    tasks = client.get("/agents/praxis-planning-agent/tasks")
+
+    assert run.status_code == 200
+    assert tasks.status_code == 200
+    assert tasks.json()["tasks"][0]["objective"] == "Prepare a Praxis queued task."
+    assert tasks.json()["tasks"][0]["status"] == "prepared"
 
 
 def test_interaction_artifact_endpoint_can_stage_package(

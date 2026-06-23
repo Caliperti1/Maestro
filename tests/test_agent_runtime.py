@@ -70,6 +70,17 @@ class FakeAgentLLMClient:
         return "## Summary\nPraxis partner run completed.\n\n## Next Steps\nSend the brief."
 
 
+class FailingAgentLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def structured_response(self, **kwargs):
+        raise AssertionError("Agent run should use text_response.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise RuntimeError("provider rejected the request")
+
+
 def test_seed_agent_registry_returns_domain_scoped_specs(session: Session) -> None:
     specs = AgentRegistryService(session).list_specs()
 
@@ -236,6 +247,23 @@ def test_run_agent_once_executes_llm_and_records_task_report_and_tool_call(
     assert result.tool_calls[0]["status"] == "complete"
     assert result.staged_artifact_path is not None
     assert Path(result.staged_artifact_path).is_file()
+
+
+def test_run_agent_once_records_failed_llm_call(session: Session) -> None:
+    _seed_memory(session)
+
+    result = PromptAggregationService(session, llm_client=FailingAgentLLMClient()).run_agent_once(
+        PromptPackageRequest(
+            agent_key="praxis-planning-agent",
+            task_instruction="Prepare a Praxis partner run.",
+            use_semantic=False,
+        ),
+        execute_llm=True,
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "provider rejected the request"
+    assert result.tool_calls[0]["status"] == "failed"
 
 
 def test_interaction_artifact_packager_stages_package_for_curation(

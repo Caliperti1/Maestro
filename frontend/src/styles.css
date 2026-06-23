@@ -132,6 +132,7 @@ h4 {
 .domain-button,
 .agent-row,
 .planner-action,
+.danger-action,
 .icon-button,
 .composer button,
 .timeline-controls button,
@@ -289,6 +290,24 @@ h4 {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+}
+
+.danger-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 12px;
+  color: #8f2d2d;
+  background: #fff7f6;
+  border: 1px solid #efc9c5;
+  font-weight: 800;
+}
+
+.danger-action:hover {
+  color: #ffffff;
+  background: #a33a34;
 }
 
 .timeline {
@@ -674,6 +693,36 @@ h4 {
 
 .connection-row strong {
   color: #26352f;
+}
+
+.task-list {
+  display: grid;
+  gap: 8px;
+}
+
+.task-row {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  background: #f9fbf8;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
+.task-row span {
+  color: #68736d;
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.task-row strong {
+  color: #26352f;
+}
+
+.task-row p {
+  color: #52605a;
+  font-size: 0.84rem;
 }
 
 .memory-grid {

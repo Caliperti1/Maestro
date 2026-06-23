@@ -49,6 +49,8 @@ GET /agents
 POST /agents
 GET /agents/{agent_key}
 PATCH /agents/{agent_key}
+DELETE /agents/{agent_key}
+GET /agents/{agent_key}/tasks
 GET /agents/global-context
 PATCH /agents/global-context
 GET /agents/domains
@@ -65,6 +67,14 @@ their own Gmail credential/config connection. Secret-like config keys such as `a
 `secret`, and `password` are redacted in API responses. This is still an MVP scaffold; a hardened
 local secret store or keychain integration should replace raw database storage before sensitive
 production credentials are added.
+
+Deleting an agent currently archives it by setting `is_active=false` and clearing current tasking.
+This removes it from the active registry without destroying historical tasks, reports, artifacts,
+or memory provenance.
+
+Agent task lists are available through `GET /agents/{agent_key}/tasks`. Manual runs create task
+records immediately. While future orchestration will enqueue work asynchronously, this endpoint is
+the first queue/read-model surface for both human-triggered and Maestro-triggered work.
 
 ### Prompt Aggregation
 

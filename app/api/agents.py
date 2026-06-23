@@ -247,6 +247,24 @@ def update_agent(
     return {"agent": _agent_payload(spec)}
 
 
+@router.delete("/{agent_key}")
+def delete_agent(agent_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        spec = AgentRegistryService(db).archive_agent(agent_key)
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"agent": _agent_payload(spec), "deleted": True}
+
+
+@router.get("/{agent_key}/tasks")
+def list_agent_tasks(agent_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        tasks = AgentRegistryService(db).list_agent_tasks(agent_key)
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"tasks": [_task_payload(task) for task in tasks]}
+
+
 @router.post("/{agent_key}/prompt-package")
 def build_prompt_package(
     agent_key: str,
@@ -382,6 +400,20 @@ def _tool_connection_payload(connection) -> dict[str, Any]:
         "auth_type": connection.auth_type,
         "config": connection.config,
         "is_active": connection.is_active,
+    }
+
+
+def _task_payload(task) -> dict[str, Any]:
+    return {
+        "id": str(task.id),
+        "status": task.status,
+        "priority": task.priority,
+        "source_type": task.source_type,
+        "workflow_key": task.workflow_key,
+        "objective": task.objective,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+        "error_message": task.error_message,
     }
 
 

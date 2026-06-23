@@ -19,6 +19,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Wrench,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -165,6 +166,18 @@ type AgentSpec = {
   scheduled_actions: Array<Record<string, unknown>>;
 };
 
+type AgentTask = {
+  id: string;
+  status: string;
+  priority: string;
+  source_type: string;
+  workflow_key: string | null;
+  objective: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+};
+
 type DomainContext = {
   id: string;
   key: string;
@@ -213,13 +226,13 @@ type AgentRun = {
   task_id: string | null;
   report_id: string | null;
   error_message: string | null;
-  tool_calls: Array<{
+  tool_calls?: Array<{
     id: string;
     tool_name: string;
     status: string;
     error_message: string | null;
   }>;
-  scheduler: {
+  scheduler?: {
     status: string;
     reason: string;
   };
@@ -691,6 +704,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
   const [promptTask, setPromptTask] = useState("Prepare a concise domain brief.");
   const [promptPreview, setPromptPreview] = useState<PromptPackage | null>(null);
   const [runPreview, setRunPreview] = useState<AgentRun | null>(null);
+  const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
   const [stageRunArtifact, setStageRunArtifact] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [busy, setBusy] = useState(false);
@@ -714,6 +728,11 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     setDomainContext(activeDomain?.context ?? "");
   }, [domainKey]);
 
+  const refreshAgentTasks = useCallback(async (agentKey: string) => {
+    const response = await apiJson<{ tasks: AgentTask[] }>(`/agents/${agentKey}/tasks`);
+    setAgentTasks(response.tasks);
+  }, []);
+
   useEffect(() => {
     refreshAgents().catch((error) =>
       setStatusMessage(error instanceof Error ? error.message : "Unable to load agents."),
@@ -729,6 +748,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     setToolPermissions(
       Object.fromEntries(selectedAgent.allowed_tools.map((tool) => [tool.key, tool.permission])),
     );
+    refreshAgentTasks(selectedAgent.key).catch(() => setAgentTasks([]));
   }, [selectedAgent?.key]);
 
   const saveGlobalContext = async () => {
@@ -791,6 +811,24 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
       await refreshAgents();
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Agent save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteAgent = async () => {
+    if (!selectedAgent) return;
+    setBusy(true);
+    try {
+      await apiJson(`/agents/${selectedAgent.key}`, { method: "DELETE" });
+      setSelectedAgentKey(null);
+      setPromptPreview(null);
+      setRunPreview(null);
+      setAgentTasks([]);
+      setStatusMessage("Agent deleted.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Agent delete failed.");
     } finally {
       setBusy(false);
     }
@@ -880,7 +918,11 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
       });
       setRunPreview(response.run);
       setPromptPreview(response.run.prompt_package);
-      setStatusMessage("Manual run prepared.");
+      await refreshAgents();
+      await refreshAgentTasks(selectedAgent.key);
+      setStatusMessage(
+        response.run.status === "completed" ? "Manual run completed." : "Manual run finished.",
+      );
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Manual run failed.");
     } finally {
@@ -1055,10 +1097,37 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
             <button className="planner-action" onClick={saveAgent} disabled={busy}>
               Save agent
             </button>
+            <button className="danger-action" onClick={deleteAgent} disabled={busy}>
+              <Trash2 size={16} />
+              Delete agent
+            </button>
           </div>
         ) : (
           <p className="empty-state">Select an agent to edit role, tasking, and tools.</p>
         )}
+      </section>
+
+      <section className="memory-panel admin-panel wide-panel" aria-labelledby="agent-task-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Agent queue</p>
+            <h3 id="agent-task-heading">{selectedAgent?.name ?? "No agent selected"}</h3>
+          </div>
+          <Clock3 size={18} />
+        </div>
+        <div className="task-list">
+          {agentTasks.map((task) => (
+            <article className="task-row" key={task.id}>
+              <span>{task.status}</span>
+              <strong>{task.objective}</strong>
+              <p>{task.workflow_key ?? task.source_type}</p>
+              {task.error_message && <p>{task.error_message}</p>}
+            </article>
+          ))}
+          {agentTasks.length === 0 && (
+            <p className="empty-state">No queued or recent tasks for this agent.</p>
+          )}
+        </div>
       </section>
 
       <section
@@ -1107,8 +1176,8 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
             <p>{runPreview.execution_note}</p>
             {runPreview.task_id && <p>Task: {runPreview.task_id}</p>}
             {runPreview.report_id && <p>Report: {runPreview.report_id}</p>}
-            <p>Scheduler: {runPreview.scheduler.status}</p>
-            {runPreview.tool_calls.map((toolCall) => (
+            <p>Scheduler: {runPreview.scheduler?.status ?? "unknown"}</p>
+            {(runPreview.tool_calls ?? []).map((toolCall) => (
               <p key={toolCall.id}>
                 {toolCall.tool_name}: {toolCall.status}
               </p>

@@ -22,7 +22,7 @@ from app.db.models import (
 )
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
-from app.llm.client import LLMClient, LLMClientError, OpenAILLMClient
+from app.llm.client import LLMClient, OpenAILLMClient
 from app.memory.retrieval import (
     MemoryContextBundle,
     MemoryContextBundleRequest,
@@ -92,6 +92,19 @@ class ToolConnectionSpec:
     auth_type: str
     config: dict[str, Any]
     is_active: bool
+
+
+@dataclass(frozen=True)
+class AgentTaskSpec:
+    id: uuid.UUID
+    status: str
+    priority: str
+    source_type: str
+    workflow_key: str | None
+    objective: str
+    started_at: str | None
+    completed_at: str | None
+    error_message: str | None
 
 
 @dataclass(frozen=True)
@@ -212,7 +225,9 @@ class AgentRegistryService:
         domains_by_id = {
             domain.id: domain for domain in DomainRepository(self.session).list_active()
         }
-        agents = self.session.scalars(select(Agent).order_by(Agent.key)).all()
+        agents = self.session.scalars(
+            select(Agent).where(Agent.is_active.is_(True)).order_by(Agent.key)
+        ).all()
         return [
             self._spec_for_agent(agent, domain=domains_by_id.get(agent.domain_id))
             for agent in agents
@@ -368,6 +383,43 @@ class AgentRegistryService:
         self.session.commit()
         self.session.refresh(agent)
         return self.get_spec(agent.key)
+
+    def archive_agent(self, agent_key: str) -> AgentSpec:
+        self.ensure_seed_agents()
+        agent = AgentRepository(self.session).get_by_key(agent_key)
+        if agent is None:
+            raise AgentRuntimeError(f"Unknown agent: {agent_key}")
+        capabilities = dict(agent.capabilities or {})
+        capabilities["current_action"] = None
+        agent.capabilities = capabilities
+        agent.is_active = False
+        self.session.commit()
+        self.session.refresh(agent)
+        domain = DomainRepository(self.session).get(agent.domain_id)
+        return self._spec_for_agent(agent, domain=domain)
+
+    def list_agent_tasks(self, agent_key: str, *, limit: int = 20) -> list[AgentTaskSpec]:
+        spec = self.get_spec(agent_key)
+        tasks = self.session.scalars(
+            select(Task)
+            .where(Task.assigned_agent_id == spec.id)
+            .order_by(Task.created_at.desc())
+            .limit(limit)
+        ).all()
+        return [
+            AgentTaskSpec(
+                id=task.id,
+                status=task.status,
+                priority=task.priority,
+                source_type=task.source_type,
+                workflow_key=task.workflow_key,
+                objective=task.objective,
+                started_at=task.started_at.isoformat() if task.started_at else None,
+                completed_at=task.completed_at.isoformat() if task.completed_at else None,
+                error_message=task.error_message,
+            )
+            for task in tasks
+        ]
 
     def list_tools(self) -> list[ToolRegistryItem]:
         self.ensure_seed_agents()
@@ -661,6 +713,7 @@ class PromptAggregationService:
         self.session.add(task)
         self.session.commit()
         self.session.refresh(task)
+        self._set_agent_current_action(package.agent.key, request.task_instruction)
 
         execution_note = "Manual run prepared."
         output_text: str | None = None
@@ -738,6 +791,11 @@ class PromptAggregationService:
                     "output_preview": output_text[:500],
                 }
                 task.completed_at = datetime.now(UTC)
+                self._set_agent_current_action(
+                    package.agent.key,
+                    f"Completed: {request.task_instruction[:160]}",
+                    commit=False,
+                )
                 execution_note = "Manual run completed through the LLM gateway."
                 status = "completed"
                 self.session.commit()
@@ -745,7 +803,7 @@ class PromptAggregationService:
                 self.session.refresh(tool_call)
                 self.session.refresh(task)
                 report_id = str(report.id)
-            except LLMClientError as exc:
+            except Exception as exc:
                 error_message = str(exc)
                 tool_call.status = "failed"
                 tool_call.error_message = error_message
@@ -753,6 +811,11 @@ class PromptAggregationService:
                 task.status = "failed"
                 task.error_message = error_message
                 task.completed_at = datetime.now(UTC)
+                self._set_agent_current_action(
+                    package.agent.key,
+                    f"Failed: {request.task_instruction[:160]}",
+                    commit=False,
+                )
                 self.session.commit()
                 self.session.refresh(tool_call)
                 self.session.refresh(task)
@@ -774,6 +837,11 @@ class PromptAggregationService:
                 "run_id": run_id,
                 "prepared_prompt_chars": len(package.assembled_prompt),
             }
+            self._set_agent_current_action(
+                package.agent.key,
+                f"Prepared: {request.task_instruction[:160]}",
+                commit=False,
+            )
             self.session.commit()
             self.session.refresh(task)
             execution_note = (
@@ -844,6 +912,22 @@ class PromptAggregationService:
             artifact_id=artifact_id,
             error_message=error_message,
         )
+
+    def _set_agent_current_action(
+        self,
+        agent_key: str,
+        current_action: str | None,
+        *,
+        commit: bool = True,
+    ) -> None:
+        agent = AgentRepository(self.session).get_by_key(agent_key)
+        if agent is None:
+            return
+        capabilities = dict(agent.capabilities or {})
+        capabilities["current_action"] = current_action
+        agent.capabilities = capabilities
+        if commit:
+            self.session.commit()
 
 
 class InteractionArtifactPackager:
