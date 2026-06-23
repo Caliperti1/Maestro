@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -34,6 +34,10 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 
 
 class RejectProposalRequest(BaseModel):
+    reason: str | None = None
+
+
+class ArchiveMemoryRequest(BaseModel):
     reason: str | None = None
 
 
@@ -171,10 +175,31 @@ def reject_proposal(
 
 
 @router.get("/items")
-def list_memory_items(limit: int = 20, db: Session = Depends(get_db)) -> dict[str, Any]:
-    query = select(MemoryItem).order_by(MemoryItem.created_at.desc()).limit(limit)
+def list_memory_items(
+    limit: int = 20,
+    include_archived: bool = False,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = select(MemoryItem)
+    if not include_archived:
+        now = datetime.now(UTC)
+        query = query.where(or_(MemoryItem.valid_until.is_(None), MemoryItem.valid_until > now))
+    query = query.order_by(MemoryItem.created_at.desc()).limit(limit)
     items = db.scalars(query).all()
     return {"items": [_memory_item_payload(item) for item in items]}
+
+
+@router.delete("/items/{memory_item_id}")
+def archive_memory_item(
+    memory_item_id: uuid.UUID,
+    request: ArchiveMemoryRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        memory_item = MemoryService(db).archive_memory_item(memory_item_id, reason=request.reason)
+    except MemoryAccessError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "archived", "memory_item": _memory_item_payload(memory_item)}
 
 
 @router.get("/retrieve")

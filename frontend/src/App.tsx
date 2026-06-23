@@ -1582,6 +1582,23 @@ function MemoryWorkspace() {
     }
   };
 
+  const archiveMemory = async (memoryItemId: string) => {
+    setBusy(true);
+    try {
+      await apiJson(`/memory/items/${memoryItemId}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Archived from Memory tab." }),
+      });
+      setStatusMessage("Memory archived.");
+      await refreshMemory();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Memory archive failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const runRetrieval = async () => {
     setBusy(true);
     try {
@@ -1818,6 +1835,14 @@ function MemoryWorkspace() {
               <span>{item.scope} / {item.memory_type} / {item.impact_level}</span>
               <h4>{item.title}</h4>
               <p>{item.content}</p>
+              <button
+                className="danger-action"
+                onClick={() => archiveMemory(item.id)}
+                disabled={busy}
+              >
+                <Trash2 size={16} />
+                Archive memory
+              </button>
             </article>
           ))}
           {items.length === 0 && <p className="empty-state">No memory has been written yet.</p>}

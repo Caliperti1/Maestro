@@ -123,6 +123,42 @@ def test_routed_items_endpoint_filters_by_domain_and_type(
     assert items[0]["domain_key"] == "praxis"
 
 
+def test_archive_memory_item_endpoint_hides_from_default_list(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    memory = MemoryItem(
+        scope="domain",
+        domain_id=praxis.id,
+        memory_type="fact",
+        title="Temporary API memory",
+        content="This should be archived by the API.",
+        impact_level="low",
+        importance=0.5,
+        metadata_={},
+    )
+    session.add(memory)
+    session.commit()
+    session.refresh(memory)
+    client = _client(session, tmp_path)
+
+    archive = client.request(
+        "DELETE",
+        f"/memory/items/{memory.id}",
+        json={"reason": "Test cleanup."},
+    )
+    active = client.get("/memory/items")
+    archived = client.get("/memory/items?include_archived=true")
+
+    assert archive.status_code == 200
+    assert archive.json()["status"] == "archived"
+    assert active.json()["items"] == []
+    assert archived.json()["items"][0]["title"] == "Temporary API memory"
+
+
 def test_memory_preview_listing_marks_in_progress_writes(
     session: Session,
     tmp_path: Path,
