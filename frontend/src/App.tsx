@@ -123,6 +123,19 @@ type MemorySource = {
   processed_at: string | null;
 };
 
+type RoutedItem = {
+  id: string;
+  domain_key: string | null;
+  route_type: string;
+  title: string;
+  content: string;
+  priority: string;
+  status: string;
+  source_refs: Array<Record<string, unknown>>;
+  metadata: Record<string, unknown>;
+  created_at: string | null;
+};
+
 type RetrievedMemory = MemoryItem & {
   domain_key: string;
   agent_id: string | null;
@@ -346,6 +359,15 @@ const agents = [
   "IRAD Project Planner",
 ];
 
+const routedGroups = [
+  { key: "human_input", label: "RFIs", empty: "No open RFIs." },
+  { key: "task", label: "Tasks", empty: "No open tasks." },
+  { key: "event", label: "Events", empty: "No extracted events." },
+  { key: "contact", label: "Contacts", empty: "No extracted contacts." },
+  { key: "decision_log", label: "Decisions", empty: "No recent decisions." },
+  { key: "think_tank", label: "Think Tank", empty: "No think tank notes." },
+];
+
 function statusLabel(status: PlannerItem["status"]) {
   if (status === "locked") return "Locked";
   if (status === "needs-input") return "Needs input";
@@ -404,6 +426,125 @@ async function apiJson<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(body.detail ?? response.statusText);
   }
   return response.json() as Promise<T>;
+}
+
+function RoutedItemsBoard({
+  domainKey,
+  title,
+  eyebrow,
+  className = "",
+}: {
+  domainKey?: string;
+  title: string;
+  eyebrow: string;
+  className?: string;
+}) {
+  const [items, setItems] = useState<RoutedItem[]>([]);
+  const [statusMessage, setStatusMessage] = useState("Ready");
+  const [busyItemId, setBusyItemId] = useState<string | null>(null);
+  const headingId = `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-heading`;
+
+  const refreshItems = useCallback(async () => {
+    const params = new URLSearchParams({ limit: "100" });
+    if (domainKey) params.set("domain_key", domainKey);
+    const response = await apiJson<{ items: RoutedItem[] }>(`/memory/routed-items?${params}`);
+    setItems(response.items);
+    setStatusMessage("Ready");
+  }, [domainKey]);
+
+  useEffect(() => {
+    refreshItems().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : "Unable to load routed items."),
+    );
+  }, [refreshItems]);
+
+  const updateStatus = async (itemId: string, status: "done" | "archived") => {
+    setBusyItemId(itemId);
+    try {
+      await apiJson(`/memory/routed-items/${itemId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status,
+          reason: `${status === "done" ? "Completed" : "Archived"} from routed-item board.`,
+        }),
+      });
+      setStatusMessage(status === "done" ? "Item marked done." : "Item archived.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Routed item update failed.");
+    } finally {
+      setBusyItemId(null);
+    }
+  };
+
+  return (
+    <section className={`memory-panel routed-board ${className}`} aria-labelledby={headingId}>
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">{eyebrow}</p>
+          <h3 id={headingId}>{title}</h3>
+        </div>
+        <button className="icon-button" onClick={refreshItems} title="Refresh routed items">
+          <RefreshCw size={18} />
+        </button>
+      </div>
+
+      <div className="routed-summary">
+        {routedGroups.map((group) => (
+          <span key={group.key}>
+            {group.label} {items.filter((item) => item.route_type === group.key).length}
+          </span>
+        ))}
+      </div>
+
+      <div className="routed-grid">
+        {routedGroups.map((group) => {
+          const groupItems = items.filter((item) => item.route_type === group.key);
+          return (
+            <section className="routed-column" key={group.key} aria-label={group.label}>
+              <div className="routed-column-heading">
+                <h4>{group.label}</h4>
+                <span>{groupItems.length}</span>
+              </div>
+              <div className="routed-list">
+                {groupItems.map((item) => (
+                  <article className="routed-card" key={item.id}>
+                    <span>
+                      {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"} /{" "}
+                      {item.priority}
+                    </span>
+                    <h4>{item.title}</h4>
+                    <p>{item.content}</p>
+                    <div className="routed-actions">
+                      <button
+                        className="planner-action"
+                        onClick={() => updateStatus(item.id, "done")}
+                        disabled={busyItemId === item.id}
+                      >
+                        <CheckCircle2 size={16} />
+                        Done
+                      </button>
+                      <button
+                        className="danger-action"
+                        onClick={() => updateStatus(item.id, "archived")}
+                        disabled={busyItemId === item.id}
+                      >
+                        <Trash2 size={16} />
+                        Archive
+                      </button>
+                    </div>
+                  </article>
+                ))}
+                {groupItems.length === 0 && <p className="empty-state">{group.empty}</p>}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      <p className="memory-status">{statusMessage}</p>
+    </section>
+  );
 }
 
 export function App() {
@@ -688,6 +829,12 @@ export function App() {
                 <button className="planner-action">Configure</button>
               </div>
             </section>
+
+            <RoutedItemsBoard
+              title="Open routed work"
+              eyebrow="Maestro aggregate"
+              className="dashboard-wide"
+            />
           </div>
         )}
       </section>
@@ -989,6 +1136,13 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
         </button>
         <p className="memory-status">{statusMessage}</p>
       </section>
+
+      <RoutedItemsBoard
+        domainKey={domainKey}
+        title={`${domainLabel} routed work`}
+        eyebrow="Domain activity"
+        className="wide-panel"
+      />
 
       <section className="memory-panel admin-panel" aria-labelledby="domain-agent-heading">
         <div className="section-heading">

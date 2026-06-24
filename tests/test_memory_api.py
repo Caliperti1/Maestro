@@ -123,6 +123,40 @@ def test_routed_items_endpoint_filters_by_domain_and_type(
     assert items[0]["domain_key"] == "praxis"
 
 
+def test_routed_item_status_update_endpoint(session: Session, tmp_path: Path) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="task",
+        title="Draft follow-up",
+        content="Draft a partner follow-up email.",
+        priority="normal",
+        status="open",
+        source_refs=[],
+        metadata_={},
+    )
+    session.add(routed_item)
+    session.commit()
+    session.refresh(routed_item)
+    client = _client(session, tmp_path)
+
+    response = client.patch(
+        f"/memory/routed-items/{routed_item.id}",
+        json={"status": "done", "reason": "Completed in routed-item board."},
+    )
+    open_items = client.get("/memory/routed-items?domain_key=praxis")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "updated"
+    assert response.json()["item"]["status"] == "done"
+    assert response.json()["item"]["metadata"]["last_status_reason"] == (
+        "Completed in routed-item board."
+    )
+    assert open_items.json()["items"] == []
+
+
 def test_archive_memory_item_endpoint_hides_from_default_list(
     session: Session,
     tmp_path: Path,

@@ -41,6 +41,11 @@ class ArchiveMemoryRequest(BaseModel):
     reason: str | None = None
 
 
+class UpdateRoutedItemRequest(BaseModel):
+    status: str
+    reason: str | None = None
+
+
 class ReclassifySourceRequest(BaseModel):
     target_domain_key: str
     reason: str | None = None
@@ -147,6 +152,33 @@ def list_routed_items(
         query = query.where(RoutedItem.status == status)
     items = db.scalars(query.order_by(RoutedItem.created_at.desc()).limit(limit)).all()
     return {"items": [_routed_item_payload(db, item) for item in items]}
+
+
+@router.patch("/routed-items/{item_id}")
+def update_routed_item(
+    item_id: uuid.UUID,
+    request: UpdateRoutedItemRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    allowed_statuses = {"open", "done", "archived"}
+    if request.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of: {', '.join(sorted(allowed_statuses))}.",
+        )
+    item = db.get(RoutedItem, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"Routed item {item_id} was not found.")
+    item.status = request.status
+    if request.reason:
+        item.metadata_ = {
+            **(item.metadata_ or {}),
+            "last_status_reason": request.reason,
+            "last_status_change_at": datetime.now(UTC).isoformat(),
+        }
+    db.commit()
+    db.refresh(item)
+    return {"status": "updated", "item": _routed_item_payload(db, item)}
 
 
 @router.post("/proposals/{proposal_id}/approve")
