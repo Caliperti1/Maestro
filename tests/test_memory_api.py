@@ -157,6 +157,52 @@ def test_routed_item_status_update_endpoint(session: Session, tmp_path: Path) ->
     assert open_items.json()["items"] == []
 
 
+def test_routed_items_endpoint_can_return_all_statuses(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    session.add_all(
+        [
+            RoutedItem(
+                domain_id=praxis.id,
+                route_type="human_input",
+                title="Confirm owner",
+                content="Chris needs to confirm the owner.",
+                priority="normal",
+                status="needs_input",
+                source_refs=[],
+                metadata_={},
+            ),
+            RoutedItem(
+                domain_id=praxis.id,
+                route_type="event",
+                title="Partner sync",
+                content="Partner sync is scheduled.",
+                priority="normal",
+                status="scheduled",
+                source_refs=[],
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+    client = _client(session, tmp_path)
+
+    open_only = client.get("/memory/routed-items?domain_key=praxis")
+    all_statuses = client.get("/memory/routed-items?domain_key=praxis&status=all")
+
+    assert open_only.status_code == 200
+    assert open_only.json()["items"] == []
+    assert all_statuses.status_code == 200
+    assert {item["status"] for item in all_statuses.json()["items"]} == {
+        "needs_input",
+        "scheduled",
+    }
+
+
 def test_archive_memory_item_endpoint_hides_from_default_list(
     session: Session,
     tmp_path: Path,

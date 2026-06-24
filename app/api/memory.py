@@ -148,7 +148,7 @@ def list_routed_items(
         query = query.where(RoutedItem.domain_id == domain_id)
     if route_type is not None:
         query = query.where(RoutedItem.route_type == route_type)
-    if status is not None:
+    if status is not None and status != "all":
         query = query.where(RoutedItem.status == status)
     items = db.scalars(query.order_by(RoutedItem.created_at.desc()).limit(limit)).all()
     return {"items": [_routed_item_payload(db, item) for item in items]}

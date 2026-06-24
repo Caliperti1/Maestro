@@ -368,6 +368,8 @@ const routedGroups = [
   { key: "think_tank", label: "Think Tank", empty: "No think tank notes." },
 ];
 
+const hiddenRoutedStatuses = new Set(["done", "archived"]);
+
 function statusLabel(status: PlannerItem["status"]) {
   if (status === "locked") return "Locked";
   if (status === "needs-input") return "Needs input";
@@ -445,10 +447,10 @@ function RoutedItemsBoard({
   const headingId = `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-heading`;
 
   const refreshItems = useCallback(async () => {
-    const params = new URLSearchParams({ limit: "100" });
+    const params = new URLSearchParams({ limit: "100", status: "all" });
     if (domainKey) params.set("domain_key", domainKey);
     const response = await apiJson<{ items: RoutedItem[] }>(`/memory/routed-items?${params}`);
-    setItems(response.items);
+    setItems(response.items.filter((item) => !hiddenRoutedStatuses.has(item.status)));
     setStatusMessage("Ready");
   }, [domainKey]);
 
