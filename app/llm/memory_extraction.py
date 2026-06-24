@@ -133,16 +133,16 @@ class ExtractedRoutedItem(BaseModel):
     title: str
     content: str
     rationale: str
-    priority: ExtractedPriority = "normal"
+    priority: ExtractedPriority
     confidence: float = Field(ge=0.0, le=1.0)
-    status: str = "open"
+    status: str
 
 
 class ExtractedMemoryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidates: list[ExtractedMemoryCandidate]
-    routed_items: list[ExtractedRoutedItem] = Field(default_factory=list)
+    routed_items: list[ExtractedRoutedItem]
 
 
 class LLMMemoryExtractor:

@@ -426,7 +426,7 @@ def _preview_payload(path: Path, domain_key: str) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        payload = {"status": "invalid", "candidates": [], "results": []}
+        payload = {"status": "invalid", "candidates": [], "routed_items": [], "results": []}
     candidates = payload.get("candidates", [])
     routed_items = payload.get("routed_items", [])
     results = payload.get("results", [])
