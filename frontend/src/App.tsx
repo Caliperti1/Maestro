@@ -261,6 +261,63 @@ type AgentRun = {
   staged_artifact_path: string | null;
 };
 
+type MaestroIntent = {
+  type: string;
+  summary: string;
+  target: string;
+  domain_key: string | null;
+  priority: string;
+};
+
+type MaestroSubtask = {
+  agent_key: string;
+  agent_name: string;
+  domain_key: string;
+  objective: string;
+  expected_output: string;
+  priority: string;
+};
+
+type MaestroPlan = {
+  plan_id: string;
+  parent_task_id: string;
+  status: string;
+  user_input: string;
+  summary: string;
+  execution_mode: string;
+  intents: MaestroIntent[];
+  subtasks: MaestroSubtask[];
+  selected_agents: Array<Record<string, unknown>>;
+  approval_required: boolean;
+  scheduler: Record<string, unknown>;
+  created_at: string;
+};
+
+type MaestroRun = {
+  plan: MaestroPlan;
+  status: string;
+  parent_task_id: string;
+  synthesis_report_id: string | null;
+  synthesis: string;
+  staged_artifact_path: string | null;
+  artifact_id: string | null;
+  error_message: string | null;
+  child_runs: Array<{
+    run_id: string;
+    status: string;
+    agent: {
+      key: string;
+      name: string;
+      domain_key: string;
+    };
+    task_id: string | null;
+    report_id: string | null;
+    execution_note: string;
+    output_text: string | null;
+    error_message: string | null;
+  }>;
+};
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
 const domainLabels: Record<string, string> = {
@@ -557,6 +614,11 @@ export function App() {
   );
   const [plannerItems, setPlannerItems] = useState(initialPlannerItems);
   const [draftMessage, setDraftMessage] = useState("");
+  const [maestroPlan, setMaestroPlan] = useState<MaestroPlan | null>(null);
+  const [maestroRun, setMaestroRun] = useState<MaestroRun | null>(null);
+  const [maestroStatus, setMaestroStatus] = useState("Ready");
+  const [executeMaestroLLM, setExecuteMaestroLLM] = useState(true);
+  const [maestroBusy, setMaestroBusy] = useState(false);
 
   const highPriorityCount = useMemo(
     () => plannerItems.filter((item) => item.priority === "high").length,
@@ -578,6 +640,49 @@ export function App() {
     setPlannerItems((items) =>
       items.map((item) => (item.id === id ? { ...item, status: nextStatus(item.status) } : item)),
     );
+  };
+
+  const proposeMaestroPlan = async () => {
+    if (!draftMessage.trim()) return;
+    setMaestroBusy(true);
+    try {
+      const response = await apiJson<{ plan: MaestroPlan }>("/maestro/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: draftMessage }),
+      });
+      setMaestroPlan(response.plan);
+      setMaestroRun(null);
+      setMaestroStatus("Proposed plan ready for approval.");
+    } catch (error) {
+      setMaestroStatus(error instanceof Error ? error.message : "Maestro planning failed.");
+    } finally {
+      setMaestroBusy(false);
+    }
+  };
+
+  const runMaestroPlan = async () => {
+    if (!maestroPlan) return;
+    setMaestroBusy(true);
+    try {
+      const response = await apiJson<{ run: MaestroRun }>(
+        `/maestro/plans/${maestroPlan.parent_task_id}/run`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ execute_llm: executeMaestroLLM }),
+        },
+      );
+      setMaestroRun(response.run);
+      setMaestroPlan(response.run.plan);
+      setMaestroStatus(
+        response.run.status === "completed" ? "Workflow completed." : "Workflow finished.",
+      );
+    } catch (error) {
+      setMaestroStatus(error instanceof Error ? error.message : "Maestro workflow failed.");
+    } finally {
+      setMaestroBusy(false);
+    }
   };
 
   return (
@@ -715,16 +820,102 @@ export function App() {
                 </div>
               </div>
 
-              <form className="composer" onSubmit={(event) => event.preventDefault()}>
+              <form
+                className="composer"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  proposeMaestroPlan();
+                }}
+              >
                 <MessageSquareText size={18} />
                 <input
                   value={draftMessage}
                   onChange={(event) => setDraftMessage(event.target.value)}
-                  placeholder="Tell Maestro what changed..."
+                  placeholder="Ask Maestro to plan and coordinate..."
                   aria-label="Message Maestro"
                 />
-                <button type="submit">Send</button>
+                <button type="submit" disabled={maestroBusy || !draftMessage.trim()}>
+                  Plan
+                </button>
               </form>
+
+              <div className="maestro-status-row">
+                <label className="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={executeMaestroLLM}
+                    onChange={(event) => setExecuteMaestroLLM(event.target.checked)}
+                  />
+                  Execute LLM
+                </label>
+                <span>{maestroStatus}</span>
+              </div>
+
+              {maestroPlan && (
+                <section className="maestro-plan" aria-labelledby="maestro-plan-heading">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">Proposed plan</p>
+                      <h3 id="maestro-plan-heading">{maestroPlan.status}</h3>
+                    </div>
+                    <button
+                      className="planner-action"
+                      onClick={runMaestroPlan}
+                      disabled={maestroBusy || !["proposed", "queued", "failed"].includes(maestroPlan.status)}
+                    >
+                      <Sparkles size={16} />
+                      Run plan
+                    </button>
+                  </div>
+                  <p>{maestroPlan.summary}</p>
+                  <div className="preview-meta">
+                    <span>{maestroPlan.intents.length} intents</span>
+                    <span>{maestroPlan.subtasks.length} subtasks</span>
+                    <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
+                  </div>
+                  <div className="maestro-plan-grid">
+                    <div>
+                      <h4>Intents</h4>
+                      {maestroPlan.intents.map((intent, index) => (
+                        <article className="mini-row" key={`${intent.type}-${index}`}>
+                          <span>{intent.type} / {intent.priority}</span>
+                          <p>{intent.summary}</p>
+                        </article>
+                      ))}
+                    </div>
+                    <div>
+                      <h4>Subtasks</h4>
+                      {maestroPlan.subtasks.map((subtask) => (
+                        <article className="mini-row" key={`${subtask.agent_key}-${subtask.objective}`}>
+                          <span>
+                            {domainLabels[subtask.domain_key] ?? subtask.domain_key} /{" "}
+                            {subtask.agent_name}
+                          </span>
+                          <p>{subtask.objective}</p>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {maestroRun && (
+                <section className="maestro-plan" aria-labelledby="maestro-run-heading">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">Workflow result</p>
+                      <h3 id="maestro-run-heading">{maestroRun.status}</h3>
+                    </div>
+                    <CheckCircle2 size={18} />
+                  </div>
+                  <div className="preview-meta">
+                    <span>{maestroRun.child_runs.length} child runs</span>
+                    <span>{maestroRun.synthesis_report_id ? "report written" : "no report"}</span>
+                    <span>{maestroRun.staged_artifact_path ? "artifact staged" : "not staged"}</span>
+                  </div>
+                  <pre>{maestroRun.synthesis}</pre>
+                </section>
+              )}
             </section>
 
             <section className="planner-panel" aria-labelledby="planner-heading">

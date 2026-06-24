@@ -687,6 +687,10 @@ class PromptAggregationService:
         *,
         stage_interaction: bool = False,
         execute_llm: bool = True,
+        parent_task_id: uuid.UUID | None = None,
+        source_type: str = "manual_run_once",
+        workflow_key: str = "agent.run_once",
+        priority: str = "normal",
     ) -> AgentRunResult:
         package = self.build_prompt_package(request)
         run_id = str(uuid.uuid4())
@@ -694,12 +698,13 @@ class PromptAggregationService:
         if domain is None:
             raise AgentRuntimeError(f"Unknown domain: {package.agent.domain_key}")
         task = Task(
+            parent_task_id=parent_task_id,
             domain_id=domain.id,
             assigned_agent_id=package.agent.id,
             status="running" if execute_llm else "prepared",
-            priority="normal",
-            source_type="manual_run_once",
-            workflow_key="agent.run_once",
+            priority=priority,
+            source_type=source_type,
+            workflow_key=workflow_key,
             objective=request.task_instruction,
             input_payload={
                 "run_id": run_id,

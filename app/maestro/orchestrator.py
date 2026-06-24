@@ -1,0 +1,569 @@
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Literal
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.agents.runtime import (
+    AgentRegistryService,
+    AgentRunResult,
+    InteractionArtifactPackager,
+    PromptAggregationService,
+    PromptPackageRequest,
+)
+from app.db.models import Artifact, Report, Task
+
+IntentType = Literal[
+    "direct_chat",
+    "workflow",
+    "task",
+    "contact",
+    "event",
+    "decision",
+    "rfi",
+    "memory_route",
+    "schedule",
+]
+
+
+@dataclass(frozen=True)
+class MaestroIntent:
+    type: IntentType
+    summary: str
+    target: str
+    domain_key: str | None = None
+    priority: str = "normal"
+
+
+@dataclass(frozen=True)
+class MaestroSubtask:
+    agent_key: str
+    agent_name: str
+    domain_key: str
+    objective: str
+    expected_output: str
+    priority: str = "normal"
+
+
+@dataclass(frozen=True)
+class MaestroPlan:
+    plan_id: str
+    status: str
+    user_input: str
+    summary: str
+    execution_mode: str
+    intents: list[MaestroIntent]
+    subtasks: list[MaestroSubtask]
+    selected_agents: list[dict[str, Any]]
+    registry_snapshot: dict[str, Any]
+    approval_required: bool
+    scheduler: dict[str, Any]
+    created_at: str
+    parent_task_id: str
+
+
+@dataclass(frozen=True)
+class MaestroRun:
+    plan: MaestroPlan
+    status: str
+    parent_task_id: str
+    child_runs: list[AgentRunResult]
+    synthesis_report_id: str | None
+    synthesis: str
+    staged_artifact_path: str | None
+    artifact_id: str | None
+    scheduler: dict[str, Any]
+    error_message: str | None = None
+
+
+class MaestroOrchestratorError(ValueError):
+    pass
+
+
+class MaestroOrchestratorService:
+    def __init__(self, session: Session, *, runtime: PromptAggregationService | None = None):
+        self.session = session
+        self.registry = AgentRegistryService(session)
+        self.runtime = runtime or PromptAggregationService(session)
+
+    def create_plan(self, user_input: str) -> MaestroPlan:
+        cleaned_input = user_input.strip()
+        if not cleaned_input:
+            raise MaestroOrchestratorError("Maestro input cannot be blank.")
+
+        agents = self.registry.list_specs()
+        domains = self.registry.list_domain_contexts()
+        tools = self.registry.list_tools()
+        selected_agents = self._select_agents(cleaned_input, agents)
+        intents = self._classify_intents(cleaned_input, selected_agents)
+        subtasks = [
+            MaestroSubtask(
+                agent_key=agent.key,
+                agent_name=agent.name,
+                domain_key=agent.domain_key,
+                objective=self._subtask_objective(cleaned_input, agent.domain_key, intents),
+                expected_output=(
+                    "Return a concise report with summary, findings, open questions, next steps, "
+                    "and provenance notes. If this is mostly an action, return an action summary."
+                ),
+                priority="high" if any(intent.priority == "high" for intent in intents) else "normal",
+            )
+            for agent in selected_agents
+        ]
+        summary = self._plan_summary(cleaned_input, intents, subtasks)
+        plan_id = str(uuid.uuid4())
+        parent_task = Task(
+            status="proposed",
+            priority="high" if any(subtask.priority == "high" for subtask in subtasks) else "normal",
+            source_type="maestro_chat",
+            workflow_key="maestro.generic",
+            objective=summary,
+            input_payload={
+                "plan_id": plan_id,
+                "user_input": cleaned_input,
+                "execution_mode": "propose_first",
+                "intents": [intent.__dict__ for intent in intents],
+                "subtasks": [subtask.__dict__ for subtask in subtasks],
+                "selected_agents": [self._selected_agent_payload(agent) for agent in selected_agents],
+                "registry_snapshot": self._registry_snapshot(domains, agents, tools),
+                "approval_required": True,
+                "scheduler": self._scheduler_payload(),
+            },
+        )
+        self.session.add(parent_task)
+        self.session.commit()
+        self.session.refresh(parent_task)
+        return self._plan_from_task(parent_task)
+
+    def get_plan(self, plan_id: uuid.UUID | str) -> MaestroPlan:
+        plan_uuid = plan_id if isinstance(plan_id, uuid.UUID) else uuid.UUID(str(plan_id))
+        task = self.session.scalar(
+            select(Task).where(
+                Task.id == plan_uuid,
+                Task.workflow_key == "maestro.generic",
+            )
+        )
+        if task is None:
+            task = self.session.scalar(
+                select(Task).where(
+                    Task.input_payload["plan_id"].as_string() == str(plan_uuid),
+                    Task.workflow_key == "maestro.generic",
+                )
+            )
+        if task is None:
+            raise MaestroOrchestratorError(f"Unknown Maestro plan: {plan_id}")
+        return self._plan_from_task(task)
+
+    def run_plan(self, plan_id: uuid.UUID | str, *, execute_llm: bool = True) -> MaestroRun:
+        plan = self.get_plan(plan_id)
+        parent_task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
+        if parent_task is None:
+            raise MaestroOrchestratorError(f"Plan parent task was not found: {plan.parent_task_id}")
+        if parent_task.status not in {"proposed", "queued", "failed"}:
+            raise MaestroOrchestratorError(
+                f"Plan cannot be run from status {parent_task.status}."
+            )
+
+        parent_task.status = "running"
+        parent_task.started_at = datetime.now(UTC)
+        self.session.commit()
+
+        child_runs: list[AgentRunResult] = []
+        status = "completed"
+        error_message: str | None = None
+        try:
+            for subtask in plan.subtasks:
+                child_runs.append(
+                    self.runtime.run_agent_once(
+                        PromptPackageRequest(
+                            agent_key=subtask.agent_key,
+                            task_instruction=subtask.objective,
+                            caller="maestro",
+                            user_context=plan.user_input,
+                            query_text=plan.user_input,
+                            use_semantic=True,
+                        ),
+                        stage_interaction=False,
+                        execute_llm=execute_llm,
+                        parent_task_id=parent_task.id,
+                        source_type="maestro_orchestrator",
+                        workflow_key="maestro.generic.child",
+                        priority=subtask.priority,
+                    )
+                )
+            if any(run.status == "failed" for run in child_runs):
+                status = "failed"
+                error_message = "One or more delegated agent tasks failed."
+            synthesis = self._synthesize(plan, child_runs, status=status)
+            report = self._write_synthesis_report(parent_task, plan, child_runs, synthesis, status)
+            staged = self._stage_workflow_artifact(parent_task, plan, child_runs, synthesis, report)
+            parent_task.status = status
+            parent_task.output_payload = {
+                "plan_id": plan.plan_id,
+                "status": status,
+                "child_task_ids": [run.task_id for run in child_runs],
+                "child_report_ids": [run.report_id for run in child_runs if run.report_id],
+                "synthesis_report_id": str(report.id),
+                "staged_artifact_path": staged.path,
+                "artifact_id": staged.artifact_id,
+            }
+            parent_task.error_message = error_message
+            parent_task.completed_at = datetime.now(UTC)
+            self.session.commit()
+            self.session.refresh(report)
+            self.session.refresh(parent_task)
+            return MaestroRun(
+                plan=self._plan_from_task(parent_task),
+                status=status,
+                parent_task_id=str(parent_task.id),
+                child_runs=child_runs,
+                synthesis_report_id=str(report.id),
+                synthesis=synthesis,
+                staged_artifact_path=staged.path,
+                artifact_id=staged.artifact_id,
+                scheduler=self._scheduler_payload(),
+                error_message=error_message,
+            )
+        except Exception as exc:
+            parent_task.status = "failed"
+            parent_task.error_message = str(exc)
+            parent_task.completed_at = datetime.now(UTC)
+            self.session.commit()
+            raise
+
+    def _select_agents(self, user_input: str, agents) -> list:
+        lowered = user_input.lower()
+        selected = [
+            agent
+            for agent in agents
+            if agent.domain_key in lowered
+            or agent.domain_key.replace("-", " ") in lowered
+            or any(token in lowered for token in _DOMAIN_HINTS.get(agent.domain_key, []))
+        ]
+        if not selected:
+            selected = [
+                agent
+                for agent in agents
+                if agent.domain_key in {"praxis", "personal", "maestro-development"}
+            ]
+        if not selected and agents:
+            selected = [agents[0]]
+        return sorted(selected, key=lambda agent: (agent.domain_key, agent.key))[:4]
+
+    def _classify_intents(self, user_input: str, selected_agents) -> list[MaestroIntent]:
+        lowered = user_input.lower()
+        default_domain = selected_agents[0].domain_key if selected_agents else None
+        intents: list[MaestroIntent] = []
+        if any(token in lowered for token in ("plan", "prepare", "coordinate", "workflow")):
+            intents.append(
+                MaestroIntent(
+                    type="workflow",
+                    summary="Coordinate a multi-step plan.",
+                    target=user_input[:180],
+                    domain_key=default_domain,
+                    priority="high",
+                )
+            )
+        if any(token in lowered for token in ("task", "todo", "due", "follow up", "follow-up")):
+            intents.append(
+                MaestroIntent(
+                    type="task",
+                    summary="Capture or delegate a concrete follow-up.",
+                    target=user_input[:180],
+                    domain_key=default_domain,
+                )
+            )
+        if any(token in lowered for token in ("contact", "lead", "partner", "crm")):
+            intents.append(
+                MaestroIntent(
+                    type="contact",
+                    summary="Extract or use relationship/contact context.",
+                    target=user_input[:180],
+                    domain_key=default_domain,
+                )
+            )
+        if any(token in lowered for token in ("event", "calendar", "meeting", "call", "sync")):
+            intents.append(
+                MaestroIntent(
+                    type="event",
+                    summary="Extract or reason over schedule context.",
+                    target=user_input[:180],
+                    domain_key=default_domain,
+                )
+            )
+        if any(token in lowered for token in ("decision", "decide", "tradeoff", "recommend")):
+            intents.append(
+                MaestroIntent(
+                    type="decision",
+                    summary="Surface a decision or recommendation.",
+                    target=user_input[:180],
+                    domain_key=default_domain,
+                )
+            )
+        if any(token in lowered for token in ("?", "confirm", "need from me", "rfi", "question")):
+            intents.append(
+                MaestroIntent(
+                    type="rfi",
+                    summary="Identify information needed from Chris.",
+                    target=user_input[:180],
+                    domain_key=default_domain,
+                )
+            )
+        if any(token in lowered for token in ("remember", "memory", "standing instruction", "preference")):
+            intents.append(
+                MaestroIntent(
+                    type="memory_route",
+                    summary="Route durable context through memory curation.",
+                    target=user_input[:180],
+                    domain_key=default_domain,
+                )
+            )
+        if not intents:
+            intents.append(
+                MaestroIntent(
+                    type="direct_chat",
+                    summary="Respond directly unless the user approves further work.",
+                    target=user_input[:180],
+                    domain_key=default_domain,
+                )
+            )
+        if selected_agents and not any(intent.type == "workflow" for intent in intents):
+            intents.append(
+                MaestroIntent(
+                    type="workflow",
+                    summary="Use available agents if Chris approves execution.",
+                    target=user_input[:180],
+                    domain_key=default_domain,
+                )
+            )
+        return intents
+
+    def _subtask_objective(
+        self,
+        user_input: str,
+        domain_key: str,
+        intents: list[MaestroIntent],
+    ) -> str:
+        intent_list = ", ".join(intent.type for intent in intents)
+        return (
+            f"Handle the {domain_key} portion of this Maestro request. "
+            f"Detected intents: {intent_list}. User request: {user_input}"
+        )
+
+    def _plan_summary(
+        self,
+        user_input: str,
+        intents: list[MaestroIntent],
+        subtasks: list[MaestroSubtask],
+    ) -> str:
+        return (
+            f"Proposed Maestro plan for {len(subtasks)} agent task(s) and "
+            f"{len(intents)} detected intent(s): {user_input[:180]}"
+        )
+
+    def _registry_snapshot(self, domains, agents, tools) -> dict[str, Any]:
+        return {
+            "domains": [
+                {"key": domain.key, "name": domain.name, "context": domain.context}
+                for domain in domains
+            ],
+            "agents": [self._selected_agent_payload(agent) for agent in agents],
+            "tools": [
+                {
+                    "key": tool.key,
+                    "name": tool.name,
+                    "exclusive": tool.exclusive,
+                    "connected_domains": tool.connected_domains,
+                    "authorized_agents": tool.authorized_agents,
+                }
+                for tool in tools
+            ],
+        }
+
+    def _selected_agent_payload(self, agent) -> dict[str, Any]:
+        return {
+            "key": agent.key,
+            "name": agent.name,
+            "domain_key": agent.domain_key,
+            "role_summary": agent.role_summary,
+            "current_action": agent.current_action,
+            "allowed_tools": [
+                {
+                    "key": tool.key,
+                    "name": tool.name,
+                    "permission": tool.permission,
+                    "connection_id": tool.connection_id,
+                }
+                for tool in agent.allowed_tools
+            ],
+        }
+
+    def _scheduler_payload(self) -> dict[str, Any]:
+        return {
+            "status": "queue_foundation",
+            "policy": "Plan-first execution. Child tasks run sequentially in MVP.",
+            "resource_locks": [],
+            "recurring_scheduler": "planned",
+        }
+
+    def _plan_from_task(self, task: Task) -> MaestroPlan:
+        payload = task.input_payload or {}
+        return MaestroPlan(
+            plan_id=str(payload.get("plan_id") or task.id),
+            status=task.status,
+            user_input=str(payload.get("user_input") or ""),
+            summary=task.objective,
+            execution_mode=str(payload.get("execution_mode") or "propose_first"),
+            intents=[MaestroIntent(**intent) for intent in payload.get("intents", [])],
+            subtasks=[MaestroSubtask(**subtask) for subtask in payload.get("subtasks", [])],
+            selected_agents=list(payload.get("selected_agents", [])),
+            registry_snapshot=dict(payload.get("registry_snapshot", {})),
+            approval_required=bool(payload.get("approval_required", True)),
+            scheduler=dict(payload.get("scheduler", self._scheduler_payload())),
+            created_at=task.created_at.isoformat() if task.created_at else "",
+            parent_task_id=str(task.id),
+        )
+
+    def _synthesize(
+        self,
+        plan: MaestroPlan,
+        child_runs: list[AgentRunResult],
+        *,
+        status: str,
+    ) -> str:
+        lines = [
+            f"# Maestro Synthesis: {plan.summary}",
+            "",
+            f"Status: {status}",
+            "",
+            "## Original Request",
+            plan.user_input,
+            "",
+            "## Delegated Results",
+        ]
+        for run in child_runs:
+            lines.extend(
+                [
+                    f"### {run.agent.name} ({run.agent.domain_key})",
+                    f"Status: {run.status}",
+                    run.output_text or run.execution_note,
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Next Steps",
+                "- Review the synthesized output.",
+                "- Address any RFIs or routed work surfaced by the agents.",
+                "- Let the memory pipeline curate the canonical workflow artifact.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _write_synthesis_report(
+        self,
+        parent_task: Task,
+        plan: MaestroPlan,
+        child_runs: list[AgentRunResult],
+        synthesis: str,
+        status: str,
+    ) -> Report:
+        report = Report(
+            task_id=parent_task.id,
+            title="Maestro workflow synthesis",
+            report_type="maestro_workflow_synthesis",
+            summary=synthesis[:500],
+            body_markdown=synthesis,
+            structured_data={
+                "plan_id": plan.plan_id,
+                "status": status,
+                "child_runs": [
+                    {
+                        "agent_key": run.agent.key,
+                        "domain_key": run.agent.domain_key,
+                        "status": run.status,
+                        "task_id": run.task_id,
+                        "report_id": run.report_id,
+                    }
+                    for run in child_runs
+                ],
+            },
+        )
+        self.session.add(report)
+        self.session.flush()
+        return report
+
+    def _stage_workflow_artifact(
+        self,
+        parent_task: Task,
+        plan: MaestroPlan,
+        child_runs: list[AgentRunResult],
+        synthesis: str,
+        report: Report,
+    ):
+        package = InteractionArtifactPackager(self.session).build_package(
+            domain_key="maestro-development",
+            agent_key=None,
+            user_input=plan.user_input,
+            maestro_tasking=plan.summary,
+            agent_output=synthesis,
+            tool_calls=[
+                tool_call
+                for run in child_runs
+                for tool_call in run.tool_calls
+            ],
+            generated_artifacts=[
+                {
+                    "name": f"{run.agent.key}-report",
+                    "type": "agent_report",
+                    "task_id": run.task_id,
+                    "report_id": run.report_id,
+                }
+                for run in child_runs
+            ]
+            + [
+                {
+                    "name": "maestro-workflow-synthesis",
+                    "type": "maestro_synthesis_report",
+                    "task_id": str(parent_task.id),
+                    "report_id": str(report.id),
+                }
+            ],
+            open_questions=[
+                intent.target for intent in plan.intents if intent.type == "rfi"
+            ],
+            next_steps=["Review workflow synthesis.", "Run memory curation on this artifact."],
+            task_id=str(parent_task.id),
+            provenance={
+                "plan_id": plan.plan_id,
+                "workflow_key": parent_task.workflow_key,
+                "child_task_ids": [run.task_id for run in child_runs],
+                "canonical_workflow_artifact": True,
+            },
+        )
+        staged = InteractionArtifactPackager(self.session).stage_package(package)
+        artifact = self.session.get(Artifact, uuid.UUID(staged.artifact_id or ""))
+        if artifact is not None:
+            artifact.task_id = parent_task.id
+            artifact.report_id = report.id
+            artifact.metadata_ = {
+                **(artifact.metadata_ or {}),
+                "plan_id": plan.plan_id,
+                "workflow_key": parent_task.workflow_key,
+                "canonical_workflow_artifact": True,
+            }
+            self.session.commit()
+        return staged
+
+
+_DOMAIN_HINTS = {
+    "personal": ["personal", "calendar", "family", "life", "preference"],
+    "maestro-development": ["maestro", "orchestrator", "agent", "memory", "system", "code"],
+    "praxis": ["praxis", "partner", "tactical innovation", "transition", "training"],
+    "ophi": ["ophi", "product", "market", "research"],
+    "usma": ["usma", "cadet", "class", "teaching", "academic"],
+    "personal-irad-projects": ["irad", "prototype", "project"],
+    "l3": ["l3"],
+}

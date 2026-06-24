@@ -248,7 +248,9 @@ h4 {
 .message p,
 .report-card p,
 .tool-shell span,
-.timeline-body p {
+.timeline-body p,
+.maestro-plan p,
+.mini-row p {
   color: #52605a;
   line-height: 1.45;
 }
@@ -288,6 +290,62 @@ h4 {
   padding: 7px 12px;
   color: #ffffff;
   background: #426b57;
+}
+
+.maestro-status-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  color: #52605a;
+  font-size: 0.86rem;
+}
+
+.maestro-plan {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px;
+  background: #f9fbf8;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
+.maestro-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mini-row {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 9px;
+  background: #ffffff;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
+.mini-row span {
+  color: #68736d;
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.maestro-plan pre {
+  max-height: 460px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  color: #26352f;
+  background: #ffffff;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  line-height: 1.45;
 }
 
 .planner-action {
@@ -1199,6 +1257,13 @@ h4 {
 
   .timeline-title-row {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .maestro-status-row,
+  .maestro-plan-grid {
+    align-items: stretch;
+    grid-template-columns: 1fr;
     flex-direction: column;
   }
 
