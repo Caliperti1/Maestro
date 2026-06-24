@@ -63,6 +63,8 @@ def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
         "user_input": plan.user_input,
         "summary": plan.summary,
         "execution_mode": plan.execution_mode,
+        "planner_mode": plan.planner_mode,
+        "work_items": [work_item.__dict__ for work_item in plan.work_items],
         "intents": [intent.__dict__ for intent in plan.intents],
         "subtasks": [subtask.__dict__ for subtask in plan.subtasks],
         "selected_agents": plan.selected_agents,
@@ -70,6 +72,8 @@ def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
         "approval_required": plan.approval_required,
         "scheduler": plan.scheduler,
         "created_at": plan.created_at,
+        "direct_response": plan.direct_response,
+        "planner_notes": plan.planner_notes,
     }
 
 

@@ -18,7 +18,9 @@ sequenceDiagram
     Chris->>UI: Complex request
     UI->>Orchestrator: POST /maestro/plan
     Orchestrator->>Registry: List domains, agents, tools
-    Orchestrator->>Orchestrator: Build multi-intent proposed plan
+    Orchestrator->>Orchestrator: Build planning context
+    Orchestrator->>Orchestrator: Decompose request into work items
+    Orchestrator->>Orchestrator: Match work items to agents/tools
     Orchestrator-->>UI: Proposed plan, intents, subtasks
     Chris->>UI: Run plan
     UI->>Orchestrator: POST /maestro/plans/{id}/run
@@ -31,13 +33,19 @@ sequenceDiagram
 
 ## Planning Contract
 
-The plan is intentionally multi-intent. A single user message can require workflow delegation,
-task capture, contact extraction, event extraction, RFIs, decisions, and memory routing at the
-same time. The MVP planner uses deterministic hints and the active registry. The later LLM planner
-should keep the same shape while improving judgment.
+The plan is intentionally decomposition-first. A single user message can require workflow
+delegation, task capture, contact extraction, event extraction, RFIs, decisions, and memory routing
+at the same time. Maestro first asks what work or retained information exists, then matches that
+work against the active registry.
+
+The preferred planner is an LLM structured-output pass. The deterministic planner remains as a
+fallback when the LLM planner is unavailable.
 
 Every proposed plan includes:
 
+- planner mode, such as `llm` or `deterministic`
+- decomposed work items, such as workflow tasks, standalone tasks, contacts, events, decisions,
+  RFIs, memory candidates, think tank notes, or direct responses
 - planning lanes, which are routing hints such as workflow, task, contact, event, RFI, decision,
   and memory-route
 - selected agents and domains
@@ -47,10 +55,10 @@ Every proposed plan includes:
 - scheduler/queue notes
 - registry snapshot of available agents and tools
 
-The deterministic MVP should not simply send the full user request to every agent in a selected
-domain. It scores agents by domain and role relevance, then writes each child task so the agent
-focuses only on the part of the request that fits its specialty. A later LLM planner should replace
-the deterministic scoring while preserving this contract.
+Maestro should not send the full user request to every agent in a selected domain. It decomposes
+the request into work items, scores agents by domain, role, tool, and suggested-agent fit, then
+writes each child task from the assigned work items. Agents receive user context through the prompt
+package, but their tasking objective is scoped to the work items they own.
 
 No child task runs during planning.
 
@@ -67,7 +75,9 @@ Running an approved plan:
 - stages one canonical workflow artifact for memory curation
 
 Agent outputs remain traceable reports, but they are not individually staged into memory by default.
-The canonical workflow artifact is the memory-curation boundary for a workflow session.
+The canonical workflow artifact is the memory-curation boundary for a workflow session. It includes
+the original user input, decomposition, work items, subtasks, child outputs, synthesis, RFIs, and
+provenance.
 
 ## Scheduler And Queue Foundation
 

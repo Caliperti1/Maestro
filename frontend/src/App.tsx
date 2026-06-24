@@ -278,6 +278,26 @@ type MaestroSubtask = {
   expected_output: string;
   priority: string;
   rationale: string | null;
+  work_item_ids: string[] | null;
+  depends_on_work_item_ids: string[] | null;
+};
+
+type MaestroWorkItem = {
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  domain_key: string | null;
+  priority: string;
+  required_capabilities: string[];
+  required_tools: string[];
+  dependencies: string[];
+  needs_agent: boolean;
+  needs_user_input: boolean;
+  can_log_directly: boolean;
+  suggested_agent_keys: string[];
+  expected_output: string;
+  rationale: string;
 };
 
 type MaestroPlan = {
@@ -287,12 +307,16 @@ type MaestroPlan = {
   user_input: string;
   summary: string;
   execution_mode: string;
+  planner_mode: string;
+  work_items: MaestroWorkItem[];
   intents: MaestroIntent[];
   subtasks: MaestroSubtask[];
   selected_agents: Array<Record<string, unknown>>;
   approval_required: boolean;
   scheduler: Record<string, unknown>;
   created_at: string;
+  direct_response: string | null;
+  planner_notes: string | null;
 };
 
 type MaestroRun = {
@@ -870,12 +894,38 @@ export function App() {
                     </button>
                   </div>
                   <p>{maestroPlan.summary}</p>
+                  {maestroPlan.planner_notes && (
+                    <p className="evaluation-note">{maestroPlan.planner_notes}</p>
+                  )}
+                  {maestroPlan.direct_response && (
+                    <p className="evaluation-note">{maestroPlan.direct_response}</p>
+                  )}
                   <div className="preview-meta">
+                    <span>{maestroPlan.planner_mode} planner</span>
+                    <span>{maestroPlan.work_items.length} work items</span>
                     <span>{maestroPlan.intents.length} lanes</span>
                     <span>{maestroPlan.subtasks.length} subtasks</span>
                     <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
                   </div>
                   <div className="maestro-plan-grid">
+                    <div>
+                      <h4>Work items</h4>
+                      {maestroPlan.work_items.map((item) => (
+                        <article className="mini-row" key={item.id}>
+                          <span>
+                            {item.id} / {item.type} / {item.priority} /{" "}
+                            {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
+                          </span>
+                          <p>{item.title}</p>
+                          <p>{item.description}</p>
+                          <div className="preview-meta">
+                            <span>{item.needs_agent ? "agent" : "no agent"}</span>
+                            <span>{item.can_log_directly ? "loggable" : "not loggable"}</span>
+                            <span>{item.needs_user_input ? "needs Chris" : "no RFI"}</span>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
                     <div>
                       <h4>Planning lanes</h4>
                       {maestroPlan.intents.map((intent, index) => (
@@ -893,6 +943,9 @@ export function App() {
                             {domainLabels[subtask.domain_key] ?? subtask.domain_key} /{" "}
                             {subtask.agent_name}
                           </span>
+                          {subtask.work_item_ids && (
+                            <span>Work items: {subtask.work_item_ids.join(", ")}</span>
+                          )}
                           <p>{subtask.objective}</p>
                           {subtask.rationale && <p>{subtask.rationale}</p>}
                         </article>

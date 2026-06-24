@@ -10,7 +10,9 @@ from app.api.main import create_app
 from app.core.config import get_settings
 from app.db.models import Artifact, Report, Task
 from app.db.session import get_db
+from app.llm.client import LLMClientError
 from app.maestro.orchestrator import MaestroOrchestratorService
+from app.maestro.planner import MaestroPlannerResponse
 
 
 class FakeOrchestratorLLMClient:
@@ -31,10 +33,142 @@ class FakeOrchestratorLLMClient:
         )
 
 
+class FakePlannerLLMClient:
+    provider = "test"
+    model = "test-planner-model"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Plan decomposed before delegation.",
+            "direct_response": None,
+            "planner_notes": "Fake structured planner response.",
+            "work_items": [
+                {
+                    "id": "wi_partner_prep",
+                    "type": "workflow_task",
+                    "title": "Prepare Praxis partner call",
+                    "description": "Prepare the partner call brief and identify follow-up risks.",
+                    "domain_key": "praxis",
+                    "priority": "high",
+                    "required_capabilities": ["partner planning", "follow-up planning"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["praxis-planning-agent"],
+                    "expected_output": "Partner-call prep report with RFIs and next steps.",
+                    "rationale": "This is substantive Praxis planning work.",
+                },
+                {
+                    "id": "wi_partner_contact",
+                    "type": "contact",
+                    "title": "Capture partner contact",
+                    "description": "Jane Smith is the partner lead at Example Corp.",
+                    "domain_key": "praxis",
+                    "priority": "normal",
+                    "required_capabilities": ["relationship management"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": False,
+                    "can_log_directly": True,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Contact routed for CRM review.",
+                    "rationale": "This should be routed separately from agent work.",
+                },
+                {
+                    "id": "wi_owner_rfi",
+                    "type": "rfi",
+                    "title": "Confirm follow-up owner",
+                    "description": "Chris needs to confirm who owns the next partner follow-up.",
+                    "domain_key": "praxis",
+                    "priority": "normal",
+                    "required_capabilities": [],
+                    "required_tools": [],
+                    "dependencies": ["wi_partner_prep"],
+                    "needs_agent": False,
+                    "needs_user_input": True,
+                    "can_log_directly": True,
+                    "suggested_agent_keys": [],
+                    "expected_output": "RFI surfaced for Chris.",
+                    "rationale": "This blocks confident follow-up assignment.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakeMultiDomainPlannerLLMClient:
+    provider = "test"
+    model = "test-multi-domain-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Coordinate Praxis and Maestro Development work.",
+            "direct_response": None,
+            "planner_notes": "Fake multi-domain structured planner response.",
+            "work_items": [
+                {
+                    "id": "wi_praxis",
+                    "type": "workflow_task",
+                    "title": "Prepare Praxis partner-call contribution",
+                    "description": "Prepare Praxis partner call context and next steps.",
+                    "domain_key": "praxis",
+                    "priority": "high",
+                    "required_capabilities": ["partner planning", "training context"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["praxis-planning-agent"],
+                    "expected_output": "Praxis partner-call prep report.",
+                    "rationale": "Praxis owns partner context.",
+                },
+                {
+                    "id": "wi_maestro",
+                    "type": "workflow_task",
+                    "title": "Assess Maestro system gaps",
+                    "description": "Identify Maestro orchestration gaps exposed by this workflow.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["system introspection", "architecture"],
+                    "required_tools": [],
+                    "dependencies": ["wi_praxis"],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-introspection-agent"],
+                    "expected_output": "Maestro gap report with implementation recommendations.",
+                    "rationale": "Maestro Development owns system improvement.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FailingPlannerLLMClient:
+    provider = "test"
+    model = "test-failing-planner"
+
+    def structured_response(self, **kwargs):
+        raise LLMClientError("Planner unavailable in deterministic fallback test.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
 def _client(session: Session, tmp_path: Path) -> TestClient:
     get_settings.cache_clear()
     settings = get_settings()
     settings.memory_dropbox_root = str(tmp_path)
+    settings.openrouter_api_key = ""
+    settings.openai_api_key = ""
 
     app = create_app()
 
@@ -46,7 +180,10 @@ def _client(session: Session, tmp_path: Path) -> TestClient:
 
 
 def test_orchestrator_plan_is_registry_aware_and_plan_first(session: Session) -> None:
-    plan = MaestroOrchestratorService(session).create_plan(
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FailingPlannerLLMClient(),
+    ).create_plan(
         "Prepare a Praxis partner call workflow and identify RFIs, tasks, contacts, and events."
     )
 
@@ -79,7 +216,10 @@ def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None
         role_summary="Tracks Praxis budgets, invoices, and financial assumptions.",
     )
 
-    plan = MaestroOrchestratorService(session).create_plan(
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FailingPlannerLLMClient(),
+    ).create_plan(
         "Prepare a Praxis partner email follow-up workflow for the next call."
     )
 
@@ -93,7 +233,39 @@ def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None
     assert "Triages Praxis email" in email_subtask.objective
     assert "only on the portion" in email_subtask.objective
     assert email_subtask.rationale is not None
-    assert "role overlap" in email_subtask.rationale
+    assert "wi_1" in email_subtask.rationale
+
+
+def test_orchestrator_decomposes_with_llm_before_agent_matching(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="Praxis Email Agent",
+        name="Praxis Email Agent",
+        role_summary="Drafts partner emails and communication follow-ups.",
+    )
+
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakePlannerLLMClient(),
+    ).create_plan(
+        "Prepare for the partner call. Jane Smith is the partner lead. Confirm who owns follow-up."
+    )
+
+    assert plan.planner_mode == "llm"
+    assert [item.id for item in plan.work_items] == [
+        "wi_partner_prep",
+        "wi_partner_contact",
+        "wi_owner_rfi",
+    ]
+    assert any(item.type == "contact" and item.can_log_directly for item in plan.work_items)
+    assert any(item.type == "rfi" and item.needs_user_input for item in plan.work_items)
+    assert len(plan.subtasks) == 1
+    subtask = plan.subtasks[0]
+    assert subtask.agent_key == "praxis-planning-agent"
+    assert subtask.work_item_ids == ["wi_partner_prep"]
+    assert "Work item wi_partner_prep" in subtask.objective
+    assert "Jane Smith is the partner lead" not in subtask.objective
 
 
 def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
@@ -104,7 +276,11 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     settings = get_settings()
     settings.memory_dropbox_root = str(tmp_path)
     runtime = PromptAggregationService(session, llm_client=FakeOrchestratorLLMClient())
-    service = MaestroOrchestratorService(session, runtime=runtime)
+    service = MaestroOrchestratorService(
+        session,
+        runtime=runtime,
+        planner_llm_client=FakeMultiDomainPlannerLLMClient(),
+    )
     plan = service.create_plan(
         "Prepare a Praxis partner call workflow and ask Maestro Development to note system gaps."
     )
@@ -157,3 +333,22 @@ def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None
     assert run["child_runs"]
     assert run["staged_artifact_path"]
     assert "Maestro Synthesis" in run["synthesis"]
+
+
+def test_maestro_planner_schema_requires_every_declared_property() -> None:
+    schema = MaestroPlannerResponse.model_json_schema()
+
+    def assert_required_matches_properties(node: dict) -> None:
+        properties = set(node.get("properties", {}))
+        if properties:
+            assert set(node.get("required", [])) == properties
+        for child in node.get("$defs", {}).values():
+            assert_required_matches_properties(child)
+        for child in node.get("properties", {}).values():
+            if isinstance(child, dict):
+                assert_required_matches_properties(child)
+        items = node.get("items")
+        if isinstance(items, dict):
+            assert_required_matches_properties(items)
+
+    assert_required_matches_properties(schema)
