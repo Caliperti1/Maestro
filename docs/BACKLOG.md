@@ -265,6 +265,15 @@ class Agent:
 - Still log messages/tasks/reports.
 - Still route memory through proposal/curator flow.
 
+### 5.4 Routed work surfaces hardening
+
+- Turn routed items into richer domain-level surfaces for tasks, RFIs, contacts, events, decisions, projects, and think tank notes.
+- Add editable detail views for each routed item type.
+- Promote approved routed tasks/events/contacts into first-class internal task, calendar, and CRM records where appropriate.
+- Keep Maestro-level aggregate views across all domains while preserving domain ownership.
+- Define external sync rules for calendars, task managers, CRM systems, and contact stores.
+- Support richer lifecycle states, owners, dates, due dates, reminders, and follow-up history.
+
 ---
 
 ## Milestone 6: Daily Standup Workflow

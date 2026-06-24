@@ -5,7 +5,7 @@ from zipfile import ZipFile
 import pytest
 from sqlalchemy.orm import Session
 
-from app.db.models import Artifact, MemoryItem, MemoryProposal, SeedPackage
+from app.db.models import Artifact, MemoryItem, MemoryProposal, RoutedItem, SeedPackage
 from app.llm import LLMMemoryExtractor
 from app.llm.client import LLMClientError
 from app.memory import LLMMemoryCurator
@@ -13,6 +13,7 @@ import app.memory.document_extract as document_extract
 from app.memory.document_extract import DocumentExtractionError, extract_dropbox_text
 import app.memory.dropbox as dropbox
 from app.memory.dropbox import MemoryDropboxProcessor
+from app.llm.memory_extraction import ExtractedMemoryResponse
 
 
 class FakeLLMClient:
@@ -85,7 +86,8 @@ def test_dropbox_processor_extracts_previews_writes_memory_and_moves_processed_f
                 "importance": 0.95,
                 "confidence": 0.8,
             },
-        ]
+        ],
+        "routed_items": [],
     }
     processor = MemoryDropboxProcessor(session, root=tmp_path, curator=_curator(session, payload))
     processor.ensure_directories()
@@ -143,6 +145,62 @@ def test_dropbox_processor_extracts_previews_writes_memory_and_moves_processed_f
     )
 
 
+def test_dropbox_processor_writes_routed_items_separate_from_memory(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    payload = {
+        "candidates": [
+            {
+                "scope": "domain",
+                "memory_type": "decision",
+                "title": "Routing design",
+                "content": "Maestro should route operational items separately from memory.",
+                "rationale": "The source states the design decision.",
+                "impact_level": "medium",
+                "importance": 0.8,
+                "confidence": 0.9,
+            }
+        ],
+        "routed_items": [
+            {
+                "route_type": "human_input",
+                "title": "Confirm RFI owner",
+                "content": "Chris needs to answer who owns the Praxis RFI.",
+                "rationale": "The source asks for user input.",
+                "priority": "high",
+                "confidence": 0.86,
+                "status": "open",
+            },
+            {
+                "route_type": "task",
+                "title": "Draft follow-up",
+                "content": "Draft the partner follow-up note.",
+                "rationale": "The source includes a due-out.",
+                "priority": "normal",
+                "confidence": 0.82,
+                "status": "open",
+            },
+        ],
+    }
+    processor = MemoryDropboxProcessor(session, root=tmp_path, curator=_curator(session, payload))
+    processor.ensure_directories()
+    source_path = tmp_path / "praxis" / "inbox" / "run.json"
+    source_path.write_text("Agent run output with RFIs and due-outs.", encoding="utf-8")
+
+    results = processor.process_once()
+
+    assert results[0].status == "processed"
+    assert results[0].candidate_count == 1
+    assert results[0].routed_count == 2
+    routed = session.query(RoutedItem).order_by(RoutedItem.route_type).all()
+    assert [item.route_type for item in routed] == ["human_input", "task"]
+    assert {item.title for item in routed} == {"Confirm RFI owner", "Draft follow-up"}
+    preview = (tmp_path / "praxis" / "previews" / "run.preview.json").read_text()
+    assert "routed_items" in preview
+    assert "Confirm RFI owner" in preview
+
+
 def test_dropbox_processor_extracts_pdf_text_for_curator(
     session: Session,
     tmp_path: Path,
@@ -159,7 +217,7 @@ def test_dropbox_processor_extracts_pdf_text_for_curator(
         def __init__(self, _path: str) -> None:
             pass
 
-    client = FakeLLMClient({"candidates": []})
+    client = FakeLLMClient({"candidates": [], "routed_items": []})
     curator = LLMMemoryCurator(session, LLMMemoryExtractor(client))
     monkeypatch.setattr(document_extract, "PdfReader", FakePdfReader)
 
@@ -300,14 +358,14 @@ def test_dropbox_processor_records_source_when_extraction_fails(
 
 
 def test_llm_extractor_rejects_invalid_model_output() -> None:
-    extractor = _extractor({"candidates": [{"scope": "domain"}]})
+    extractor = _extractor({"candidates": [{"scope": "domain"}], "routed_items": []})
 
     with pytest.raises(LLMClientError):
         extractor.extract(source_title="bad", source_text="bad", domain_key="ophi")
 
 
 def test_llm_extractor_prompt_includes_memory_policy_and_domain_context() -> None:
-    client = FakeLLMClient({"candidates": []})
+    client = FakeLLMClient({"candidates": [], "routed_items": []})
     extractor = LLMMemoryExtractor(client)
 
     extractor.extract(
@@ -327,3 +385,22 @@ def test_llm_extractor_prompt_includes_memory_policy_and_domain_context() -> Non
     assert "Do not invent facts" in instructions
     assert "Domain key: maestro-development" in input_text
     assert "Maestro Development domain" in input_text
+
+
+def test_memory_extraction_schema_requires_every_declared_property() -> None:
+    schema = ExtractedMemoryResponse.model_json_schema()
+
+    def assert_required_matches_properties(node: dict) -> None:
+        properties = set(node.get("properties", {}))
+        if properties:
+            assert set(node.get("required", [])) == properties
+        for child in node.get("$defs", {}).values():
+            assert_required_matches_properties(child)
+        for child in node.get("properties", {}).values():
+            if isinstance(child, dict):
+                assert_required_matches_properties(child)
+        items = node.get("items")
+        if isinstance(items, dict):
+            assert_required_matches_properties(items)
+
+    assert_required_matches_properties(schema)

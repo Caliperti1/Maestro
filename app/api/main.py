@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.agents import router as agents_router
 from app.api.memory import router as memory_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -24,6 +25,7 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": settings.app_name}
 
     app.include_router(memory_router)
+    app.include_router(agents_router)
 
     return app
 

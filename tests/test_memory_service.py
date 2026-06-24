@@ -141,6 +141,28 @@ def test_rejected_proposal_remains_auditable_and_does_not_write_memory(session: 
     assert session.query(MemoryItem).count() == 0
 
 
+def test_archive_memory_item_sets_valid_until_and_metadata(session: Session) -> None:
+    praxis, _, _, _ = _domain_and_agents(session)
+    service = MemoryService(session)
+    result = service.write_candidate(
+        MemoryCandidate(
+            scope="domain",
+            domain_id=praxis.id,
+            memory_type="fact",
+            title="Temporary test memory",
+            content="This memory should be archived after a test.",
+            impact_level="low",
+        )
+    )
+    assert result.memory_item is not None
+
+    archived = service.archive_memory_item(result.memory_item.id, reason="Test cleanup.")
+
+    assert archived.valid_until is not None
+    assert archived.metadata_["archived"] is True
+    assert archived.metadata_["archive_event"]["reason"] == "Test cleanup."
+
+
 def test_agent_retrieval_is_limited_to_global_own_domain_and_own_agent_memory(
     session: Session,
 ) -> None:

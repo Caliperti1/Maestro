@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import MemoryItem, MemoryProposal, SeedPackage
+from app.db.models import MemoryItem, MemoryProposal, RoutedItem, SeedPackage
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
@@ -56,6 +56,7 @@ def test_memory_preview_listing(session: Session, tmp_path: Path) -> None:
           "source_file": "note.md",
           "status": "written",
           "candidates": [{}],
+          "routed_items": [{"route_type": "human_input"}],
           "results": [{"outcome": "written", "memory_item_id": "memory-1"}]
         }
         """,
@@ -69,11 +70,173 @@ def test_memory_preview_listing(session: Session, tmp_path: Path) -> None:
     assert len(previews) == 1
     assert previews[0]["source_file"] == "note.md"
     assert previews[0]["candidate_count"] == 1
+    assert previews[0]["routed_count"] == 1
     assert previews[0]["result_count"] == 1
     assert previews[0]["progress_count"] == 1
     assert previews[0]["progress_total"] == 1
     assert previews[0]["is_processing"] is False
     assert previews[0]["written_count"] == 1
+
+
+def test_routed_items_endpoint_filters_by_domain_and_type(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    ophi = DomainRepository(session).get_by_key("ophi")
+    assert praxis is not None
+    assert ophi is not None
+    session.add_all(
+        [
+            RoutedItem(
+                domain_id=praxis.id,
+                route_type="human_input",
+                title="Confirm Praxis RFI",
+                content="Chris needs to answer the Praxis RFI.",
+                priority="high",
+                status="open",
+                source_refs=[],
+                metadata_={},
+            ),
+            RoutedItem(
+                domain_id=ophi.id,
+                route_type="task",
+                title="Ophi task",
+                content="This should not appear in Praxis RFI filter.",
+                priority="normal",
+                status="open",
+                source_refs=[],
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.get("/memory/routed-items?domain_key=praxis&route_type=human_input")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["title"] == "Confirm Praxis RFI"
+    assert items[0]["domain_key"] == "praxis"
+
+
+def test_routed_item_status_update_endpoint(session: Session, tmp_path: Path) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="task",
+        title="Draft follow-up",
+        content="Draft a partner follow-up email.",
+        priority="normal",
+        status="open",
+        source_refs=[],
+        metadata_={},
+    )
+    session.add(routed_item)
+    session.commit()
+    session.refresh(routed_item)
+    client = _client(session, tmp_path)
+
+    response = client.patch(
+        f"/memory/routed-items/{routed_item.id}",
+        json={"status": "done", "reason": "Completed in routed-item board."},
+    )
+    open_items = client.get("/memory/routed-items?domain_key=praxis")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "updated"
+    assert response.json()["item"]["status"] == "done"
+    assert response.json()["item"]["metadata"]["last_status_reason"] == (
+        "Completed in routed-item board."
+    )
+    assert open_items.json()["items"] == []
+
+
+def test_routed_items_endpoint_can_return_all_statuses(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    session.add_all(
+        [
+            RoutedItem(
+                domain_id=praxis.id,
+                route_type="human_input",
+                title="Confirm owner",
+                content="Chris needs to confirm the owner.",
+                priority="normal",
+                status="needs_input",
+                source_refs=[],
+                metadata_={},
+            ),
+            RoutedItem(
+                domain_id=praxis.id,
+                route_type="event",
+                title="Partner sync",
+                content="Partner sync is scheduled.",
+                priority="normal",
+                status="scheduled",
+                source_refs=[],
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+    client = _client(session, tmp_path)
+
+    open_only = client.get("/memory/routed-items?domain_key=praxis")
+    all_statuses = client.get("/memory/routed-items?domain_key=praxis&status=all")
+
+    assert open_only.status_code == 200
+    assert open_only.json()["items"] == []
+    assert all_statuses.status_code == 200
+    assert {item["status"] for item in all_statuses.json()["items"]} == {
+        "needs_input",
+        "scheduled",
+    }
+
+
+def test_archive_memory_item_endpoint_hides_from_default_list(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    memory = MemoryItem(
+        scope="domain",
+        domain_id=praxis.id,
+        memory_type="fact",
+        title="Temporary API memory",
+        content="This should be archived by the API.",
+        impact_level="low",
+        importance=0.5,
+        metadata_={},
+    )
+    session.add(memory)
+    session.commit()
+    session.refresh(memory)
+    client = _client(session, tmp_path)
+
+    archive = client.request(
+        "DELETE",
+        f"/memory/items/{memory.id}",
+        json={"reason": "Test cleanup."},
+    )
+    active = client.get("/memory/items")
+    archived = client.get("/memory/items?include_archived=true")
+
+    assert archive.status_code == 200
+    assert archive.json()["status"] == "archived"
+    assert active.json()["items"] == []
+    assert archived.json()["items"][0]["title"] == "Temporary API memory"
 
 
 def test_memory_preview_listing_marks_in_progress_writes(

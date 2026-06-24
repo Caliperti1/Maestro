@@ -19,6 +19,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Wrench,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -55,6 +56,7 @@ type MemoryPreview = {
   pending_approval_count: number;
   progress_count: number;
   progress_total: number;
+  routed_count: number;
   payload: {
     candidates?: Array<{
       title?: string;
@@ -75,6 +77,13 @@ type MemoryPreview = {
         rationale?: string | null;
         related_memory_id?: string | null;
       };
+    }>;
+    routed_items?: Array<{
+      route_type?: string;
+      title?: string;
+      content?: string;
+      priority?: string;
+      status?: string;
     }>;
   };
 };
@@ -114,6 +123,19 @@ type MemorySource = {
   processed_at: string | null;
 };
 
+type RoutedItem = {
+  id: string;
+  domain_key: string | null;
+  route_type: string;
+  title: string;
+  content: string;
+  priority: string;
+  status: string;
+  source_refs: Array<Record<string, unknown>>;
+  metadata: Record<string, unknown>;
+  created_at: string | null;
+};
+
 type RetrievedMemory = MemoryItem & {
   domain_key: string;
   agent_id: string | null;
@@ -138,6 +160,105 @@ type RetrievedMemory = MemoryItem & {
     direction: string;
     memory: MemoryItem & { domain_key: string };
   }>;
+};
+
+type AgentTool = {
+  key: string;
+  name: string;
+  permission: string;
+  description: string;
+  connection_id: string | null;
+  auth_type: string | null;
+};
+
+type AgentSpec = {
+  id: string;
+  key: string;
+  name: string;
+  domain_key: string;
+  agent_type: string;
+  role_summary: string;
+  role_prompt: string;
+  memory_profile: string;
+  model_profile: string;
+  allowed_tools: AgentTool[];
+  is_active: boolean;
+  current_action: string | null;
+  scheduled_actions: Array<Record<string, unknown>>;
+};
+
+type AgentTask = {
+  id: string;
+  status: string;
+  priority: string;
+  source_type: string;
+  workflow_key: string | null;
+  objective: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+};
+
+type DomainContext = {
+  id: string;
+  key: string;
+  name: string;
+  context: string;
+  is_active: boolean;
+};
+
+type ToolRegistryItem = {
+  key: string;
+  name: string;
+  description: string;
+  exclusive: boolean;
+  connected_domains: string[];
+  authorized_agents: Array<{
+    agent_key: string;
+    agent_name: string;
+    domain_key: string;
+    permission: string;
+  }>;
+};
+
+type ToolConnection = {
+  id: string;
+  domain_key: string;
+  tool_key: string;
+  display_name: string;
+  auth_type: string;
+  config: Record<string, unknown>;
+  is_active: boolean;
+};
+
+type PromptPackage = {
+  assembled_prompt: string;
+  memory_context: {
+    included_count: number;
+    semantic_status: string;
+  };
+};
+
+type AgentRun = {
+  run_id: string;
+  status: string;
+  execution_note: string;
+  output_text: string | null;
+  task_id: string | null;
+  report_id: string | null;
+  error_message: string | null;
+  tool_calls?: Array<{
+    id: string;
+    tool_name: string;
+    status: string;
+    error_message: string | null;
+  }>;
+  scheduler?: {
+    status: string;
+    reason: string;
+  };
+  prompt_package: PromptPackage;
+  staged_artifact_path: string | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -171,6 +292,10 @@ const domains = [
   "Personal IRAD",
   "L3",
 ];
+
+const domainKeysByLabel: Record<string, string> = Object.fromEntries(
+  Object.entries(domainLabels).map(([key, label]) => [label, key]),
+);
 
 const initialPlannerItems: PlannerItem[] = [
   {
@@ -234,6 +359,17 @@ const agents = [
   "IRAD Project Planner",
 ];
 
+const routedGroups = [
+  { key: "human_input", label: "RFIs", empty: "No open RFIs." },
+  { key: "task", label: "Tasks", empty: "No open tasks." },
+  { key: "event", label: "Events", empty: "No extracted events." },
+  { key: "contact", label: "Contacts", empty: "No extracted contacts." },
+  { key: "decision_log", label: "Decisions", empty: "No recent decisions." },
+  { key: "think_tank", label: "Think Tank", empty: "No think tank notes." },
+];
+
+const hiddenRoutedStatuses = new Set(["done", "archived"]);
+
 function statusLabel(status: PlannerItem["status"]) {
   if (status === "locked") return "Locked";
   if (status === "needs-input") return "Needs input";
@@ -294,10 +430,131 @@ async function apiJson<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function RoutedItemsBoard({
+  domainKey,
+  title,
+  eyebrow,
+  className = "",
+}: {
+  domainKey?: string;
+  title: string;
+  eyebrow: string;
+  className?: string;
+}) {
+  const [items, setItems] = useState<RoutedItem[]>([]);
+  const [statusMessage, setStatusMessage] = useState("Ready");
+  const [busyItemId, setBusyItemId] = useState<string | null>(null);
+  const headingId = `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-heading`;
+
+  const refreshItems = useCallback(async () => {
+    const params = new URLSearchParams({ limit: "100", status: "all" });
+    if (domainKey) params.set("domain_key", domainKey);
+    const response = await apiJson<{ items: RoutedItem[] }>(`/memory/routed-items?${params}`);
+    setItems(response.items.filter((item) => !hiddenRoutedStatuses.has(item.status)));
+    setStatusMessage("Ready");
+  }, [domainKey]);
+
+  useEffect(() => {
+    refreshItems().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : "Unable to load routed items."),
+    );
+  }, [refreshItems]);
+
+  const updateStatus = async (itemId: string, status: "done" | "archived") => {
+    setBusyItemId(itemId);
+    try {
+      await apiJson(`/memory/routed-items/${itemId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status,
+          reason: `${status === "done" ? "Completed" : "Archived"} from routed-item board.`,
+        }),
+      });
+      setStatusMessage(status === "done" ? "Item marked done." : "Item archived.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Routed item update failed.");
+    } finally {
+      setBusyItemId(null);
+    }
+  };
+
+  return (
+    <section className={`memory-panel routed-board ${className}`} aria-labelledby={headingId}>
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">{eyebrow}</p>
+          <h3 id={headingId}>{title}</h3>
+        </div>
+        <button className="icon-button" onClick={refreshItems} title="Refresh routed items">
+          <RefreshCw size={18} />
+        </button>
+      </div>
+
+      <div className="routed-summary">
+        {routedGroups.map((group) => (
+          <span key={group.key}>
+            {group.label} {items.filter((item) => item.route_type === group.key).length}
+          </span>
+        ))}
+      </div>
+
+      <div className="routed-grid">
+        {routedGroups.map((group) => {
+          const groupItems = items.filter((item) => item.route_type === group.key);
+          return (
+            <section className="routed-column" key={group.key} aria-label={group.label}>
+              <div className="routed-column-heading">
+                <h4>{group.label}</h4>
+                <span>{groupItems.length}</span>
+              </div>
+              <div className="routed-list">
+                {groupItems.map((item) => (
+                  <article className="routed-card" key={item.id}>
+                    <span>
+                      {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"} /{" "}
+                      {item.priority}
+                    </span>
+                    <h4>{item.title}</h4>
+                    <p>{item.content}</p>
+                    <div className="routed-actions">
+                      <button
+                        className="planner-action"
+                        onClick={() => updateStatus(item.id, "done")}
+                        disabled={busyItemId === item.id}
+                      >
+                        <CheckCircle2 size={16} />
+                        Done
+                      </button>
+                      <button
+                        className="danger-action"
+                        onClick={() => updateStatus(item.id, "archived")}
+                        disabled={busyItemId === item.id}
+                      >
+                        <Trash2 size={16} />
+                        Archive
+                      </button>
+                    </div>
+                  </article>
+                ))}
+                {groupItems.length === 0 && <p className="empty-state">{group.empty}</p>}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      <p className="memory-status">{statusMessage}</p>
+    </section>
+  );
+}
+
 export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeDomain, setActiveDomain] = useState("Maestro");
-  const [activeSurface, setActiveSurface] = useState<"dashboard" | "memory">("dashboard");
+  const [activeSurface, setActiveSurface] = useState<"dashboard" | "domain" | "memory" | "tools">(
+    "dashboard",
+  );
   const [plannerItems, setPlannerItems] = useState(initialPlannerItems);
   const [draftMessage, setDraftMessage] = useState("");
 
@@ -359,13 +616,20 @@ export function App() {
             <Database size={17} />
             <span>Memory</span>
           </button>
+          <button
+            className={activeSurface === "tools" ? "domain-button active" : "domain-button"}
+            onClick={() => setActiveSurface("tools")}
+          >
+            <Wrench size={17} />
+            <span>Tools</span>
+          </button>
           {domains.map((domain) => (
             <button
               key={domain}
               className={activeDomain === domain ? "domain-button active" : "domain-button"}
               onClick={() => {
                 setActiveDomain(domain);
-                setActiveSurface("dashboard");
+                setActiveSurface("domain");
               }}
             >
               <ChevronRight size={16} />
@@ -386,7 +650,13 @@ export function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">Active surface</p>
-            <h2>{activeSurface === "memory" ? "Memory" : activeDomain}</h2>
+            <h2>
+              {activeSurface === "memory"
+                ? "Memory"
+                : activeSurface === "tools"
+                  ? "Tools"
+                  : activeDomain}
+            </h2>
           </div>
           <div className="status-strip" aria-label="Runtime status">
             <span>
@@ -397,6 +667,11 @@ export function App() {
               <span>
                 <Database size={16} />
                 Memory pipeline
+              </span>
+            ) : activeSurface === "tools" ? (
+              <span>
+                <Wrench size={16} />
+                Shared tool suite
               </span>
             ) : (
               <span>
@@ -409,6 +684,10 @@ export function App() {
 
         {activeSurface === "memory" ? (
           <MemoryWorkspace />
+        ) : activeSurface === "tools" ? (
+          <ToolsWorkspace />
+        ) : activeSurface === "domain" ? (
+          <DomainWorkspace domainLabel={activeDomain} />
         ) : (
           <div className="workspace-grid">
             <section className="chat-panel" aria-labelledby="chat-heading">
@@ -552,10 +831,775 @@ export function App() {
                 <button className="planner-action">Configure</button>
               </div>
             </section>
+
+            <RoutedItemsBoard
+              title="Open routed work"
+              eyebrow="Maestro aggregate"
+              className="dashboard-wide"
+            />
           </div>
         )}
       </section>
     </main>
+  );
+}
+
+function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
+  const domainKey = domainKeysByLabel[domainLabel] ?? "maestro-development";
+  const [domains, setDomains] = useState<DomainContext[]>([]);
+  const [agents, setAgents] = useState<AgentSpec[]>([]);
+  const [tools, setTools] = useState<ToolRegistryItem[]>([]);
+  const [globalContext, setGlobalContext] = useState("");
+  const [domainContext, setDomainContext] = useState("");
+  const [selectedAgentKey, setSelectedAgentKey] = useState<string | null>(null);
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentRole, setNewAgentRole] = useState("");
+  const [roleSummary, setRoleSummary] = useState("");
+  const [rolePrompt, setRolePrompt] = useState("");
+  const [currentAction, setCurrentAction] = useState("");
+  const [toolPermissions, setToolPermissions] = useState<Record<string, string>>({});
+  const [promptTask, setPromptTask] = useState("Prepare a concise domain brief.");
+  const [promptPreview, setPromptPreview] = useState<PromptPackage | null>(null);
+  const [runPreview, setRunPreview] = useState<AgentRun | null>(null);
+  const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
+  const [stageRunArtifact, setStageRunArtifact] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("Ready");
+  const [busy, setBusy] = useState(false);
+
+  const domainAgents = agents.filter((agent) => agent.domain_key === domainKey);
+  const selectedAgent =
+    domainAgents.find((agent) => agent.key === selectedAgentKey) ?? domainAgents[0] ?? null;
+
+  const refreshAgents = useCallback(async () => {
+    const [globalResponse, domainResponse, agentResponse, toolResponse] = await Promise.all([
+      apiJson<{ global_context: { context: string } }>("/agents/global-context"),
+      apiJson<{ domains: DomainContext[] }>("/agents/domains"),
+      apiJson<{ agents: AgentSpec[] }>("/agents"),
+      apiJson<{ tools: ToolRegistryItem[] }>("/agents/tools"),
+    ]);
+    setGlobalContext(globalResponse.global_context.context);
+    setDomains(domainResponse.domains);
+    setAgents(agentResponse.agents);
+    setTools(toolResponse.tools);
+    const activeDomain = domainResponse.domains.find((domain) => domain.key === domainKey);
+    setDomainContext(activeDomain?.context ?? "");
+  }, [domainKey]);
+
+  const refreshAgentTasks = useCallback(async (agentKey: string) => {
+    const response = await apiJson<{ tasks: AgentTask[] }>(`/agents/${agentKey}/tasks`);
+    setAgentTasks(response.tasks);
+  }, []);
+
+  useEffect(() => {
+    refreshAgents().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : "Unable to load agents."),
+    );
+  }, [refreshAgents]);
+
+  useEffect(() => {
+    if (!selectedAgent) return;
+    setSelectedAgentKey(selectedAgent.key);
+    setRoleSummary(selectedAgent.role_summary);
+    setRolePrompt(selectedAgent.role_prompt);
+    setCurrentAction(selectedAgent.current_action ?? "");
+    setToolPermissions(
+      Object.fromEntries(selectedAgent.allowed_tools.map((tool) => [tool.key, tool.permission])),
+    );
+    refreshAgentTasks(selectedAgent.key).catch(() => setAgentTasks([]));
+  }, [selectedAgent?.key]);
+
+  const saveGlobalContext = async () => {
+    setBusy(true);
+    try {
+      await apiJson("/agents/global-context", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context: globalContext }),
+      });
+      setStatusMessage("Global Maestro context saved.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Global context save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveDomainContext = async () => {
+    setBusy(true);
+    try {
+      await apiJson(`/agents/domains/${domainKey}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context: domainContext }),
+      });
+      setStatusMessage("Domain context saved.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Domain save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveAgent = async () => {
+    if (!selectedAgent) return;
+    setBusy(true);
+    try {
+      await apiJson(`/agents/${selectedAgent.key}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role_summary: roleSummary,
+          role_prompt: rolePrompt,
+          current_action: currentAction,
+          tool_permissions: Object.fromEntries(
+            Object.entries(toolPermissions).map(([key, permission]) => [
+              key,
+              {
+                permission,
+                description: tools.find((tool) => tool.key === key)?.description ?? "",
+              },
+            ]),
+          ),
+        }),
+      });
+      setStatusMessage("Agent settings saved.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Agent save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteAgent = async () => {
+    if (!selectedAgent) return;
+    setBusy(true);
+    try {
+      await apiJson(`/agents/${selectedAgent.key}`, { method: "DELETE" });
+      setSelectedAgentKey(null);
+      setPromptPreview(null);
+      setRunPreview(null);
+      setAgentTasks([]);
+      setStatusMessage("Agent deleted.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Agent delete failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createAgent = async () => {
+    setBusy(true);
+    try {
+      const response = await apiJson<{ agent: AgentSpec }>("/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          domain_key: domainKey,
+          key: newAgentName,
+          name: newAgentName,
+          role_summary: newAgentRole,
+          role_prompt:
+            newAgentRole || `You are ${newAgentName}. Work only inside the ${domainLabel} domain.`,
+          tool_permissions: {
+            "memory.context_bundle": {
+              permission: "read",
+              description: "Retrieve scoped memory bundles.",
+            },
+            "artifact.stage_interaction": {
+              permission: "write",
+              description: "Stage interaction artifacts for memory curation.",
+            },
+            "llm.gateway": {
+              permission: "use",
+              description: "Use Maestro's shared LLM gateway.",
+            },
+          },
+        }),
+      });
+      setNewAgentName("");
+      setNewAgentRole("");
+      setSelectedAgentKey(response.agent.key);
+      setStatusMessage("Agent created.");
+      await refreshAgents();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Agent creation failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const generatePrompt = async () => {
+    if (!selectedAgent) return;
+    setBusy(true);
+    try {
+      const response = await apiJson<{ prompt_package: PromptPackage }>(
+        `/agents/${selectedAgent.key}/prompt-package`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            task_instruction: promptTask,
+            query_text: promptTask,
+            use_semantic: true,
+          }),
+        },
+      );
+      setPromptPreview(response.prompt_package);
+      setRunPreview(null);
+      setStatusMessage("Prompt package generated.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Prompt generation failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runAgentOnce = async () => {
+    if (!selectedAgent) return;
+    setBusy(true);
+    try {
+      const response = await apiJson<{ run: AgentRun }>(`/agents/${selectedAgent.key}/run-once`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task_instruction: promptTask,
+          query_text: promptTask,
+          use_semantic: true,
+          stage_interaction: stageRunArtifact,
+          execute_llm: true,
+        }),
+      });
+      setRunPreview(response.run);
+      setPromptPreview(response.run.prompt_package);
+      await refreshAgents();
+      await refreshAgentTasks(selectedAgent.key);
+      setStatusMessage(
+        response.run.status === "completed" ? "Manual run completed." : "Manual run finished.",
+      );
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Manual run failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleTool = (toolKey: string, checked: boolean) => {
+    setToolPermissions((current) => {
+      const next = { ...current };
+      if (checked) next[toolKey] = next[toolKey] ?? "use";
+      else delete next[toolKey];
+      return next;
+    });
+  };
+
+  return (
+    <div className="admin-grid">
+      {domainKey === "maestro-development" && (
+        <section className="memory-panel admin-panel wide-panel" aria-labelledby="global-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Global context</p>
+              <h3 id="global-heading">Maestro base prompt</h3>
+            </div>
+            <Settings size={18} />
+          </div>
+          <textarea
+            value={globalContext}
+            onChange={(event) => setGlobalContext(event.target.value)}
+            aria-label="Global Maestro context"
+          />
+          <button className="planner-action" onClick={saveGlobalContext} disabled={busy}>
+            Save global context
+          </button>
+        </section>
+      )}
+
+      <section className="memory-panel admin-panel" aria-labelledby="domain-context-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Domain context</p>
+            <h3 id="domain-context-heading">{domainLabel}</h3>
+          </div>
+          <button className="icon-button" onClick={refreshAgents} title="Refresh agents">
+            <RefreshCw size={18} />
+          </button>
+        </div>
+        <textarea
+          value={domainContext}
+          onChange={(event) => setDomainContext(event.target.value)}
+          aria-label="Domain context"
+        />
+        <button className="planner-action" onClick={saveDomainContext} disabled={busy}>
+          Save domain context
+        </button>
+        <p className="memory-status">{statusMessage}</p>
+      </section>
+
+      <RoutedItemsBoard
+        domainKey={domainKey}
+        title={`${domainLabel} routed work`}
+        eyebrow="Domain activity"
+        className="wide-panel"
+      />
+
+      <section className="memory-panel admin-panel" aria-labelledby="domain-agent-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Active agents</p>
+            <h3 id="domain-agent-heading">Registry</h3>
+          </div>
+          <span className="count-badge">{domainAgents.length}</span>
+        </div>
+        <div className="inline-form">
+          <input
+            value={newAgentName}
+            onChange={(event) => setNewAgentName(event.target.value)}
+            placeholder="New agent name"
+          />
+          <input
+            value={newAgentRole}
+            onChange={(event) => setNewAgentRole(event.target.value)}
+            placeholder="Role summary"
+          />
+          <button
+            className="planner-action"
+            onClick={createAgent}
+            disabled={busy || !newAgentName.trim()}
+          >
+            <Plus size={16} />
+            Add agent
+          </button>
+        </div>
+        <div className="agent-list">
+          {domainAgents.map((agent) => (
+            <button
+              className={agent.key === selectedAgent?.key ? "agent-row active" : "agent-row"}
+              key={agent.key}
+              onClick={() => setSelectedAgentKey(agent.key)}
+            >
+              <span>
+                <Bot size={17} />
+                {agent.name}
+              </span>
+              <CheckCircle2 size={17} />
+            </button>
+          ))}
+          {domainAgents.length === 0 && (
+            <p className="empty-state">No agents in this domain yet.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="memory-panel admin-panel wide-panel" aria-labelledby="agent-edit-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Agent settings</p>
+            <h3 id="agent-edit-heading">{selectedAgent?.name ?? "No agent selected"}</h3>
+          </div>
+          <Bot size={18} />
+        </div>
+        {selectedAgent ? (
+          <div className="admin-form">
+            <label>
+              Role summary
+              <textarea
+                value={roleSummary}
+                onChange={(event) => setRoleSummary(event.target.value)}
+              />
+            </label>
+            <label>
+              Role prompt
+              <textarea
+                value={rolePrompt}
+                onChange={(event) => setRolePrompt(event.target.value)}
+              />
+            </label>
+            <label>
+              Current tasking
+              <input
+                value={currentAction}
+                onChange={(event) => setCurrentAction(event.target.value)}
+                placeholder="What this agent is currently working on..."
+              />
+            </label>
+            <label>
+              Tool access
+              <div className="tool-picker">
+                {tools.map((tool) => (
+                  <div className="tool-picker-row" key={tool.key}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={tool.key in toolPermissions}
+                        onChange={(event) => toggleTool(tool.key, event.target.checked)}
+                      />
+                      <span>{tool.name}</span>
+                    </label>
+                    <select
+                      value={toolPermissions[tool.key] ?? "use"}
+                      disabled={!(tool.key in toolPermissions)}
+                      onChange={(event) =>
+                        setToolPermissions((current) => ({
+                          ...current,
+                          [tool.key]: event.target.value,
+                        }))
+                      }
+                    >
+                      <option value="use">Use</option>
+                      <option value="read">Read</option>
+                      <option value="write">Write</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </label>
+            <button className="planner-action" onClick={saveAgent} disabled={busy}>
+              Save agent
+            </button>
+            <button className="danger-action" onClick={deleteAgent} disabled={busy}>
+              <Trash2 size={16} />
+              Delete agent
+            </button>
+          </div>
+        ) : (
+          <p className="empty-state">Select an agent to edit role, tasking, and tools.</p>
+        )}
+      </section>
+
+      <section className="memory-panel admin-panel wide-panel" aria-labelledby="agent-task-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Agent queue</p>
+            <h3 id="agent-task-heading">{selectedAgent?.name ?? "No agent selected"}</h3>
+          </div>
+          <Clock3 size={18} />
+        </div>
+        <div className="task-list">
+          {agentTasks.map((task) => (
+            <article className="task-row" key={task.id}>
+              <span>{task.status}</span>
+              <strong>{task.objective}</strong>
+              <p>{task.workflow_key ?? task.source_type}</p>
+              {task.error_message && <p>{task.error_message}</p>}
+            </article>
+          ))}
+          {agentTasks.length === 0 && (
+            <p className="empty-state">No queued or recent tasks for this agent.</p>
+          )}
+        </div>
+      </section>
+
+      <section
+        className="memory-panel admin-panel wide-panel"
+        aria-labelledby="prompt-debug-heading"
+      >
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Prompt package</p>
+            <h3 id="prompt-debug-heading">Debug assembly</h3>
+          </div>
+          <Sparkles size={18} />
+        </div>
+        <div className="admin-form">
+          <label>
+            Task instruction
+            <input value={promptTask} onChange={(event) => setPromptTask(event.target.value)} />
+          </label>
+          <button
+            className="planner-action"
+            onClick={generatePrompt}
+            disabled={busy || !selectedAgent}
+          >
+            Generate prompt package
+          </button>
+          <label className="checkbox-line">
+            <input
+              type="checkbox"
+              checked={stageRunArtifact}
+              onChange={(event) => setStageRunArtifact(event.target.checked)}
+            />
+            Stage run artifact for memory curation
+          </label>
+          <button
+            className="planner-action"
+            onClick={runAgentOnce}
+            disabled={busy || !selectedAgent}
+          >
+            <Sparkles size={16} />
+            Run once
+          </button>
+        </div>
+        {runPreview && (
+          <div className="run-preview">
+            <span>{runPreview.status}</span>
+            <p>{runPreview.execution_note}</p>
+            {runPreview.task_id && <p>Task: {runPreview.task_id}</p>}
+            {runPreview.report_id && <p>Report: {runPreview.report_id}</p>}
+            <p>Scheduler: {runPreview.scheduler?.status ?? "unknown"}</p>
+            {(runPreview.tool_calls ?? []).map((toolCall) => (
+              <p key={toolCall.id}>
+                {toolCall.tool_name}: {toolCall.status}
+              </p>
+            ))}
+            {runPreview.error_message && <p>{runPreview.error_message}</p>}
+            {runPreview.staged_artifact_path && (
+              <p>Staged artifact: {runPreview.staged_artifact_path}</p>
+            )}
+            {runPreview.output_text && <pre>{runPreview.output_text}</pre>}
+          </div>
+        )}
+        {promptPreview && (
+          <div className="prompt-preview">
+            <div className="preview-meta">
+              <span>{promptPreview.memory_context.included_count} memories</span>
+              <span>semantic {promptPreview.memory_context.semantic_status}</span>
+            </div>
+            <pre>{promptPreview.assembled_prompt}</pre>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ToolsWorkspace() {
+  const [tools, setTools] = useState<ToolRegistryItem[]>([]);
+  const [connections, setConnections] = useState<ToolConnection[]>([]);
+  const [selectedToolKey, setSelectedToolKey] = useState("memory.context_bundle");
+  const [connectionDomain, setConnectionDomain] = useState("praxis");
+  const [connectionName, setConnectionName] = useState("Praxis memory retrieval");
+  const [connectionAuthType, setConnectionAuthType] = useState("service");
+  const [connectionConfig, setConnectionConfig] = useState("{}");
+  const [statusMessage, setStatusMessage] = useState("Ready");
+
+  const selectedTool = tools.find((tool) => tool.key === selectedToolKey) ?? tools[0] ?? null;
+  const selectedToolConnections = connections.filter(
+    (connection) => connection.tool_key === selectedTool?.key,
+  );
+  const selectedToolAgents = selectedTool?.authorized_agents ?? [];
+  const selectedConnection = selectedToolConnections.find(
+    (connection) => connection.domain_key === connectionDomain,
+  );
+
+  const refreshTools = useCallback(async () => {
+    const [toolResponse, connectionResponse] = await Promise.all([
+      apiJson<{ tools: ToolRegistryItem[] }>("/agents/tools"),
+      apiJson<{ connections: ToolConnection[] }>("/agents/tools/connections"),
+    ]);
+    setTools(toolResponse.tools);
+    setConnections(connectionResponse.connections);
+    if (!toolResponse.tools.some((tool) => tool.key === selectedToolKey)) {
+      setSelectedToolKey(toolResponse.tools[0]?.key ?? "memory.context_bundle");
+    }
+  }, [selectedToolKey]);
+
+  useEffect(() => {
+    if (!selectedTool) return;
+    const existing = connections.find(
+      (connection) =>
+        connection.tool_key === selectedTool.key && connection.domain_key === connectionDomain,
+    );
+    if (existing) {
+      setConnectionName(existing.display_name);
+      setConnectionAuthType(existing.auth_type);
+      setConnectionConfig(JSON.stringify(existing.config, null, 2));
+      return;
+    }
+    setConnectionName(`${domainLabels[connectionDomain] ?? connectionDomain} ${selectedTool.name}`);
+    setConnectionAuthType("service");
+    setConnectionConfig("{}");
+  }, [connectionDomain, connections, selectedTool?.key]);
+
+  useEffect(() => {
+    if (!selectedTool) return;
+    setConnectionDomain(selectedToolConnections[0]?.domain_key ?? "praxis");
+  }, [selectedTool?.key]);
+
+  const selectConnection = (domainKey: string) => {
+    setConnectionDomain(domainKey);
+  };
+
+  useEffect(() => {
+    refreshTools().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : "Unable to load tools."),
+    );
+  }, [refreshTools]);
+
+  const saveConnection = async () => {
+    try {
+      const config = JSON.parse(connectionConfig) as Record<string, unknown>;
+      await apiJson("/agents/tools/connections", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          domain_key: connectionDomain,
+          tool_key: selectedTool?.key,
+          display_name: connectionName,
+          auth_type: connectionAuthType,
+          config,
+          is_active: true,
+        }),
+      });
+      setStatusMessage("Tool connection saved.");
+      await refreshTools();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Tool connection save failed.");
+    }
+  };
+
+  return (
+    <div className="admin-grid">
+      <section className="memory-panel admin-panel" aria-labelledby="tools-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Shared tool suite</p>
+            <h3 id="tools-heading">Tools</h3>
+          </div>
+          <button className="icon-button" onClick={refreshTools} title="Refresh tools">
+            <RefreshCw size={18} />
+          </button>
+        </div>
+        <div className="tool-registry-list">
+          {tools.map((tool) => (
+            <button
+              className={
+                tool.key === selectedTool?.key
+                  ? "tool-registry-row selectable active"
+                  : "tool-registry-row selectable"
+              }
+              key={tool.key}
+              onClick={() => setSelectedToolKey(tool.key)}
+            >
+              <div>
+                <span>{tool.exclusive ? "Exclusive / queued" : "Shared"}</span>
+                <h4>{tool.name}</h4>
+                <p>{tool.description}</p>
+              </div>
+              <div className="preview-meta">
+                <span>{tool.connected_domains.length} connected domains</span>
+                <span>{tool.authorized_agents.length} authorized agents</span>
+              </div>
+            </button>
+          ))}
+          {tools.length === 0 && <p className="empty-state">No tools registered yet.</p>}
+        </div>
+        <p className="memory-status">{statusMessage}</p>
+      </section>
+
+      <section className="memory-panel admin-panel" aria-labelledby="tool-detail-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Selected tool</p>
+            <h3 id="tool-detail-heading">{selectedTool?.name ?? "No tool selected"}</h3>
+          </div>
+          <ShieldCheck size={18} />
+        </div>
+        {selectedTool ? (
+          <>
+            <p className="empty-state">{selectedTool.description}</p>
+            <div className="connection-list">
+              {Object.entries(domainLabels)
+                .filter(([key]) => key !== "global")
+                .map(([domainKey, label]) => {
+                  const connection = selectedToolConnections.find(
+                    (item) => item.domain_key === domainKey,
+                  );
+                  const domainAgents = selectedToolAgents.filter(
+                    (agent) => agent.domain_key === domainKey,
+                  );
+                  return (
+                    <button
+                      className={
+                        domainKey === connectionDomain
+                          ? "connection-row selectable active"
+                          : "connection-row selectable"
+                      }
+                      key={domainKey}
+                      onClick={() => selectConnection(domainKey)}
+                    >
+                      <span>{label}</span>
+                      <strong>{connection?.display_name ?? "No credentials stored"}</strong>
+                      <span>{connection?.auth_type ?? "not connected"}</span>
+                      <span>{domainAgents.length} agents</span>
+                    </button>
+                  );
+                })}
+            </div>
+            <div className="agent-chip-list">
+              {selectedToolAgents.map((agent) => (
+                <span key={`${selectedTool.key}-${agent.agent_key}`} className="agent-chip">
+                  {domainLabels[agent.domain_key] ?? agent.domain_key}: {agent.agent_name} (
+                  {agent.permission})
+                </span>
+              ))}
+              {selectedToolAgents.length === 0 && (
+                <p className="empty-state">No agents currently have access to this tool.</p>
+              )}
+            </div>
+            <div className="admin-form">
+              <label>
+                Domain
+                <select
+                  value={connectionDomain}
+                  onChange={(event) => setConnectionDomain(event.target.value)}
+                >
+                  {Object.entries(domainLabels)
+                    .filter(([key]) => key !== "global")
+                    .map(([key, label]) => (
+                      <option key={key} value={key}>
+                        {label}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label>
+                Display name
+                <input
+                  value={connectionName}
+                  onChange={(event) => setConnectionName(event.target.value)}
+                />
+              </label>
+              <label>
+                Auth type
+                <select
+                  value={connectionAuthType}
+                  onChange={(event) => setConnectionAuthType(event.target.value)}
+                >
+                  <option value="service">Service</option>
+                  <option value="api_key">API key</option>
+                  <option value="oauth">OAuth</option>
+                  <option value="login_password">Login + password</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </label>
+              <label>
+                Credential/config JSON
+                <textarea
+                  value={connectionConfig}
+                  onChange={(event) => setConnectionConfig(event.target.value)}
+                  placeholder='{"username":"praxis@example.com","password":"..."}'
+                />
+              </label>
+              {selectedConnection && (
+                <p className="memory-status">
+                  Existing secret-like values are redacted. Replace them here to update.
+                </p>
+              )}
+              <button className="planner-action" onClick={saveConnection}>
+                Save {domainLabels[connectionDomain] ?? connectionDomain} credentials
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="empty-state">Select a tool to inspect domain credentials.</p>
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -582,13 +1626,14 @@ function MemoryWorkspace() {
   const [busy, setBusy] = useState(false);
 
   const refreshMemory = useCallback(async () => {
-    const [status, previewResponse, pendingResponse, itemResponse, sourceResponse] = await Promise.all([
+    const [status, previewResponse, pendingResponse, itemResponse, sourceResponse] =
+      await Promise.all([
       apiJson<{ domains: DropboxDomain[] }>("/memory/dropbox/status"),
       apiJson<{ previews: MemoryPreview[] }>("/memory/dropbox/previews"),
       apiJson<{ proposals: PendingProposal[] }>("/memory/proposals/pending"),
       apiJson<{ items: MemoryItem[] }>("/memory/items?limit=8"),
       apiJson<{ sources: MemorySource[] }>("/memory/sources?limit=8"),
-    ]);
+      ]);
     setDomains(status.domains);
     const sortedPreviews = [...previewResponse.previews].sort(
       (first, second) => previewTime(second) - previewTime(first),
@@ -693,6 +1738,23 @@ function MemoryWorkspace() {
     }
   };
 
+  const archiveMemory = async (memoryItemId: string) => {
+    setBusy(true);
+    try {
+      await apiJson(`/memory/items/${memoryItemId}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Archived from Memory tab." }),
+      });
+      setStatusMessage("Memory archived.");
+      await refreshMemory();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Memory archive failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const runRetrieval = async () => {
     setBusy(true);
     try {
@@ -757,7 +1819,9 @@ function MemoryWorkspace() {
           </label>
           <label className="file-drop">
             <HardDriveUpload size={20} />
-            <span>{selectedFile ? selectedFile.name : "Choose PDF, DOCX, Markdown, text, or data"}</span>
+            <span>
+              {selectedFile ? selectedFile.name : "Choose PDF, DOCX, Markdown, text, or data"}
+            </span>
             <input
               type="file"
               accept=".pdf,.docx,.md,.txt,.json,.csv,.tsv,.html,.htm"
@@ -846,6 +1910,7 @@ function MemoryWorkspace() {
               <span>{latestPreview.domain_key}</span>
               <span>{latestPreview.status}</span>
               <span>{latestPreview.candidate_count} candidates</span>
+              <span>{latestPreview.routed_count} routed</span>
               <span>
                 {latestPreview.progress_count}/{latestPreview.progress_total} processed
               </span>
@@ -890,6 +1955,22 @@ function MemoryWorkspace() {
                 </article>
               ))}
             </div>
+            {(latestPreview.payload.routed_items ?? []).length > 0 && (
+              <>
+                <h4>Routed items</h4>
+                <div className="candidate-list">
+                  {(latestPreview.payload.routed_items ?? []).map((item, index) => (
+                    <article className="candidate-row routed" key={`${item.title}-${index}`}>
+                      <span>
+                        {item.route_type} / {item.priority} / {item.status}
+                      </span>
+                      <h4>{item.title}</h4>
+                      <p>{item.content}</p>
+                    </article>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <p className="empty-state">Process a file to see extracted candidates.</p>
@@ -910,6 +1991,14 @@ function MemoryWorkspace() {
               <span>{item.scope} / {item.memory_type} / {item.impact_level}</span>
               <h4>{item.title}</h4>
               <p>{item.content}</p>
+              <button
+                className="danger-action"
+                onClick={() => archiveMemory(item.id)}
+                disabled={busy}
+              >
+                <Trash2 size={16} />
+                Archive memory
+              </button>
             </article>
           ))}
           {items.length === 0 && <p className="empty-state">No memory has been written yet.</p>}

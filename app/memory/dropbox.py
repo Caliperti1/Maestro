@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Artifact, Domain, SeedPackage
+from app.db.models import Artifact, Domain, RoutedItem, SeedPackage
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal
@@ -30,6 +30,7 @@ class DropboxProcessResult:
     preview_path: Path | None
     status: str
     candidate_count: int = 0
+    routed_count: int = 0
     written_count: int = 0
     pending_approval_count: int = 0
     error: str | None = None
@@ -124,21 +125,24 @@ class MemoryDropboxProcessor:
                 original_path,
                 domain_key=domain_key,
                 candidates=preview.candidates,
+                routed_items=preview.routed_items,
                 results=None,
                 status="writing",
             )
-            batch = curator.write_candidates(source, preview.candidates)
+            batch = curator.write_candidates(source, preview.candidates, preview.routed_items)
             destination = self._move_file(path, domain_key=domain_key, status="processed")
             self._finalize_provenance(
                 seed_package=seed_package,
                 artifact=artifact,
                 results=batch.results,
+                routed_items=preview.routed_items,
                 processed_path=destination,
             )
             preview_path = self._write_preview(
                 original_path,
                 domain_key=domain_key,
                 candidates=batch.candidates,
+                routed_items=preview.routed_items,
                 results=batch.results,
                 status="written",
             )
@@ -151,6 +155,7 @@ class MemoryDropboxProcessor:
                 preview_path=preview_path,
                 status="processed",
                 candidate_count=len(batch.candidates),
+                routed_count=len(preview.routed_items),
                 written_count=sum(1 for result in batch.results if result.memory_item is not None),
                 pending_approval_count=batch.pending_approval_count,
             )
@@ -266,6 +271,7 @@ class MemoryDropboxProcessor:
         seed_package: SeedPackage,
         artifact: Artifact,
         results: list[MemoryWriteResult] | tuple[MemoryWriteResult, ...] | Any,
+        routed_items: list[RoutedItem] | tuple[RoutedItem, ...] | Any,
         processed_path: Path,
     ) -> None:
         processed_path_text = str(processed_path)
@@ -297,6 +303,18 @@ class MemoryDropboxProcessor:
                     artifact_id=str(artifact.id),
                     processed_path=processed_path_text,
                 )
+
+        for routed_item in routed_items:
+            routed_item.metadata_ = self._metadata_with_processed_path(
+                routed_item.metadata_,
+                artifact_id=str(artifact.id),
+                processed_path=processed_path_text,
+            )
+            routed_item.source_refs = self._source_refs_with_processed_path(
+                routed_item.source_refs,
+                artifact_id=str(artifact.id),
+                processed_path=processed_path_text,
+            )
 
     def _metadata_with_processed_path(
         self,
@@ -345,6 +363,7 @@ class MemoryDropboxProcessor:
         candidates: list[MemoryCandidate] | tuple[MemoryCandidate, ...] | Any,
         results: list[MemoryWriteResult] | tuple[MemoryWriteResult, ...] | None,
         status: str,
+        routed_items: list[RoutedItem] | tuple[RoutedItem, ...] | Any = (),
     ) -> Path:
         preview_dir = self.root / domain_key / "previews"
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -354,6 +373,7 @@ class MemoryDropboxProcessor:
             "status": status,
             "generated_at": datetime.now(UTC).isoformat(),
             "candidates": [self._candidate_preview(candidate) for candidate in candidates],
+            "routed_items": [self._routed_item_preview(item) for item in routed_items],
             "results": []
             if results is None
             else [self._result_preview(result) for result in results],
@@ -372,6 +392,17 @@ class MemoryDropboxProcessor:
             "importance": candidate.importance,
             "source_refs": candidate.source_refs,
             "metadata": candidate.metadata,
+        }
+
+    def _routed_item_preview(self, item: RoutedItem) -> dict[str, Any]:
+        return {
+            "route_type": item.route_type,
+            "title": item.title,
+            "content": item.content,
+            "priority": item.priority,
+            "status": item.status,
+            "source_refs": item.source_refs,
+            "metadata": item.metadata_,
         }
 
     def _result_preview(self, result: MemoryWriteResult) -> dict[str, Any]:

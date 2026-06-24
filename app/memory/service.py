@@ -254,6 +254,28 @@ class MemoryService:
         self.session.refresh(proposal)
         return proposal
 
+    def archive_memory_item(
+        self,
+        memory_item_id: uuid.UUID,
+        *,
+        reason: str | None = None,
+    ) -> MemoryItem:
+        memory_item = self.session.get(MemoryItem, memory_item_id)
+        if memory_item is None:
+            raise MemoryAccessError(f"Memory item {memory_item_id} was not found.")
+        metadata = dict(memory_item.metadata_ or {})
+        archive_event = {
+            "at": datetime.now(UTC).isoformat(),
+            "reason": reason,
+        }
+        metadata["archived"] = True
+        metadata["archive_event"] = archive_event
+        memory_item.metadata_ = metadata
+        memory_item.valid_until = datetime.now(UTC)
+        self.session.commit()
+        self.session.refresh(memory_item)
+        return memory_item
+
     def list_proposals(
         self,
         *,
