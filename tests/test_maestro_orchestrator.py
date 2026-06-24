@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.agents.runtime import PromptAggregationService
+from app.agents.runtime import AgentRegistryService
 from app.api.main import create_app
 from app.core.config import get_settings
 from app.db.models import Artifact, Report, Task
@@ -61,6 +62,38 @@ def test_orchestrator_plan_is_registry_aware_and_plan_first(session: Session) ->
     assert plan.scheduler["status"] == "queue_foundation"
     assert session.query(Task).filter(Task.status == "proposed").count() == 1
     assert session.query(Report).count() == 0
+
+
+def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="Praxis Email Agent",
+        name="Praxis Email Agent",
+        role_summary="Triages Praxis email, partner messages, and follow-up drafts.",
+    )
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="Praxis Finance Agent",
+        name="Praxis Finance Agent",
+        role_summary="Tracks Praxis budgets, invoices, and financial assumptions.",
+    )
+
+    plan = MaestroOrchestratorService(session).create_plan(
+        "Prepare a Praxis partner email follow-up workflow for the next call."
+    )
+
+    selected_agent_keys = {subtask.agent_key for subtask in plan.subtasks}
+    assert "praxis-planning-agent" in selected_agent_keys
+    assert "praxis-email-agent" in selected_agent_keys
+    assert "praxis-finance-agent" not in selected_agent_keys
+    email_subtask = next(
+        subtask for subtask in plan.subtasks if subtask.agent_key == "praxis-email-agent"
+    )
+    assert "Triages Praxis email" in email_subtask.objective
+    assert "only on the portion" in email_subtask.objective
+    assert email_subtask.rationale is not None
+    assert "role overlap" in email_subtask.rationale
 
 
 def test_orchestrator_run_dispatches_children_and_stages_one_artifact(

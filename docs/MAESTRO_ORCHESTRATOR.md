@@ -38,13 +38,19 @@ should keep the same shape while improving judgment.
 
 Every proposed plan includes:
 
-- detected intents
+- planning lanes, which are routing hints such as workflow, task, contact, event, RFI, decision,
+  and memory-route
 - selected agents and domains
-- child subtasks
+- child subtasks tailored to each selected agent's role summary, current tasking, and tool access
 - expected outputs
 - approval requirement
 - scheduler/queue notes
 - registry snapshot of available agents and tools
+
+The deterministic MVP should not simply send the full user request to every agent in a selected
+domain. It scores agents by domain and role relevance, then writes each child task so the agent
+focuses only on the part of the request that fits its specialty. A later LLM planner should replace
+the deterministic scoring while preserving this contract.
 
 No child task runs during planning.
 

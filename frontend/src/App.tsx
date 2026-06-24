@@ -267,6 +267,7 @@ type MaestroIntent = {
   target: string;
   domain_key: string | null;
   priority: string;
+  action: string | null;
 };
 
 type MaestroSubtask = {
@@ -276,6 +277,7 @@ type MaestroSubtask = {
   objective: string;
   expected_output: string;
   priority: string;
+  rationale: string | null;
 };
 
 type MaestroPlan = {
@@ -869,17 +871,17 @@ export function App() {
                   </div>
                   <p>{maestroPlan.summary}</p>
                   <div className="preview-meta">
-                    <span>{maestroPlan.intents.length} intents</span>
+                    <span>{maestroPlan.intents.length} lanes</span>
                     <span>{maestroPlan.subtasks.length} subtasks</span>
                     <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
                   </div>
                   <div className="maestro-plan-grid">
                     <div>
-                      <h4>Intents</h4>
+                      <h4>Planning lanes</h4>
                       {maestroPlan.intents.map((intent, index) => (
                         <article className="mini-row" key={`${intent.type}-${index}`}>
                           <span>{intent.type} / {intent.priority}</span>
-                          <p>{intent.summary}</p>
+                          <p>{intent.action ?? intent.summary}</p>
                         </article>
                       ))}
                     </div>
@@ -892,6 +894,7 @@ export function App() {
                             {subtask.agent_name}
                           </span>
                           <p>{subtask.objective}</p>
+                          {subtask.rationale && <p>{subtask.rationale}</p>}
                         </article>
                       ))}
                     </div>

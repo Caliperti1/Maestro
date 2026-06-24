@@ -35,6 +35,7 @@ class MaestroIntent:
     target: str
     domain_key: str | None = None
     priority: str = "normal"
+    action: str | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class MaestroSubtask:
     objective: str
     expected_output: str
     priority: str = "normal"
+    rationale: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,20 +100,7 @@ class MaestroOrchestratorService:
         tools = self.registry.list_tools()
         selected_agents = self._select_agents(cleaned_input, agents)
         intents = self._classify_intents(cleaned_input, selected_agents)
-        subtasks = [
-            MaestroSubtask(
-                agent_key=agent.key,
-                agent_name=agent.name,
-                domain_key=agent.domain_key,
-                objective=self._subtask_objective(cleaned_input, agent.domain_key, intents),
-                expected_output=(
-                    "Return a concise report with summary, findings, open questions, next steps, "
-                    "and provenance notes. If this is mostly an action, return an action summary."
-                ),
-                priority="high" if any(intent.priority == "high" for intent in intents) else "normal",
-            )
-            for agent in selected_agents
-        ]
+        subtasks = self._build_subtasks(cleaned_input, selected_agents, intents)
         summary = self._plan_summary(cleaned_input, intents, subtasks)
         plan_id = str(uuid.uuid4())
         parent_task = Task(
@@ -126,7 +115,10 @@ class MaestroOrchestratorService:
                 "execution_mode": "propose_first",
                 "intents": [intent.__dict__ for intent in intents],
                 "subtasks": [subtask.__dict__ for subtask in subtasks],
-                "selected_agents": [self._selected_agent_payload(agent) for agent in selected_agents],
+                "selected_agents": [
+                    self._selected_agent_payload(agent, user_input=cleaned_input)
+                    for agent in selected_agents
+                ],
                 "registry_snapshot": self._registry_snapshot(domains, agents, tools),
                 "approval_required": True,
                 "scheduler": self._scheduler_payload(),
@@ -235,22 +227,87 @@ class MaestroOrchestratorService:
 
     def _select_agents(self, user_input: str, agents) -> list:
         lowered = user_input.lower()
-        selected = [
-            agent
-            for agent in agents
-            if agent.domain_key in lowered
-            or agent.domain_key.replace("-", " ") in lowered
-            or any(token in lowered for token in _DOMAIN_HINTS.get(agent.domain_key, []))
-        ]
-        if not selected:
-            selected = [
-                agent
+        scored: list[tuple[float, Any, str]] = []
+        for agent in agents:
+            score, rationale = self._agent_relevance_score(lowered, agent)
+            if score > 0:
+                scored.append((score, agent, rationale))
+        if not scored:
+            scored = [
+                (1.0, agent, "default fallback agent")
                 for agent in agents
                 if agent.domain_key in {"praxis", "personal", "maestro-development"}
             ]
-        if not selected and agents:
-            selected = [agents[0]]
-        return sorted(selected, key=lambda agent: (agent.domain_key, agent.key))[:4]
+        if not scored and agents:
+            scored = [(1.0, agents[0], "first available agent")]
+
+        scored.sort(key=lambda item: (-item[0], item[1].domain_key, item[1].key))
+        top_score = scored[0][0] if scored else 0
+        if top_score <= 3.5:
+            return [scored[0][1]] if scored else []
+        threshold = max(3.5, top_score * 0.55)
+        selected = [
+            agent
+            for score, agent, _ in scored
+            if score >= threshold
+        ]
+        if not selected and scored:
+            selected = [scored[0][1]]
+        return selected[:4]
+
+    def _agent_relevance_score(self, lowered_input: str, agent) -> tuple[float, str]:
+        score = 0.0
+        rationale: list[str] = []
+        domain_tokens = [agent.domain_key, agent.domain_key.replace("-", " ")]
+        domain_tokens.extend(_DOMAIN_HINTS.get(agent.domain_key, []))
+        if any(token and token in lowered_input for token in domain_tokens):
+            score += 3.0
+            rationale.append(f"domain match: {agent.domain_key}")
+
+        agent_text = " ".join(
+            [
+                agent.key,
+                agent.name,
+                agent.role_summary,
+                agent.current_action or "",
+                " ".join(tool.key for tool in agent.allowed_tools),
+            ]
+        )
+        input_tokens = _meaningful_tokens(lowered_input)
+        agent_tokens = _meaningful_tokens(agent_text.lower())
+        domain_noise = _meaningful_tokens(
+            " ".join([agent.domain_key, agent.domain_key.replace("-", " "), "agent"])
+        )
+        agent_tokens = agent_tokens - domain_noise
+        input_tokens = input_tokens - domain_noise
+        overlap = sorted(input_tokens & agent_tokens)
+        if overlap:
+            score += min(len(overlap), 6) * 0.75
+            rationale.append(f"role overlap: {', '.join(overlap[:6])}")
+        if any(token in agent.key for token in ("planning", "chief", "manager", "lead")):
+            score += 0.5
+            rationale.append("coordination-capable role")
+        return score, "; ".join(rationale) or "low relevance"
+
+    def _build_subtasks(
+        self,
+        user_input: str,
+        selected_agents,
+        intents: list[MaestroIntent],
+    ) -> list[MaestroSubtask]:
+        priority = "high" if any(intent.priority == "high" for intent in intents) else "normal"
+        return [
+            MaestroSubtask(
+                agent_key=agent.key,
+                agent_name=agent.name,
+                domain_key=agent.domain_key,
+                objective=self._subtask_objective(user_input, agent, intents),
+                expected_output=self._expected_output_for_agent(agent, intents),
+                priority=priority,
+                rationale=self._subtask_rationale(user_input, agent),
+            )
+            for agent in selected_agents
+        ]
 
     def _classify_intents(self, user_input: str, selected_agents) -> list[MaestroIntent]:
         lowered = user_input.lower()
@@ -264,6 +321,7 @@ class MaestroOrchestratorService:
                     target=user_input[:180],
                     domain_key=default_domain,
                     priority="high",
+                    action="Generate an executable workflow plan and delegate work by agent specialty.",
                 )
             )
         if any(token in lowered for token in ("task", "todo", "due", "follow up", "follow-up")):
@@ -273,6 +331,7 @@ class MaestroOrchestratorService:
                     summary="Capture or delegate a concrete follow-up.",
                     target=user_input[:180],
                     domain_key=default_domain,
+                    action="Identify concrete due-outs and owners rather than storing them as memory.",
                 )
             )
         if any(token in lowered for token in ("contact", "lead", "partner", "crm")):
@@ -282,6 +341,7 @@ class MaestroOrchestratorService:
                     summary="Extract or use relationship/contact context.",
                     target=user_input[:180],
                     domain_key=default_domain,
+                    action="Identify contact facts and relationship context for CRM routing.",
                 )
             )
         if any(token in lowered for token in ("event", "calendar", "meeting", "call", "sync")):
@@ -291,6 +351,7 @@ class MaestroOrchestratorService:
                     summary="Extract or reason over schedule context.",
                     target=user_input[:180],
                     domain_key=default_domain,
+                    action="Identify time-bound events or calendar implications.",
                 )
             )
         if any(token in lowered for token in ("decision", "decide", "tradeoff", "recommend")):
@@ -300,6 +361,7 @@ class MaestroOrchestratorService:
                     summary="Surface a decision or recommendation.",
                     target=user_input[:180],
                     domain_key=default_domain,
+                    action="Separate recommendations and decisions from factual memory.",
                 )
             )
         if any(token in lowered for token in ("?", "confirm", "need from me", "rfi", "question")):
@@ -309,6 +371,7 @@ class MaestroOrchestratorService:
                     summary="Identify information needed from Chris.",
                     target=user_input[:180],
                     domain_key=default_domain,
+                    action="Surface questions that block execution or improve output quality.",
                 )
             )
         if any(token in lowered for token in ("remember", "memory", "standing instruction", "preference")):
@@ -318,6 +381,7 @@ class MaestroOrchestratorService:
                     summary="Route durable context through memory curation.",
                     target=user_input[:180],
                     domain_key=default_domain,
+                    action="Send durable context to the memory curation pipeline at session close.",
                 )
             )
         if not intents:
@@ -327,6 +391,7 @@ class MaestroOrchestratorService:
                     summary="Respond directly unless the user approves further work.",
                     target=user_input[:180],
                     domain_key=default_domain,
+                    action="Prepare a concise direct answer and avoid unnecessary delegation.",
                 )
             )
         if selected_agents and not any(intent.type == "workflow" for intent in intents):
@@ -336,6 +401,7 @@ class MaestroOrchestratorService:
                     summary="Use available agents if Chris approves execution.",
                     target=user_input[:180],
                     domain_key=default_domain,
+                    action="Create agent-specific subtasks before execution.",
                 )
             )
         return intents
@@ -343,14 +409,44 @@ class MaestroOrchestratorService:
     def _subtask_objective(
         self,
         user_input: str,
-        domain_key: str,
+        agent,
         intents: list[MaestroIntent],
     ) -> str:
         intent_list = ", ".join(intent.type for intent in intents)
-        return (
-            f"Handle the {domain_key} portion of this Maestro request. "
-            f"Detected intents: {intent_list}. User request: {user_input}"
+        intent_actions = "\n".join(
+            f"- {intent.type}: {intent.action or intent.summary}" for intent in intents
         )
+        role_summary = agent.role_summary or "No role summary configured."
+        tool_list = ", ".join(tool.key for tool in agent.allowed_tools) or "no tools configured"
+        return (
+            f"You are {agent.name}. Work only within the {agent.domain_key} domain and only on "
+            "the portion of this Maestro request that fits your specialty.\n\n"
+            f"Your specialty: {role_summary}\n"
+            f"Authorized tools: {tool_list}\n"
+            f"Detected planning lanes: {intent_list}\n"
+            f"Lane actions:\n{intent_actions}\n\n"
+            f"Original Maestro request:\n{user_input}\n\n"
+            "Do not answer for sister agents. Produce your domain contribution, note assumptions, "
+            "surface RFIs, and call out any tasks/events/contacts/decisions that Maestro should "
+            "route separately."
+        )
+
+    def _expected_output_for_agent(self, agent, intents: list[MaestroIntent]) -> str:
+        if any(intent.type in {"workflow", "decision"} for intent in intents):
+            return (
+                "Role-scoped report with summary, specialty-specific findings, recommended "
+                "actions, RFIs, and dependencies on other agents."
+            )
+        if any(intent.type in {"task", "event", "contact"} for intent in intents):
+            return (
+                "Structured extraction notes for items that should become tasks, events, contacts, "
+                "or RFIs, plus a short action summary."
+            )
+        return "Concise role-scoped response with next steps and provenance notes."
+
+    def _subtask_rationale(self, user_input: str, agent) -> str:
+        score, rationale = self._agent_relevance_score(user_input.lower(), agent)
+        return f"Selected for {rationale}; relevance score {score:.2f}."
 
     def _plan_summary(
         self,
@@ -382,8 +478,8 @@ class MaestroOrchestratorService:
             ],
         }
 
-    def _selected_agent_payload(self, agent) -> dict[str, Any]:
-        return {
+    def _selected_agent_payload(self, agent, *, user_input: str | None = None) -> dict[str, Any]:
+        payload = {
             "key": agent.key,
             "name": agent.name,
             "domain_key": agent.domain_key,
@@ -399,6 +495,9 @@ class MaestroOrchestratorService:
                 for tool in agent.allowed_tools
             ],
         }
+        if user_input is not None:
+            payload["selection_rationale"] = self._subtask_rationale(user_input, agent)
+        return payload
 
     def _scheduler_payload(self) -> dict[str, Any]:
         return {
@@ -567,3 +666,41 @@ _DOMAIN_HINTS = {
     "personal-irad-projects": ["irad", "prototype", "project"],
     "l3": ["l3"],
 }
+
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "have",
+    "in",
+    "is",
+    "it",
+    "me",
+    "of",
+    "on",
+    "or",
+    "our",
+    "that",
+    "the",
+    "this",
+    "to",
+    "we",
+    "with",
+    "you",
+}
+
+
+def _meaningful_tokens(text: str) -> set[str]:
+    normalized = "".join(character if character.isalnum() else " " for character in text.lower())
+    return {
+        token
+        for token in normalized.split()
+        if len(token) > 2 and token not in _STOPWORDS
+    }
