@@ -370,6 +370,15 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
         ["praxis-planning-agent"],
         ["maestro-introspection-agent"],
     ]
+    assert plan.workflow_graph["edges"] == [
+        {
+            "from_work_item_id": "wi_praxis",
+            "to_work_item_id": "wi_maestro",
+            "relation": "must_complete_before",
+        }
+    ]
+    assert plan.workflow_graph["stages"][0]["work_item_ids"] == ["wi_praxis"]
+    assert plan.workflow_graph["stages"][1]["waits_for_work_item_ids"] == ["wi_praxis"]
 
     run = service.run_plan(plan.parent_task_id, execute_llm=True)
 
@@ -438,6 +447,8 @@ def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None
     assert plan["status"] == "proposed"
     assert plan["subtasks"]
     assert plan["execution_stages"]
+    assert "workflow_graph" in plan
+    assert "nodes" in plan["workflow_graph"]
 
     run_response = client.post(
         f"/maestro/plans/{plan['parent_task_id']}/run",

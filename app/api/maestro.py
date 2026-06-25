@@ -158,6 +158,7 @@ def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
         "intents": [intent.__dict__ for intent in plan.intents],
         "subtasks": [subtask.__dict__ for subtask in plan.subtasks],
         "execution_stages": plan.execution_stages,
+        "workflow_graph": plan.workflow_graph,
         "is_chat_only": plan.is_chat_only,
         "selected_agents": plan.selected_agents,
         "registry_snapshot": plan.registry_snapshot,

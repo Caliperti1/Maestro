@@ -91,6 +91,7 @@ class MaestroPlan:
     intents: list[MaestroIntent]
     subtasks: list[MaestroSubtask]
     execution_stages: list[list[str]]
+    workflow_graph: dict[str, Any]
     is_chat_only: bool
     selected_agents: list[dict[str, Any]]
     registry_snapshot: dict[str, Any]
@@ -153,6 +154,7 @@ class MaestroOrchestratorService:
         intents = self._intents_from_work_items(work_items, selected_agents)
         subtasks = self._build_subtasks(cleaned_input, selected_agents, intents, work_items)
         execution_stages = self._execution_stage_keys(subtasks)
+        workflow_graph = self._workflow_graph(work_items, subtasks)
         summary = decomposition.plan_summary or self._plan_summary(cleaned_input, intents, subtasks)
         plan_id = str(uuid.uuid4())
         parent_task = Task(
@@ -170,6 +172,7 @@ class MaestroOrchestratorService:
                 "intents": [intent.__dict__ for intent in intents],
                 "subtasks": [subtask.__dict__ for subtask in subtasks],
                 "execution_stages": execution_stages,
+                "workflow_graph": workflow_graph,
                 "is_chat_only": is_chat_only,
                 "selected_agents": [
                     self._selected_agent_payload(agent, user_input=cleaned_input)
@@ -1008,6 +1011,61 @@ class MaestroOrchestratorService:
     def _execution_stage_keys(self, subtasks: list[MaestroSubtask]) -> list[list[str]]:
         return [[subtask.agent_key for subtask in stage] for stage in self._execution_stages(subtasks)]
 
+    def _workflow_graph(
+        self,
+        work_items: list[MaestroWorkItem],
+        subtasks: list[MaestroSubtask],
+    ) -> dict[str, Any]:
+        agent_keys_by_work_item: dict[str, list[str]] = {}
+        for subtask in subtasks:
+            for work_item_id in subtask.work_item_ids or []:
+                agent_keys_by_work_item.setdefault(work_item_id, []).append(subtask.agent_key)
+        stages = []
+        for index, stage in enumerate(self._execution_stages(subtasks), start=1):
+            stages.append(
+                {
+                    "index": index,
+                    "agent_keys": [subtask.agent_key for subtask in stage],
+                    "work_item_ids": [
+                        work_item_id
+                        for subtask in stage
+                        for work_item_id in (subtask.work_item_ids or [])
+                    ],
+                    "waits_for_work_item_ids": sorted(
+                        {
+                            dependency
+                            for subtask in stage
+                            for dependency in (subtask.depends_on_work_item_ids or [])
+                        }
+                    ),
+                }
+            )
+        return {
+            "nodes": [
+                {
+                    "id": item.id,
+                    "type": item.type,
+                    "title": item.title,
+                    "domain_key": item.domain_key,
+                    "priority": item.priority,
+                    "needs_agent": item.needs_agent,
+                    "can_log_directly": item.can_log_directly,
+                    "agent_keys": sorted(agent_keys_by_work_item.get(item.id, [])),
+                }
+                for item in work_items
+            ],
+            "edges": [
+                {
+                    "from_work_item_id": dependency,
+                    "to_work_item_id": item.id,
+                    "relation": "must_complete_before",
+                }
+                for item in work_items
+                for dependency in item.dependencies
+            ],
+            "stages": stages,
+        }
+
     def _is_chat_only(
         self,
         work_items: list[MaestroWorkItem],
@@ -1152,6 +1210,7 @@ class MaestroOrchestratorService:
             intents=[MaestroIntent(**intent) for intent in payload.get("intents", [])],
             subtasks=[MaestroSubtask(**subtask) for subtask in payload.get("subtasks", [])],
             execution_stages=list(payload.get("execution_stages", [])),
+            workflow_graph=dict(payload.get("workflow_graph", {})),
             is_chat_only=bool(payload.get("is_chat_only", False)),
             selected_agents=list(payload.get("selected_agents", [])),
             registry_snapshot=dict(payload.get("registry_snapshot", {})),

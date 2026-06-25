@@ -326,6 +326,11 @@ type MaestroPlan = {
   intents: MaestroIntent[];
   subtasks: MaestroSubtask[];
   execution_stages: string[][];
+  workflow_graph: {
+    nodes?: Array<Record<string, unknown>>;
+    edges?: Array<Record<string, unknown>>;
+    stages?: Array<Record<string, unknown>>;
+  };
   is_chat_only: boolean;
   selected_agents: Array<Record<string, unknown>>;
   approval_required: boolean;
@@ -1087,6 +1092,7 @@ export function App() {
                     <span>{maestroPlan.intents.length} lanes</span>
                     <span>{maestroPlan.subtasks.length} subtasks</span>
                     <span>{maestroPlanStages.length} stages</span>
+                    <span>{maestroPlan.workflow_graph.edges?.length ?? 0} edges</span>
                     <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
                   </div>
                   <div className="maestro-plan-grid">
@@ -1100,6 +1106,9 @@ export function App() {
                           </span>
                           <p>{item.title}</p>
                           <p>{item.description}</p>
+                          {item.dependencies.length > 0 && (
+                            <span>Depends on: {item.dependencies.join(", ")}</span>
+                          )}
                           <div className="preview-meta">
                             <span>{item.needs_agent ? "agent" : "no agent"}</span>
                             <span>{item.can_log_directly ? "loggable" : "not loggable"}</span>
