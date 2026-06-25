@@ -52,6 +52,8 @@ Every proposed plan includes:
   and memory-route
 - selected agents and domains
 - child subtasks tailored to each selected agent's role summary, current tasking, and tool access
+- proposed execution stages derived from dependency edges, so Chris can inspect parallelizable and
+  blocked work before running the plan
 - expected outputs
 - approval requirement
 - scheduler/queue notes
@@ -68,6 +70,11 @@ context, meeting capture plan, and follow-up strategy, with dependencies where l
 earlier outputs.
 
 No child task runs during planning.
+
+RFIs, events, contacts, tasks, decisions, and memory candidates found during planning remain
+proposal contents until the plan is accepted and executed. This keeps unapproved plans from
+polluting the routed operational boards. The plan preview is responsible for showing those items
+before execution; the boards represent accepted or observed routed items.
 
 ## Execution Contract
 

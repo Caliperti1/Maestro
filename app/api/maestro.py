@@ -67,6 +67,7 @@ def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
         "work_items": [work_item.__dict__ for work_item in plan.work_items],
         "intents": [intent.__dict__ for intent in plan.intents],
         "subtasks": [subtask.__dict__ for subtask in plan.subtasks],
+        "execution_stages": plan.execution_stages,
         "selected_agents": plan.selected_agents,
         "registry_snapshot": plan.registry_snapshot,
         "approval_required": plan.approval_required,

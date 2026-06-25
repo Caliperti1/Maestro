@@ -312,6 +312,7 @@ type MaestroPlan = {
   work_items: MaestroWorkItem[];
   intents: MaestroIntent[];
   subtasks: MaestroSubtask[];
+  execution_stages: string[][];
   selected_agents: Array<Record<string, unknown>>;
   approval_required: boolean;
   scheduler: Record<string, unknown>;
@@ -653,6 +654,25 @@ export function App() {
     [plannerItems],
   );
 
+  const maestroPlanStages = useMemo(() => {
+    if (!maestroPlan) return [];
+    const executionStages = maestroPlan.execution_stages ?? [];
+    if (!executionStages.length) return [maestroPlan.subtasks];
+    const unassigned = [...maestroPlan.subtasks];
+    return executionStages
+      .map((stage) =>
+        stage
+          .map((agentKey) => {
+            const index = unassigned.findIndex((subtask) => subtask.agent_key === agentKey);
+            if (index < 0) return null;
+            const [subtask] = unassigned.splice(index, 1);
+            return subtask;
+          })
+          .filter((subtask): subtask is MaestroSubtask => subtask !== null),
+      )
+      .filter((stage) => stage.length > 0);
+  }, [maestroPlan]);
+
   const moveItem = (id: number, direction: -1 | 1) => {
     setPlannerItems((items) => {
       const index = items.findIndex((item) => item.id === id);
@@ -916,6 +936,7 @@ export function App() {
                     <span>{maestroPlan.work_items.length} work items</span>
                     <span>{maestroPlan.intents.length} lanes</span>
                     <span>{maestroPlan.subtasks.length} subtasks</span>
+                    <span>{maestroPlanStages.length} stages</span>
                     <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
                   </div>
                   <div className="maestro-plan-grid">
@@ -953,19 +974,36 @@ export function App() {
                       ))}
                     </div>
                     <div>
-                      <h4>Subtasks</h4>
-                      {maestroPlan.subtasks.map((subtask) => (
-                        <article className="mini-row" key={`${subtask.agent_key}-${subtask.objective}`}>
-                          <span>
-                            {domainLabels[subtask.domain_key] ?? subtask.domain_key} /{" "}
-                            {subtask.agent_name}
-                          </span>
-                          {subtask.work_item_ids && (
-                            <span>Work items: {subtask.work_item_ids.join(", ")}</span>
-                          )}
-                          <p>{subtask.objective}</p>
-                          {subtask.rationale && <p>{subtask.rationale}</p>}
-                        </article>
+                      <h4>Workflow order</h4>
+                      {maestroPlanStages.map((stage, stageIndex) => (
+                        <div className="workflow-stage" key={`plan-stage-${stageIndex}`}>
+                          <div className="workflow-stage-heading">
+                            <span>Stage {stageIndex + 1}</span>
+                            <span>{stage.length > 1 ? "parallel-ready" : "single task"}</span>
+                          </div>
+                          {stage.map((subtask) => (
+                            <article
+                              className="mini-row"
+                              key={`${stageIndex}-${subtask.agent_key}-${subtask.objective}`}
+                            >
+                              <span>
+                                {domainLabels[subtask.domain_key] ?? subtask.domain_key} /{" "}
+                                {subtask.agent_name}
+                              </span>
+                              {subtask.work_item_ids && subtask.work_item_ids.length > 0 && (
+                                <span>Work items: {subtask.work_item_ids.join(", ")}</span>
+                              )}
+                              {subtask.depends_on_work_item_ids &&
+                                subtask.depends_on_work_item_ids.length > 0 && (
+                                  <span>
+                                    Waits for: {subtask.depends_on_work_item_ids.join(", ")}
+                                  </span>
+                                )}
+                              <p>{subtask.objective}</p>
+                              {subtask.rationale && <p>{subtask.rationale}</p>}
+                            </article>
+                          ))}
+                        </div>
                       ))}
                     </div>
                   </div>

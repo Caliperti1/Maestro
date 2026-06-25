@@ -221,6 +221,7 @@ def test_orchestrator_plan_is_registry_aware_and_plan_first(session: Session) ->
         agent["key"] == "praxis-planning-agent" for agent in plan.registry_snapshot["agents"]
     )
     assert plan.scheduler["status"] == "queue_foundation"
+    assert plan.execution_stages
     assert session.query(Task).filter(Task.status == "proposed").count() == 1
     assert session.query(Report).count() == 0
 
@@ -309,6 +310,11 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
         "Prepare a Praxis partner call workflow and ask Maestro Development to note system gaps."
     )
 
+    assert plan.execution_stages == [
+        ["praxis-planning-agent"],
+        ["maestro-introspection-agent"],
+    ]
+
     run = service.run_plan(plan.parent_task_id, execute_llm=True)
 
     assert run.status == "completed"
@@ -375,6 +381,7 @@ def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None
     plan = plan_response.json()["plan"]
     assert plan["status"] == "proposed"
     assert plan["subtasks"]
+    assert plan["execution_stages"]
 
     run_response = client.post(
         f"/maestro/plans/{plan['parent_task_id']}/run",

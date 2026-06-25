@@ -90,6 +90,7 @@ class MaestroPlan:
     work_items: list[MaestroWorkItem]
     intents: list[MaestroIntent]
     subtasks: list[MaestroSubtask]
+    execution_stages: list[list[str]]
     selected_agents: list[dict[str, Any]]
     registry_snapshot: dict[str, Any]
     approval_required: bool
@@ -149,6 +150,7 @@ class MaestroOrchestratorService:
         selected_agents = self._select_agents_for_work_items(work_items, agents)
         intents = self._intents_from_work_items(work_items, selected_agents)
         subtasks = self._build_subtasks(cleaned_input, selected_agents, intents, work_items)
+        execution_stages = self._execution_stage_keys(subtasks)
         summary = decomposition.plan_summary or self._plan_summary(cleaned_input, intents, subtasks)
         plan_id = str(uuid.uuid4())
         parent_task = Task(
@@ -165,6 +167,7 @@ class MaestroOrchestratorService:
                 "work_items": [work_item.__dict__ for work_item in work_items],
                 "intents": [intent.__dict__ for intent in intents],
                 "subtasks": [subtask.__dict__ for subtask in subtasks],
+                "execution_stages": execution_stages,
                 "selected_agents": [
                     self._selected_agent_payload(agent, user_input=cleaned_input)
                     for agent in selected_agents
@@ -260,10 +263,7 @@ class MaestroOrchestratorService:
             synthesis = self._synthesize(plan, child_runs, status=status)
             report = self._write_synthesis_report(parent_task, plan, child_runs, synthesis, status)
             staged = self._stage_workflow_artifact(parent_task, plan, child_runs, synthesis, report)
-            execution_stages = [
-                [subtask.agent_key for subtask in stage]
-                for stage in self._execution_stages(plan.subtasks)
-            ]
+            execution_stages = self._execution_stage_keys(plan.subtasks)
             parent_task.status = status
             parent_task.output_payload = {
                 "plan_id": plan.plan_id,
@@ -923,6 +923,9 @@ class MaestroOrchestratorService:
                 completed_work_items.update(subtask.work_item_ids or [])
         return stages
 
+    def _execution_stage_keys(self, subtasks: list[MaestroSubtask]) -> list[list[str]]:
+        return [[subtask.agent_key for subtask in stage] for stage in self._execution_stages(subtasks)]
+
     def _dependency_context(
         self,
         completed_outputs_by_work_item: dict[str, str],
@@ -1023,6 +1026,7 @@ class MaestroOrchestratorService:
             ],
             intents=[MaestroIntent(**intent) for intent in payload.get("intents", [])],
             subtasks=[MaestroSubtask(**subtask) for subtask in payload.get("subtasks", [])],
+            execution_stages=list(payload.get("execution_stages", [])),
             selected_agents=list(payload.get("selected_agents", [])),
             registry_snapshot=dict(payload.get("registry_snapshot", {})),
             approval_required=bool(payload.get("approval_required", True)),
