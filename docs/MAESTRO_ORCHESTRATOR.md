@@ -87,6 +87,12 @@ envelope with a `kind` of `chat_only`, `planned`, or `refined`, plus a plain-tex
 and an optional plan payload. Legacy plan/refine endpoints remain available for targeted tests and
 tooling, but the UI composer should use the unified response contract.
 
+When a plan is already active, `POST /maestro/respond` first classifies the new message against
+that active session. The MVP deterministic classifier distinguishes side-chat, plan refinement,
+blocking RFI answers, routed context, and explicit new workflow requests. Side-chat leaves the
+active plan untouched. The other active-session classifications either refine the existing plan or
+start a separate plan according to the classification.
+
 ## Execution Contract
 
 Running an approved plan:

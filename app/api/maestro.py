@@ -56,18 +56,42 @@ def respond_to_maestro(
     try:
         service = MaestroOrchestratorService(db)
         if body.active_plan_id is not None:
-            plan = service.refine_plan(body.active_plan_id, body.message)
-            kind = "chat_only" if plan.is_chat_only else "refined"
+            active_plan = service.get_plan(body.active_plan_id)
+            classification = _classify_active_session_message(body.message, active_plan)
+            if classification == "side_chat":
+                return {
+                    "kind": "chat_only",
+                    "classification": classification,
+                    "message": _side_chat_response(body.message, active_plan),
+                    "plan": None,
+                    "chat_plan": None,
+                    "active_plan": _plan_payload(active_plan),
+                }
+            if classification == "new_workflow":
+                plan = service.create_plan(body.message)
+                kind = "chat_only" if plan.is_chat_only else "planned"
+            else:
+                plan = service.refine_plan(
+                    body.active_plan_id,
+                    _classified_refinement_message(body.message, classification, active_plan),
+                )
+                kind = "chat_only" if plan.is_chat_only else classification
         else:
             plan = service.create_plan(body.message)
             kind = "chat_only" if plan.is_chat_only else "planned"
+            classification = kind
     except MaestroOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "kind": kind,
-        "message": _maestro_response_text(plan, refined=kind == "refined"),
+        "classification": classification,
+        "message": _maestro_response_text(
+            plan,
+            refined=kind in {"refined", "rfi_answered", "routed"},
+        ),
         "plan": None if plan.is_chat_only else _plan_payload(plan),
         "chat_plan": _plan_payload(plan) if plan.is_chat_only else None,
+        "active_plan": None,
     }
 
 
@@ -174,6 +198,58 @@ def _maestro_response_text(plan: MaestroPlan, *, refined: bool) -> str:
         f"{len(plan.subtasks)} subtasks, and {stage_count} "
         f"{'stage' if stage_count == 1 else 'stages'}.{question_text} "
         "It is ready for review."
+    )
+
+
+def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> str:
+    lowered = message.lower().strip()
+    has_blocking_rfi = any(
+        item.needs_user_input and item.blocks_execution for item in active_plan.work_items
+    )
+    if any(token in lowered for token in ("new workflow", "new plan", "separate workflow", "start over")):
+        return "new_workflow"
+    if any(
+        token in lowered
+        for token in ("change the plan", "update the plan", "refine", "instead", "also include", "add ")
+    ):
+        return "refined"
+    if has_blocking_rfi and not lowered.endswith("?"):
+        return "rfi_answered"
+    if any(token in lowered for token in ("remember", "log ", "capture ", "add task", "contact:", "event:")):
+        return "routed"
+    if lowered.endswith("?") or any(
+        lowered.startswith(prefix)
+        for prefix in ("what ", "why ", "how ", "who ", "when ", "where ", "can you explain")
+    ):
+        return "side_chat"
+    return "refined"
+
+
+def _classified_refinement_message(message: str, classification: str, active_plan: MaestroPlan) -> str:
+    if classification == "rfi_answered":
+        blocking_titles = [
+            item.title
+            for item in active_plan.work_items
+            if item.needs_user_input and item.blocks_execution
+        ]
+        return (
+            "User answered blocking RFI(s): "
+            f"{'; '.join(blocking_titles)}\n\nAnswer:\n{message}"
+        )
+    if classification == "routed":
+        return (
+            "User added routed context inside the active Maestro session. "
+            "Classify it as a task, contact, event, decision, RFI, memory candidate, or think tank "
+            f"item as appropriate without disrupting still-valid workflow work.\n\nMessage:\n{message}"
+        )
+    return message
+
+
+def _side_chat_response(message: str, active_plan: MaestroPlan) -> str:
+    return (
+        "Quick answer while keeping the current plan open: "
+        "I can answer that here without changing the proposed workflow. "
+        f"The active plan is still `{active_plan.summary}`."
     )
 
 

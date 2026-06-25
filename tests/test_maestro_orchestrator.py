@@ -525,6 +525,92 @@ def test_maestro_api_respond_refines_active_plan(
     assert payload["plan"]["plan_id"] != first_plan["plan_id"]
 
 
+def test_maestro_api_respond_side_chat_keeps_active_plan(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "What does the workflow order mean?",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["classification"] == "side_chat"
+    assert payload["plan"] is None
+    assert payload["active_plan"]["plan_id"] == first_plan["plan_id"]
+    assert "without changing the proposed workflow" in payload["message"]
+
+
+def test_maestro_api_respond_applies_blocking_rfi_answer(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Coordinate a Praxis partner prep workflow and confirm which follow-up owner "
+                "Chris wants assigned."
+            )
+        },
+    )
+    first_plan = first_response.json()["plan"]
+    assert any(item["blocks_execution"] for item in first_plan["work_items"])
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Chris owns the partner follow-up.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "rfi_answered"
+    assert payload["classification"] == "rfi_answered"
+    assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+
+
+def test_maestro_api_respond_routes_context_inside_active_session(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Remember that Jane Smith prefers a short agenda before partner calls.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "routed"
+    assert payload["classification"] == "routed"
+    assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+
+
 def test_maestro_api_marks_direct_chat_plan(session: Session, tmp_path: Path) -> None:
     get_settings.cache_clear()
     settings = get_settings()

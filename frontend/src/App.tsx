@@ -362,10 +362,12 @@ type MaestroRun = {
 };
 
 type MaestroRespond = {
-  kind: "chat_only" | "planned" | "refined";
+  kind: "chat_only" | "planned" | "refined" | "rfi_answered" | "routed";
+  classification: string;
   message: string;
   plan: MaestroPlan | null;
   chat_plan: MaestroPlan | null;
+  active_plan: MaestroPlan | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -746,6 +748,10 @@ export function App() {
       setMaestroStatus(
         response.kind === "chat_only"
           ? "Answered directly."
+          : response.kind === "rfi_answered"
+            ? "RFI answer applied."
+            : response.kind === "routed"
+              ? "Routed context applied."
           : response.kind === "refined"
             ? "Plan refined."
             : "Proposed plan ready for approval.",
