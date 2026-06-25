@@ -361,6 +361,13 @@ type MaestroRun = {
   }>;
 };
 
+type MaestroRespond = {
+  kind: "chat_only" | "planned" | "refined";
+  message: string;
+  plan: MaestroPlan | null;
+  chat_plan: MaestroPlan | null;
+};
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
 const domainLabels: Record<string, string> = {
@@ -689,34 +696,6 @@ export function App() {
       .filter((stage) => stage.length > 0);
   }, [maestroPlan]);
 
-  const buildMaestroPlanResponse = (plan: MaestroPlan, refined: boolean) => {
-    if (plan.is_chat_only) {
-      return plan.direct_response || plan.summary || "I can handle that directly here.";
-    }
-    const blockingItems = plan.work_items.filter((item) => item.needs_user_input && item.blocks_execution);
-    const nonBlockingQuestions = plan.work_items.filter(
-      (item) => item.needs_user_input && !item.blocks_execution,
-    );
-    if (blockingItems.length > 0) {
-      return `I need one answer before this can run: ${blockingItems
-        .map((item) => item.title)
-        .join("; ")}. I updated the proposed plan and will refine it when you answer.`;
-    }
-    const stageText =
-      plan.execution_stages.length === 1
-        ? "1 stage"
-        : `${plan.execution_stages.length || 1} stages`;
-    const questionText =
-      nonBlockingQuestions.length > 0
-        ? ` I also found ${nonBlockingQuestions.length} non-blocking question${
-            nonBlockingQuestions.length === 1 ? "" : "s"
-          } that can be answered later.`
-        : "";
-    return `${refined ? "I refined the plan" : "I drafted a plan"} with ${
-      plan.work_items.length
-    } work items, ${plan.subtasks.length} subtasks, and ${stageText}.${questionText} It is ready for review.`;
-  };
-
   const moveItem = (id: number, direction: -1 | 1) => {
     setPlannerItems((items) => {
       const index = items.findIndex((item) => item.id === id);
@@ -741,30 +720,36 @@ export function App() {
       sender: "user",
       content: draftMessage.trim(),
     };
-    const shouldRefine = maestroPlan !== null && maestroRun === null;
+    const activePlanId = maestroPlan && maestroRun === null ? maestroPlan.parent_task_id : null;
     setMaestroBusy(true);
     setChatMessages((messages) => [...messages, outgoingMessage]);
     setDraftMessage("");
     try {
-      const response = await apiJson<{ plan: MaestroPlan }>(
-        shouldRefine ? `/maestro/plans/${maestroPlan.parent_task_id}/refine` : "/maestro/plan",
-        {
+      const response = await apiJson<MaestroRespond>("/maestro/respond", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: outgoingMessage.content }),
-        },
-      );
-      setMaestroPlan(response.plan.is_chat_only ? null : response.plan);
+        body: JSON.stringify({
+          message: outgoingMessage.content,
+          active_plan_id: activePlanId,
+        }),
+      });
+      setMaestroPlan(response.plan);
       setMaestroRun(null);
       setChatMessages((messages) => [
         ...messages,
         {
           id: crypto.randomUUID(),
           sender: "maestro",
-          content: buildMaestroPlanResponse(response.plan, shouldRefine),
+          content: response.message,
         },
       ]);
-      setMaestroStatus(shouldRefine ? "Plan refined." : "Proposed plan ready for approval.");
+      setMaestroStatus(
+        response.kind === "chat_only"
+          ? "Answered directly."
+          : response.kind === "refined"
+            ? "Plan refined."
+            : "Proposed plan ready for approval.",
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Maestro planning failed.";
       setChatMessages((messages) => [

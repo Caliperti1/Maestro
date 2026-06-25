@@ -480,6 +480,51 @@ def test_maestro_api_refines_plan_with_existing_context(
     assert "GroundTruth demo technical readiness" in refined_task.input_payload["refinement"]
 
 
+def test_maestro_api_respond_plans_without_active_plan(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "planned"
+    assert payload["message"].startswith("I drafted a plan")
+    assert payload["plan"]["status"] == "proposed"
+    assert payload["chat_plan"] is None
+
+
+def test_maestro_api_respond_refines_active_plan(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    refine_response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Also include GroundTruth demo technical readiness.",
+        },
+    )
+
+    assert refine_response.status_code == 200
+    payload = refine_response.json()
+    assert payload["kind"] == "refined"
+    assert payload["message"]
+    assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+
+
 def test_maestro_api_marks_direct_chat_plan(session: Session, tmp_path: Path) -> None:
     get_settings.cache_clear()
     settings = get_settings()
@@ -504,6 +549,33 @@ def test_maestro_api_marks_direct_chat_plan(session: Session, tmp_path: Path) ->
     assert payload["is_chat_only"] is True
     assert payload["subtasks"] == []
     assert payload["direct_response"] == "Maestro can answer that directly without delegating work."
+
+
+def test_maestro_api_respond_returns_chat_only_without_plan(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    app = create_app()
+
+    def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Tell me about Maestro"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["plan"] is None
+    assert payload["chat_plan"]["is_chat_only"] is True
+    assert payload["message"]
 
 
 def test_maestro_api_close_session_stages_transcript_artifact(

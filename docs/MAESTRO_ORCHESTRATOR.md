@@ -82,6 +82,11 @@ Maestro replans with the prior work items and subtasks in context. The manual ne
 closes the active session, stages the transcript as a Maestro Development interaction artifact, and
 starts a clean session.
 
+The preferred API entrypoint for user chat is `POST /maestro/respond`. It returns one response
+envelope with a `kind` of `chat_only`, `planned`, or `refined`, plus a plain-text Maestro message
+and an optional plan payload. Legacy plan/refine endpoints remain available for targeted tests and
+tooling, but the UI composer should use the unified response contract.
+
 ## Execution Contract
 
 Running an approved plan:

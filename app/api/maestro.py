@@ -20,6 +20,11 @@ class MaestroPlanBody(BaseModel):
     message: str
 
 
+class MaestroRespondBody(BaseModel):
+    message: str
+    active_plan_id: uuid.UUID | None = None
+
+
 class MaestroRunBody(BaseModel):
     execute_llm: bool = True
 
@@ -41,6 +46,29 @@ def create_maestro_plan(body: MaestroPlanBody, db: Session = Depends(get_db)) ->
     except MaestroOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"plan": _plan_payload(plan)}
+
+
+@router.post("/respond")
+def respond_to_maestro(
+    body: MaestroRespondBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        service = MaestroOrchestratorService(db)
+        if body.active_plan_id is not None:
+            plan = service.refine_plan(body.active_plan_id, body.message)
+            kind = "chat_only" if plan.is_chat_only else "refined"
+        else:
+            plan = service.create_plan(body.message)
+            kind = "chat_only" if plan.is_chat_only else "planned"
+    except MaestroOrchestratorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "kind": kind,
+        "message": _maestro_response_text(plan, refined=kind == "refined"),
+        "plan": None if plan.is_chat_only else _plan_payload(plan),
+        "chat_plan": _plan_payload(plan) if plan.is_chat_only else None,
+    }
 
 
 @router.post("/plans/{plan_id}/refine")
@@ -115,6 +143,38 @@ def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
         "direct_response": plan.direct_response,
         "planner_notes": plan.planner_notes,
     }
+
+
+def _maestro_response_text(plan: MaestroPlan, *, refined: bool) -> str:
+    if plan.is_chat_only:
+        return plan.direct_response or plan.summary or "I can handle that directly here."
+    blocking_items = [
+        item for item in plan.work_items if item.needs_user_input and item.blocks_execution
+    ]
+    if blocking_items:
+        titles = "; ".join(item.title for item in blocking_items)
+        return (
+            f"I need one answer before this can run: {titles}. "
+            "I updated the proposed plan and will refine it when you answer."
+        )
+    non_blocking_questions = [
+        item for item in plan.work_items if item.needs_user_input and not item.blocks_execution
+    ]
+    stage_count = len(plan.execution_stages) or 1
+    question_text = ""
+    if non_blocking_questions:
+        suffix = "" if len(non_blocking_questions) == 1 else "s"
+        question_text = (
+            f" I also found {len(non_blocking_questions)} non-blocking question{suffix} "
+            "that can be answered later."
+        )
+    verb = "refined" if refined else "drafted"
+    return (
+        f"I {verb} a plan with {len(plan.work_items)} work items, "
+        f"{len(plan.subtasks)} subtasks, and {stage_count} "
+        f"{'stage' if stage_count == 1 else 'stages'}.{question_text} "
+        "It is ready for review."
+    )
 
 
 def _run_payload(run: MaestroRun) -> dict[str, Any]:
