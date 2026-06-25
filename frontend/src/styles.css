@@ -385,6 +385,17 @@ h4 {
   text-transform: uppercase;
 }
 
+.queue-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.queue-list {
+  display: grid;
+  gap: 8px;
+}
+
 .maestro-plan pre {
   max-height: 460px;
   overflow: auto;

@@ -379,6 +379,9 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     ]
     assert plan.workflow_graph["stages"][0]["work_item_ids"] == ["wi_praxis"]
     assert plan.workflow_graph["stages"][1]["waits_for_work_item_ids"] == ["wi_praxis"]
+    queue_items = plan.scheduler["queue_items"]
+    assert [item["status"] for item in queue_items] == ["pending", "pending"]
+    assert [item["stage_index"] for item in queue_items] == [1, 2]
 
     run = service.run_plan(plan.parent_task_id, execute_llm=True)
 
@@ -398,6 +401,10 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     assert parent is not None
     assert parent.status == "completed"
     assert parent.output_payload["synthesis_report_id"] == run.synthesis_report_id
+    completed_queue = parent.input_payload["scheduler"]["queue_items"]
+    assert [item["status"] for item in completed_queue] == ["completed", "completed"]
+    assert all(item["child_task_id"] for item in completed_queue)
+    assert parent.output_payload["scheduler"]["queue_items"] == completed_queue
 
 
 def test_orchestrator_passes_dependency_outputs_to_later_agent(session: Session, tmp_path: Path) -> None:
@@ -428,6 +435,7 @@ def test_orchestrator_passes_dependency_outputs_to_later_agent(session: Session,
         ["praxis-planning-agent"],
         ["maestro-introspection-agent"],
     ]
+    assert parent.output_payload["scheduler"]["queue_items"][1]["status"] == "completed"
 
 
 def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None:
@@ -449,6 +457,7 @@ def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None
     assert plan["execution_stages"]
     assert "workflow_graph" in plan
     assert "nodes" in plan["workflow_graph"]
+    assert plan["scheduler"]["queue_items"]
 
     run_response = client.post(
         f"/maestro/plans/{plan['parent_task_id']}/run",

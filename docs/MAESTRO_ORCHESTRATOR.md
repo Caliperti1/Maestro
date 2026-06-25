@@ -120,6 +120,9 @@ The MVP scheduler is a queue foundation, not the final recurring scheduler. It r
 - parent task status
 - child task status
 - sequential execution order
+- plan-level queue items derived from the workflow graph
+- queue item status transitions from pending to ready, running, completed, or failed
+- child task/report IDs once execution creates durable child tasks
 - future resource-lock placeholder
 - future recurring-scheduler placeholder
 

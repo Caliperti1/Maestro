@@ -314,6 +314,25 @@ type MaestroWorkItem = {
   rationale: string;
 };
 
+type MaestroQueueItem = {
+  id: string;
+  stage_index: number;
+  position: number;
+  status: string;
+  agent_key: string;
+  agent_name: string;
+  domain_key: string;
+  objective: string;
+  priority: string;
+  work_item_ids: string[];
+  depends_on_work_item_ids: string[];
+  child_task_id: string | null;
+  child_report_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+};
+
 type MaestroPlan = {
   plan_id: string;
   parent_task_id: string;
@@ -334,7 +353,7 @@ type MaestroPlan = {
   is_chat_only: boolean;
   selected_agents: Array<Record<string, unknown>>;
   approval_required: boolean;
-  scheduler: Record<string, unknown>;
+  scheduler: Record<string, unknown> & { queue_items?: MaestroQueueItem[] };
   created_at: string;
   direct_response: string | null;
   planner_notes: string | null;
@@ -1166,6 +1185,32 @@ export function App() {
                       ))}
                     </div>
                   </div>
+                  {(maestroPlan.scheduler.queue_items?.length ?? 0) > 0 && (
+                    <div className="queue-panel">
+                      <h4>Execution queue</h4>
+                      <div className="queue-list">
+                        {maestroPlan.scheduler.queue_items?.map((item) => (
+                          <article className="mini-row" key={item.id}>
+                            <span>
+                              Stage {item.stage_index} / {item.status} /{" "}
+                              {domainLabels[item.domain_key] ?? item.domain_key}
+                            </span>
+                            <p>{item.agent_name}</p>
+                            <p>{item.objective}</p>
+                            <div className="preview-meta">
+                              <span>{item.priority}</span>
+                              <span>{item.work_item_ids.join(", ") || "no work items"}</span>
+                              {item.depends_on_work_item_ids.length > 0 && (
+                                <span>Waits for {item.depends_on_work_item_ids.join(", ")}</span>
+                              )}
+                              {item.child_task_id && <span>Task {item.child_task_id.slice(0, 8)}</span>}
+                              {item.error_message && <span>{item.error_message}</span>}
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </section>
               )}
 

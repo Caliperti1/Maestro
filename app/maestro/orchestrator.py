@@ -155,6 +155,7 @@ class MaestroOrchestratorService:
         subtasks = self._build_subtasks(cleaned_input, selected_agents, intents, work_items)
         execution_stages = self._execution_stage_keys(subtasks)
         workflow_graph = self._workflow_graph(work_items, subtasks)
+        queue_items = self._queue_items(subtasks)
         summary = decomposition.plan_summary or self._plan_summary(cleaned_input, intents, subtasks)
         plan_id = str(uuid.uuid4())
         parent_task = Task(
@@ -180,7 +181,7 @@ class MaestroOrchestratorService:
                 ],
                 "registry_snapshot": registry_snapshot,
                 "approval_required": True,
-                "scheduler": self._scheduler_payload(),
+                "scheduler": self._scheduler_payload(queue_items=queue_items),
                 "direct_response": decomposition.direct_response,
                 "planner_notes": decomposition.planner_notes,
             },
@@ -306,6 +307,7 @@ class MaestroOrchestratorService:
                 f"Plan needs Chris before execution can start: {titles}"
             )
 
+        self._replace_scheduler(parent_task, queue_items=self._queue_with_status(plan.scheduler, "pending"))
         parent_task.status = "running"
         parent_task.started_at = datetime.now(UTC)
         self.session.commit()
@@ -316,7 +318,19 @@ class MaestroOrchestratorService:
         error_message: str | None = None
         try:
             for stage in self._execution_stages(plan.subtasks):
+                for stage_subtask in stage:
+                    self._update_queue_item(
+                        parent_task,
+                        stage_subtask,
+                        status="ready",
+                    )
                 for subtask in stage:
+                    self._update_queue_item(
+                        parent_task,
+                        subtask,
+                        status="running",
+                        started_at=datetime.now(UTC).isoformat(),
+                    )
                     dependency_context = self._dependency_context(
                         completed_outputs_by_work_item,
                         subtask,
@@ -338,6 +352,15 @@ class MaestroOrchestratorService:
                         priority=subtask.priority,
                     )
                     child_runs.append(run)
+                    self._update_queue_item(
+                        parent_task,
+                        subtask,
+                        status="failed" if run.status == "failed" else "completed",
+                        child_task_id=run.task_id,
+                        child_report_id=run.report_id,
+                        completed_at=datetime.now(UTC).isoformat(),
+                        error_message=run.error_message,
+                    )
                     for work_item_id in subtask.work_item_ids or []:
                         completed_outputs_by_work_item[work_item_id] = (
                             run.output_text or run.execution_note
@@ -356,6 +379,7 @@ class MaestroOrchestratorService:
                 "child_task_ids": [run.task_id for run in child_runs],
                 "child_report_ids": [run.report_id for run in child_runs if run.report_id],
                 "execution_stages": execution_stages,
+                "scheduler": dict((parent_task.input_payload or {}).get("scheduler", {})),
                 "synthesis_report_id": str(report.id),
                 "staged_artifact_path": staged.path,
                 "artifact_id": staged.artifact_id,
@@ -374,11 +398,20 @@ class MaestroOrchestratorService:
                 synthesis=synthesis,
                 staged_artifact_path=staged.path,
                 artifact_id=staged.artifact_id,
-                scheduler=self._scheduler_payload(),
+                scheduler=dict((parent_task.input_payload or {}).get("scheduler", {})),
                 execution_stages=execution_stages,
                 error_message=error_message,
             )
         except Exception as exc:
+            for subtask in plan.subtasks:
+                self._update_queue_item(
+                    parent_task,
+                    subtask,
+                    status="failed",
+                    completed_at=datetime.now(UTC).isoformat(),
+                    error_message=str(exc),
+                    only_statuses={"ready", "running"},
+                )
             parent_task.status = "failed"
             parent_task.error_message = str(exc)
             parent_task.completed_at = datetime.now(UTC)
@@ -1153,13 +1186,105 @@ class MaestroOrchestratorService:
             payload["selection_rationale"] = self._subtask_rationale(user_input, agent)
         return payload
 
-    def _scheduler_payload(self) -> dict[str, Any]:
+    def _scheduler_payload(self, *, queue_items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         return {
             "status": "queue_foundation",
             "policy": "Plan-first execution. Child tasks run sequentially in MVP.",
             "resource_locks": [],
             "recurring_scheduler": "planned",
+            "queue_items": queue_items or [],
         }
+
+    def _queue_items(self, subtasks: list[MaestroSubtask]) -> list[dict[str, Any]]:
+        queue_items: list[dict[str, Any]] = []
+        for stage_index, stage in enumerate(self._execution_stages(subtasks), start=1):
+            for position, subtask in enumerate(stage, start=1):
+                work_item_key = "-".join(subtask.work_item_ids or [subtask.agent_key])
+                queue_items.append(
+                    {
+                        "id": f"q{stage_index}-{position}-{work_item_key}",
+                        "stage_index": stage_index,
+                        "position": position,
+                        "status": "pending",
+                        "agent_key": subtask.agent_key,
+                        "agent_name": subtask.agent_name,
+                        "domain_key": subtask.domain_key,
+                        "objective": subtask.objective,
+                        "priority": subtask.priority,
+                        "work_item_ids": subtask.work_item_ids or [],
+                        "depends_on_work_item_ids": subtask.depends_on_work_item_ids or [],
+                        "child_task_id": None,
+                        "child_report_id": None,
+                        "started_at": None,
+                        "completed_at": None,
+                        "error_message": None,
+                    }
+                )
+        return queue_items
+
+    def _queue_with_status(self, scheduler: dict[str, Any], status: str) -> list[dict[str, Any]]:
+        return [
+            {
+                **item,
+                "status": status,
+                "child_task_id": None,
+                "child_report_id": None,
+                "started_at": None,
+                "completed_at": None,
+                "error_message": None,
+            }
+            for item in scheduler.get("queue_items", [])
+        ]
+
+    def _replace_scheduler(self, task: Task, *, queue_items: list[dict[str, Any]]) -> None:
+        payload = dict(task.input_payload or {})
+        scheduler = {
+            **self._scheduler_payload(),
+            **dict(payload.get("scheduler", {})),
+            "queue_items": queue_items,
+        }
+        payload["scheduler"] = scheduler
+        task.input_payload = payload
+
+    def _update_queue_item(
+        self,
+        task: Task,
+        subtask: MaestroSubtask,
+        *,
+        status: str,
+        child_task_id: str | None = None,
+        child_report_id: str | None = None,
+        started_at: str | None = None,
+        completed_at: str | None = None,
+        error_message: str | None = None,
+        only_statuses: set[str] | None = None,
+    ) -> None:
+        payload = dict(task.input_payload or {})
+        scheduler = {
+            **self._scheduler_payload(),
+            **dict(payload.get("scheduler", {})),
+        }
+        queue_items = []
+        for item in scheduler.get("queue_items", []):
+            matches = (
+                item.get("agent_key") == subtask.agent_key
+                and item.get("work_item_ids") == (subtask.work_item_ids or [])
+            )
+            if matches and (only_statuses is None or item.get("status") in only_statuses):
+                item = {
+                    **item,
+                    "status": status,
+                    "child_task_id": child_task_id if child_task_id is not None else item.get("child_task_id"),
+                    "child_report_id": child_report_id if child_report_id is not None else item.get("child_report_id"),
+                    "started_at": started_at if started_at is not None else item.get("started_at"),
+                    "completed_at": completed_at if completed_at is not None else item.get("completed_at"),
+                    "error_message": error_message,
+                }
+            queue_items.append(item)
+        scheduler["queue_items"] = queue_items
+        payload["scheduler"] = scheduler
+        task.input_payload = payload
+        self.session.commit()
 
     def _refined_plan_input(self, previous_plan: MaestroPlan, refinement: str) -> str:
         work_item_lines = [
