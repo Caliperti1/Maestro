@@ -91,6 +91,7 @@ class MaestroPlan:
     intents: list[MaestroIntent]
     subtasks: list[MaestroSubtask]
     execution_stages: list[list[str]]
+    is_chat_only: bool
     selected_agents: list[dict[str, Any]]
     registry_snapshot: dict[str, Any]
     approval_required: bool
@@ -147,6 +148,7 @@ class MaestroOrchestratorService:
             registry_snapshot=registry_snapshot,
         )
         work_items = [self._work_item_from_planner(item) for item in decomposition.work_items]
+        is_chat_only = self._is_chat_only(work_items, decomposition)
         selected_agents = self._select_agents_for_work_items(work_items, agents)
         intents = self._intents_from_work_items(work_items, selected_agents)
         subtasks = self._build_subtasks(cleaned_input, selected_agents, intents, work_items)
@@ -168,6 +170,7 @@ class MaestroOrchestratorService:
                 "intents": [intent.__dict__ for intent in intents],
                 "subtasks": [subtask.__dict__ for subtask in subtasks],
                 "execution_stages": execution_stages,
+                "is_chat_only": is_chat_only,
                 "selected_agents": [
                     self._selected_agent_payload(agent, user_input=cleaned_input)
                     for agent in selected_agents
@@ -289,6 +292,8 @@ class MaestroOrchestratorService:
             raise MaestroOrchestratorError(
                 f"Plan cannot be run from status {parent_task.status}."
             )
+        if plan.is_chat_only:
+            raise MaestroOrchestratorError("Direct chat responses do not have an executable plan.")
         blocking_items = [
             item for item in plan.work_items if item.needs_user_input and item.blocks_execution
         ]
@@ -1003,6 +1008,16 @@ class MaestroOrchestratorService:
     def _execution_stage_keys(self, subtasks: list[MaestroSubtask]) -> list[list[str]]:
         return [[subtask.agent_key for subtask in stage] for stage in self._execution_stages(subtasks)]
 
+    def _is_chat_only(
+        self,
+        work_items: list[MaestroWorkItem],
+        decomposition: MaestroPlannerResponse,
+    ) -> bool:
+        return bool(decomposition.direct_response) and not any(
+            item.needs_agent or item.can_log_directly or item.needs_user_input
+            for item in work_items
+        )
+
     def _dependency_context(
         self,
         completed_outputs_by_work_item: dict[str, str],
@@ -1137,6 +1152,7 @@ class MaestroOrchestratorService:
             intents=[MaestroIntent(**intent) for intent in payload.get("intents", [])],
             subtasks=[MaestroSubtask(**subtask) for subtask in payload.get("subtasks", [])],
             execution_stages=list(payload.get("execution_stages", [])),
+            is_chat_only=bool(payload.get("is_chat_only", False)),
             selected_agents=list(payload.get("selected_agents", [])),
             registry_snapshot=dict(payload.get("registry_snapshot", {})),
             approval_required=bool(payload.get("approval_required", True)),

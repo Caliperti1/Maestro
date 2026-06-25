@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.db.models import Artifact, Report, Task
 from app.db.session import get_db
 from app.llm.client import LLMClientError
-from app.maestro.orchestrator import MaestroOrchestratorService
+from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
 from app.maestro.planner import MaestroPlannerResponse
 
 
@@ -174,6 +174,41 @@ class FakeMultiDomainPlannerLLMClient:
         raise AssertionError("Planner should use structured_response.")
 
 
+class FakeDirectChatPlannerLLMClient:
+    provider = "test"
+    model = "test-direct-chat-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Answered directly in chat.",
+            "direct_response": "Maestro can answer that directly without delegating work.",
+            "planner_notes": "No executable work was detected.",
+            "work_items": [
+                {
+                    "id": "wi_direct",
+                    "type": "direct_response",
+                    "title": "Direct chat answer",
+                    "description": "Answer the user's question directly.",
+                    "domain_key": None,
+                    "priority": "normal",
+                    "required_capabilities": [],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Plain text answer.",
+                    "rationale": "No routing, memory write, or agent work is needed.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
 class FailingPlannerLLMClient:
     provider = "test"
     model = "test-failing-planner"
@@ -291,6 +326,27 @@ def test_orchestrator_decomposes_with_llm_before_agent_matching(session: Session
     assert subtask.work_item_ids == ["wi_partner_prep"]
     assert "Work item wi_partner_prep" in subtask.objective
     assert "Jane Smith is the partner lead" not in subtask.objective
+
+
+def test_orchestrator_direct_chat_has_no_executable_plan(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeDirectChatPlannerLLMClient(),
+    )
+
+    plan = service.create_plan("What is Maestro?")
+
+    assert plan.is_chat_only is True
+    assert plan.direct_response == "Maestro can answer that directly without delegating work."
+    assert plan.subtasks == []
+    assert plan.execution_stages == []
+
+    try:
+        service.run_plan(plan.parent_task_id, execute_llm=False)
+    except MaestroOrchestratorError as exc:
+        assert "Direct chat responses" in str(exc)
+    else:
+        raise AssertionError("Direct chat plans should not be executable.")
 
 
 def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
@@ -422,6 +478,32 @@ def test_maestro_api_refines_plan_with_existing_context(
     assert refined_task is not None
     assert refined_task.input_payload["refined_from_plan_id"] == first_plan["plan_id"]
     assert "GroundTruth demo technical readiness" in refined_task.input_payload["refinement"]
+
+
+def test_maestro_api_marks_direct_chat_plan(session: Session, tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    app = create_app()
+
+    def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeDirectChatPlannerLLMClient(),
+    )
+    plan = service.create_plan("What is Maestro?")
+
+    response = client.get(f"/maestro/plans/{plan.parent_task_id}")
+
+    assert response.status_code == 200
+    payload = response.json()["plan"]
+    assert payload["is_chat_only"] is True
+    assert payload["subtasks"] == []
+    assert payload["direct_response"] == "Maestro can answer that directly without delegating work."
 
 
 def test_maestro_api_close_session_stages_transcript_artifact(

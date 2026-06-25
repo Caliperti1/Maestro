@@ -326,6 +326,7 @@ type MaestroPlan = {
   intents: MaestroIntent[];
   subtasks: MaestroSubtask[];
   execution_stages: string[][];
+  is_chat_only: boolean;
   selected_agents: Array<Record<string, unknown>>;
   approval_required: boolean;
   scheduler: Record<string, unknown>;
@@ -689,6 +690,9 @@ export function App() {
   }, [maestroPlan]);
 
   const buildMaestroPlanResponse = (plan: MaestroPlan, refined: boolean) => {
+    if (plan.is_chat_only) {
+      return plan.direct_response || plan.summary || "I can handle that directly here.";
+    }
     const blockingItems = plan.work_items.filter((item) => item.needs_user_input && item.blocks_execution);
     const nonBlockingQuestions = plan.work_items.filter(
       (item) => item.needs_user_input && !item.blocks_execution,
@@ -750,7 +754,7 @@ export function App() {
           body: JSON.stringify({ message: outgoingMessage.content }),
         },
       );
-      setMaestroPlan(response.plan);
+      setMaestroPlan(response.plan.is_chat_only ? null : response.plan);
       setMaestroRun(null);
       setChatMessages((messages) => [
         ...messages,
