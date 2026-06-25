@@ -33,6 +33,19 @@ type PlannerItem = {
   priority: "high" | "medium" | "low";
 };
 
+type ChatMessage = {
+  id: string;
+  sender: "user" | "maestro";
+  content: string;
+};
+
+type MaestroSessionSummary = {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  stagedArtifactPath: string | null;
+};
+
 type DropboxDomain = {
   key: string;
   inbox: number;
@@ -642,6 +655,8 @@ export function App() {
     "dashboard",
   );
   const [plannerItems, setPlannerItems] = useState(initialPlannerItems);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [sessionHistory, setSessionHistory] = useState<MaestroSessionSummary[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const [maestroPlan, setMaestroPlan] = useState<MaestroPlan | null>(null);
   const [maestroRun, setMaestroRun] = useState<MaestroRun | null>(null);
@@ -673,6 +688,31 @@ export function App() {
       .filter((stage) => stage.length > 0);
   }, [maestroPlan]);
 
+  const buildMaestroPlanResponse = (plan: MaestroPlan, refined: boolean) => {
+    const blockingItems = plan.work_items.filter((item) => item.needs_user_input && item.blocks_execution);
+    const nonBlockingQuestions = plan.work_items.filter(
+      (item) => item.needs_user_input && !item.blocks_execution,
+    );
+    if (blockingItems.length > 0) {
+      return `I need one answer before this can run: ${blockingItems
+        .map((item) => item.title)
+        .join("; ")}. I updated the proposed plan and will refine it when you answer.`;
+    }
+    const stageText =
+      plan.execution_stages.length === 1
+        ? "1 stage"
+        : `${plan.execution_stages.length || 1} stages`;
+    const questionText =
+      nonBlockingQuestions.length > 0
+        ? ` I also found ${nonBlockingQuestions.length} non-blocking question${
+            nonBlockingQuestions.length === 1 ? "" : "s"
+          } that can be answered later.`
+        : "";
+    return `${refined ? "I refined the plan" : "I drafted a plan"} with ${
+      plan.work_items.length
+    } work items, ${plan.subtasks.length} subtasks, and ${stageText}.${questionText} It is ready for review.`;
+  };
+
   const moveItem = (id: number, direction: -1 | 1) => {
     setPlannerItems((items) => {
       const index = items.findIndex((item) => item.id === id);
@@ -690,20 +730,44 @@ export function App() {
     );
   };
 
-  const proposeMaestroPlan = async () => {
+  const sendMaestroMessage = async () => {
     if (!draftMessage.trim()) return;
+    const outgoingMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      sender: "user",
+      content: draftMessage.trim(),
+    };
+    const shouldRefine = maestroPlan !== null && maestroRun === null;
     setMaestroBusy(true);
+    setChatMessages((messages) => [...messages, outgoingMessage]);
+    setDraftMessage("");
     try {
-      const response = await apiJson<{ plan: MaestroPlan }>("/maestro/plan", {
+      const response = await apiJson<{ plan: MaestroPlan }>(
+        shouldRefine ? `/maestro/plans/${maestroPlan.parent_task_id}/refine` : "/maestro/plan",
+        {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: draftMessage }),
-      });
+          body: JSON.stringify({ message: outgoingMessage.content }),
+        },
+      );
       setMaestroPlan(response.plan);
       setMaestroRun(null);
-      setMaestroStatus("Proposed plan ready for approval.");
+      setChatMessages((messages) => [
+        ...messages,
+        {
+          id: crypto.randomUUID(),
+          sender: "maestro",
+          content: buildMaestroPlanResponse(response.plan, shouldRefine),
+        },
+      ]);
+      setMaestroStatus(shouldRefine ? "Plan refined." : "Proposed plan ready for approval.");
     } catch (error) {
-      setMaestroStatus(error instanceof Error ? error.message : "Maestro planning failed.");
+      const message = error instanceof Error ? error.message : "Maestro planning failed.";
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), sender: "maestro", content: message },
+      ]);
+      setMaestroStatus(message);
     } finally {
       setMaestroBusy(false);
     }
@@ -723,11 +787,75 @@ export function App() {
       );
       setMaestroRun(response.run);
       setMaestroPlan(response.run.plan);
+      setChatMessages((messages) => [
+        ...messages,
+        {
+          id: crypto.randomUUID(),
+          sender: "maestro",
+          content:
+            response.run.status === "completed"
+              ? "The workflow completed. I synthesized the child agent outputs and staged the canonical workflow artifact for memory curation."
+              : `The workflow finished with status ${response.run.status}. Review the synthesis below.`,
+        },
+      ]);
       setMaestroStatus(
         response.run.status === "completed" ? "Workflow completed." : "Workflow finished.",
       );
     } catch (error) {
-      setMaestroStatus(error instanceof Error ? error.message : "Maestro workflow failed.");
+      const message = error instanceof Error ? error.message : "Maestro workflow failed.";
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), sender: "maestro", content: message },
+      ]);
+      setMaestroStatus(message);
+    } finally {
+      setMaestroBusy(false);
+    }
+  };
+
+  const startNewMaestroSession = async () => {
+    if (chatMessages.length === 0 && !maestroPlan && !maestroRun) return;
+    setMaestroBusy(true);
+    let stagedArtifactPath: string | null = null;
+    try {
+      if (chatMessages.length > 0) {
+        const response = await apiJson<{ staged_artifact_path: string | null }>(
+          "/maestro/sessions/close",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              plan_id: maestroPlan?.parent_task_id ?? null,
+              messages: chatMessages.map((message) => ({
+                sender: message.sender,
+                content: message.content,
+              })),
+            }),
+          },
+        );
+        stagedArtifactPath = response.staged_artifact_path;
+      }
+      setSessionHistory((sessions) => [
+        {
+          id: crypto.randomUUID(),
+          title: chatMessages.find((message) => message.sender === "user")?.content.slice(0, 72) ||
+            "Maestro session",
+          messages: chatMessages,
+          stagedArtifactPath,
+        },
+        ...sessions,
+      ]);
+      setChatMessages([]);
+      setDraftMessage("");
+      setMaestroPlan(null);
+      setMaestroRun(null);
+      setMaestroStatus(
+        stagedArtifactPath
+          ? "Previous session staged for memory curation."
+          : "New Maestro session ready.",
+      );
+    } catch (error) {
+      setMaestroStatus(error instanceof Error ? error.message : "Could not close session.");
     } finally {
       setMaestroBusy(false);
     }
@@ -849,39 +977,66 @@ export function App() {
                   <p className="eyebrow">Maestro chat</p>
                   <h3 id="chat-heading">Command thread</h3>
                 </div>
-                <button className="icon-button" aria-label="New thread" title="New thread">
+                <button
+                  className="icon-button"
+                  aria-label="New session"
+                  title="New session"
+                  onClick={startNewMaestroSession}
+                  disabled={maestroBusy || (chatMessages.length === 0 && !maestroPlan && !maestroRun)}
+                >
                   <Plus size={18} />
                 </button>
               </div>
 
               <div className="thread">
-                {maestroPlan || maestroRun ? (
-                  <>
-                    {maestroPlan && (
-                      <div className="message user-message">
-                        <span>You</span>
-                        <p>{maestroPlan.user_input}</p>
-                      </div>
-                    )}
-                    {maestroRun && (
-                      <div className="message maestro-message">
-                        <span>Maestro</span>
-                        <p>{maestroRun.status}: workflow synthesis is ready below.</p>
-                      </div>
-                    )}
-                  </>
+                {chatMessages.length > 0 ? (
+                  chatMessages.map((message) => (
+                    <div
+                      className={`message ${
+                        message.sender === "user" ? "user-message" : "maestro-message"
+                      }`}
+                      key={message.id}
+                    >
+                      <span>{message.sender === "user" ? "You" : "Maestro"}</span>
+                      <p>{message.content}</p>
+                    </div>
+                  ))
                 ) : (
                   <p className="empty-state">
-                    No active Maestro conversation yet. Send a request to generate a proposed plan.
+                    No active Maestro session yet. Send a request to start a plan or conversation.
                   </p>
                 )}
               </div>
+
+              {sessionHistory.length > 0 && (
+                <div className="session-history" aria-label="Previous Maestro sessions">
+                  <span>Previous sessions</span>
+                  {sessionHistory.slice(0, 3).map((session) => (
+                    <button
+                      type="button"
+                      key={session.id}
+                      onClick={() => {
+                        setChatMessages(session.messages);
+                        setMaestroPlan(null);
+                        setMaestroRun(null);
+                        setMaestroStatus(
+                          session.stagedArtifactPath
+                            ? "Viewing previous session. Artifact was staged for memory curation."
+                            : "Viewing previous session.",
+                        );
+                      }}
+                    >
+                      {session.title}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               <form
                 className="composer"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  proposeMaestroPlan();
+                  sendMaestroMessage();
                 }}
               >
                 <MessageSquareText size={18} />
@@ -892,7 +1047,7 @@ export function App() {
                   aria-label="Message Maestro"
                 />
                 <button type="submit" disabled={maestroBusy || !draftMessage.trim()}>
-                  Plan
+                  Send
                 </button>
               </form>
 

@@ -203,6 +203,83 @@ class MaestroOrchestratorService:
             raise MaestroOrchestratorError(f"Unknown Maestro plan: {plan_id}")
         return self._plan_from_task(task)
 
+    def refine_plan(self, plan_id: uuid.UUID | str, refinement: str) -> MaestroPlan:
+        cleaned_refinement = refinement.strip()
+        if not cleaned_refinement:
+            raise MaestroOrchestratorError("Maestro refinement cannot be blank.")
+        previous_plan = self.get_plan(plan_id)
+        refined_input = self._refined_plan_input(previous_plan, cleaned_refinement)
+        plan = self.create_plan(refined_input)
+        task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
+        if task is not None:
+            task.input_payload = {
+                **(task.input_payload or {}),
+                "refined_from_plan_id": previous_plan.plan_id,
+                "refinement": cleaned_refinement,
+            }
+            self.session.commit()
+            self.session.refresh(task)
+            return self._plan_from_task(task)
+        return plan
+
+    def close_session(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        plan_id: uuid.UUID | str | None = None,
+    ) -> str | None:
+        cleaned_messages = [
+            {
+                "sender": str(message.get("sender") or "").strip(),
+                "content": str(message.get("content") or "").strip(),
+            }
+            for message in messages
+            if str(message.get("content") or "").strip()
+        ]
+        if not cleaned_messages:
+            return None
+        plan = self.get_plan(plan_id) if plan_id else None
+        transcript = "\n".join(
+            f"{message['sender']}: {message['content']}" for message in cleaned_messages
+        )
+        package = InteractionArtifactPackager(self.session).build_package(
+            domain_key="maestro-development",
+            agent_key=None,
+            user_input=transcript,
+            maestro_tasking=plan.summary if plan else "Maestro chat session",
+            agent_output=plan.direct_response if plan else None,
+            generated_artifacts=[
+                {
+                    "name": "maestro-chat-transcript",
+                    "type": "maestro_session_transcript",
+                    "message_count": len(cleaned_messages),
+                }
+            ],
+            open_questions=[
+                item.description
+                for item in (plan.work_items if plan else [])
+                if item.type == "rfi" or item.needs_user_input
+            ],
+            next_steps=["Curate durable context from this Maestro session artifact."],
+            task_id=plan.parent_task_id if plan else None,
+            provenance={
+                "session_boundary": "manual_new_session",
+                "plan_id": plan.plan_id if plan else None,
+                "artifact_role": "maestro_session_close",
+            },
+        )
+        staged = InteractionArtifactPackager(self.session).stage_package(package)
+        artifact = self.session.get(Artifact, uuid.UUID(staged.artifact_id or ""))
+        if artifact is not None:
+            artifact.metadata_ = {
+                **(artifact.metadata_ or {}),
+                "session_boundary": "manual_new_session",
+                "plan_id": plan.plan_id if plan else None,
+                "canonical_session_artifact": True,
+            }
+            self.session.commit()
+        return staged.path
+
     def run_plan(self, plan_id: uuid.UUID | str, *, execute_llm: bool = True) -> MaestroRun:
         plan = self.get_plan(plan_id)
         parent_task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
@@ -1010,6 +1087,39 @@ class MaestroOrchestratorService:
             "resource_locks": [],
             "recurring_scheduler": "planned",
         }
+
+    def _refined_plan_input(self, previous_plan: MaestroPlan, refinement: str) -> str:
+        work_item_lines = [
+            f"- {item.id}: {item.type} / {item.domain_key or 'global'} / {item.title}"
+            for item in previous_plan.work_items
+        ]
+        subtask_lines = [
+            f"- {subtask.agent_key}: {subtask.objective}"
+            for subtask in previous_plan.subtasks
+        ]
+        return "\n".join(
+            [
+                "Refine the existing Maestro plan using the new user message.",
+                "",
+                "Original user input:",
+                previous_plan.user_input,
+                "",
+                "Previous plan summary:",
+                previous_plan.summary,
+                "",
+                "Previous work items:",
+                *(work_item_lines or ["- none"]),
+                "",
+                "Previous subtasks:",
+                *(subtask_lines or ["- none"]),
+                "",
+                "New user refinement:",
+                refinement,
+                "",
+                "Return an updated plan that preserves still-valid work, removes obsolete work, "
+                "and incorporates the refinement without treating this as an unrelated new session.",
+            ]
+        )
 
     def _plan_from_task(self, task: Task) -> MaestroPlan:
         payload = task.input_payload or {}

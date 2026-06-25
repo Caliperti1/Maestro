@@ -76,6 +76,12 @@ proposal contents until the plan is accepted and executed. This keeps unapproved
 polluting the routed operational boards. The plan preview is responsible for showing those items
 before execution; the boards represent accepted or observed routed items.
 
+The chat surface is session-oriented. Each user message gets a plain-text Maestro response. If a
+plan is active and has not run yet, the next user message is treated as a refinement to that plan:
+Maestro replans with the prior work items and subtasks in context. The manual new-session control
+closes the active session, stages the transcript as a Maestro Development interaction artifact, and
+starts a clean session.
+
 ## Execution Contract
 
 Running an approved plan:

@@ -24,10 +24,33 @@ class MaestroRunBody(BaseModel):
     execute_llm: bool = True
 
 
+class MaestroSessionMessage(BaseModel):
+    sender: str
+    content: str
+
+
+class MaestroSessionCloseBody(BaseModel):
+    messages: list[MaestroSessionMessage]
+    plan_id: uuid.UUID | None = None
+
+
 @router.post("/plan")
 def create_maestro_plan(body: MaestroPlanBody, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         plan = MaestroOrchestratorService(db).create_plan(body.message)
+    except MaestroOrchestratorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"plan": _plan_payload(plan)}
+
+
+@router.post("/plans/{plan_id}/refine")
+def refine_maestro_plan(
+    plan_id: uuid.UUID,
+    body: MaestroPlanBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        plan = MaestroOrchestratorService(db).refine_plan(plan_id, body.message)
     except MaestroOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"plan": _plan_payload(plan)}
@@ -53,6 +76,21 @@ def run_maestro_plan(
     except MaestroOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"run": _run_payload(run)}
+
+
+@router.post("/sessions/close")
+def close_maestro_session(
+    body: MaestroSessionCloseBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        staged_artifact_path = MaestroOrchestratorService(db).close_session(
+            messages=[message.model_dump() for message in body.messages],
+            plan_id=body.plan_id,
+        )
+    except MaestroOrchestratorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"staged_artifact_path": staged_artifact_path}
 
 
 def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:

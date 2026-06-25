@@ -396,6 +396,58 @@ def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None
     assert "Maestro Synthesis" in run["synthesis"]
 
 
+def test_maestro_api_refines_plan_with_existing_context(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    plan_response = client.post(
+        "/maestro/plan",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    assert plan_response.status_code == 200
+    first_plan = plan_response.json()["plan"]
+
+    refine_response = client.post(
+        f"/maestro/plans/{first_plan['parent_task_id']}/refine",
+        json={"message": "Also include GroundTruth demo technical readiness."},
+    )
+
+    assert refine_response.status_code == 200
+    refined_plan = refine_response.json()["plan"]
+    assert refined_plan["status"] == "proposed"
+    assert refined_plan["plan_id"] != first_plan["plan_id"]
+    refined_task = session.get(Task, uuid.UUID(refined_plan["parent_task_id"]))
+    assert refined_task is not None
+    assert refined_task.input_payload["refined_from_plan_id"] == first_plan["plan_id"]
+    assert "GroundTruth demo technical readiness" in refined_task.input_payload["refinement"]
+
+
+def test_maestro_api_close_session_stages_transcript_artifact(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/maestro/sessions/close",
+        json={
+            "messages": [
+                {"sender": "user", "content": "Think through a Praxis workflow."},
+                {"sender": "maestro", "content": "I proposed a staged plan."},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    staged_path = Path(response.json()["staged_artifact_path"])
+    assert staged_path.is_file()
+    assert staged_path.parent == tmp_path / "maestro-development" / "inbox"
+    artifact = session.query(Artifact).one()
+    assert artifact.metadata_["canonical_session_artifact"] is True
+
+
 def test_maestro_api_blocks_run_when_plan_needs_chris(
     session: Session,
     tmp_path: Path,
