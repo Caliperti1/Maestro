@@ -35,6 +35,11 @@ Rules:
 - Use required_capabilities to describe what expertise is needed before matching an agent.
 - Use required_tools only for tool classes that are clearly needed.
 - Use dependencies to reference other work item IDs that must complete first.
+- Set blocks_execution true for RFIs or missing inputs that should pause the workflow until Chris
+  answers. Set it false when useful work can proceed while waiting.
+- Workflow work items should be role-sized. Do not create one broad workflow_task that requires
+  every agent in a domain. If product demo planning, CRM context, technical feasibility, and meeting
+  capture are all needed, create separate work items with dependencies.
 - If the request is just a note, idea, simple task, or memory/logging item, say so. Do not invent
   a workflow.
 - If the workflow cannot proceed without Chris, emit an RFI work item.
@@ -58,6 +63,7 @@ class PlannerWorkItem(BaseModel):
     dependencies: list[str]
     needs_agent: bool
     needs_user_input: bool
+    blocks_execution: bool
     can_log_directly: bool
     suggested_agent_keys: list[str]
     expected_output: str

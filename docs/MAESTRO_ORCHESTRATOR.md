@@ -46,6 +46,8 @@ Every proposed plan includes:
 - planner mode, such as `llm` or `deterministic`
 - decomposed work items, such as workflow tasks, standalone tasks, contacts, events, decisions,
   RFIs, memory candidates, think tank notes, or direct responses
+- whether an RFI blocks execution or can be answered while useful work proceeds
+- dependency edges between work items
 - planning lanes, which are routing hints such as workflow, task, contact, event, RFI, decision,
   and memory-route
 - selected agents and domains
@@ -56,9 +58,14 @@ Every proposed plan includes:
 - registry snapshot of available agents and tools
 
 Maestro should not send the full user request to every agent in a selected domain. It decomposes
-the request into work items, scores agents by domain, role, tool, and suggested-agent fit, then
-writes each child task from the assigned work items. Agents receive user context through the prompt
-package, but their tasking objective is scoped to the work items they own.
+the request into role-sized work items, scores agents by domain, role, tool, and suggested-agent
+fit, then writes each child task from the assigned work items. Agents receive user context through
+the prompt package, but their tasking objective is scoped to the work items they own.
+
+If the planner emits one broad work item for a multi-role workflow, the resulting plan is too coarse.
+The correct shape is several work items, such as demo narrative, technical demo risk, CRM/contact
+context, meeting capture plan, and follow-up strategy, with dependencies where later work needs
+earlier outputs.
 
 No child task runs during planning.
 
@@ -69,6 +76,8 @@ Running an approved plan:
 - marks the parent task running
 - creates child tasks through the existing agent runtime
 - runs each selected agent sequentially in the MVP
+- groups subtasks into dependency stages so independent work can be identified as parallelizable
+- passes completed upstream work-item outputs into dependent downstream subtasks
 - records agent reports and tool calls
 - writes one Maestro synthesis report
 - marks the parent task completed or failed

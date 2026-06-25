@@ -72,6 +72,7 @@ class MaestroWorkItem:
     dependencies: list[str]
     needs_agent: bool
     needs_user_input: bool
+    blocks_execution: bool
     can_log_directly: bool
     suggested_agent_keys: list[str]
     expected_output: str
@@ -110,6 +111,7 @@ class MaestroRun:
     staged_artifact_path: str | None
     artifact_id: str | None
     scheduler: dict[str, Any]
+    execution_stages: list[list[str]]
     error_message: str | None = None
 
 
@@ -207,23 +209,36 @@ class MaestroOrchestratorService:
             raise MaestroOrchestratorError(
                 f"Plan cannot be run from status {parent_task.status}."
             )
+        blocking_items = [
+            item for item in plan.work_items if item.needs_user_input and item.blocks_execution
+        ]
+        if blocking_items:
+            titles = ", ".join(item.title for item in blocking_items)
+            raise MaestroOrchestratorError(
+                f"Plan needs Chris before execution can start: {titles}"
+            )
 
         parent_task.status = "running"
         parent_task.started_at = datetime.now(UTC)
         self.session.commit()
 
         child_runs: list[AgentRunResult] = []
+        completed_outputs_by_work_item: dict[str, str] = {}
         status = "completed"
         error_message: str | None = None
         try:
-            for subtask in plan.subtasks:
-                child_runs.append(
-                    self.runtime.run_agent_once(
+            for stage in self._execution_stages(plan.subtasks):
+                for subtask in stage:
+                    dependency_context = self._dependency_context(
+                        completed_outputs_by_work_item,
+                        subtask,
+                    )
+                    run = self.runtime.run_agent_once(
                         PromptPackageRequest(
                             agent_key=subtask.agent_key,
                             task_instruction=subtask.objective,
                             caller="maestro",
-                            user_context=plan.user_input,
+                            user_context=self._child_user_context(plan, dependency_context),
                             query_text=plan.user_input,
                             use_semantic=True,
                         ),
@@ -234,19 +249,28 @@ class MaestroOrchestratorService:
                         workflow_key="maestro.generic.child",
                         priority=subtask.priority,
                     )
-                )
+                    child_runs.append(run)
+                    for work_item_id in subtask.work_item_ids or []:
+                        completed_outputs_by_work_item[work_item_id] = (
+                            run.output_text or run.execution_note
+                        )
             if any(run.status == "failed" for run in child_runs):
                 status = "failed"
                 error_message = "One or more delegated agent tasks failed."
             synthesis = self._synthesize(plan, child_runs, status=status)
             report = self._write_synthesis_report(parent_task, plan, child_runs, synthesis, status)
             staged = self._stage_workflow_artifact(parent_task, plan, child_runs, synthesis, report)
+            execution_stages = [
+                [subtask.agent_key for subtask in stage]
+                for stage in self._execution_stages(plan.subtasks)
+            ]
             parent_task.status = status
             parent_task.output_payload = {
                 "plan_id": plan.plan_id,
                 "status": status,
                 "child_task_ids": [run.task_id for run in child_runs],
                 "child_report_ids": [run.report_id for run in child_runs if run.report_id],
+                "execution_stages": execution_stages,
                 "synthesis_report_id": str(report.id),
                 "staged_artifact_path": staged.path,
                 "artifact_id": staged.artifact_id,
@@ -266,6 +290,7 @@ class MaestroOrchestratorService:
                 staged_artifact_path=staged.path,
                 artifact_id=staged.artifact_id,
                 scheduler=self._scheduler_payload(),
+                execution_stages=execution_stages,
                 error_message=error_message,
             )
         except Exception as exc:
@@ -379,6 +404,7 @@ class MaestroOrchestratorService:
                     dependencies=[],
                     needs_agent=True,
                     needs_user_input=False,
+                    blocks_execution=False,
                     can_log_directly=False,
                     suggested_agent_keys=[],
                     expected_output="Role-scoped workflow contribution and recommended next steps.",
@@ -399,6 +425,7 @@ class MaestroOrchestratorService:
                     dependencies=[],
                     needs_agent=False,
                     needs_user_input=False,
+                    blocks_execution=False,
                     can_log_directly=True,
                     suggested_agent_keys=[],
                     expected_output="Task candidate routed for review.",
@@ -419,6 +446,7 @@ class MaestroOrchestratorService:
                     dependencies=[],
                     needs_agent=False,
                     needs_user_input=False,
+                    blocks_execution=False,
                     can_log_directly=True,
                     suggested_agent_keys=[],
                     expected_output="Contact or relationship candidate routed for review.",
@@ -439,6 +467,7 @@ class MaestroOrchestratorService:
                     dependencies=[],
                     needs_agent=False,
                     needs_user_input=False,
+                    blocks_execution=False,
                     can_log_directly=True,
                     suggested_agent_keys=[],
                     expected_output="Event candidate routed for review.",
@@ -459,6 +488,7 @@ class MaestroOrchestratorService:
                     dependencies=[],
                     needs_agent=False,
                     needs_user_input=True,
+                    blocks_execution=True,
                     can_log_directly=True,
                     suggested_agent_keys=[],
                     expected_output="RFI routed for Chris.",
@@ -479,6 +509,7 @@ class MaestroOrchestratorService:
                     dependencies=[],
                     needs_agent=False,
                     needs_user_input=False,
+                    blocks_execution=False,
                     can_log_directly=False,
                     suggested_agent_keys=[],
                     expected_output="Direct Maestro response.",
@@ -873,6 +904,50 @@ class MaestroOrchestratorService:
             for item in work_items
         ]
         return "Assigned decomposed work items based on role/tool fit. " + " | ".join(parts)
+
+    def _execution_stages(self, subtasks: list[MaestroSubtask]) -> list[list[MaestroSubtask]]:
+        remaining = list(subtasks)
+        completed_work_items: set[str] = set()
+        stages: list[list[MaestroSubtask]] = []
+        while remaining:
+            ready = [
+                subtask
+                for subtask in remaining
+                if set(subtask.depends_on_work_item_ids or []).issubset(completed_work_items)
+            ]
+            if not ready:
+                ready = [remaining[0]]
+            stages.append(ready)
+            for subtask in ready:
+                remaining.remove(subtask)
+                completed_work_items.update(subtask.work_item_ids or [])
+        return stages
+
+    def _dependency_context(
+        self,
+        completed_outputs_by_work_item: dict[str, str],
+        subtask: MaestroSubtask,
+    ) -> str | None:
+        dependencies = set(subtask.depends_on_work_item_ids or [])
+        if not dependencies:
+            return None
+        matching_outputs = [
+            (work_item_id, completed_outputs_by_work_item[work_item_id])
+            for work_item_id in sorted(dependencies)
+            if work_item_id in completed_outputs_by_work_item
+        ]
+        if not matching_outputs:
+            return None
+        return "\n\n".join(
+            f"Upstream output for {work_item_id}:\n{output}"
+            for work_item_id, output in matching_outputs
+        )
+
+    def _child_user_context(self, plan: MaestroPlan, dependency_context: str | None) -> str:
+        base = f"Original Maestro request:\n{plan.user_input}"
+        if dependency_context:
+            return f"{base}\n\nDependency context:\n{dependency_context}"
+        return base
 
     def _plan_summary(
         self,

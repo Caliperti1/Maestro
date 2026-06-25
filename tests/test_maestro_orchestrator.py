@@ -33,6 +33,23 @@ class FakeOrchestratorLLMClient:
         )
 
 
+class RecordingOrchestratorLLMClient:
+    provider = "test"
+    model = "test-recording-agent"
+
+    def __init__(self) -> None:
+        self.inputs: list[str] = []
+
+    def structured_response(self, **kwargs):
+        raise AssertionError("Orchestrated agent runs should use text_response.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        self.inputs.append(input_text)
+        if "Praxis Planning Agent" in input_text:
+            return "Praxis upstream output for the partner call."
+        return "Maestro used dependency context to inspect the workflow."
+
+
 class FakePlannerLLMClient:
     provider = "test"
     model = "test-planner-model"
@@ -55,6 +72,7 @@ class FakePlannerLLMClient:
                     "dependencies": [],
                     "needs_agent": True,
                     "needs_user_input": False,
+                    "blocks_execution": False,
                     "can_log_directly": False,
                     "suggested_agent_keys": ["praxis-planning-agent"],
                     "expected_output": "Partner-call prep report with RFIs and next steps.",
@@ -72,6 +90,7 @@ class FakePlannerLLMClient:
                     "dependencies": [],
                     "needs_agent": False,
                     "needs_user_input": False,
+                    "blocks_execution": False,
                     "can_log_directly": True,
                     "suggested_agent_keys": [],
                     "expected_output": "Contact routed for CRM review.",
@@ -89,6 +108,7 @@ class FakePlannerLLMClient:
                     "dependencies": ["wi_partner_prep"],
                     "needs_agent": False,
                     "needs_user_input": True,
+                    "blocks_execution": False,
                     "can_log_directly": True,
                     "suggested_agent_keys": [],
                     "expected_output": "RFI surfaced for Chris.",
@@ -123,6 +143,7 @@ class FakeMultiDomainPlannerLLMClient:
                     "dependencies": [],
                     "needs_agent": True,
                     "needs_user_input": False,
+                    "blocks_execution": False,
                     "can_log_directly": False,
                     "suggested_agent_keys": ["praxis-planning-agent"],
                     "expected_output": "Praxis partner-call prep report.",
@@ -140,6 +161,7 @@ class FakeMultiDomainPlannerLLMClient:
                     "dependencies": ["wi_praxis"],
                     "needs_agent": True,
                     "needs_user_input": False,
+                    "blocks_execution": False,
                     "can_log_directly": False,
                     "suggested_agent_keys": ["maestro-introspection-agent"],
                     "expected_output": "Maestro gap report with implementation recommendations.",
@@ -167,6 +189,8 @@ def _client(session: Session, tmp_path: Path) -> TestClient:
     get_settings.cache_clear()
     settings = get_settings()
     settings.memory_dropbox_root = str(tmp_path)
+    settings.openrouter_api_key = ""
+    settings.openai_api_key = ""
     settings.openrouter_api_key = ""
     settings.openai_api_key = ""
 
@@ -305,6 +329,36 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     assert parent.output_payload["synthesis_report_id"] == run.synthesis_report_id
 
 
+def test_orchestrator_passes_dependency_outputs_to_later_agent(session: Session, tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    recording_client = RecordingOrchestratorLLMClient()
+    runtime = PromptAggregationService(session, llm_client=recording_client)
+    service = MaestroOrchestratorService(
+        session,
+        runtime=runtime,
+        planner_llm_client=FakeMultiDomainPlannerLLMClient(),
+    )
+    plan = service.create_plan(
+        "Prepare a Praxis partner call workflow and ask Maestro Development to note system gaps."
+    )
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=True)
+
+    assert run.status == "completed"
+    assert len(recording_client.inputs) == 2
+    assert "Dependency context" not in recording_client.inputs[0]
+    assert "Upstream output for wi_praxis" in recording_client.inputs[1]
+    assert "Praxis upstream output for the partner call." in recording_client.inputs[1]
+    parent = session.get(Task, uuid.UUID(plan.parent_task_id))
+    assert parent is not None
+    assert parent.output_payload["execution_stages"] == [
+        ["praxis-planning-agent"],
+        ["maestro-introspection-agent"],
+    ]
+
+
 def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None:
     client = _client(session, tmp_path)
 
@@ -313,7 +367,7 @@ def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None
         json={
             "message": (
                 "Coordinate Praxis and Maestro Development on a partner prep workflow, "
-                "capture any RFIs, and produce a synthesized plan."
+                "and produce a synthesized plan."
             )
         },
     )
@@ -333,6 +387,33 @@ def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None
     assert run["child_runs"]
     assert run["staged_artifact_path"]
     assert "Maestro Synthesis" in run["synthesis"]
+
+
+def test_maestro_api_blocks_run_when_plan_needs_chris(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    plan_response = client.post(
+        "/maestro/plan",
+        json={
+            "message": (
+                "Coordinate a Praxis partner prep workflow and confirm which follow-up owner "
+                "Chris wants assigned."
+            )
+        },
+    )
+    plan = plan_response.json()["plan"]
+    assert any(item["blocks_execution"] for item in plan["work_items"])
+
+    run_response = client.post(
+        f"/maestro/plans/{plan['parent_task_id']}/run",
+        json={"execute_llm": False},
+    )
+
+    assert run_response.status_code == 400
+    assert "needs Chris" in run_response.json()["detail"]
 
 
 def test_maestro_planner_schema_requires_every_declared_property() -> None:

@@ -87,6 +87,7 @@ def _run_payload(run: MaestroRun) -> dict[str, Any]:
         "staged_artifact_path": run.staged_artifact_path,
         "artifact_id": run.artifact_id,
         "scheduler": run.scheduler,
+        "execution_stages": run.execution_stages,
         "error_message": run.error_message,
         "child_runs": [
             {

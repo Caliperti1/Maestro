@@ -294,6 +294,7 @@ type MaestroWorkItem = {
   dependencies: string[];
   needs_agent: boolean;
   needs_user_input: boolean;
+  blocks_execution: boolean;
   can_log_directly: boolean;
   suggested_agent_keys: string[];
   expected_output: string;
@@ -328,6 +329,7 @@ type MaestroRun = {
   staged_artifact_path: string | null;
   artifact_id: string | null;
   error_message: string | null;
+  execution_stages: string[][];
   child_runs: Array<{
     run_id: string;
     status: string;
@@ -833,17 +835,26 @@ export function App() {
               </div>
 
               <div className="thread">
-                <div className="message user-message">
-                  <span>You</span>
-                  <p>Build today around the morning standup and keep the plan adjustable.</p>
-                </div>
-                <div className="message maestro-message">
-                  <span>Maestro</span>
-                  <p>
-                    Daily planner is ready as a stub. The standup workflow will populate this with
-                    schedule, tasks, blockers, and recommended tradeoffs.
+                {maestroPlan || maestroRun ? (
+                  <>
+                    {maestroPlan && (
+                      <div className="message user-message">
+                        <span>You</span>
+                        <p>{maestroPlan.user_input}</p>
+                      </div>
+                    )}
+                    {maestroRun && (
+                      <div className="message maestro-message">
+                        <span>Maestro</span>
+                        <p>{maestroRun.status}: workflow synthesis is ready below.</p>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="empty-state">
+                    No active Maestro conversation yet. Send a request to generate a proposed plan.
                   </p>
-                </div>
+                )}
               </div>
 
               <form
@@ -921,7 +932,13 @@ export function App() {
                           <div className="preview-meta">
                             <span>{item.needs_agent ? "agent" : "no agent"}</span>
                             <span>{item.can_log_directly ? "loggable" : "not loggable"}</span>
-                            <span>{item.needs_user_input ? "needs Chris" : "no RFI"}</span>
+                            <span>
+                              {item.blocks_execution
+                                ? "blocks run"
+                                : item.needs_user_input
+                                  ? "needs Chris"
+                                  : "no RFI"}
+                            </span>
                           </div>
                         </article>
                       ))}
@@ -966,9 +983,19 @@ export function App() {
                   </div>
                   <div className="preview-meta">
                     <span>{maestroRun.child_runs.length} child runs</span>
+                    <span>{maestroRun.execution_stages.length} stages</span>
                     <span>{maestroRun.synthesis_report_id ? "report written" : "no report"}</span>
                     <span>{maestroRun.staged_artifact_path ? "artifact staged" : "not staged"}</span>
                   </div>
+                  {maestroRun.execution_stages.length > 0 && (
+                    <div className="preview-meta">
+                      {maestroRun.execution_stages.map((stage, index) => (
+                        <span key={`stage-${index}`}>
+                          Stage {index + 1}: {stage.join(", ")}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <pre>{maestroRun.synthesis}</pre>
                 </section>
               )}
