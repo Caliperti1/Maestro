@@ -357,10 +357,20 @@ type MaestroRun = {
   parent_task_id: string;
   synthesis_report_id: string | null;
   synthesis: string;
+  chat_summary: string;
   staged_artifact_path: string | null;
   artifact_id: string | null;
   error_message: string | null;
   execution_stages: string[][];
+  tool_activity: Array<{
+    agent_key: string;
+    agent_name: string;
+    domain_key: string;
+    tool_name: string;
+    status: string;
+    error_message: string | null;
+    details: string;
+  }>;
   child_runs: Array<{
     run_id: string;
     status: string;
@@ -374,6 +384,8 @@ type MaestroRun = {
     execution_note: string;
     output_text: string | null;
     error_message: string | null;
+    tool_calls?: AgentRun["tool_calls"];
+    tool_loop?: Record<string, unknown>;
   }>;
 };
 
@@ -613,6 +625,7 @@ export function App() {
   const [maestroRun, setMaestroRun] = useState<MaestroRun | null>(null);
   const [maestroStatus, setMaestroStatus] = useState("Ready");
   const [executeMaestroLLM, setExecuteMaestroLLM] = useState(true);
+  const [autoMaestroToolLoop, setAutoMaestroToolLoop] = useState(true);
   const [maestroBusy, setMaestroBusy] = useState(false);
   const [expandedWorkflowNodeId, setExpandedWorkflowNodeId] = useState<string | null>(null);
 
@@ -775,7 +788,11 @@ export function App() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ execute_llm: executeMaestroLLM }),
+          body: JSON.stringify({
+            execute_llm: executeMaestroLLM,
+            auto_tool_loop: autoMaestroToolLoop,
+            max_tool_iterations: 2,
+          }),
         },
       );
       setMaestroRun(response.run);
@@ -787,8 +804,8 @@ export function App() {
           sender: "maestro",
           content:
             response.run.status === "completed"
-              ? "The workflow completed. I synthesized the child agent outputs and staged the canonical workflow artifact for memory curation."
-              : `The workflow finished with status ${response.run.status}. Review the synthesis below.`,
+              ? response.run.chat_summary
+              : `The workflow finished with status ${response.run.status}.\n\n${response.run.chat_summary}`,
         },
       ]);
       setMaestroStatus(
@@ -1080,6 +1097,15 @@ export function App() {
                   />
                   Execute LLM
                 </label>
+                <label className="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={autoMaestroToolLoop}
+                    onChange={(event) => setAutoMaestroToolLoop(event.target.checked)}
+                    disabled={!executeMaestroLLM}
+                  />
+                  Let agents plan safe tools
+                </label>
                 <span>
                   {maestroBusy ? "Conducting" : maestroStatus}
                 </span>
@@ -1269,6 +1295,31 @@ export function App() {
                         <span key={`stage-${index}`}>
                           Stage {index + 1}: {stage.join(", ")}
                         </span>
+                      ))}
+                    </div>
+                  )}
+                  {maestroRun.tool_activity.length > 0 && (
+                    <div className="tool-activity-list">
+                      <h4>Tool activity</h4>
+                      {maestroRun.tool_activity.map((activity, index) => (
+                        <article
+                          className={`tool-activity-item tool-activity-${activity.status}`}
+                          key={`${activity.agent_key}-${activity.tool_name}-${index}`}
+                        >
+                          <strong>{activity.agent_name}</strong>
+                          <span>{activity.tool_name}</span>
+                          <p>
+                            {activity.status === "complete"
+                              ? "Completed"
+                              : activity.status === "approval_required"
+                                ? "Needs approval"
+                                : activity.status === "failed"
+                                  ? "Failed"
+                                  : activity.status}
+                            {activity.details ? ` - ${activity.details}` : ""}
+                            {activity.error_message ? ` - ${activity.error_message}` : ""}
+                          </p>
+                        </article>
                       ))}
                     </div>
                   )}

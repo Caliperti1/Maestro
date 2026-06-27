@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shutil
@@ -5,6 +6,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -198,10 +200,18 @@ class GitHubCliToolAdapter:
             return {"dry_run": True, "tool": self.key, "payload": payload}
         if shutil.which("gh") is None:
             raise ToolExecutionError("GitHub CLI (`gh`) is not installed or not on PATH.")
-        repo = _repo_from(context.connection, payload)
         env = _github_env(context.connection)
+        if self.key == "github.repo.list":
+            return self._repo_list(context.connection, payload, env=env)
+        if self.key == "github.repo.create":
+            return self._repo_create(context.connection, payload, env=env)
+        repo = _repo_from(context.connection, payload)
         if self.key == "github.repo.get":
             return self._repo_get(repo, env=env)
+        if self.key == "github.file.get":
+            return self._file_get(repo, payload, env=env)
+        if self.key == "github.file.search":
+            return self._file_search(repo, payload, env=env)
         if self.key == "github.issue.search":
             return self._issue_search(repo, payload, env=env)
         if self.key == "github.issue.get":
@@ -235,6 +245,147 @@ class GitHubCliToolAdapter:
                 ],
                 env=env,
             ),
+        }
+
+    def _repo_list(
+        self,
+        connection: ToolConnection | None,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        owner = _repo_owner(connection, payload)
+        limit = _bounded_int(payload.get("limit"), default=30, minimum=1, maximum=100)
+        visibility = str(payload.get("visibility") or "all").strip().lower()
+        args = [
+            "repo",
+            "list",
+            owner,
+            "--limit",
+            str(limit),
+            "--json",
+            "name,nameWithOwner,description,isPrivate,url,updatedAt",
+        ]
+        if visibility in {"public", "private"}:
+            args.extend(["--visibility", visibility])
+        return {
+            "owner": owner,
+            "limit": limit,
+            "visibility": visibility,
+            "repos": _run_gh_json(args, env=env),
+        }
+
+    def _repo_create(
+        self,
+        connection: ToolConnection | None,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        name = _required_text(payload, "name")
+        owner = str(payload.get("owner") or "").strip() or _repo_owner(connection, payload)
+        full_name = name if "/" in name else f"{owner}/{name}"
+        private = bool(payload.get("private", True))
+        description = str(payload.get("description") or "").strip()
+        args = ["repo", "create", full_name, "--private" if private else "--public"]
+        if description:
+            args.extend(["--description", description])
+        if bool(payload.get("add_readme")):
+            args.append("--add-readme")
+        url = _run_gh_text(args, env=env).strip()
+        return {"repo": full_name, "url": url, "private": private, "description": description}
+
+    def _file_get(self, repo: str, payload: dict[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
+        path = _required_text(payload, "path").lstrip("/")
+        ref = str(payload.get("ref") or "").strip()
+        max_chars = _bounded_int(payload.get("max_chars"), default=40000, minimum=1000, maximum=100000)
+        endpoint = f"repos/{repo}/contents/{quote(path)}"
+        if ref:
+            endpoint = f"{endpoint}?ref={quote(ref)}"
+        result = _run_gh_json(["api", "--method", "GET", endpoint], env=env)
+        if isinstance(result, list):
+            return {
+                "repo": repo,
+                "path": path,
+                "ref": ref or None,
+                "type": "directory",
+                "entries": [
+                    {
+                        "name": item.get("name"),
+                        "path": item.get("path"),
+                        "type": item.get("type"),
+                        "sha": item.get("sha"),
+                    }
+                    for item in result
+                    if isinstance(item, dict)
+                ],
+            }
+        if not isinstance(result, dict):
+            raise ToolExecutionError("GitHub file read returned an unexpected response.")
+        content = ""
+        if result.get("type") == "file":
+            encoded = str(result.get("content") or "")
+            if result.get("encoding") == "base64" and encoded:
+                content = base64.b64decode(encoded).decode("utf-8", errors="replace")
+        return {
+            "repo": repo,
+            "path": path,
+            "ref": ref or None,
+            "type": result.get("type"),
+            "name": result.get("name"),
+            "sha": result.get("sha"),
+            "size": result.get("size"),
+            "download_url": result.get("download_url"),
+            "truncated": len(content) > max_chars,
+            "content": content[:max_chars],
+        }
+
+    def _file_search(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        query = _required_text(payload, "query")
+        path = str(payload.get("path") or "").strip().strip("/")
+        limit = _bounded_int(payload.get("limit"), default=10, minimum=1, maximum=30)
+        search_query = f"{query} repo:{repo}"
+        if path:
+            search_query = f"{search_query} path:{path}"
+        result = _run_gh_json(
+            [
+                "api",
+                "--method",
+                "GET",
+                "search/code",
+                "-f",
+                f"q={search_query}",
+                "-f",
+                f"per_page={limit}",
+            ],
+            env=env,
+        )
+        items = result.get("items", []) if isinstance(result, dict) else []
+        return {
+            "repo": repo,
+            "query": query,
+            "path": path or None,
+            "limit": limit,
+            "total_count": result.get("total_count") if isinstance(result, dict) else None,
+            "files": [
+                {
+                    "name": item.get("name"),
+                    "path": item.get("path"),
+                    "sha": item.get("sha"),
+                    "url": item.get("html_url"),
+                    "repository": (item.get("repository") or {}).get("full_name")
+                    if isinstance(item, dict)
+                    else None,
+                }
+                for item in items
+                if isinstance(item, dict)
+            ],
         }
 
     def _issue_search(
@@ -457,6 +608,10 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
         key: GitHubCliToolAdapter(key)
         for key in (
             "github.repo.get",
+            "github.repo.list",
+            "github.repo.create",
+            "github.file.get",
+            "github.file.search",
             "github.issue.search",
             "github.issue.get",
             "github.issue.create",
@@ -491,6 +646,22 @@ def _repo_from(connection: ToolConnection | None, payload: dict[str, Any]) -> st
     if "/" not in repo:
         raise ToolExecutionError("GitHub repo must be in owner/name form.")
     return repo
+
+
+def _repo_owner(connection: ToolConnection | None, payload: dict[str, Any]) -> str:
+    owner = str(payload.get("owner") or "").strip()
+    if owner:
+        return owner
+    repo = str(payload.get("repo") or "").strip()
+    if not repo and connection is not None:
+        config = connection.config or {}
+        owner = str(config.get("owner") or "").strip()
+        if owner:
+            return owner
+        repo = str(config.get("repo") or "").strip()
+    if repo and "/" in repo:
+        return repo.split("/", 1)[0]
+    raise ToolExecutionError("GitHub tool requires an owner or repo in owner/name form.")
 
 
 def _clean_github_search_query(query: str, *, kind: str) -> str:

@@ -25,6 +25,7 @@ sequenceDiagram
     Chris->>UI: Run plan
     UI->>Orchestrator: POST /maestro/plans/{id}/run
     Orchestrator->>Runtime: Run stage queue items with retry policy
+    Runtime->>Runtime: Optional safe agent-planned tool loop
     Runtime-->>Orchestrator: Agent reports and task traces
     Orchestrator->>Orchestrator: Synthesize workflow result
     Orchestrator->>Memory: Stage one canonical workflow artifact
@@ -99,6 +100,8 @@ Running an approved plan:
 
 - marks the parent task running
 - creates child tasks through the existing agent runtime
+- can opt child agents into the safe read-only tool loop so an agent may plan and execute
+  authorized tools such as GitHub PR search before writing its final report
 - groups subtasks into dependency stages so independent work can be identified as parallel-ready
 - marks every queue item in the current stage ready/running before execution
 - retries failed queue items once before marking them failed
@@ -107,6 +110,7 @@ Running an approved plan:
 - passes completed upstream work-item outputs into dependent downstream subtasks
 - records a phase synthesis after each execution stage
 - records agent reports and tool calls
+- summarizes child tool activity in the Maestro synthesis and run payload
 - writes one Maestro synthesis report
 - marks the parent task completed, blocked, or failed
 - stages one canonical workflow artifact for memory curation
@@ -115,6 +119,12 @@ Agent outputs remain traceable reports, but they are not individually staged int
 The canonical workflow artifact is the memory-curation boundary for a workflow session. It includes
 the original user input, decomposition, work items, subtasks, child outputs, synthesis, RFIs, and
 provenance.
+
+The orchestration endpoint accepts `auto_tool_loop` and `max_tool_iterations`. When enabled, each
+child agent receives its normal enriched prompt package, asks the LLM for tool calls, executes
+currently approved read tools, and then writes the final report using those tool results as
+evidence. Write/action tools are recorded as `approval_required` proposals with their payload and
+rationale instead of being executed automatically.
 
 The current runner enforces parallel-ready queue semantics, retry policy, dependency blocking, and
 phase synthesis. Actual concurrent worker execution is intentionally left behind the queue contract
@@ -154,8 +164,10 @@ Use the Maestro home page:
 5. Send a refinement such as "remove that task," "have only the CRM agent do this," "do this first,"
    or "this belongs in Personal." The active plan should preserve unaffected work while updating
    the requested part.
-6. Click **Run plan**.
-7. Confirm child runs complete, a synthesis appears, phase synthesis appears in the report, and a
+6. Leave **Let agents plan safe tools** enabled when testing GitHub read-tool behavior, then click
+   **Run plan**.
+7. Confirm child runs complete, tool activity appears when tools were used, write/action tools show
+   as approval-required instead of executed, a synthesis appears, phase synthesis appears in the report, and a
    canonical workflow artifact is staged.
 
 For a dry run, disable **Execute LLM** before running the plan. This still verifies planning,

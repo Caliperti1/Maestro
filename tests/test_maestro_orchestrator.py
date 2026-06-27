@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import uuid
 
 from fastapi.testclient import TestClient
@@ -202,6 +203,124 @@ class FakeMultiDomainPlannerLLMClient:
 
     def text_response(self, *, instructions: str, input_text: str) -> str:
         raise AssertionError("Planner should use structured_response.")
+
+
+class FakeMaestroGithubPlannerLLMClient:
+    provider = "test"
+    model = "test-maestro-github-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Ask Maestro Development to inspect the latest PR.",
+            "direct_response": None,
+            "planner_notes": "Fake GitHub tool orchestration planner response.",
+            "work_items": [
+                {
+                    "id": "wi_latest_pr",
+                    "type": "workflow_task",
+                    "title": "Inspect latest Maestro PR",
+                    "description": "Use GitHub PR context to inspect the latest Maestro pull request.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["system introspection", "github review"],
+                    "required_tools": ["github.pr.search"],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-introspection-agent"],
+                    "expected_output": "Readable PR inspection report.",
+                    "rationale": "Maestro Development owns repository inspection.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakeOrchestratedToolLoopLLMClient:
+    provider = "test"
+    model = "test-orchestrated-tool-loop-agent"
+
+    def __init__(self) -> None:
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        assert "execution planner" in instructions
+        assert "latest Maestro pull request" in input_text
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Search GitHub for the latest PR before reporting.",
+                "requires_final_answer": True,
+                "tool_calls": [
+                    {
+                        "tool_key": "github.pr.search",
+                        "payload_json": '{"state":"all","limit":1}',
+                        "rationale": "Find the latest pull request.",
+                    }
+                ],
+            }
+        return {
+            "plan_summary": "Enough GitHub context has been gathered.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "Tool Results" in input_text
+        assert "github.pr.search" in input_text
+        assert "Wire orchestrator tool loop" in input_text
+        assert "top-level `conversation` field" in instructions
+        return json.dumps(
+            {
+                "conversation": (
+                    "I checked PR #47. It wires Maestro's orchestrator to child-agent "
+                    "safe tool use and shows the tool activity back in the workflow result."
+                ),
+                "summary": {
+                    "latest_pr": {
+                        "number": 47,
+                        "title": "Wire orchestrator tool loop",
+                        "status": "OPEN / Draft",
+                    },
+                    "change_summary": "Reviewed the latest Maestro PR with GitHub context.",
+                    "ci_status": "No checks were reported.",
+                },
+                "findings": ["PR #47 wires the orchestrator to agent-planned tools."],
+                "open_questions": [],
+                "next_steps": [
+                    {
+                        "title": "Manual pre-merge test",
+                        "steps": ["Run a Maestro workflow that asks an agent to inspect the latest PR."],
+                        "expected_outcome": ["Tool activity appears in the workflow result."],
+                    }
+                ],
+                "artifact_refs": [],
+            }
+        )
+
+
+class FakeGitHubPrSearchAdapter:
+    key = "github.pr.search"
+
+    def execute(self, context, payload: dict[str, object]) -> dict[str, object]:
+        assert context.domain.key == "maestro-development"
+        assert context.connection is not None
+        assert payload["limit"] == 1
+        return {
+            "repo": context.connection.config["repo"],
+            "prs": [
+                {
+                    "number": 47,
+                    "title": "Wire orchestrator tool loop",
+                    "state": "OPEN",
+                    "url": "https://github.com/Caliperti1/Maestro/pull/47",
+                }
+            ],
+        }
 
 
 class FakeGroundTruthDemoPlannerLLMClient:
@@ -644,6 +763,56 @@ def test_orchestrator_passes_dependency_outputs_to_later_agent(session: Session,
     assert parent.output_payload["scheduler"]["queue_items"][1]["status"] == "completed"
 
 
+def test_orchestrator_can_delegate_agent_planned_safe_tool_loop(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    AgentRegistryService(session).upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    runtime = PromptAggregationService(
+        session,
+        llm_client=FakeOrchestratedToolLoopLLMClient(),
+        tool_adapters={"github.pr.search": FakeGitHubPrSearchAdapter()},
+    )
+    service = MaestroOrchestratorService(
+        session,
+        runtime=runtime,
+        planner_llm_client=FakeMaestroGithubPlannerLLMClient(),
+    )
+    plan = service.create_plan("Have Maestro inspect the latest Maestro pull request.")
+
+    run = service.run_plan(
+        plan.parent_task_id,
+        execute_llm=True,
+        auto_tool_loop=True,
+        max_tool_iterations=2,
+    )
+
+    assert run.status == "completed"
+    assert run.tool_activity
+    assert any(item["tool_name"] == "github.pr.search" for item in run.tool_activity)
+    assert any(item["tool_name"] == "llm.tool_planner" for item in run.tool_activity)
+    assert "## Tool Activity" in run.synthesis
+    assert "github.pr.search" in run.synthesis
+    assert "I checked PR #47" in run.synthesis
+    assert "I checked PR #47" in run.chat_summary
+    assert "findings" not in run.chat_summary
+    child = run.child_runs[0]
+    assert child.tool_loop["enabled"] is True
+    assert any(call["tool_name"] == "github.pr.search" for call in child.tool_calls)
+    parent = session.get(Task, uuid.UUID(plan.parent_task_id))
+    assert parent is not None
+    assert parent.output_payload["tool_activity"][0]["tool_name"] == "llm.tool_planner"
+
+
 def test_orchestrator_retries_failed_queue_item_before_marking_complete(
     session: Session,
     tmp_path: Path,
@@ -740,6 +909,7 @@ def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None
     assert run["child_runs"]
     assert run["staged_artifact_path"]
     assert "Maestro Synthesis" in run["synthesis"]
+    assert run["chat_summary"]
 
 
 def test_maestro_api_refines_plan_with_existing_context(
