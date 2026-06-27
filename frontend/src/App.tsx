@@ -260,6 +260,7 @@ type AgentRun = {
     status: string;
     reason: string;
   };
+  tool_loop?: Record<string, unknown>;
   prompt_package: PromptPackage;
   staged_artifact_path: string | null;
 };
@@ -1453,6 +1454,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
   const [runPreview, setRunPreview] = useState<AgentRun | null>(null);
   const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
   const [stageRunArtifact, setStageRunArtifact] = useState(false);
+  const [autoToolLoop, setAutoToolLoop] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [busy, setBusy] = useState(false);
 
@@ -1666,6 +1668,8 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
           stage_interaction: stageRunArtifact,
           execute_llm: true,
           tool_requests: parsedToolRequests,
+          auto_tool_loop: autoToolLoop,
+          max_tool_iterations: 2,
         }),
       });
       setRunPreview(response.run);
@@ -1914,6 +1918,14 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
             />
             Stage run artifact for memory curation
           </label>
+          <label className="checkbox-line">
+            <input
+              type="checkbox"
+              checked={autoToolLoop}
+              onChange={(event) => setAutoToolLoop(event.target.checked)}
+            />
+            Let agent plan safe tool calls
+          </label>
           <button
             className="planner-action"
             onClick={runAgentOnce}
@@ -1930,6 +1942,9 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
             {runPreview.task_id && <p>Task: {runPreview.task_id}</p>}
             {runPreview.report_id && <p>Report: {runPreview.report_id}</p>}
             <p>Scheduler: {runPreview.scheduler?.status ?? "unknown"}</p>
+            {runPreview.tool_loop?.enabled === true && (
+              <pre>{JSON.stringify(runPreview.tool_loop, null, 2)}</pre>
+            )}
             {(runPreview.tool_calls ?? []).map((toolCall) => (
               <div key={toolCall.id} className="tool-call-preview">
                 <p>

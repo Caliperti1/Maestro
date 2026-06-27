@@ -14,7 +14,7 @@ from app.core.config import get_settings
 from app.db.models import Artifact, MemoryItem, Task, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
-from app.tools.runtime import GitHubCliToolAdapter, ToolExecutionContext
+from app.tools.runtime import GitHubCliToolAdapter, ToolExecutionContext, _clean_github_search_query
 
 
 def _seed_memory(session: Session) -> None:
@@ -88,6 +88,42 @@ class FakeToolAwareAgentLLMClient:
         return "## Summary\nReviewed matching GitHub issues.\n\n## Next Steps\nPick the next issue."
 
 
+class FakeAutoToolLoopLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def __init__(self):
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        assert "execution planner" in instructions
+        assert "check out the latest PR" in input_text
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Find the latest PR before reporting.",
+                "requires_final_answer": True,
+                "tool_calls": [
+                    {
+                        "tool_key": "github.pr.search",
+                        "payload_json": '{"state":"all","limit":1}',
+                        "rationale": "Find the latest pull request.",
+                    }
+                ],
+            }
+        return {
+            "plan_summary": "Enough PR context has been gathered.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "Tool Results" in input_text
+        assert "github.pr.search" in input_text
+        assert "Add GitHub read tools MVP" in input_text
+        return "## Summary\nLatest PR reviewed.\n\n## Findings\nPR #44 is ready for inspection."
+
+
 class FailingAgentLLMClient:
     provider = "test"
     model = "test-agent-model"
@@ -117,6 +153,29 @@ class FakeGitHubIssueSearchAdapter:
                     "number": 42,
                     "title": "Implement GitHub tools",
                     "state": "OPEN",
+                }
+            ],
+        }
+
+
+class FakeGitHubPrSearchAdapter:
+    key = "github.pr.search"
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        assert context.domain.key == "maestro-development"
+        assert payload["limit"] == 1
+        return {
+            "repo": context.connection.config["repo"] if context.connection else "Caliperti1/Maestro",
+            "prs": [
+                {
+                    "number": 44,
+                    "title": "Add GitHub read tools MVP",
+                    "state": "MERGED",
+                    "url": "https://github.com/Caliperti1/Maestro/pull/44",
                 }
             ],
         }
@@ -429,6 +488,23 @@ def test_github_adapter_can_resolve_token_ref_from_dotenv(
     get_settings.cache_clear()
 
 
+def test_github_search_query_cleanup_removes_repo_placeholders() -> None:
+    assert (
+        _clean_github_search_query(
+            "repo:AUTHORIZED_REPOSITORY is:pr sort:updated-desc",
+            kind="pr",
+        )
+        == "sort:updated-desc"
+    )
+    assert (
+        _clean_github_search_query(
+            "repo:CURRENT is:issue label:test",
+            kind="issue",
+        )
+        == "label:test"
+    )
+
+
 def test_run_agent_once_prepares_prompt_and_optional_staged_artifact(
     session: Session,
     tmp_path: Path,
@@ -527,6 +603,41 @@ def test_run_agent_once_executes_authorized_tool_before_llm(
     assert result.tool_calls[0]["output_payload"]["issues"][0]["number"] == 42
     assert result.tool_calls[1]["tool_name"] == "llm.gateway"
     assert "Reviewed matching GitHub issues" in result.output_text
+
+
+def test_run_agent_once_can_auto_plan_safe_tool_calls_before_final_report(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    llm_client = FakeAutoToolLoopLLMClient()
+
+    result = PromptAggregationService(
+        session,
+        llm_client=llm_client,
+        tool_adapters={"github.pr.search": FakeGitHubPrSearchAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Please check out the latest PR.",
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    assert result.tool_loop["enabled"] is True
+    assert result.tool_loop["iterations"][0]["requested_tools"][0]["tool_key"] == "github.pr.search"
+    assert any(call["tool_name"] == "github.pr.search" for call in result.tool_calls)
+    assert result.output_text is not None
+    assert "Latest PR reviewed" in result.output_text
 
 
 def test_run_agent_once_records_failed_llm_call(session: Session) -> None:

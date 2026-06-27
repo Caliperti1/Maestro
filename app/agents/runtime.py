@@ -185,6 +185,7 @@ class AgentRunResult:
     task_id: str | None = None
     report_id: str | None = None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_loop: dict[str, Any] = field(default_factory=dict)
     staged_artifact_path: str | None = None
     artifact_id: str | None = None
     error_message: str | None = None
@@ -724,6 +725,8 @@ class PromptAggregationService:
         stage_interaction: bool = False,
         execute_llm: bool = True,
         tool_requests: list[AgentToolRequest] | None = None,
+        auto_tool_loop: bool = False,
+        max_tool_iterations: int = 2,
         parent_task_id: uuid.UUID | None = None,
         source_type: str = "manual_run_once",
         workflow_key: str = "agent.run_once",
@@ -749,6 +752,8 @@ class PromptAggregationService:
                 "query_text": request.query_text,
                 "execute_llm": execute_llm,
                 "stage_interaction": stage_interaction,
+                "auto_tool_loop": auto_tool_loop,
+                "max_tool_iterations": max_tool_iterations,
                 "requested_tools": [
                     {
                         "tool_key": tool_request.tool_key,
@@ -768,6 +773,7 @@ class PromptAggregationService:
         output_text: str | None = None
         error_message: str | None = None
         tool_call_payloads: list[dict[str, Any]] = []
+        tool_loop_trace: dict[str, Any] = {"enabled": auto_tool_loop, "iterations": []}
         report_id: str | None = None
         status = "prepared"
 
@@ -787,6 +793,22 @@ class PromptAggregationService:
 
         if execute_llm:
             llm_client = self.llm_client
+            if llm_client is None:
+                llm_client = OpenAILLMClient(
+                    model=(
+                        package.agent.model_profile if package.agent.model_profile != "default" else None
+                    )
+                )
+            if auto_tool_loop:
+                loop_results = self._run_auto_tool_loop(
+                    package=package,
+                    task=task,
+                    llm_client=llm_client,
+                    initial_tool_results=tool_call_payloads,
+                    max_iterations=max_tool_iterations,
+                )
+                tool_call_payloads.extend(loop_results["tool_calls"])
+                tool_loop_trace = loop_results["trace"]
             assembled_prompt = package.assembled_prompt
             if tool_call_payloads:
                 assembled_prompt = (
@@ -813,14 +835,6 @@ class PromptAggregationService:
             self.session.commit()
             self.session.refresh(tool_call)
             try:
-                if llm_client is None:
-                    llm_client = OpenAILLMClient(
-                        model=(
-                            package.agent.model_profile
-                            if package.agent.model_profile != "default"
-                            else None
-                        )
-                    )
                 tool_call.input_payload = {
                     **tool_call.input_payload,
                     "provider": getattr(llm_client, "provider", "unknown"),
@@ -855,6 +869,7 @@ class PromptAggregationService:
                         "prompt_created_at": package.created_at,
                         "memory_included_count": package.memory_context.included_count,
                         "semantic_status": package.memory_context.semantic_status,
+                        "tool_loop": tool_loop_trace,
                     },
                 )
                 self.session.add(report)
@@ -984,9 +999,177 @@ class PromptAggregationService:
             task_id=str(task.id),
             report_id=report_id,
             tool_calls=tool_call_payloads,
+            tool_loop=tool_loop_trace,
             staged_artifact_path=staged_path,
             artifact_id=artifact_id,
             error_message=error_message,
+        )
+
+    def _run_auto_tool_loop(
+        self,
+        *,
+        package: PromptPackage,
+        task: Task,
+        llm_client: LLMClient,
+        initial_tool_results: list[dict[str, Any]],
+        max_iterations: int,
+    ) -> dict[str, Any]:
+        tool_service = ToolExecutionService(self.session, adapters=self.tool_adapters)
+        executed_calls: list[dict[str, Any]] = []
+        prior_results = list(initial_tool_results)
+        trace: dict[str, Any] = {"enabled": True, "iterations": []}
+        bounded_iterations = max(1, min(max_iterations, 4))
+        for index in range(bounded_iterations):
+            planner_call = ToolCall(
+                task_id=task.id,
+                agent_id=package.agent.id,
+                tool_name="llm.tool_planner",
+                input_payload={
+                    "iteration": index + 1,
+                    "model": getattr(llm_client, "model", package.agent.model_profile),
+                    "provider": getattr(llm_client, "provider", "configured"),
+                },
+                status="running",
+                started_at=datetime.now(UTC),
+            )
+            self.session.add(planner_call)
+            self.session.commit()
+            self.session.refresh(planner_call)
+            try:
+                plan = llm_client.structured_response(
+                    instructions=_TOOL_PLANNER_INSTRUCTIONS,
+                    input_text=self._render_tool_planner_input(
+                        package=package,
+                        prior_results=prior_results,
+                        iteration=index + 1,
+                    ),
+                    schema_name="agent_tool_plan",
+                    schema=_TOOL_PLAN_SCHEMA,
+                )
+                requested = _normalize_tool_plan(plan)
+                planner_call.status = "complete"
+                planner_call.output_payload = {
+                    "plan_summary": plan.get("plan_summary"),
+                    "tool_call_count": len(requested),
+                    "requires_final_answer": bool(plan.get("requires_final_answer", True)),
+                }
+                planner_call.completed_at = datetime.now(UTC)
+                self.session.commit()
+                self.session.refresh(planner_call)
+                planner_payload = {
+                    "id": str(planner_call.id),
+                    "tool_name": planner_call.tool_name,
+                    "status": planner_call.status,
+                    "error_message": planner_call.error_message,
+                    "input_payload": planner_call.input_payload,
+                    "output_payload": planner_call.output_payload,
+                }
+                executed_calls.append(planner_payload)
+                iteration_trace = {
+                    "iteration": index + 1,
+                    "plan_summary": plan.get("plan_summary"),
+                    "requested_tools": requested,
+                    "executed": [],
+                    "blocked": [],
+                }
+                if not requested:
+                    trace["iterations"].append(iteration_trace)
+                    break
+                for requested_tool in requested:
+                    tool_key = requested_tool["tool_key"]
+                    if tool_key not in _AUTO_TOOL_SAFE_TOOL_KEYS:
+                        blocked = {
+                            "tool_key": tool_key,
+                            "payload": requested_tool.get("payload") or {},
+                            "reason": "Tool requires explicit approval/manual execution.",
+                        }
+                        iteration_trace["blocked"].append(blocked)
+                        blocked_payload = {
+                            "id": f"blocked-{uuid.uuid4()}",
+                            "tool_name": tool_key,
+                            "status": "blocked",
+                            "error_message": blocked["reason"],
+                            "input_payload": {"payload": requested_tool.get("payload") or {}},
+                            "output_payload": None,
+                        }
+                        executed_calls.append(blocked_payload)
+                        prior_results.append(blocked_payload)
+                        continue
+                    result = tool_service.execute_for_task(
+                        ToolExecutionRequest(
+                            agent_key=package.agent.key,
+                            tool_key=tool_key,
+                            payload=requested_tool.get("payload") or {},
+                            dry_run=False,
+                        ),
+                        task=task,
+                    )
+                    payload = tool_result_payload(result)
+                    executed_calls.append(payload)
+                    prior_results.append(payload)
+                    iteration_trace["executed"].append(payload)
+                trace["iterations"].append(iteration_trace)
+                if iteration_trace["blocked"] or not iteration_trace["executed"]:
+                    break
+            except Exception as exc:
+                planner_call.status = "failed"
+                planner_call.error_message = str(exc)
+                planner_call.completed_at = datetime.now(UTC)
+                self.session.commit()
+                self.session.refresh(planner_call)
+                failed_payload = {
+                    "id": str(planner_call.id),
+                    "tool_name": planner_call.tool_name,
+                    "status": planner_call.status,
+                    "error_message": planner_call.error_message,
+                    "input_payload": planner_call.input_payload,
+                    "output_payload": planner_call.output_payload,
+                }
+                executed_calls.append(failed_payload)
+                trace["iterations"].append(
+                    {
+                        "iteration": index + 1,
+                        "plan_summary": "Tool planning failed.",
+                        "requested_tools": [],
+                        "executed": [],
+                        "blocked": [],
+                        "error_message": str(exc),
+                    }
+                )
+                break
+        trace["max_iterations"] = bounded_iterations
+        return {"tool_calls": executed_calls, "trace": trace}
+
+    def _render_tool_planner_input(
+        self,
+        *,
+        package: PromptPackage,
+        prior_results: list[dict[str, Any]],
+        iteration: int,
+    ) -> str:
+        allowed_tools = [
+            {
+                "key": tool.key,
+                "name": tool.name,
+                "permission": tool.permission,
+                "description": tool.description,
+                "auto_safe": tool.key in _AUTO_TOOL_SAFE_TOOL_KEYS,
+            }
+            for tool in package.tool_manifest
+        ]
+        return "\n\n".join(
+            [
+                package.assembled_prompt,
+                "## Tool Planning Context",
+                (
+                    f"Iteration: {iteration}\n"
+                    "Choose zero or more allowed tools that are necessary before producing the "
+                    "final report. Prefer the smallest useful read-only tool set. If the task can "
+                    "be answered with existing context, return no tool calls."
+                ),
+                "## Allowed Tool Manifest\n" + json.dumps(allowed_tools, indent=2),
+                "## Prior Tool Results\n" + json.dumps(prior_results, indent=2),
+            ]
         )
 
     def _set_agent_current_action(
@@ -1119,6 +1302,32 @@ def _is_secret_key(key: str) -> bool:
     return any(token in lowered for token in ("secret", "token", "api_key", "apikey", "password"))
 
 
+def _normalize_tool_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in plan.get("tool_calls") or []:
+        if not isinstance(item, dict):
+            continue
+        tool_key = str(item.get("tool_key") or "").strip()
+        if not tool_key:
+            continue
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        payload_json = item.get("payload_json")
+        if not payload and isinstance(payload_json, str) and payload_json.strip():
+            try:
+                parsed_payload = json.loads(payload_json)
+                payload = parsed_payload if isinstance(parsed_payload, dict) else {}
+            except json.JSONDecodeError:
+                payload = {}
+        normalized.append(
+            {
+                "tool_key": tool_key,
+                "payload": payload,
+                "rationale": str(item.get("rationale") or "").strip(),
+            }
+        )
+    return normalized[:5]
+
+
 _GLOBAL_CONTEXT_SETTING_KEY = "global_maestro_context"
 
 
@@ -1161,6 +1370,60 @@ _DEFAULT_OUTPUT_CONTRACT = {
     "format": "structured_report",
     "required_sections": ["summary", "findings", "open_questions", "next_steps", "artifact_refs"],
     "provenance_required": True,
+}
+
+_AUTO_TOOL_SAFE_TOOL_KEYS = {
+    "github.repo.get",
+    "github.issue.search",
+    "github.issue.get",
+    "github.pr.search",
+    "github.pr.get",
+    "github.pr.diff",
+    "github.pr.checks",
+}
+
+_TOOL_PLANNER_INSTRUCTIONS = (
+    "You are an execution planner for a Maestro domain agent. Return only JSON matching the "
+    "schema. Choose only tools from the allowed manifest. Prefer read-only tools and the smallest "
+    "number of calls needed. Do not request write/action tools unless the task explicitly needs "
+    "them; those may be blocked until approval. Return tool payloads as JSON strings in "
+    "`payload_json`. Do not include repo placeholders such as repo:CURRENT or "
+    "repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies the repo. "
+    "For a request like 'check out the latest PR', use GitHub PR search/list tools first, then "
+    "details/checks/diff if useful."
+)
+
+_TOOL_PLAN_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "plan_summary": {
+            "type": "string",
+            "description": "Short explanation of the tool plan or why no tools are needed.",
+        },
+        "requires_final_answer": {
+            "type": "boolean",
+            "description": "Whether the agent should still produce a final report after tools.",
+        },
+        "tool_calls": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "tool_key": {"type": "string"},
+                    "payload_json": {
+                        "type": "string",
+                        "description": "JSON object string to pass as the tool payload.",
+                    },
+                    "rationale": {"type": "string"},
+                },
+                "required": ["tool_key", "payload_json", "rationale"],
+            },
+        },
+    },
+    "required": ["plan_summary", "requires_final_answer", "tool_calls"],
 }
 
 _TOOL_DESCRIPTIONS = {

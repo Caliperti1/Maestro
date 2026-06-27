@@ -80,6 +80,8 @@ class AgentRunOnceBody(PromptPackageBody):
     stage_interaction: bool = False
     execute_llm: bool = True
     tool_requests: list[AgentToolRequestBody] = Field(default_factory=list)
+    auto_tool_loop: bool = False
+    max_tool_iterations: int = Field(default=2, ge=1, le=4)
 
 
 class InteractionArtifactBody(BaseModel):
@@ -325,6 +327,8 @@ def run_agent_once(
                 )
                 for tool_request in body.tool_requests
             ],
+            auto_tool_loop=body.auto_tool_loop,
+            max_tool_iterations=body.max_tool_iterations,
         )
     except AgentRuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -340,6 +344,7 @@ def run_agent_once(
             "task_id": result.task_id,
             "report_id": result.report_id,
             "tool_calls": result.tool_calls,
+            "tool_loop": result.tool_loop,
             "staged_artifact_path": result.staged_artifact_path,
             "artifact_id": result.artifact_id,
             "error_message": result.error_message,
