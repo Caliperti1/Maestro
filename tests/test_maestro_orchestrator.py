@@ -174,6 +174,113 @@ class FakeMultiDomainPlannerLLMClient:
         raise AssertionError("Planner should use structured_response.")
 
 
+class FakeGroundTruthDemoPlannerLLMClient:
+    provider = "test"
+    model = "test-groundtruth-demo-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Prepare a GroundTruth demo for a new potential end user.",
+            "direct_response": None,
+            "planner_notes": "Fake GroundTruth demo structured planner response.",
+            "work_items": [
+                {
+                    "id": "wi_1",
+                    "type": "rfi",
+                    "title": "Request missing GroundTruth demo details from Chris",
+                    "description": "Need attendee, organization, role, and calendar details.",
+                    "domain_key": "praxis",
+                    "priority": "urgent",
+                    "required_capabilities": ["demo preparation intake"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": True,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Missing inputs for Chris.",
+                    "rationale": "The demo can proceed generically but contact-specific work needs details.",
+                },
+                {
+                    "id": "wi_3",
+                    "type": "workflow_task",
+                    "title": "Prepare GroundTruth demo narrative and run-of-show",
+                    "description": "Create the demo talk track and flow.",
+                    "domain_key": "praxis",
+                    "priority": "urgent",
+                    "required_capabilities": ["product demo planning"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["praxis-planning-agent"],
+                    "expected_output": "Demo run-of-show.",
+                    "rationale": "Planning owns the demo narrative.",
+                },
+                {
+                    "id": "wi_4",
+                    "type": "workflow_task",
+                    "title": "Assess GroundTruth technical demo readiness",
+                    "description": "Identify product demo risks and fallback plan.",
+                    "domain_key": "praxis",
+                    "priority": "urgent",
+                    "required_capabilities": ["technical risk assessment"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["groundtruth-chief-engineer"],
+                    "expected_output": "Technical readiness checklist.",
+                    "rationale": "GroundTruth engineer owns technical readiness.",
+                },
+                {
+                    "id": "wi_6",
+                    "type": "workflow_task",
+                    "title": "Prepare CRM/contact intake shell for the potential end user",
+                    "description": "Prepare CRM contact and opportunity shell for the attendee.",
+                    "domain_key": "praxis",
+                    "priority": "high",
+                    "required_capabilities": ["CRM hygiene", "contact capture"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["paxis-crm-manager"],
+                    "expected_output": "CRM shell.",
+                    "rationale": "CRM owns contact capture.",
+                },
+                {
+                    "id": "wi_8",
+                    "type": "workflow_task",
+                    "title": "Assemble final GroundTruth demo prep packet",
+                    "description": "Synthesize narrative, technical readiness, and CRM context.",
+                    "domain_key": "praxis",
+                    "priority": "urgent",
+                    "required_capabilities": ["executive synthesis"],
+                    "required_tools": [],
+                    "dependencies": ["wi_3", "wi_4", "wi_6"],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["praxis-planning-agent"],
+                    "expected_output": "Final demo prep packet.",
+                    "rationale": "Planning should synthesize the final packet.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
 class FakeDirectChatPlannerLLMClient:
     provider = "test"
     model = "test-direct-chat-planner"
@@ -326,6 +433,73 @@ def test_orchestrator_decomposes_with_llm_before_agent_matching(session: Session
     assert subtask.work_item_ids == ["wi_partner_prep"]
     assert "Work item wi_partner_prep" in subtask.objective
     assert "Jane Smith is the partner lead" not in subtask.objective
+
+
+def test_orchestrator_prevents_broad_assignment_and_self_dependencies(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="GroundTruth Chief Engineer",
+        name="GroundTruth Chief Engineer",
+        role_summary="Manages GroundTruth application development and technical demo readiness.",
+    )
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="Paxis CRM Manager",
+        name="Paxis CRM Manager",
+        role_summary="Manages Praxis CRM contacts, opportunities, and contact capture.",
+    )
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeGroundTruthDemoPlannerLLMClient(),
+    )
+
+    plan = service.create_plan(
+        "We have a GroundTruth demo this afternoon with a new potential end user."
+    )
+
+    rfi = next(item for item in plan.work_items if item.id == "wi_1")
+    assert rfi.blocks_execution is True
+
+    assignments = {
+        (subtask.agent_key, tuple(subtask.work_item_ids or [])): set(subtask.depends_on_work_item_ids or [])
+        for subtask in plan.subtasks
+    }
+    assert assignments[("groundtruth-chief-engineer", ("wi_4",))] == set()
+    assert assignments[("paxis-crm-manager", ("wi_6",))] == {"wi_1"}
+    assert assignments[("praxis-planning-agent", ("wi_3",))] == set()
+    assert assignments[("praxis-planning-agent", ("wi_8",))] == {"wi_1", "wi_4", "wi_6"}
+    assert all(
+        not (set(subtask.work_item_ids or []) & set(subtask.depends_on_work_item_ids or []))
+        for subtask in plan.subtasks
+    )
+
+    crm_subtask = next(subtask for subtask in plan.subtasks if subtask.agent_key == "paxis-crm-manager")
+    assert crm_subtask.depends_on_work_item_ids == ["wi_1"]
+    synthesis_subtask = next(
+        subtask for subtask in plan.subtasks if "wi_8" in (subtask.work_item_ids or [])
+    )
+    assert set(synthesis_subtask.depends_on_work_item_ids or []) == {"wi_1", "wi_4", "wi_6"}
+
+    assert set(plan.workflow_graph["stages"][0]["work_item_ids"]) == {"wi_3", "wi_4"}
+    assert all(
+        work_item_id not in stage["waits_for_work_item_ids"]
+        for stage in plan.workflow_graph["stages"]
+        for work_item_id in stage["work_item_ids"]
+    )
+    assert any(item["status"] == "pending" for item in plan.scheduler["queue_items"])
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=False)
+
+    assert run.status == "blocked"
+    queue_by_work_item = {
+        tuple(item["work_item_ids"]): item["status"]
+        for item in run.scheduler["queue_items"]
+    }
+    assert queue_by_work_item[("wi_3",)] == "completed"
+    assert queue_by_work_item[("wi_4",)] == "completed"
+    assert queue_by_work_item[("wi_6",)] == "blocked"
+    assert queue_by_work_item[("wi_8",)] == "blocked"
 
 
 def test_orchestrator_direct_chat_has_no_executable_plan(session: Session) -> None:

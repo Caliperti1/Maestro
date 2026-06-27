@@ -1,5 +1,5 @@
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -148,7 +148,9 @@ class MaestroOrchestratorService:
             cleaned_input,
             registry_snapshot=registry_snapshot,
         )
-        work_items = [self._work_item_from_planner(item) for item in decomposition.work_items]
+        work_items = self._harden_work_items(
+            [self._work_item_from_planner(item) for item in decomposition.work_items]
+        )
         is_chat_only = self._is_chat_only(work_items, decomposition)
         selected_agents = self._select_agents_for_work_items(work_items, agents)
         intents = self._intents_from_work_items(work_items, selected_agents)
@@ -298,16 +300,45 @@ class MaestroOrchestratorService:
             )
         if plan.is_chat_only:
             raise MaestroOrchestratorError("Direct chat responses do not have an executable plan.")
-        blocking_items = [
-            item for item in plan.work_items if item.needs_user_input and item.blocks_execution
+        blocking_dependency_ids = self._blocked_work_item_ids(plan.work_items)
+        has_attached_blocking_dependency = any(
+            set(item.dependencies) & {
+                blocking_item.id
+                for blocking_item in plan.work_items
+                if blocking_item.needs_user_input and blocking_item.blocks_execution
+            }
+            for item in plan.work_items
+        )
+        executable_subtasks = [
+            subtask
+            for subtask in plan.subtasks
+            if not (
+                set(subtask.depends_on_work_item_ids or []) & blocking_dependency_ids
+                or set(subtask.work_item_ids or []) & blocking_dependency_ids
+            )
         ]
-        if blocking_items:
-            titles = ", ".join(item.title for item in blocking_items)
+        if blocking_dependency_ids and (not executable_subtasks or not has_attached_blocking_dependency):
+            titles = ", ".join(
+                item.title
+                for item in plan.work_items
+                if item.needs_user_input and item.blocks_execution
+            )
             raise MaestroOrchestratorError(
                 f"Plan needs Chris before execution can start: {titles}"
             )
 
         self._replace_scheduler(parent_task, queue_items=self._queue_with_status(plan.scheduler, "pending"))
+        for subtask in plan.subtasks:
+            if (
+                set(subtask.depends_on_work_item_ids or []) & blocking_dependency_ids
+                or set(subtask.work_item_ids or []) & blocking_dependency_ids
+            ):
+                self._update_queue_item(
+                    parent_task,
+                    subtask,
+                    status="blocked",
+                    error_message="Waiting for blocking user input.",
+                )
         parent_task.status = "running"
         parent_task.started_at = datetime.now(UTC)
         self.session.commit()
@@ -317,7 +348,7 @@ class MaestroOrchestratorService:
         status = "completed"
         error_message: str | None = None
         try:
-            for stage in self._execution_stages(plan.subtasks):
+            for stage in self._execution_stages(executable_subtasks):
                 for stage_subtask in stage:
                     self._update_queue_item(
                         parent_task,
@@ -368,10 +399,13 @@ class MaestroOrchestratorService:
             if any(run.status == "failed" for run in child_runs):
                 status = "failed"
                 error_message = "One or more delegated agent tasks failed."
+            elif len(executable_subtasks) < len(plan.subtasks):
+                status = "blocked"
+                error_message = "Some queue items are waiting for blocking user input."
             synthesis = self._synthesize(plan, child_runs, status=status)
             report = self._write_synthesis_report(parent_task, plan, child_runs, synthesis, status)
             staged = self._stage_workflow_artifact(parent_task, plan, child_runs, synthesis, report)
-            execution_stages = self._execution_stage_keys(plan.subtasks)
+            execution_stages = self._execution_stage_keys(executable_subtasks)
             parent_task.status = status
             parent_task.output_payload = {
                 "plan_id": plan.plan_id,
@@ -665,6 +699,75 @@ class MaestroOrchestratorService:
     def _work_item_from_planner(self, item: PlannerWorkItem) -> MaestroWorkItem:
         return MaestroWorkItem(**item.model_dump())
 
+    def _harden_work_items(self, work_items: list[MaestroWorkItem]) -> list[MaestroWorkItem]:
+        intake_rfis = [
+            item
+            for item in work_items
+            if item.type == "rfi"
+            and item.needs_user_input
+            and any(
+                token in f"{item.title} {item.description}".lower()
+                for token in (
+                    "attendee",
+                    "attendees",
+                    "contact",
+                    "who",
+                    "person",
+                    "end user",
+                    "calendar",
+                    "meeting details",
+                    "demo details",
+                    "missing",
+                )
+            )
+        ]
+        if not intake_rfis:
+            return work_items
+        intake_ids = [item.id for item in intake_rfis]
+        hardened: list[MaestroWorkItem] = []
+        for item in work_items:
+            if item.id in intake_ids:
+                hardened.append(
+                    replace(
+                        item,
+                        blocks_execution=True,
+                        rationale=(
+                            item.rationale
+                            + " Hardened by Maestro: this missing user/context detail blocks "
+                            "dependent CRM/calendar/person-specific work."
+                        ),
+                    )
+                )
+                continue
+            text = " ".join(
+                [
+                    item.title,
+                    item.description,
+                    item.expected_output,
+                    " ".join(item.required_capabilities),
+                ]
+            ).lower()
+            needs_intake = any(
+                token in text
+                for token in (
+                    "crm",
+                    "contact",
+                    "calendar",
+                    "attendee",
+                    "attendees",
+                    "person",
+                    "end user",
+                    "organization",
+                    "meeting invite",
+                )
+            )
+            if item.needs_agent and needs_intake:
+                dependencies = list(dict.fromkeys([*item.dependencies, *intake_ids]))
+                hardened.append(replace(item, dependencies=dependencies))
+            else:
+                hardened.append(item)
+        return hardened
+
     def _select_agents_for_work_items(
         self,
         work_items: list[MaestroWorkItem],
@@ -785,40 +888,54 @@ class MaestroOrchestratorService:
             assigned_items = self._work_items_for_agent(agent, work_items)
             if not assigned_items:
                 continue
-            priority = "high" if any(item.priority in {"high", "urgent"} for item in assigned_items) else "normal"
-            dependencies = sorted(
-                {
-                    dependency
-                    for item in assigned_items
-                    for dependency in item.dependencies
-                }
-            )
-            subtasks.append(
-                MaestroSubtask(
-                    agent_key=agent.key,
-                    agent_name=agent.name,
-                    domain_key=agent.domain_key,
-                    objective=self._subtask_objective(user_input, agent, intents, assigned_items),
-                    expected_output=self._expected_output_for_agent(agent, intents, assigned_items),
-                    priority=priority,
-                    rationale=self._subtask_rationale_for_items(agent, assigned_items),
-                    work_item_ids=[item.id for item in assigned_items],
-                    depends_on_work_item_ids=dependencies,
+            grouped_items: dict[tuple[str, ...], list[MaestroWorkItem]] = {}
+            assigned_item_ids = {item.id for item in assigned_items}
+            for item in assigned_items:
+                dependencies = tuple(
+                    sorted(
+                        dependency
+                        for dependency in item.dependencies
+                        if dependency not in assigned_item_ids
+                    )
                 )
-            )
+                grouped_items.setdefault(dependencies, []).append(item)
+            for dependencies, group_items in grouped_items.items():
+                priority = "high" if any(item.priority in {"high", "urgent"} for item in group_items) else "normal"
+                subtasks.append(
+                    MaestroSubtask(
+                        agent_key=agent.key,
+                        agent_name=agent.name,
+                        domain_key=agent.domain_key,
+                        objective=self._subtask_objective(user_input, agent, intents, group_items),
+                        expected_output=self._expected_output_for_agent(agent, intents, group_items),
+                        priority=priority,
+                        rationale=self._subtask_rationale_for_items(agent, group_items),
+                        work_item_ids=[item.id for item in group_items],
+                        depends_on_work_item_ids=list(dependencies),
+                    )
+                )
         return subtasks
 
     def _work_items_for_agent(self, agent, work_items: list[MaestroWorkItem]) -> list[MaestroWorkItem]:
         assigned: list[MaestroWorkItem] = []
+        specs = self.registry.list_specs()
+        active_agent_keys = {spec.key for spec in specs}
         for item in work_items:
             if not item.needs_agent:
                 continue
             if item.domain_key is not None and item.domain_key != agent.domain_key:
                 continue
+            valid_suggested_keys = [
+                key for key in item.suggested_agent_keys if key in active_agent_keys
+            ]
+            if valid_suggested_keys:
+                if agent.key in valid_suggested_keys:
+                    assigned.append(item)
+                continue
             score = self._agent_work_item_score(item, agent)
             candidates = [
                 self._agent_work_item_score(item, candidate)
-                for candidate in self.registry.list_specs()
+                for candidate in specs
                 if item.domain_key is None or candidate.domain_key == item.domain_key
             ]
             top_score = max(candidates) if candidates else score
@@ -1034,7 +1151,8 @@ class MaestroOrchestratorService:
                 if set(subtask.depends_on_work_item_ids or []).issubset(completed_work_items)
             ]
             if not ready:
-                ready = [remaining[0]]
+                stages.extend([[subtask] for subtask in remaining])
+                break
             stages.append(ready)
             for subtask in ready:
                 remaining.remove(subtask)
@@ -1043,6 +1161,19 @@ class MaestroOrchestratorService:
 
     def _execution_stage_keys(self, subtasks: list[MaestroSubtask]) -> list[list[str]]:
         return [[subtask.agent_key for subtask in stage] for stage in self._execution_stages(subtasks)]
+
+    def _blocked_work_item_ids(self, work_items: list[MaestroWorkItem]) -> set[str]:
+        blocked = {
+            item.id for item in work_items if item.needs_user_input and item.blocks_execution
+        }
+        changed = True
+        while changed:
+            changed = False
+            for item in work_items:
+                if item.id not in blocked and set(item.dependencies) & blocked:
+                    blocked.add(item.id)
+                    changed = True
+        return blocked
 
     def _workflow_graph(
         self,
