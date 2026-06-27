@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.models import Agent, Domain, Task, ToolCall, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 
@@ -161,6 +162,17 @@ class ToolExecutionService:
             raise ToolExecutionError(f"Agent {agent.key} has invalid permission for {tool_key}.")
 
     def _connection_for(self, domain: Domain, tool_key: str) -> ToolConnection | None:
+        provider_key = _provider_key(tool_key)
+        if provider_key != tool_key:
+            provider = self.session.scalar(
+                select(ToolConnection).where(
+                    ToolConnection.domain_id == domain.id,
+                    ToolConnection.tool_key == provider_key,
+                    ToolConnection.is_active.is_(True),
+                )
+            )
+            if provider is not None:
+                return provider
         exact = self.session.scalar(
             select(ToolConnection).where(
                 ToolConnection.domain_id == domain.id,
@@ -170,16 +182,7 @@ class ToolExecutionService:
         )
         if exact is not None:
             return exact
-        provider_key = _provider_key(tool_key)
-        if provider_key == tool_key:
-            return None
-        return self.session.scalar(
-            select(ToolConnection).where(
-                ToolConnection.domain_id == domain.id,
-                ToolConnection.tool_key == provider_key,
-                ToolConnection.is_active.is_(True),
-            )
-        )
+        return None
 
 
 class GitHubCliToolAdapter:
@@ -503,7 +506,7 @@ def _github_env(connection: ToolConnection | None) -> dict[str, str]:
     config = connection.config or {}
     token_env_name = str(config.get("env_token_name") or "").strip()
     if token_env_name:
-        token = os.environ.get(token_env_name)
+        token = os.environ.get(token_env_name) or _dotenv_value(token_env_name)
         if not token:
             raise ToolExecutionError(f"GitHub token env var is not set: {token_env_name}")
         env["GH_TOKEN"] = token
@@ -511,6 +514,29 @@ def _github_env(connection: ToolConnection | None) -> dict[str, str]:
     if token:
         env["GH_TOKEN"] = token
     return env
+
+
+def _dotenv_value(key: str) -> str | None:
+    env_path = get_settings().model_config.get("env_file", ".env")
+    if isinstance(env_path, (list, tuple)):
+        paths = [str(path) for path in env_path]
+    else:
+        paths = [str(env_path)]
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#") or "=" not in stripped:
+                        continue
+                    raw_key, raw_value = stripped.split("=", 1)
+                    if raw_key.strip() != key:
+                        continue
+                    value = raw_value.strip().strip('"').strip("'")
+                    return value or None
+        except FileNotFoundError:
+            continue
+    return None
 
 
 def _run_gh_json(

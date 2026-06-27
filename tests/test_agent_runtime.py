@@ -349,6 +349,86 @@ def test_github_adapter_uses_domain_token_env_for_write_tools(
     assert captured["env"]["GH_TOKEN"] == "test-token"
 
 
+def test_github_adapter_can_resolve_token_ref_from_dotenv(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.chdir(tmp_path)
+    Path(".env").write_text("MAESTRO_GITHUB_TOKEN_TEST=dotenv-token\n", encoding="utf-8")
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={
+            "repo": "Caliperti1/Maestro",
+            "env_token_name": "MAESTRO_GITHUB_TOKEN_TEST",
+        },
+    )
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github.repo.get",
+        display_name="Stale per-tool GitHub repo metadata",
+        auth_type="gh_cli",
+        config={
+            "repo": "Wrong/Repo",
+            "env_token_name": "MISSING_STALE_TOKEN",
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Read repo metadata.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout='{"nameWithOwner":"Caliperti1/Maestro"}\n',
+        )
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeToolAwareAgentLLMClient(),
+        tool_adapters=None,
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Use repo metadata.",
+            use_semantic=False,
+        ),
+        tool_requests=[AgentToolRequest(tool_key="github.repo.get")],
+        execute_llm=False,
+    )
+
+    assert result.tool_calls[0]["status"] == "complete"
+    assert captured["env"]["GH_TOKEN"] == "dotenv-token"
+    assert captured["args"][3] == "Caliperti1/Maestro"
+    get_settings.cache_clear()
+
+
 def test_run_agent_once_prepares_prompt_and_optional_staged_artifact(
     session: Session,
     tmp_path: Path,
