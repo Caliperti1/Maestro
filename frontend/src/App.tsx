@@ -6,12 +6,10 @@ import {
   Clock3,
   Database,
   FileText,
-  GripVertical,
   HardDriveUpload,
   Inbox,
   Menu,
   MessageSquareText,
-  MoreHorizontal,
   PanelLeftClose,
   Plus,
   RefreshCw,
@@ -23,15 +21,6 @@ import {
   Wrench,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-
-type PlannerItem = {
-  id: number;
-  time: string;
-  title: string;
-  domain: string;
-  status: "locked" | "flex" | "needs-input";
-  priority: "high" | "medium" | "low";
-};
 
 type ChatMessage = {
   id: string;
@@ -431,68 +420,6 @@ const domainKeysByLabel: Record<string, string> = Object.fromEntries(
   Object.entries(domainLabels).map(([key, label]) => [label, key]),
 );
 
-const initialPlannerItems: PlannerItem[] = [
-  {
-    id: 1,
-    time: "08:00",
-    title: "Daily standup synthesis",
-    domain: "Maestro",
-    status: "locked",
-    priority: "high",
-  },
-  {
-    id: 2,
-    time: "09:30",
-    title: "Review Praxis follow-up candidates",
-    domain: "Praxis",
-    status: "needs-input",
-    priority: "high",
-  },
-  {
-    id: 3,
-    time: "11:00",
-    title: "USMA prep block",
-    domain: "USMA",
-    status: "flex",
-    priority: "medium",
-  },
-  {
-    id: 4,
-    time: "14:00",
-    title: "Maestro implementation window",
-    domain: "Maestro Development",
-    status: "flex",
-    priority: "high",
-  },
-];
-
-const reports = [
-  {
-    title: "Morning standup",
-    summary: "Awaiting first workflow run.",
-    meta: "Maestro / Today",
-  },
-  {
-    title: "Memory curator",
-    summary: "Seed package ingestion not configured yet.",
-    meta: "Admin / Pending",
-  },
-  {
-    title: "Praxis brief",
-    summary: "Domain agent stub will populate this panel.",
-    meta: "Praxis / Stub",
-  },
-];
-
-const agents = [
-  "Personal Chief of Staff",
-  "Maestro CTO",
-  "Praxis CGO",
-  "Ophi Research",
-  "USMA Teaching",
-  "IRAD Project Planner",
-];
-
 const routedGroups = [
   { key: "human_input", label: "RFIs", empty: "No open RFIs." },
   { key: "task", label: "Tasks", empty: "No open tasks." },
@@ -503,18 +430,6 @@ const routedGroups = [
 ];
 
 const hiddenRoutedStatuses = new Set(["done", "archived"]);
-
-function statusLabel(status: PlannerItem["status"]) {
-  if (status === "locked") return "Locked";
-  if (status === "needs-input") return "Needs input";
-  return "Flexible";
-}
-
-function nextStatus(status: PlannerItem["status"]): PlannerItem["status"] {
-  if (status === "locked") return "flex";
-  if (status === "flex") return "needs-input";
-  return "locked";
-}
 
 function resultLabel(result?: PreviewResult) {
   if (!result) return "Preview only";
@@ -689,7 +604,6 @@ export function App() {
   const [activeSurface, setActiveSurface] = useState<"dashboard" | "domain" | "memory" | "tools">(
     "dashboard",
   );
-  const [plannerItems, setPlannerItems] = useState(initialPlannerItems);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [sessionHistory, setSessionHistory] = useState<MaestroSessionSummary[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
@@ -699,11 +613,6 @@ export function App() {
   const [executeMaestroLLM, setExecuteMaestroLLM] = useState(true);
   const [maestroBusy, setMaestroBusy] = useState(false);
   const [expandedWorkflowNodeId, setExpandedWorkflowNodeId] = useState<string | null>(null);
-
-  const highPriorityCount = useMemo(
-    () => plannerItems.filter((item) => item.priority === "high").length,
-    [plannerItems],
-  );
 
   const maestroPlanStages = useMemo(() => {
     if (!maestroPlan) return [];
@@ -775,22 +684,32 @@ export function App() {
     );
   }, [maestroPlan]);
 
-  const moveItem = (id: number, direction: -1 | 1) => {
-    setPlannerItems((items) => {
-      const index = items.findIndex((item) => item.id === id);
-      const target = index + direction;
-      if (index < 0 || target < 0 || target >= items.length) return items;
-      const next = [...items];
-      [next[index], next[target]] = [next[target], next[index]];
-      return next;
-    });
-  };
-
-  const cycleItemStatus = (id: number) => {
-    setPlannerItems((items) =>
-      items.map((item) => (item.id === id ? { ...item, status: nextStatus(item.status) } : item)),
-    );
-  };
+  const activeWorkflowSummary = useMemo(() => {
+    if (!maestroPlan && !maestroRun) return null;
+    const plan = maestroRun?.plan ?? maestroPlan;
+    if (!plan) return null;
+    const queueItems = plan.scheduler.queue_items ?? [];
+    const completed = queueItems.filter((item) => item.status === "completed").length;
+    const blocked = queueItems.filter((item) => item.status === "blocked").length;
+    const failed = queueItems.filter((item) => item.status === "failed").length;
+    const running = queueItems.filter((item) =>
+      ["ready", "running", "retrying", "pending"].includes(item.status),
+    ).length;
+    return {
+      id: plan.parent_task_id,
+      title: plan.summary,
+      status: maestroRun?.status ?? plan.status,
+      schedulerStatus: String(plan.scheduler.status ?? "queue"),
+      queueItems,
+      completed,
+      blocked,
+      failed,
+      running,
+      stageCount: plan.execution_stages.length || queueStages.length,
+      reportWritten: Boolean(maestroRun?.synthesis_report_id),
+      artifactStaged: Boolean(maestroRun?.staged_artifact_path),
+    };
+  }, [maestroPlan, maestroRun, queueStages.length]);
 
   const sendMaestroMessage = async () => {
     if (!draftMessage.trim()) return;
@@ -1029,7 +948,9 @@ export function App() {
             ) : (
               <span>
                 <Clock3 size={16} />
-                {highPriorityCount} high priority
+                {activeWorkflowSummary
+                  ? `${activeWorkflowSummary.schedulerStatus} scheduler`
+                  : "No active workflow"}
               </span>
             )}
           </div>
@@ -1348,103 +1269,143 @@ export function App() {
                   <p className="eyebrow">Daily planner</p>
                   <h3 id="planner-heading">Today</h3>
                 </div>
-                <button className="planner-action">
+                <button className="planner-action" disabled>
                   <CalendarDays size={17} />
                   Adjust
                 </button>
               </div>
 
-              <div className="timeline">
-                {plannerItems.map((item, index) => (
-                  <article className="timeline-item" key={item.id}>
-                    <div className="time-column">
-                      <span>{item.time}</span>
-                      <GripVertical size={16} />
-                    </div>
-                    <div className="timeline-body">
-                      <div className="timeline-title-row">
-                        <div>
-                          <h4>{item.title}</h4>
-                          <p>{item.domain}</p>
-                        </div>
-                        <button
-                          className={`status-pill ${item.status}`}
-                          onClick={() => cycleItemStatus(item.id)}
-                        >
-                          {statusLabel(item.status)}
-                        </button>
-                      </div>
-                      <div className="timeline-controls">
-                        <button onClick={() => moveItem(item.id, -1)} disabled={index === 0}>
-                          Earlier
-                        </button>
-                        <button
-                          onClick={() => moveItem(item.id, 1)}
-                          disabled={index === plannerItems.length - 1}
-                        >
-                          Later
-                        </button>
-                        <span className={`priority priority-${item.priority}`}>
-                          {item.priority} priority
-                        </span>
-                      </div>
-                    </div>
-                  </article>
-                ))}
+              <div className="empty-planner-state">
+                <CalendarDays size={20} />
+                <p>
+                  Daily planner is ready for the morning standup workflow. Scheduled blocks will
+                  appear here once Maestro starts producing a real daily plan.
+                </p>
               </div>
             </section>
 
             <section className="reports-panel" aria-labelledby="reports-heading">
               <div className="section-heading">
                 <div>
-                  <p className="eyebrow">Recent reports</p>
+                  <p className="eyebrow">Scheduler</p>
                   <h3 id="reports-heading">Queue</h3>
                 </div>
-                <button className="icon-button" aria-label="Report menu" title="Report menu">
-                  <MoreHorizontal size={18} />
-                </button>
+                <Clock3 size={18} />
               </div>
-              <div className="report-list">
-                {reports.map((report) => (
-                  <article className="report-card" key={report.title}>
-                    <span>{report.meta}</span>
-                    <h4>{report.title}</h4>
-                    <p>{report.summary}</p>
+              {activeWorkflowSummary ? (
+                <div className="scheduler-visualizer">
+                  <article className="workflow-summary-card">
+                    <span>{activeWorkflowSummary.schedulerStatus}</span>
+                    <h4>{activeWorkflowSummary.title}</h4>
+                    <div className="preview-meta">
+                      <span>{activeWorkflowSummary.status}</span>
+                      <span>{activeWorkflowSummary.queueItems.length} queue items</span>
+                      <span>{activeWorkflowSummary.stageCount} stages</span>
+                      <span>{activeWorkflowSummary.completed} complete</span>
+                      {activeWorkflowSummary.running > 0 && (
+                        <span>{activeWorkflowSummary.running} active/pending</span>
+                      )}
+                      {activeWorkflowSummary.blocked > 0 && (
+                        <span>{activeWorkflowSummary.blocked} blocked</span>
+                      )}
+                      {activeWorkflowSummary.failed > 0 && (
+                        <span>{activeWorkflowSummary.failed} failed</span>
+                      )}
+                    </div>
                   </article>
-                ))}
-              </div>
-            </section>
-
-            <section className="domain-panel" aria-labelledby="domain-heading">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Domain page</p>
-                  <h3 id="domain-heading">Agents & tools</h3>
+                  {queueStages.length > 0 && (
+                    <div className="workflow-map compact-map" aria-label="Scheduler workflow map">
+                      <div className="workflow-map-scroll">
+                        {queueStages.map((stage, index) => (
+                          <div className="workflow-map-stage" key={`scheduler-stage-${stage.stageIndex}`}>
+                            <div className="workflow-map-heading">
+                              <span>Stage {stage.stageIndex}</span>
+                              <span>{stage.items.length > 1 ? "Parallel" : "Single"}</span>
+                            </div>
+                            <div className="workflow-map-items">
+                              {stage.items.map((item) => (
+                                <button
+                                  className={`workflow-node node-${item.status} ${
+                                    expandedWorkflowNodeId === item.id ? "node-selected" : ""
+                                  }`}
+                                  key={item.id}
+                                  type="button"
+                                  onClick={() =>
+                                    setExpandedWorkflowNodeId((selectedId) =>
+                                      selectedId === item.id ? null : item.id,
+                                    )
+                                  }
+                                >
+                                  <span>{item.status}</span>
+                                  <strong>{item.agent_name}</strong>
+                                  <small>{item.work_item_ids.join(", ")}</small>
+                                </button>
+                              ))}
+                            </div>
+                            {index < queueStages.length - 1 && (
+                              <ChevronRight className="workflow-arrow" size={18} />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {selectedWorkflowItem && (
+                    <div className="workflow-detail-panel">
+                      <div className="workflow-detail-heading">
+                        <div>
+                          <span>
+                            Stage {selectedWorkflowItem.stage_index} / {selectedWorkflowItem.status}
+                          </span>
+                          <h4>{selectedWorkflowItem.agent_name}</h4>
+                        </div>
+                        <button type="button" onClick={() => setExpandedWorkflowNodeId(null)}>
+                          Close
+                        </button>
+                      </div>
+                      <p>{selectedWorkflowItem.objective}</p>
+                      <div className="preview-meta">
+                        <span>{domainLabels[selectedWorkflowItem.domain_key] ?? selectedWorkflowItem.domain_key}</span>
+                        <span>{selectedWorkflowItem.priority}</span>
+                        <span>{selectedWorkflowItem.work_item_ids.join(", ") || "no work items"}</span>
+                        <span>{selectedWorkflowItem.retry_count ?? 0} retries</span>
+                        {selectedWorkflowItem.depends_on_work_item_ids.length > 0 && (
+                          <span>Waits for {selectedWorkflowItem.depends_on_work_item_ids.join(", ")}</span>
+                        )}
+                        {selectedWorkflowItem.child_task_id && (
+                          <span>Task {selectedWorkflowItem.child_task_id.slice(0, 8)}</span>
+                        )}
+                      </div>
+                      {selectedWorkflowItem.error_message && (
+                        <p className="evaluation-note">{selectedWorkflowItem.error_message}</p>
+                      )}
+                      {selectedWorkflowSubtask?.rationale && (
+                        <p className="evaluation-note">{selectedWorkflowSubtask.rationale}</p>
+                      )}
+                      <div className="workflow-detail-grid">
+                        {selectedWorkflowWorkItems.map((item) => (
+                          <article className="mini-row" key={`queue-${item.id}`}>
+                            <span>
+                              {item.id} / {item.type} / {item.priority} /{" "}
+                              {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
+                            </span>
+                            <p>{item.title}</p>
+                            <p>{item.description}</p>
+                            {item.dependencies.length > 0 && (
+                              <span>Depends on: {item.dependencies.join(", ")}</span>
+                            )}
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <button className="icon-button" aria-label="Add agent" title="Add agent">
-                  <Bot size={18} />
-                </button>
-              </div>
-
-              <div className="agent-list">
-                {agents.map((agent) => (
-                  <button className="agent-row" key={agent}>
-                    <span>
-                      <Bot size={17} />
-                      {agent}
-                    </span>
-                    <CheckCircle2 size={17} />
-                  </button>
-                ))}
-              </div>
-
-              <div className="tool-shell">
-                <div>
-                  <Wrench size={18} />
-                  <span>Tool credentials and descriptions will open here.</span>
-                </div>
-                <button className="planner-action">Configure</button>
-              </div>
+              ) : (
+                <p className="empty-state">
+                  No scheduled or running workflows yet. Maestro workflows will appear here after
+                  they are proposed, queued, or executed.
+                </p>
+              )}
             </section>
 
             <RoutedItemsBoard

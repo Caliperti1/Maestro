@@ -368,6 +368,12 @@ h4 {
   background: #426b57;
 }
 
+.planner-action:disabled {
+  color: #68736d;
+  background: #eef2ee;
+  border-color: #d7ded7;
+}
+
 .maestro-status-row {
   display: flex;
   gap: 10px;
@@ -447,6 +453,10 @@ h4 {
   display: grid;
   gap: 8px;
   margin-top: 12px;
+}
+
+.compact-map {
+  margin-top: 0;
 }
 
 .workflow-map-scroll {
@@ -596,6 +606,38 @@ h4 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 8px;
+}
+
+.empty-planner-state,
+.scheduler-visualizer {
+  display: grid;
+  gap: 10px;
+}
+
+.empty-planner-state {
+  align-content: center;
+  min-height: 150px;
+  padding: 16px;
+  color: #52605a;
+  background: #f6f9f6;
+  border: 1px dashed #cfd8d0;
+  border-radius: 8px;
+}
+
+.workflow-summary-card {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  background: #ffffff;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
+.workflow-summary-card > span {
+  color: #68736d;
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
 }
 
 .maestro-plan pre {
