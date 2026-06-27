@@ -128,6 +128,8 @@ provenance, and optionally stages an interaction artifact for memory curation. S
 `execute_llm: false` to prepare/debug the package without making a provider call. Explicit
 `tool_requests` can be provided for MVP tool execution; the runtime executes those tools first,
 records their `tool_calls`, appends the results to the assembled prompt, and then calls the LLM.
+Set `auto_tool_loop: true` to let the agent LLM plan safe read-only tool calls from its tasking and
+tool manifest before the final report.
 
 API:
 
@@ -146,7 +148,8 @@ curl -s http://localhost:8000/agents/praxis-planning-agent/run-once \
     "use_semantic": true,
     "stage_interaction": true,
     "execute_llm": true,
-    "tool_requests": []
+    "tool_requests": [],
+    "auto_tool_loop": false
   }'
 ```
 
@@ -158,6 +161,7 @@ Expected:
 - `task_id` is set for the manual run
 - `tool_calls` includes the `llm.gateway` call when `execute_llm` is true
 - `tool_calls` includes any explicit tools requested before `llm.gateway`
+- `tool_loop` explains any agent-planned tool iterations when `auto_tool_loop` is true
 - `report_id` and `output_text` are set when execution succeeds
 - `scheduler.status` is `stubbed`
 - if `stage_interaction` is true, a package lands in `maestro_dropbox/<domain>/inbox`
@@ -169,6 +173,31 @@ like a manually dropped file.
 The scheduler is deliberately separate. Maestro will need a master scheduler service that can
 coordinate recurring work, resource locks, exclusive tools, queue priority, and user approvals
 without individual agents fighting over the same capabilities.
+
+### Agent-Planned Tool Loop
+
+The first autonomous tool loop is intentionally conservative:
+
+1. Maestro or a human sends tasking to a domain agent.
+2. Prompt aggregation provides global context, domain context, role prompt, memory, and the allowed
+   tool manifest.
+3. A planner LLM call (`llm.tool_planner`) returns a small JSON plan of tool calls.
+4. The runtime validates each requested tool against the agent's permissions.
+5. Only safe read tools are executed automatically in this slice:
+   - `github.repo.get`
+   - `github.issue.search`
+   - `github.issue.get`
+   - `github.pr.search`
+   - `github.pr.get`
+   - `github.pr.diff`
+   - `github.pr.checks`
+6. Tool outputs are fed back into the final `llm.gateway` report call.
+
+Write/action tools such as `github.issue.create`, `github.issue.comment`, and
+`github.issue.update` are available as explicit tools but are blocked from autonomous execution
+until Maestro has a user-visible approval gate. This means a task like "check out the latest PR"
+can plan and execute read tools, while "create an issue" still needs explicit/manual execution in
+this phase.
 
 ### Tool Execution Contract
 
