@@ -763,6 +763,18 @@ export function App() {
     );
   }, [maestroPlan, selectedWorkflowItem]);
 
+  const routedPlanItems = useMemo(() => {
+    if (!maestroPlan) return [];
+    const queuedWorkItemIds = new Set(
+      (maestroPlan.scheduler.queue_items ?? []).flatMap((item) => item.work_item_ids),
+    );
+    return maestroPlan.work_items.filter(
+      (item) =>
+        !queuedWorkItemIds.has(item.id) &&
+        (item.can_log_directly || item.needs_user_input || !item.needs_agent),
+    );
+  }, [maestroPlan]);
+
   const moveItem = (id: number, direction: -1 | 1) => {
     setPlannerItems((items) => {
       const index = items.findIndex((item) => item.id === id);
@@ -1204,6 +1216,36 @@ export function App() {
                               <ChevronRight className="workflow-arrow" size={18} />
                             )}
                           </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {routedPlanItems.length > 0 && (
+                    <div className="routed-plan-panel">
+                      <h4>Routed items</h4>
+                      <div className="workflow-detail-grid">
+                        {routedPlanItems.map((item) => (
+                          <article className="mini-row" key={item.id}>
+                            <span>
+                              {item.id} / {item.type} / {item.priority} /{" "}
+                              {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
+                            </span>
+                            <p>{item.title}</p>
+                            <p>{item.description}</p>
+                            {item.dependencies.length > 0 && (
+                              <span>Depends on: {item.dependencies.join(", ")}</span>
+                            )}
+                            <div className="preview-meta">
+                              <span>{item.can_log_directly ? "board route" : "plan context"}</span>
+                              <span>
+                                {item.blocks_execution
+                                  ? "asked in chat"
+                                  : item.needs_user_input
+                                    ? "needs Chris"
+                                    : "no RFI"}
+                              </span>
+                            </div>
+                          </article>
                         ))}
                       </div>
                     </div>

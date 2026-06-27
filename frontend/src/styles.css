@@ -559,6 +559,15 @@ h4 {
   border-radius: 8px;
 }
 
+.routed-plan-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: #ffffff;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
 .workflow-detail-heading {
   display: flex;
   align-items: flex-start;

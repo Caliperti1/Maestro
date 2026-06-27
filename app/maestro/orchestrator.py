@@ -327,7 +327,11 @@ class MaestroOrchestratorService:
                 f"Plan needs Chris before execution can start: {titles}"
             )
 
-        self._replace_scheduler(parent_task, queue_items=self._queue_with_status(plan.scheduler, "pending"))
+        self._replace_scheduler(
+            parent_task,
+            queue_items=self._queue_with_status(plan.scheduler, "pending"),
+            scheduler_status="pending",
+        )
         for subtask in plan.subtasks:
             if (
                 set(subtask.depends_on_work_item_ids or []) & blocking_dependency_ids
@@ -341,6 +345,7 @@ class MaestroOrchestratorService:
                 )
         parent_task.status = "running"
         parent_task.started_at = datetime.now(UTC)
+        self._set_scheduler_status(parent_task, "running")
         self.session.commit()
 
         child_runs: list[AgentRunResult] = []
@@ -431,6 +436,7 @@ class MaestroOrchestratorService:
             )
             execution_stages = self._execution_stage_keys(executable_subtasks)
             parent_task.status = status
+            self._set_scheduler_status(parent_task, status)
             parent_task.output_payload = {
                 "plan_id": plan.plan_id,
                 "status": status,
@@ -474,6 +480,7 @@ class MaestroOrchestratorService:
             parent_task.status = "failed"
             parent_task.error_message = str(exc)
             parent_task.completed_at = datetime.now(UTC)
+            self._set_scheduler_status(parent_task, "failed")
             self.session.commit()
             raise
 
@@ -1414,9 +1421,14 @@ class MaestroOrchestratorService:
             payload["selection_rationale"] = self._subtask_rationale(user_input, agent)
         return payload
 
-    def _scheduler_payload(self, *, queue_items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def _scheduler_payload(
+        self,
+        *,
+        queue_items: list[dict[str, Any]] | None = None,
+        status: str = "queue_foundation",
+    ) -> dict[str, Any]:
         return {
-            "status": "queue_foundation",
+            "status": status,
             "policy": (
                 "Plan-first execution. Queue items are grouped into dependency stages; items "
                 "inside a stage are parallel-ready, retried once on failure, and downstream "
@@ -1471,12 +1483,30 @@ class MaestroOrchestratorService:
             for item in scheduler.get("queue_items", [])
         ]
 
-    def _replace_scheduler(self, task: Task, *, queue_items: list[dict[str, Any]]) -> None:
+    def _replace_scheduler(
+        self,
+        task: Task,
+        *,
+        queue_items: list[dict[str, Any]],
+        scheduler_status: str | None = None,
+    ) -> None:
         payload = dict(task.input_payload or {})
         scheduler = {
             **self._scheduler_payload(),
             **dict(payload.get("scheduler", {})),
             "queue_items": queue_items,
+        }
+        if scheduler_status is not None:
+            scheduler["status"] = scheduler_status
+        payload["scheduler"] = scheduler
+        task.input_payload = payload
+
+    def _set_scheduler_status(self, task: Task, status: str) -> None:
+        payload = dict(task.input_payload or {})
+        scheduler = {
+            **self._scheduler_payload(),
+            **dict(payload.get("scheduler", {})),
+            "status": status,
         }
         payload["scheduler"] = scheduler
         task.input_payload = payload

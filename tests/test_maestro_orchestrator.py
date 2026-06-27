@@ -606,9 +606,11 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     assert parent.status == "completed"
     assert parent.output_payload["synthesis_report_id"] == run.synthesis_report_id
     completed_queue = parent.input_payload["scheduler"]["queue_items"]
+    assert parent.input_payload["scheduler"]["status"] == "completed"
     assert [item["status"] for item in completed_queue] == ["completed", "completed"]
     assert all(item["child_task_id"] for item in completed_queue)
     assert parent.output_payload["scheduler"]["queue_items"] == completed_queue
+    assert parent.output_payload["scheduler"]["status"] == "completed"
 
 
 def test_orchestrator_passes_dependency_outputs_to_later_agent(session: Session, tmp_path: Path) -> None:
@@ -697,6 +699,7 @@ def test_orchestrator_blocks_downstream_work_after_retry_exhaustion(
     queue_by_work_item = {
         tuple(item["work_item_ids"]): item for item in run.scheduler["queue_items"]
     }
+    assert run.scheduler["status"] == "failed"
     assert queue_by_work_item[("wi_praxis",)]["status"] == "failed"
     assert queue_by_work_item[("wi_praxis",)]["retry_count"] == 1
     assert queue_by_work_item[("wi_maestro",)]["status"] == "blocked"
