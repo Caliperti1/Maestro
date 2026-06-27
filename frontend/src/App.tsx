@@ -24,6 +24,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+const WORKING_STEPS = ["Classifying", "Planning", "Checking dependencies", "Updating queue"];
+
 type PlannerItem = {
   id: number;
   time: string;
@@ -697,6 +699,18 @@ export function App() {
   const [maestroStatus, setMaestroStatus] = useState("Ready");
   const [executeMaestroLLM, setExecuteMaestroLLM] = useState(true);
   const [maestroBusy, setMaestroBusy] = useState(false);
+  const [workingStepIndex, setWorkingStepIndex] = useState(0);
+
+  useEffect(() => {
+    if (!maestroBusy) {
+      setWorkingStepIndex(0);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setWorkingStepIndex((index) => (index + 1) % WORKING_STEPS.length);
+    }, 650);
+    return () => window.clearInterval(timer);
+  }, [maestroBusy]);
 
   const highPriorityCount = useMemo(
     () => plannerItems.filter((item) => item.priority === "high").length,
@@ -720,6 +734,22 @@ export function App() {
           .filter((subtask): subtask is MaestroSubtask => subtask !== null),
       )
       .filter((stage) => stage.length > 0);
+  }, [maestroPlan]);
+
+  const queueStages = useMemo(() => {
+    const queueItems = maestroPlan?.scheduler.queue_items ?? [];
+    const stages = new Map<number, MaestroQueueItem[]>();
+    queueItems.forEach((item) => {
+      const items = stages.get(item.stage_index) ?? [];
+      items.push(item);
+      stages.set(item.stage_index, items);
+    });
+    return Array.from(stages)
+      .sort(([left], [right]) => left - right)
+      .map(([stageIndex, items]) => ({
+        stageIndex,
+        items: items.sort((left, right) => left.position - right.position),
+      }));
   }, [maestroPlan]);
 
   const moveItem = (id: number, direction: -1 | 1) => {
@@ -1025,6 +1055,19 @@ export function App() {
                     No active Maestro session yet. Send a request to start a plan or conversation.
                   </p>
                 )}
+                {maestroBusy && (
+                  <div className="message maestro-message working-message" aria-live="polite">
+                    <span>Maestro</span>
+                    <p>
+                      Conducting: {WORKING_STEPS[workingStepIndex]}
+                      <span className="working-dots" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                    </p>
+                  </div>
+                )}
               </div>
 
               {sessionHistory.length > 0 && (
@@ -1079,7 +1122,11 @@ export function App() {
                   />
                   Execute LLM
                 </label>
-                <span>{maestroStatus}</span>
+                <span>
+                  {maestroBusy
+                    ? `Conducting: ${WORKING_STEPS[workingStepIndex]}`
+                    : maestroStatus}
+                </span>
               </div>
 
               {maestroPlan && (
@@ -1207,6 +1254,33 @@ export function App() {
                               {item.error_message && <span>{item.error_message}</span>}
                             </div>
                           </article>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {queueStages.length > 0 && (
+                    <div className="workflow-map" aria-label="Workflow dependency map">
+                      <h4>Workflow map</h4>
+                      <div className="workflow-map-scroll">
+                        {queueStages.map((stage, index) => (
+                          <div className="workflow-map-stage" key={`queue-stage-${stage.stageIndex}`}>
+                            <div className="workflow-map-heading">
+                              <span>Stage {stage.stageIndex}</span>
+                              <span>{stage.items.length > 1 ? "Parallel" : "Single"}</span>
+                            </div>
+                            <div className="workflow-map-items">
+                              {stage.items.map((item) => (
+                                <div className={`workflow-node node-${item.status}`} key={item.id}>
+                                  <span>{item.status}</span>
+                                  <strong>{item.agent_name}</strong>
+                                  <small>{item.work_item_ids.join(", ")}</small>
+                                </div>
+                              ))}
+                            </div>
+                            {index < queueStages.length - 1 && (
+                              <ChevronRight className="workflow-arrow" size={18} />
+                            )}
+                          </div>
                         ))}
                       </div>
                     </div>
