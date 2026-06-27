@@ -1965,7 +1965,10 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
 function ToolsWorkspace() {
   const [tools, setTools] = useState<ToolRegistryItem[]>([]);
   const [connections, setConnections] = useState<ToolConnection[]>([]);
-  const [selectedToolKey, setSelectedToolKey] = useState("memory.context_bundle");
+  const [selectedToolKey, setSelectedToolKey] = useState("github");
+  const [expandedToolFamilies, setExpandedToolFamilies] = useState<Record<string, boolean>>({
+    github: true,
+  });
   const [connectionDomain, setConnectionDomain] = useState("praxis");
   const [connectionName, setConnectionName] = useState("Praxis memory retrieval");
   const [connectionAuthType, setConnectionAuthType] = useState("service");
@@ -1976,10 +1979,44 @@ function ToolsWorkspace() {
   const selectedConnectionToolKey = selectedTool?.key.startsWith("github.")
     ? "github"
     : selectedTool?.key;
+  const toolFamilies = useMemo(() => {
+    const providerKeys = new Set(
+      tools.filter((tool) => !tool.key.includes(".")).map((tool) => tool.key),
+    );
+    const families = tools
+      .filter((tool) => providerKeys.has(tool.key))
+      .map((provider) => ({
+        provider,
+        children: tools.filter((tool) => tool.key.startsWith(`${provider.key}.`)),
+      }));
+    const childKeys = new Set(
+      families.flatMap((family) => family.children.map((tool) => tool.key)),
+    );
+    const standalone = tools.filter(
+      (tool) =>
+        !childKeys.has(tool.key) && !families.some((family) => family.provider.key === tool.key),
+    );
+    return { families, standalone };
+  }, [tools]);
   const selectedToolConnections = connections.filter(
     (connection) => connection.tool_key === selectedConnectionToolKey,
   );
-  const selectedToolAgents = selectedTool?.authorized_agents ?? [];
+  const selectedToolAgents = useMemo(() => {
+    if (!selectedTool) return [];
+    if (selectedTool.key === "github") {
+      const githubAgents = tools
+        .filter((tool) => tool.key.startsWith("github."))
+        .flatMap((tool) => tool.authorized_agents);
+      const unique = new Map<string, ToolRegistryItem["authorized_agents"][number]>();
+      githubAgents.forEach((agent) => {
+        unique.set(`${agent.domain_key}-${agent.agent_key}`, agent);
+      });
+      return Array.from(unique.values()).sort((a, b) =>
+        `${a.domain_key}-${a.agent_key}`.localeCompare(`${b.domain_key}-${b.agent_key}`),
+      );
+    }
+    return selectedTool.authorized_agents;
+  }, [selectedTool, tools]);
   const selectedConnection = selectedToolConnections.find(
     (connection) => connection.domain_key === connectionDomain,
   );
@@ -1992,7 +2029,11 @@ function ToolsWorkspace() {
     setTools(toolResponse.tools);
     setConnections(connectionResponse.connections);
     if (!toolResponse.tools.some((tool) => tool.key === selectedToolKey)) {
-      setSelectedToolKey(toolResponse.tools[0]?.key ?? "memory.context_bundle");
+      setSelectedToolKey(
+        toolResponse.tools.some((tool) => tool.key === "github")
+          ? "github"
+          : (toolResponse.tools[0]?.key ?? "memory.context_bundle"),
+      );
     }
   }, [selectedToolKey]);
 
@@ -2009,10 +2050,13 @@ function ToolsWorkspace() {
       setConnectionConfig(JSON.stringify(existing.config, null, 2));
       return;
     }
-    setConnectionName(`${domainLabels[connectionDomain] ?? connectionDomain} ${selectedTool.name}`);
-    setConnectionAuthType(selectedTool.key.startsWith("github.") ? "gh_cli" : "service");
+    const isGitHub = selectedConnectionToolKey === "github";
+    setConnectionName(
+      `${domainLabels[connectionDomain] ?? connectionDomain} ${isGitHub ? "GitHub" : selectedTool.name}`,
+    );
+    setConnectionAuthType(isGitHub ? "gh_cli" : "service");
     setConnectionConfig(
-      selectedTool.key.startsWith("github.")
+      isGitHub
         ? JSON.stringify(
             {
               repo: "Caliperti1/Maestro",
@@ -2032,6 +2076,13 @@ function ToolsWorkspace() {
 
   const selectConnection = (domainKey: string) => {
     setConnectionDomain(domainKey);
+  };
+
+  const toggleToolFamily = (familyKey: string) => {
+    setExpandedToolFamilies((current) => ({
+      ...current,
+      [familyKey]: !current[familyKey],
+    }));
   };
 
   useEffect(() => {
@@ -2075,7 +2126,68 @@ function ToolsWorkspace() {
           </button>
         </div>
         <div className="tool-registry-list">
-          {tools.map((tool) => (
+          {toolFamilies.families.map(({ provider, children }) => (
+            <div className="tool-family-group" key={provider.key}>
+              <div
+                className={
+                  provider.key === selectedTool?.key
+                    ? "tool-registry-row tool-family-row active"
+                    : "tool-registry-row tool-family-row"
+                }
+              >
+                <button
+                  className="tool-family-main selectable"
+                  onClick={() => setSelectedToolKey(provider.key)}
+                >
+                  <div>
+                    <span>Tool family</span>
+                    <h4>{provider.name}</h4>
+                    <p>{provider.description}</p>
+                  </div>
+                  <div className="preview-meta">
+                    <span>{provider.connected_domains.length} connected domains</span>
+                    <span>{children.length} tools</span>
+                  </div>
+                </button>
+                <button
+                  className="icon-button"
+                  onClick={() => toggleToolFamily(provider.key)}
+                  title={expandedToolFamilies[provider.key] ? "Collapse tools" : "Expand tools"}
+                >
+                  <ChevronRight
+                    className={expandedToolFamilies[provider.key] ? "expanded-icon" : ""}
+                    size={18}
+                  />
+                </button>
+              </div>
+              {expandedToolFamilies[provider.key] && (
+                <div className="tool-family-children">
+                  {children.map((tool) => (
+                    <button
+                      className={
+                        tool.key === selectedTool?.key
+                          ? "tool-child-row selectable active"
+                          : "tool-child-row selectable"
+                      }
+                      key={tool.key}
+                      onClick={() => setSelectedToolKey(tool.key)}
+                    >
+                      <div>
+                        <span>{tool.exclusive ? "Exclusive / queued" : "Shared tool"}</span>
+                        <h4>{tool.name}</h4>
+                        <p>{tool.description}</p>
+                      </div>
+                      <div className="preview-meta">
+                        <span>{tool.connected_domains.length} connected domains</span>
+                        <span>{tool.authorized_agents.length} agents</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          {toolFamilies.standalone.map((tool) => (
             <button
               className={
                 tool.key === selectedTool?.key
@@ -2112,6 +2224,12 @@ function ToolsWorkspace() {
         {selectedTool ? (
           <>
             <p className="empty-state">{selectedTool.description}</p>
+            {selectedTool.key === "github" && (
+              <p className="memory-status">
+                Edit the shared GitHub repo and credential config here. Every GitHub child tool in
+                this domain inherits it unless a more specific override is added later.
+              </p>
+            )}
             {selectedTool.key.startsWith("github.") && (
               <p className="memory-status">
                 GitHub tools share one domain connection named <strong>GitHub</strong>. Save repo
