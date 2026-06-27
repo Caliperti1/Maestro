@@ -328,6 +328,7 @@ type MaestroQueueItem = {
   depends_on_work_item_ids: string[];
   child_task_id: string | null;
   child_report_id: string | null;
+  retry_count?: number;
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
@@ -697,6 +698,7 @@ export function App() {
   const [maestroStatus, setMaestroStatus] = useState("Ready");
   const [executeMaestroLLM, setExecuteMaestroLLM] = useState(true);
   const [maestroBusy, setMaestroBusy] = useState(false);
+  const [expandedWorkflowNodeId, setExpandedWorkflowNodeId] = useState<string | null>(null);
 
   const highPriorityCount = useMemo(
     () => plannerItems.filter((item) => item.priority === "high").length,
@@ -737,6 +739,29 @@ export function App() {
         items: items.sort((left, right) => left.position - right.position),
       }));
   }, [maestroPlan]);
+
+  const selectedWorkflowItem = useMemo(() => {
+    const queueItems = maestroPlan?.scheduler.queue_items ?? [];
+    return queueItems.find((item) => item.id === expandedWorkflowNodeId) ?? null;
+  }, [expandedWorkflowNodeId, maestroPlan]);
+
+  const selectedWorkflowWorkItems = useMemo(() => {
+    if (!maestroPlan || !selectedWorkflowItem) return [];
+    const selectedIds = new Set(selectedWorkflowItem.work_item_ids);
+    return maestroPlan.work_items.filter((item) => selectedIds.has(item.id));
+  }, [maestroPlan, selectedWorkflowItem]);
+
+  const selectedWorkflowSubtask = useMemo(() => {
+    if (!maestroPlan || !selectedWorkflowItem) return null;
+    return (
+      maestroPlan.subtasks.find(
+        (subtask) =>
+          subtask.agent_key === selectedWorkflowItem.agent_key &&
+          JSON.stringify(subtask.work_item_ids ?? []) ===
+            JSON.stringify(selectedWorkflowItem.work_item_ids),
+      ) ?? null
+    );
+  }, [maestroPlan, selectedWorkflowItem]);
 
   const moveItem = (id: number, direction: -1 | 1) => {
     setPlannerItems((items) => {
@@ -1145,103 +1170,6 @@ export function App() {
                     <span>{maestroPlan.workflow_graph.edges?.length ?? 0} edges</span>
                     <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
                   </div>
-                  <div className="maestro-plan-grid">
-                    <div>
-                      <h4>Work items</h4>
-                      {maestroPlan.work_items.map((item) => (
-                        <article className="mini-row" key={item.id}>
-                          <span>
-                            {item.id} / {item.type} / {item.priority} /{" "}
-                            {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
-                          </span>
-                          <p>{item.title}</p>
-                          <p>{item.description}</p>
-                          {item.dependencies.length > 0 && (
-                            <span>Depends on: {item.dependencies.join(", ")}</span>
-                          )}
-                          <div className="preview-meta">
-                            <span>{item.needs_agent ? "agent" : "no agent"}</span>
-                            <span>{item.can_log_directly ? "loggable" : "not loggable"}</span>
-                            <span>
-                              {item.blocks_execution
-                                ? "blocks run"
-                                : item.needs_user_input
-                                  ? "needs Chris"
-                                  : "no RFI"}
-                            </span>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                    <div>
-                      <h4>Planning lanes</h4>
-                      {maestroPlan.intents.map((intent, index) => (
-                        <article className="mini-row" key={`${intent.type}-${index}`}>
-                          <span>{intent.type} / {intent.priority}</span>
-                          <p>{intent.action ?? intent.summary}</p>
-                        </article>
-                      ))}
-                    </div>
-                    <div>
-                      <h4>Workflow order</h4>
-                      {maestroPlanStages.map((stage, stageIndex) => (
-                        <div className="workflow-stage" key={`plan-stage-${stageIndex}`}>
-                          <div className="workflow-stage-heading">
-                            <span>Stage {stageIndex + 1}</span>
-                            <span>{stage.length > 1 ? "parallel-ready" : "single task"}</span>
-                          </div>
-                          {stage.map((subtask) => (
-                            <article
-                              className="mini-row"
-                              key={`${stageIndex}-${subtask.agent_key}-${subtask.objective}`}
-                            >
-                              <span>
-                                {domainLabels[subtask.domain_key] ?? subtask.domain_key} /{" "}
-                                {subtask.agent_name}
-                              </span>
-                              {subtask.work_item_ids && subtask.work_item_ids.length > 0 && (
-                                <span>Work items: {subtask.work_item_ids.join(", ")}</span>
-                              )}
-                              {subtask.depends_on_work_item_ids &&
-                                subtask.depends_on_work_item_ids.length > 0 && (
-                                  <span>
-                                    Waits for: {subtask.depends_on_work_item_ids.join(", ")}
-                                  </span>
-                                )}
-                              <p>{subtask.objective}</p>
-                              {subtask.rationale && <p>{subtask.rationale}</p>}
-                            </article>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  {(maestroPlan.scheduler.queue_items?.length ?? 0) > 0 && (
-                    <div className="queue-panel">
-                      <h4>Execution queue</h4>
-                      <div className="queue-list">
-                        {maestroPlan.scheduler.queue_items?.map((item) => (
-                          <article className="mini-row" key={item.id}>
-                            <span>
-                              Stage {item.stage_index} / {item.status} /{" "}
-                              {domainLabels[item.domain_key] ?? item.domain_key}
-                            </span>
-                            <p>{item.agent_name}</p>
-                            <p>{item.objective}</p>
-                            <div className="preview-meta">
-                              <span>{item.priority}</span>
-                              <span>{item.work_item_ids.join(", ") || "no work items"}</span>
-                              {item.depends_on_work_item_ids.length > 0 && (
-                                <span>Waits for {item.depends_on_work_item_ids.join(", ")}</span>
-                              )}
-                              {item.child_task_id && <span>Task {item.child_task_id.slice(0, 8)}</span>}
-                              {item.error_message && <span>{item.error_message}</span>}
-                            </div>
-                          </article>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                   {queueStages.length > 0 && (
                     <div className="workflow-map" aria-label="Workflow dependency map">
                       <h4>Workflow map</h4>
@@ -1254,17 +1182,88 @@ export function App() {
                             </div>
                             <div className="workflow-map-items">
                               {stage.items.map((item) => (
-                                <div className={`workflow-node node-${item.status}`} key={item.id}>
+                                <button
+                                  className={`workflow-node node-${item.status} ${
+                                    expandedWorkflowNodeId === item.id ? "node-selected" : ""
+                                  }`}
+                                  key={item.id}
+                                  type="button"
+                                  onClick={() =>
+                                    setExpandedWorkflowNodeId((selectedId) =>
+                                      selectedId === item.id ? null : item.id,
+                                    )
+                                  }
+                                >
                                   <span>{item.status}</span>
                                   <strong>{item.agent_name}</strong>
                                   <small>{item.work_item_ids.join(", ")}</small>
-                                </div>
+                                </button>
                               ))}
                             </div>
                             {index < queueStages.length - 1 && (
                               <ChevronRight className="workflow-arrow" size={18} />
                             )}
                           </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {selectedWorkflowItem && (
+                    <div className="workflow-detail-panel">
+                      <div className="workflow-detail-heading">
+                        <div>
+                          <span>
+                            Stage {selectedWorkflowItem.stage_index} / {selectedWorkflowItem.status}
+                          </span>
+                          <h4>{selectedWorkflowItem.agent_name}</h4>
+                        </div>
+                        <button type="button" onClick={() => setExpandedWorkflowNodeId(null)}>
+                          Close
+                        </button>
+                      </div>
+                      <p>{selectedWorkflowItem.objective}</p>
+                      <div className="preview-meta">
+                        <span>{domainLabels[selectedWorkflowItem.domain_key] ?? selectedWorkflowItem.domain_key}</span>
+                        <span>{selectedWorkflowItem.priority}</span>
+                        <span>{selectedWorkflowItem.work_item_ids.join(", ") || "no work items"}</span>
+                        <span>{selectedWorkflowItem.retry_count ?? 0} retries</span>
+                        {selectedWorkflowItem.depends_on_work_item_ids.length > 0 && (
+                          <span>Waits for {selectedWorkflowItem.depends_on_work_item_ids.join(", ")}</span>
+                        )}
+                        {selectedWorkflowItem.child_task_id && (
+                          <span>Task {selectedWorkflowItem.child_task_id.slice(0, 8)}</span>
+                        )}
+                      </div>
+                      {selectedWorkflowItem.error_message && (
+                        <p className="evaluation-note">{selectedWorkflowItem.error_message}</p>
+                      )}
+                      {selectedWorkflowSubtask?.rationale && (
+                        <p className="evaluation-note">{selectedWorkflowSubtask.rationale}</p>
+                      )}
+                      <div className="workflow-detail-grid">
+                        {selectedWorkflowWorkItems.map((item) => (
+                          <article className="mini-row" key={item.id}>
+                            <span>
+                              {item.id} / {item.type} / {item.priority} /{" "}
+                              {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
+                            </span>
+                            <p>{item.title}</p>
+                            <p>{item.description}</p>
+                            {item.dependencies.length > 0 && (
+                              <span>Depends on: {item.dependencies.join(", ")}</span>
+                            )}
+                            <div className="preview-meta">
+                              <span>{item.needs_agent ? "agent" : "no agent"}</span>
+                              <span>{item.can_log_directly ? "loggable" : "not loggable"}</span>
+                              <span>
+                                {item.blocks_execution
+                                  ? "blocks run"
+                                  : item.needs_user_input
+                                    ? "needs Chris"
+                                    : "no RFI"}
+                              </span>
+                            </div>
+                          </article>
                         ))}
                       </div>
                     </div>

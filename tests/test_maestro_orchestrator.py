@@ -50,6 +50,36 @@ class RecordingOrchestratorLLMClient:
         return "Maestro used dependency context to inspect the workflow."
 
 
+class FlakyOrchestratorLLMClient:
+    provider = "test"
+    model = "test-flaky-agent"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def structured_response(self, **kwargs):
+        raise AssertionError("Orchestrated agent runs should use text_response.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("Transient tool/LLM failure.")
+        return "Recovered after retry and completed the assigned work."
+
+
+class AlwaysFailPraxisLLMClient:
+    provider = "test"
+    model = "test-failing-praxis-agent"
+
+    def structured_response(self, **kwargs):
+        raise AssertionError("Orchestrated agent runs should use text_response.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        if "Praxis Planning Agent" in input_text:
+            raise RuntimeError("Persistent Praxis agent failure.")
+        return "This should not run if it depends on failed Praxis work."
+
+
 class FakePlannerLLMClient:
     provider = "test"
     model = "test-planner-model"
@@ -612,6 +642,69 @@ def test_orchestrator_passes_dependency_outputs_to_later_agent(session: Session,
     assert parent.output_payload["scheduler"]["queue_items"][1]["status"] == "completed"
 
 
+def test_orchestrator_retries_failed_queue_item_before_marking_complete(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    flaky_client = FlakyOrchestratorLLMClient()
+    runtime = PromptAggregationService(session, llm_client=flaky_client)
+    service = MaestroOrchestratorService(
+        session,
+        runtime=runtime,
+        planner_llm_client=FakeMultiDomainPlannerLLMClient(),
+    )
+    plan = service.create_plan(
+        "Prepare a Praxis partner call workflow and ask Maestro Development to note system gaps."
+    )
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=True)
+
+    assert run.status == "completed"
+    assert flaky_client.calls == 3
+    assert len(run.child_runs) == 3
+    queue_item = run.scheduler["queue_items"][0]
+    assert queue_item["status"] == "completed"
+    assert queue_item["retry_count"] == 1
+    parent = session.get(Task, uuid.UUID(plan.parent_task_id))
+    assert parent is not None
+    assert parent.output_payload["phase_syntheses"][0]["completed_count"] == 1
+    assert "Phase Syntheses" in run.synthesis
+
+
+def test_orchestrator_blocks_downstream_work_after_retry_exhaustion(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    runtime = PromptAggregationService(session, llm_client=AlwaysFailPraxisLLMClient())
+    service = MaestroOrchestratorService(
+        session,
+        runtime=runtime,
+        planner_llm_client=FakeMultiDomainPlannerLLMClient(),
+    )
+    plan = service.create_plan(
+        "Prepare a Praxis partner call workflow and ask Maestro Development to note system gaps."
+    )
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=True)
+
+    assert run.status == "failed"
+    queue_by_work_item = {
+        tuple(item["work_item_ids"]): item for item in run.scheduler["queue_items"]
+    }
+    assert queue_by_work_item[("wi_praxis",)]["status"] == "failed"
+    assert queue_by_work_item[("wi_praxis",)]["retry_count"] == 1
+    assert queue_by_work_item[("wi_maestro",)]["status"] == "blocked"
+    assert "upstream agent task failed" in queue_by_work_item[("wi_maestro",)]["error_message"]
+    assert len(run.child_runs) == 2
+    assert all(child.agent.key == "praxis-planning-agent" for child in run.child_runs)
+
+
 def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None:
     client = _client(session, tmp_path)
 
@@ -717,6 +810,42 @@ def test_maestro_api_respond_refines_active_plan(
     assert payload["kind"] == "refined"
     assert payload["message"]
     assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+
+
+def test_maestro_api_respond_classifies_specific_plan_guidance_as_refinement(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    guidance_messages = [
+        "Remove the CRM task but preserve the rest of the plan.",
+        "Have only the planning agent do the executive summary.",
+        "Actually this belongs in Personal, not Praxis.",
+        "Do this first, then have the email agent draft the follow-up.",
+    ]
+
+    for message in guidance_messages:
+        response = client.post(
+            "/maestro/respond",
+            json={
+                "active_plan_id": first_plan["parent_task_id"],
+                "message": message,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["kind"] == "refined"
+        refined_task = session.get(Task, uuid.UUID(payload["plan"]["parent_task_id"]))
+        assert refined_task is not None
+        assert refined_task.input_payload["refined_from_plan_id"] == first_plan["plan_id"]
+        assert message in refined_task.input_payload["refinement"]
+        assert "Previous work items:" in refined_task.input_payload["user_input"]
 
 
 def test_maestro_api_respond_side_chat_keeps_active_plan(
