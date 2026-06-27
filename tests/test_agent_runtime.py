@@ -81,6 +81,8 @@ class FakeToolAwareAgentLLMClient:
 
     def text_response(self, *, instructions: str, input_text: str) -> str:
         assert "Tool Results" in input_text
+        assert "already been executed by Maestro" in input_text
+        assert "do not emit synthetic tool-call markup" in instructions
         assert "Implement GitHub tools" in input_text
         return "## Summary\nReviewed matching GitHub issues.\n\n## Next Steps\nPick the next issue."
 

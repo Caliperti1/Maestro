@@ -787,6 +787,10 @@ class PromptAggregationService:
             if tool_call_payloads:
                 assembled_prompt = (
                     f"{assembled_prompt}\n\n## Tool Results\n"
+                    "The following tool calls have already been executed by Maestro. "
+                    "Use these results as evidence in your report. Do not emit tool-call XML, "
+                    "JSON function-call requests, or instructions to call more tools; instead, "
+                    "state any additional tool access needed as an open question or next step.\n\n"
                     f"{json.dumps(tool_call_payloads, indent=2)}"
                 )
             tool_call = ToolCall(
@@ -822,7 +826,9 @@ class PromptAggregationService:
                     instructions=(
                         "You are executing as a Maestro domain agent. Follow the provided "
                         "assembled prompt exactly, stay within your domain, respect the tool "
-                        "manifest, and produce the requested structured output."
+                        "manifest, and produce the requested structured output. Tool results, "
+                        "when present, have already been executed by Maestro; do not emit "
+                        "synthetic tool-call markup or function-call requests in your answer."
                     ),
                     input_text=assembled_prompt,
                 )
