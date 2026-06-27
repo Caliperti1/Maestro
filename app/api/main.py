@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.agents import router as agents_router
+from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -26,6 +27,7 @@ def create_app() -> FastAPI:
 
     app.include_router(memory_router)
     app.include_router(agents_router)
+    app.include_router(maestro_router)
 
     return app
 

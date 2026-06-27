@@ -33,6 +33,19 @@ type PlannerItem = {
   priority: "high" | "medium" | "low";
 };
 
+type ChatMessage = {
+  id: string;
+  sender: "user" | "maestro";
+  content: string;
+};
+
+type MaestroSessionSummary = {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  stagedArtifactPath: string | null;
+};
+
 type DropboxDomain = {
   key: string;
   inbox: number;
@@ -259,6 +272,126 @@ type AgentRun = {
   };
   prompt_package: PromptPackage;
   staged_artifact_path: string | null;
+};
+
+type MaestroIntent = {
+  type: string;
+  summary: string;
+  target: string;
+  domain_key: string | null;
+  priority: string;
+  action: string | null;
+};
+
+type MaestroSubtask = {
+  agent_key: string;
+  agent_name: string;
+  domain_key: string;
+  objective: string;
+  expected_output: string;
+  priority: string;
+  rationale: string | null;
+  work_item_ids: string[] | null;
+  depends_on_work_item_ids: string[] | null;
+};
+
+type MaestroWorkItem = {
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  domain_key: string | null;
+  priority: string;
+  required_capabilities: string[];
+  required_tools: string[];
+  dependencies: string[];
+  needs_agent: boolean;
+  needs_user_input: boolean;
+  blocks_execution: boolean;
+  can_log_directly: boolean;
+  suggested_agent_keys: string[];
+  expected_output: string;
+  rationale: string;
+};
+
+type MaestroQueueItem = {
+  id: string;
+  stage_index: number;
+  position: number;
+  status: string;
+  agent_key: string;
+  agent_name: string;
+  domain_key: string;
+  objective: string;
+  priority: string;
+  work_item_ids: string[];
+  depends_on_work_item_ids: string[];
+  child_task_id: string | null;
+  child_report_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+};
+
+type MaestroPlan = {
+  plan_id: string;
+  parent_task_id: string;
+  status: string;
+  user_input: string;
+  summary: string;
+  execution_mode: string;
+  planner_mode: string;
+  work_items: MaestroWorkItem[];
+  intents: MaestroIntent[];
+  subtasks: MaestroSubtask[];
+  execution_stages: string[][];
+  workflow_graph: {
+    nodes?: Array<Record<string, unknown>>;
+    edges?: Array<Record<string, unknown>>;
+    stages?: Array<Record<string, unknown>>;
+  };
+  is_chat_only: boolean;
+  selected_agents: Array<Record<string, unknown>>;
+  approval_required: boolean;
+  scheduler: Record<string, unknown> & { queue_items?: MaestroQueueItem[] };
+  created_at: string;
+  direct_response: string | null;
+  planner_notes: string | null;
+};
+
+type MaestroRun = {
+  plan: MaestroPlan;
+  status: string;
+  parent_task_id: string;
+  synthesis_report_id: string | null;
+  synthesis: string;
+  staged_artifact_path: string | null;
+  artifact_id: string | null;
+  error_message: string | null;
+  execution_stages: string[][];
+  child_runs: Array<{
+    run_id: string;
+    status: string;
+    agent: {
+      key: string;
+      name: string;
+      domain_key: string;
+    };
+    task_id: string | null;
+    report_id: string | null;
+    execution_note: string;
+    output_text: string | null;
+    error_message: string | null;
+  }>;
+};
+
+type MaestroRespond = {
+  kind: "chat_only" | "planned" | "refined" | "rfi_answered" | "routed";
+  classification: string;
+  message: string;
+  plan: MaestroPlan | null;
+  chat_plan: MaestroPlan | null;
+  active_plan: MaestroPlan | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -556,12 +689,54 @@ export function App() {
     "dashboard",
   );
   const [plannerItems, setPlannerItems] = useState(initialPlannerItems);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [sessionHistory, setSessionHistory] = useState<MaestroSessionSummary[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
+  const [maestroPlan, setMaestroPlan] = useState<MaestroPlan | null>(null);
+  const [maestroRun, setMaestroRun] = useState<MaestroRun | null>(null);
+  const [maestroStatus, setMaestroStatus] = useState("Ready");
+  const [executeMaestroLLM, setExecuteMaestroLLM] = useState(true);
+  const [maestroBusy, setMaestroBusy] = useState(false);
 
   const highPriorityCount = useMemo(
     () => plannerItems.filter((item) => item.priority === "high").length,
     [plannerItems],
   );
+
+  const maestroPlanStages = useMemo(() => {
+    if (!maestroPlan) return [];
+    const executionStages = maestroPlan.execution_stages ?? [];
+    if (!executionStages.length) return [maestroPlan.subtasks];
+    const unassigned = [...maestroPlan.subtasks];
+    return executionStages
+      .map((stage) =>
+        stage
+          .map((agentKey) => {
+            const index = unassigned.findIndex((subtask) => subtask.agent_key === agentKey);
+            if (index < 0) return null;
+            const [subtask] = unassigned.splice(index, 1);
+            return subtask;
+          })
+          .filter((subtask): subtask is MaestroSubtask => subtask !== null),
+      )
+      .filter((stage) => stage.length > 0);
+  }, [maestroPlan]);
+
+  const queueStages = useMemo(() => {
+    const queueItems = maestroPlan?.scheduler.queue_items ?? [];
+    const stages = new Map<number, MaestroQueueItem[]>();
+    queueItems.forEach((item) => {
+      const items = stages.get(item.stage_index) ?? [];
+      items.push(item);
+      stages.set(item.stage_index, items);
+    });
+    return Array.from(stages)
+      .sort(([left], [right]) => left - right)
+      .map(([stageIndex, items]) => ({
+        stageIndex,
+        items: items.sort((left, right) => left.position - right.position),
+      }));
+  }, [maestroPlan]);
 
   const moveItem = (id: number, direction: -1 | 1) => {
     setPlannerItems((items) => {
@@ -578,6 +753,147 @@ export function App() {
     setPlannerItems((items) =>
       items.map((item) => (item.id === id ? { ...item, status: nextStatus(item.status) } : item)),
     );
+  };
+
+  const sendMaestroMessage = async () => {
+    if (!draftMessage.trim()) return;
+    const outgoingMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      sender: "user",
+      content: draftMessage.trim(),
+    };
+    const activePlanId = maestroPlan && maestroRun === null ? maestroPlan.parent_task_id : null;
+    setMaestroBusy(true);
+    setChatMessages((messages) => [...messages, outgoingMessage]);
+    setDraftMessage("");
+    try {
+      const response = await apiJson<MaestroRespond>("/maestro/respond", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: outgoingMessage.content,
+          active_plan_id: activePlanId,
+        }),
+      });
+      setMaestroPlan(response.plan ?? response.active_plan);
+      setMaestroRun(null);
+      setChatMessages((messages) => [
+        ...messages,
+        {
+          id: crypto.randomUUID(),
+          sender: "maestro",
+          content: response.message,
+        },
+      ]);
+      setMaestroStatus(
+        response.kind === "chat_only"
+          ? "Answered directly."
+          : response.kind === "rfi_answered"
+            ? "RFI answer applied."
+            : response.kind === "routed"
+              ? "Routed context applied."
+          : response.kind === "refined"
+            ? "Plan refined."
+            : "Proposed plan ready for approval.",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Maestro planning failed.";
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), sender: "maestro", content: message },
+      ]);
+      setMaestroStatus(message);
+    } finally {
+      setMaestroBusy(false);
+    }
+  };
+
+  const runMaestroPlan = async () => {
+    if (!maestroPlan) return;
+    setMaestroBusy(true);
+    try {
+      const response = await apiJson<{ run: MaestroRun }>(
+        `/maestro/plans/${maestroPlan.parent_task_id}/run`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ execute_llm: executeMaestroLLM }),
+        },
+      );
+      setMaestroRun(response.run);
+      setMaestroPlan(response.run.plan);
+      setChatMessages((messages) => [
+        ...messages,
+        {
+          id: crypto.randomUUID(),
+          sender: "maestro",
+          content:
+            response.run.status === "completed"
+              ? "The workflow completed. I synthesized the child agent outputs and staged the canonical workflow artifact for memory curation."
+              : `The workflow finished with status ${response.run.status}. Review the synthesis below.`,
+        },
+      ]);
+      setMaestroStatus(
+        response.run.status === "completed" ? "Workflow completed." : "Workflow finished.",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Maestro workflow failed.";
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), sender: "maestro", content: message },
+      ]);
+      setMaestroStatus(message);
+    } finally {
+      setMaestroBusy(false);
+    }
+  };
+
+  const startNewMaestroSession = async () => {
+    if (chatMessages.length === 0 && !maestroPlan && !maestroRun) return;
+    setMaestroBusy(true);
+    let stagedArtifactPath: string | null = null;
+    try {
+      if (chatMessages.length > 0) {
+        const response = await apiJson<{ staged_artifact_path: string | null }>(
+          "/maestro/sessions/close",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              plan_id: maestroPlan?.parent_task_id ?? null,
+              messages: chatMessages.map((message) => ({
+                sender: message.sender,
+                content: message.content,
+              })),
+            }),
+          },
+        );
+        stagedArtifactPath = response.staged_artifact_path;
+      }
+      setSessionHistory((sessions) => [
+        {
+          id: crypto.randomUUID(),
+          title: chatMessages.find((message) => message.sender === "user")?.content.slice(0, 72) ||
+            "Maestro session",
+          messages: chatMessages,
+          stagedArtifactPath,
+        },
+        ...sessions,
+      ]);
+      setChatMessages([]);
+      setDraftMessage("");
+      setMaestroPlan(null);
+      setMaestroRun(null);
+      setMaestroStatus(
+        stagedArtifactPath
+          ? "Previous session staged for memory curation."
+          : "New Maestro session ready.",
+      );
+    } catch (error) {
+      setMaestroStatus(error instanceof Error ? error.message : "Could not close session.");
+    } finally {
+      setMaestroBusy(false);
+    }
   };
 
   return (
@@ -696,35 +1012,293 @@ export function App() {
                   <p className="eyebrow">Maestro chat</p>
                   <h3 id="chat-heading">Command thread</h3>
                 </div>
-                <button className="icon-button" aria-label="New thread" title="New thread">
+                <button
+                  className="icon-button"
+                  aria-label="New session"
+                  title="New session"
+                  onClick={startNewMaestroSession}
+                  disabled={maestroBusy || (chatMessages.length === 0 && !maestroPlan && !maestroRun)}
+                >
                   <Plus size={18} />
                 </button>
               </div>
 
               <div className="thread">
-                <div className="message user-message">
-                  <span>You</span>
-                  <p>Build today around the morning standup and keep the plan adjustable.</p>
-                </div>
-                <div className="message maestro-message">
-                  <span>Maestro</span>
-                  <p>
-                    Daily planner is ready as a stub. The standup workflow will populate this with
-                    schedule, tasks, blockers, and recommended tradeoffs.
+                {chatMessages.length > 0 ? (
+                  chatMessages.map((message) => (
+                    <div
+                      className={`message ${
+                        message.sender === "user" ? "user-message" : "maestro-message"
+                      }`}
+                      key={message.id}
+                    >
+                      <span>{message.sender === "user" ? "You" : "Maestro"}</span>
+                      <p>{message.content}</p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="empty-state">
+                    No active Maestro session yet. Send a request to start a plan or conversation.
                   </p>
-                </div>
+                )}
+                {maestroBusy && (
+                  <div className="message maestro-message working-message" aria-live="polite">
+                    <span>Maestro</span>
+                    <p>
+                      Conducting
+                      <span className="working-dots" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                    </p>
+                  </div>
+                )}
               </div>
 
-              <form className="composer" onSubmit={(event) => event.preventDefault()}>
+              {sessionHistory.length > 0 && (
+                <div className="session-history" aria-label="Previous Maestro sessions">
+                  <span>Previous sessions</span>
+                  {sessionHistory.slice(0, 3).map((session) => (
+                    <button
+                      type="button"
+                      key={session.id}
+                      onClick={() => {
+                        setChatMessages(session.messages);
+                        setMaestroPlan(null);
+                        setMaestroRun(null);
+                        setMaestroStatus(
+                          session.stagedArtifactPath
+                            ? "Viewing previous session. Artifact was staged for memory curation."
+                            : "Viewing previous session.",
+                        );
+                      }}
+                    >
+                      {session.title}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <form
+                className="composer"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  sendMaestroMessage();
+                }}
+              >
                 <MessageSquareText size={18} />
                 <input
                   value={draftMessage}
                   onChange={(event) => setDraftMessage(event.target.value)}
-                  placeholder="Tell Maestro what changed..."
+                  placeholder="Ask Maestro to plan and coordinate..."
                   aria-label="Message Maestro"
                 />
-                <button type="submit">Send</button>
+                <button type="submit" disabled={maestroBusy || !draftMessage.trim()}>
+                  Send
+                </button>
               </form>
+
+              <div className="maestro-status-row">
+                <label className="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={executeMaestroLLM}
+                    onChange={(event) => setExecuteMaestroLLM(event.target.checked)}
+                  />
+                  Execute LLM
+                </label>
+                <span>
+                  {maestroBusy ? "Conducting" : maestroStatus}
+                </span>
+              </div>
+
+              {maestroPlan && (
+                <section className="maestro-plan" aria-labelledby="maestro-plan-heading">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">Proposed plan</p>
+                      <h3 id="maestro-plan-heading">{maestroPlan.status}</h3>
+                    </div>
+                    <button
+                      className="planner-action"
+                      onClick={runMaestroPlan}
+                      disabled={maestroBusy || !["proposed", "queued", "failed"].includes(maestroPlan.status)}
+                    >
+                      <Sparkles size={16} />
+                      Run plan
+                    </button>
+                  </div>
+                  <p>{maestroPlan.summary}</p>
+                  {maestroPlan.planner_notes && (
+                    <p className="evaluation-note">{maestroPlan.planner_notes}</p>
+                  )}
+                  {maestroPlan.direct_response && (
+                    <p className="evaluation-note">{maestroPlan.direct_response}</p>
+                  )}
+                  <div className="preview-meta">
+                    <span>{maestroPlan.planner_mode} planner</span>
+                    <span>{maestroPlan.work_items.length} work items</span>
+                    <span>{maestroPlan.intents.length} lanes</span>
+                    <span>{maestroPlan.subtasks.length} subtasks</span>
+                    <span>{maestroPlanStages.length} stages</span>
+                    <span>{maestroPlan.workflow_graph.edges?.length ?? 0} edges</span>
+                    <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
+                  </div>
+                  <div className="maestro-plan-grid">
+                    <div>
+                      <h4>Work items</h4>
+                      {maestroPlan.work_items.map((item) => (
+                        <article className="mini-row" key={item.id}>
+                          <span>
+                            {item.id} / {item.type} / {item.priority} /{" "}
+                            {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
+                          </span>
+                          <p>{item.title}</p>
+                          <p>{item.description}</p>
+                          {item.dependencies.length > 0 && (
+                            <span>Depends on: {item.dependencies.join(", ")}</span>
+                          )}
+                          <div className="preview-meta">
+                            <span>{item.needs_agent ? "agent" : "no agent"}</span>
+                            <span>{item.can_log_directly ? "loggable" : "not loggable"}</span>
+                            <span>
+                              {item.blocks_execution
+                                ? "blocks run"
+                                : item.needs_user_input
+                                  ? "needs Chris"
+                                  : "no RFI"}
+                            </span>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                    <div>
+                      <h4>Planning lanes</h4>
+                      {maestroPlan.intents.map((intent, index) => (
+                        <article className="mini-row" key={`${intent.type}-${index}`}>
+                          <span>{intent.type} / {intent.priority}</span>
+                          <p>{intent.action ?? intent.summary}</p>
+                        </article>
+                      ))}
+                    </div>
+                    <div>
+                      <h4>Workflow order</h4>
+                      {maestroPlanStages.map((stage, stageIndex) => (
+                        <div className="workflow-stage" key={`plan-stage-${stageIndex}`}>
+                          <div className="workflow-stage-heading">
+                            <span>Stage {stageIndex + 1}</span>
+                            <span>{stage.length > 1 ? "parallel-ready" : "single task"}</span>
+                          </div>
+                          {stage.map((subtask) => (
+                            <article
+                              className="mini-row"
+                              key={`${stageIndex}-${subtask.agent_key}-${subtask.objective}`}
+                            >
+                              <span>
+                                {domainLabels[subtask.domain_key] ?? subtask.domain_key} /{" "}
+                                {subtask.agent_name}
+                              </span>
+                              {subtask.work_item_ids && subtask.work_item_ids.length > 0 && (
+                                <span>Work items: {subtask.work_item_ids.join(", ")}</span>
+                              )}
+                              {subtask.depends_on_work_item_ids &&
+                                subtask.depends_on_work_item_ids.length > 0 && (
+                                  <span>
+                                    Waits for: {subtask.depends_on_work_item_ids.join(", ")}
+                                  </span>
+                                )}
+                              <p>{subtask.objective}</p>
+                              {subtask.rationale && <p>{subtask.rationale}</p>}
+                            </article>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {(maestroPlan.scheduler.queue_items?.length ?? 0) > 0 && (
+                    <div className="queue-panel">
+                      <h4>Execution queue</h4>
+                      <div className="queue-list">
+                        {maestroPlan.scheduler.queue_items?.map((item) => (
+                          <article className="mini-row" key={item.id}>
+                            <span>
+                              Stage {item.stage_index} / {item.status} /{" "}
+                              {domainLabels[item.domain_key] ?? item.domain_key}
+                            </span>
+                            <p>{item.agent_name}</p>
+                            <p>{item.objective}</p>
+                            <div className="preview-meta">
+                              <span>{item.priority}</span>
+                              <span>{item.work_item_ids.join(", ") || "no work items"}</span>
+                              {item.depends_on_work_item_ids.length > 0 && (
+                                <span>Waits for {item.depends_on_work_item_ids.join(", ")}</span>
+                              )}
+                              {item.child_task_id && <span>Task {item.child_task_id.slice(0, 8)}</span>}
+                              {item.error_message && <span>{item.error_message}</span>}
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {queueStages.length > 0 && (
+                    <div className="workflow-map" aria-label="Workflow dependency map">
+                      <h4>Workflow map</h4>
+                      <div className="workflow-map-scroll">
+                        {queueStages.map((stage, index) => (
+                          <div className="workflow-map-stage" key={`queue-stage-${stage.stageIndex}`}>
+                            <div className="workflow-map-heading">
+                              <span>Stage {stage.stageIndex}</span>
+                              <span>{stage.items.length > 1 ? "Parallel" : "Single"}</span>
+                            </div>
+                            <div className="workflow-map-items">
+                              {stage.items.map((item) => (
+                                <div className={`workflow-node node-${item.status}`} key={item.id}>
+                                  <span>{item.status}</span>
+                                  <strong>{item.agent_name}</strong>
+                                  <small>{item.work_item_ids.join(", ")}</small>
+                                </div>
+                              ))}
+                            </div>
+                            {index < queueStages.length - 1 && (
+                              <ChevronRight className="workflow-arrow" size={18} />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {maestroRun && (
+                <section className="maestro-plan" aria-labelledby="maestro-run-heading">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">Workflow result</p>
+                      <h3 id="maestro-run-heading">{maestroRun.status}</h3>
+                    </div>
+                    <CheckCircle2 size={18} />
+                  </div>
+                  <div className="preview-meta">
+                    <span>{maestroRun.child_runs.length} child runs</span>
+                    <span>{maestroRun.execution_stages.length} stages</span>
+                    <span>{maestroRun.synthesis_report_id ? "report written" : "no report"}</span>
+                    <span>{maestroRun.staged_artifact_path ? "artifact staged" : "not staged"}</span>
+                  </div>
+                  {maestroRun.execution_stages.length > 0 && (
+                    <div className="preview-meta">
+                      {maestroRun.execution_stages.map((stage, index) => (
+                        <span key={`stage-${index}`}>
+                          Stage {index + 1}: {stage.join(", ")}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <pre>{maestroRun.synthesis}</pre>
+                </section>
+              )}
             </section>
 
             <section className="planner-panel" aria-labelledby="planner-heading">

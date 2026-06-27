@@ -1,0 +1,954 @@
+from pathlib import Path
+import uuid
+
+from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from app.agents.runtime import PromptAggregationService
+from app.agents.runtime import AgentRegistryService
+from app.api.main import create_app
+from app.core.config import get_settings
+from app.db.models import Artifact, Report, Task
+from app.db.session import get_db
+from app.llm.client import LLMClientError
+from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
+from app.maestro.planner import MaestroPlannerResponse
+
+
+class FakeOrchestratorLLMClient:
+    provider = "test"
+    model = "test-orchestrator-agent"
+
+    def structured_response(self, **kwargs):
+        raise AssertionError("Orchestrated agent runs should use text_response.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        return (
+            "## Summary\n"
+            "Prepared the requested domain contribution.\n\n"
+            "## Findings\n"
+            "- Agent registry and scoped memory were available.\n\n"
+            "## Next Steps\n"
+            "- Return to Maestro for synthesis."
+        )
+
+
+class RecordingOrchestratorLLMClient:
+    provider = "test"
+    model = "test-recording-agent"
+
+    def __init__(self) -> None:
+        self.inputs: list[str] = []
+
+    def structured_response(self, **kwargs):
+        raise AssertionError("Orchestrated agent runs should use text_response.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        self.inputs.append(input_text)
+        if "Praxis Planning Agent" in input_text:
+            return "Praxis upstream output for the partner call."
+        return "Maestro used dependency context to inspect the workflow."
+
+
+class FakePlannerLLMClient:
+    provider = "test"
+    model = "test-planner-model"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Plan decomposed before delegation.",
+            "direct_response": None,
+            "planner_notes": "Fake structured planner response.",
+            "work_items": [
+                {
+                    "id": "wi_partner_prep",
+                    "type": "workflow_task",
+                    "title": "Prepare Praxis partner call",
+                    "description": "Prepare the partner call brief and identify follow-up risks.",
+                    "domain_key": "praxis",
+                    "priority": "high",
+                    "required_capabilities": ["partner planning", "follow-up planning"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["praxis-planning-agent"],
+                    "expected_output": "Partner-call prep report with RFIs and next steps.",
+                    "rationale": "This is substantive Praxis planning work.",
+                },
+                {
+                    "id": "wi_partner_contact",
+                    "type": "contact",
+                    "title": "Capture partner contact",
+                    "description": "Jane Smith is the partner lead at Example Corp.",
+                    "domain_key": "praxis",
+                    "priority": "normal",
+                    "required_capabilities": ["relationship management"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": True,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Contact routed for CRM review.",
+                    "rationale": "This should be routed separately from agent work.",
+                },
+                {
+                    "id": "wi_owner_rfi",
+                    "type": "rfi",
+                    "title": "Confirm follow-up owner",
+                    "description": "Chris needs to confirm who owns the next partner follow-up.",
+                    "domain_key": "praxis",
+                    "priority": "normal",
+                    "required_capabilities": [],
+                    "required_tools": [],
+                    "dependencies": ["wi_partner_prep"],
+                    "needs_agent": False,
+                    "needs_user_input": True,
+                    "blocks_execution": False,
+                    "can_log_directly": True,
+                    "suggested_agent_keys": [],
+                    "expected_output": "RFI surfaced for Chris.",
+                    "rationale": "This blocks confident follow-up assignment.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakeMultiDomainPlannerLLMClient:
+    provider = "test"
+    model = "test-multi-domain-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Coordinate Praxis and Maestro Development work.",
+            "direct_response": None,
+            "planner_notes": "Fake multi-domain structured planner response.",
+            "work_items": [
+                {
+                    "id": "wi_praxis",
+                    "type": "workflow_task",
+                    "title": "Prepare Praxis partner-call contribution",
+                    "description": "Prepare Praxis partner call context and next steps.",
+                    "domain_key": "praxis",
+                    "priority": "high",
+                    "required_capabilities": ["partner planning", "training context"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["praxis-planning-agent"],
+                    "expected_output": "Praxis partner-call prep report.",
+                    "rationale": "Praxis owns partner context.",
+                },
+                {
+                    "id": "wi_maestro",
+                    "type": "workflow_task",
+                    "title": "Assess Maestro system gaps",
+                    "description": "Identify Maestro orchestration gaps exposed by this workflow.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["system introspection", "architecture"],
+                    "required_tools": [],
+                    "dependencies": ["wi_praxis"],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-introspection-agent"],
+                    "expected_output": "Maestro gap report with implementation recommendations.",
+                    "rationale": "Maestro Development owns system improvement.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakeGroundTruthDemoPlannerLLMClient:
+    provider = "test"
+    model = "test-groundtruth-demo-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Prepare a GroundTruth demo for a new potential end user.",
+            "direct_response": None,
+            "planner_notes": "Fake GroundTruth demo structured planner response.",
+            "work_items": [
+                {
+                    "id": "wi_1",
+                    "type": "rfi",
+                    "title": "Request missing GroundTruth demo details from Chris",
+                    "description": "Need attendee, organization, role, and calendar details.",
+                    "domain_key": "praxis",
+                    "priority": "urgent",
+                    "required_capabilities": ["demo preparation intake"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": True,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Missing inputs for Chris.",
+                    "rationale": "The demo can proceed generically but contact-specific work needs details.",
+                },
+                {
+                    "id": "wi_3",
+                    "type": "workflow_task",
+                    "title": "Prepare GroundTruth demo narrative and run-of-show",
+                    "description": "Create the demo talk track and flow.",
+                    "domain_key": "praxis",
+                    "priority": "urgent",
+                    "required_capabilities": ["product demo planning"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["praxis-planning-agent"],
+                    "expected_output": "Demo run-of-show.",
+                    "rationale": "Planning owns the demo narrative.",
+                },
+                {
+                    "id": "wi_4",
+                    "type": "workflow_task",
+                    "title": "Assess GroundTruth technical demo readiness",
+                    "description": "Identify product demo risks and fallback plan.",
+                    "domain_key": "praxis",
+                    "priority": "urgent",
+                    "required_capabilities": ["technical risk assessment"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["groundtruth-chief-engineer"],
+                    "expected_output": "Technical readiness checklist.",
+                    "rationale": "GroundTruth engineer owns technical readiness.",
+                },
+                {
+                    "id": "wi_6",
+                    "type": "workflow_task",
+                    "title": "Prepare CRM/contact intake shell for the potential end user",
+                    "description": "Prepare CRM contact and opportunity shell for the attendee.",
+                    "domain_key": "praxis",
+                    "priority": "high",
+                    "required_capabilities": ["CRM hygiene", "contact capture"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["paxis-crm-manager"],
+                    "expected_output": "CRM shell.",
+                    "rationale": "CRM owns contact capture.",
+                },
+                {
+                    "id": "wi_8",
+                    "type": "workflow_task",
+                    "title": "Assemble final GroundTruth demo prep packet",
+                    "description": "Synthesize narrative, technical readiness, and CRM context.",
+                    "domain_key": "praxis",
+                    "priority": "urgent",
+                    "required_capabilities": ["executive synthesis"],
+                    "required_tools": [],
+                    "dependencies": ["wi_3", "wi_4", "wi_6"],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["praxis-planning-agent"],
+                    "expected_output": "Final demo prep packet.",
+                    "rationale": "Planning should synthesize the final packet.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakeDirectChatPlannerLLMClient:
+    provider = "test"
+    model = "test-direct-chat-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Answered directly in chat.",
+            "direct_response": "Maestro can answer that directly without delegating work.",
+            "planner_notes": "No executable work was detected.",
+            "work_items": [
+                {
+                    "id": "wi_direct",
+                    "type": "direct_response",
+                    "title": "Direct chat answer",
+                    "description": "Answer the user's question directly.",
+                    "domain_key": None,
+                    "priority": "normal",
+                    "required_capabilities": [],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Plain text answer.",
+                    "rationale": "No routing, memory write, or agent work is needed.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FailingPlannerLLMClient:
+    provider = "test"
+    model = "test-failing-planner"
+
+    def structured_response(self, **kwargs):
+        raise LLMClientError("Planner unavailable in deterministic fallback test.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+def _client(session: Session, tmp_path: Path) -> TestClient:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    settings.openrouter_api_key = ""
+    settings.openai_api_key = ""
+    settings.openrouter_api_key = ""
+    settings.openai_api_key = ""
+
+    app = create_app()
+
+    def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    return TestClient(app)
+
+
+def test_orchestrator_plan_is_registry_aware_and_plan_first(session: Session) -> None:
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FailingPlannerLLMClient(),
+    ).create_plan(
+        "Prepare a Praxis partner call workflow and identify RFIs, tasks, contacts, and events."
+    )
+
+    assert plan.status == "proposed"
+    assert plan.approval_required is True
+    assert plan.execution_mode == "propose_first"
+    assert any(intent.type == "workflow" for intent in plan.intents)
+    assert any(intent.type == "rfi" for intent in plan.intents)
+    assert any(subtask.agent_key == "praxis-planning-agent" for subtask in plan.subtasks)
+    assert any(
+        agent["key"] == "praxis-planning-agent" for agent in plan.registry_snapshot["agents"]
+    )
+    assert plan.scheduler["status"] == "queue_foundation"
+    assert plan.execution_stages
+    assert session.query(Task).filter(Task.status == "proposed").count() == 1
+    assert session.query(Report).count() == 0
+
+
+def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="Praxis Email Agent",
+        name="Praxis Email Agent",
+        role_summary="Triages Praxis email, partner messages, and follow-up drafts.",
+    )
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="Praxis Finance Agent",
+        name="Praxis Finance Agent",
+        role_summary="Tracks Praxis budgets, invoices, and financial assumptions.",
+    )
+
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FailingPlannerLLMClient(),
+    ).create_plan(
+        "Prepare a Praxis partner email follow-up workflow for the next call."
+    )
+
+    selected_agent_keys = {subtask.agent_key for subtask in plan.subtasks}
+    assert "praxis-planning-agent" in selected_agent_keys
+    assert "praxis-email-agent" in selected_agent_keys
+    assert "praxis-finance-agent" not in selected_agent_keys
+    email_subtask = next(
+        subtask for subtask in plan.subtasks if subtask.agent_key == "praxis-email-agent"
+    )
+    assert "Triages Praxis email" in email_subtask.objective
+    assert "only on the portion" in email_subtask.objective
+    assert email_subtask.rationale is not None
+    assert "wi_1" in email_subtask.rationale
+
+
+def test_orchestrator_decomposes_with_llm_before_agent_matching(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="Praxis Email Agent",
+        name="Praxis Email Agent",
+        role_summary="Drafts partner emails and communication follow-ups.",
+    )
+
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakePlannerLLMClient(),
+    ).create_plan(
+        "Prepare for the partner call. Jane Smith is the partner lead. Confirm who owns follow-up."
+    )
+
+    assert plan.planner_mode == "llm"
+    assert [item.id for item in plan.work_items] == [
+        "wi_partner_prep",
+        "wi_partner_contact",
+        "wi_owner_rfi",
+    ]
+    assert any(item.type == "contact" and item.can_log_directly for item in plan.work_items)
+    assert any(item.type == "rfi" and item.needs_user_input for item in plan.work_items)
+    assert len(plan.subtasks) == 1
+    subtask = plan.subtasks[0]
+    assert subtask.agent_key == "praxis-planning-agent"
+    assert subtask.work_item_ids == ["wi_partner_prep"]
+    assert "Work item wi_partner_prep" in subtask.objective
+    assert "Jane Smith is the partner lead" not in subtask.objective
+
+
+def test_orchestrator_prevents_broad_assignment_and_self_dependencies(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="GroundTruth Chief Engineer",
+        name="GroundTruth Chief Engineer",
+        role_summary="Manages GroundTruth application development and technical demo readiness.",
+    )
+    registry.create_agent_spec(
+        domain_key="praxis",
+        key="Paxis CRM Manager",
+        name="Paxis CRM Manager",
+        role_summary="Manages Praxis CRM contacts, opportunities, and contact capture.",
+    )
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeGroundTruthDemoPlannerLLMClient(),
+    )
+
+    plan = service.create_plan(
+        "We have a GroundTruth demo this afternoon with a new potential end user."
+    )
+
+    rfi = next(item for item in plan.work_items if item.id == "wi_1")
+    assert rfi.blocks_execution is True
+
+    assignments = {
+        (subtask.agent_key, tuple(subtask.work_item_ids or [])): set(subtask.depends_on_work_item_ids or [])
+        for subtask in plan.subtasks
+    }
+    assert assignments[("groundtruth-chief-engineer", ("wi_4",))] == set()
+    assert assignments[("paxis-crm-manager", ("wi_6",))] == {"wi_1"}
+    assert assignments[("praxis-planning-agent", ("wi_3",))] == set()
+    assert assignments[("praxis-planning-agent", ("wi_8",))] == {"wi_1", "wi_4", "wi_6"}
+    assert all(
+        not (set(subtask.work_item_ids or []) & set(subtask.depends_on_work_item_ids or []))
+        for subtask in plan.subtasks
+    )
+
+    crm_subtask = next(subtask for subtask in plan.subtasks if subtask.agent_key == "paxis-crm-manager")
+    assert crm_subtask.depends_on_work_item_ids == ["wi_1"]
+    synthesis_subtask = next(
+        subtask for subtask in plan.subtasks if "wi_8" in (subtask.work_item_ids or [])
+    )
+    assert set(synthesis_subtask.depends_on_work_item_ids or []) == {"wi_1", "wi_4", "wi_6"}
+
+    assert set(plan.workflow_graph["stages"][0]["work_item_ids"]) == {"wi_3", "wi_4"}
+    assert all(
+        work_item_id not in stage["waits_for_work_item_ids"]
+        for stage in plan.workflow_graph["stages"]
+        for work_item_id in stage["work_item_ids"]
+    )
+    assert any(item["status"] == "pending" for item in plan.scheduler["queue_items"])
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=False)
+
+    assert run.status == "blocked"
+    queue_by_work_item = {
+        tuple(item["work_item_ids"]): item["status"]
+        for item in run.scheduler["queue_items"]
+    }
+    assert queue_by_work_item[("wi_3",)] == "completed"
+    assert queue_by_work_item[("wi_4",)] == "completed"
+    assert queue_by_work_item[("wi_6",)] == "blocked"
+    assert queue_by_work_item[("wi_8",)] == "blocked"
+
+
+def test_orchestrator_direct_chat_has_no_executable_plan(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeDirectChatPlannerLLMClient(),
+    )
+
+    plan = service.create_plan("What is Maestro?")
+
+    assert plan.is_chat_only is True
+    assert plan.direct_response == "Maestro can answer that directly without delegating work."
+    assert plan.subtasks == []
+    assert plan.execution_stages == []
+
+    try:
+        service.run_plan(plan.parent_task_id, execute_llm=False)
+    except MaestroOrchestratorError as exc:
+        assert "Direct chat responses" in str(exc)
+    else:
+        raise AssertionError("Direct chat plans should not be executable.")
+
+
+def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    runtime = PromptAggregationService(session, llm_client=FakeOrchestratorLLMClient())
+    service = MaestroOrchestratorService(
+        session,
+        runtime=runtime,
+        planner_llm_client=FakeMultiDomainPlannerLLMClient(),
+    )
+    plan = service.create_plan(
+        "Prepare a Praxis partner call workflow and ask Maestro Development to note system gaps."
+    )
+
+    assert plan.execution_stages == [
+        ["praxis-planning-agent"],
+        ["maestro-introspection-agent"],
+    ]
+    assert plan.workflow_graph["edges"] == [
+        {
+            "from_work_item_id": "wi_praxis",
+            "to_work_item_id": "wi_maestro",
+            "relation": "must_complete_before",
+        }
+    ]
+    assert plan.workflow_graph["stages"][0]["work_item_ids"] == ["wi_praxis"]
+    assert plan.workflow_graph["stages"][1]["waits_for_work_item_ids"] == ["wi_praxis"]
+    queue_items = plan.scheduler["queue_items"]
+    assert [item["status"] for item in queue_items] == ["pending", "pending"]
+    assert [item["stage_index"] for item in queue_items] == [1, 2]
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=True)
+
+    assert run.status == "completed"
+    assert run.synthesis_report_id is not None
+    assert run.staged_artifact_path is not None
+    assert Path(run.staged_artifact_path).is_file()
+    assert len(run.child_runs) >= 2
+    parent_task_id = uuid.UUID(plan.parent_task_id)
+    child_tasks = session.query(Task).filter(Task.parent_task_id == parent_task_id).all()
+    assert len(child_tasks) == len(run.child_runs)
+    assert all(task.source_type == "maestro_orchestrator" for task in child_tasks)
+    artifacts = session.query(Artifact).all()
+    assert len(artifacts) == 1
+    assert artifacts[0].metadata_["canonical_workflow_artifact"] is True
+    parent = session.get(Task, parent_task_id)
+    assert parent is not None
+    assert parent.status == "completed"
+    assert parent.output_payload["synthesis_report_id"] == run.synthesis_report_id
+    completed_queue = parent.input_payload["scheduler"]["queue_items"]
+    assert [item["status"] for item in completed_queue] == ["completed", "completed"]
+    assert all(item["child_task_id"] for item in completed_queue)
+    assert parent.output_payload["scheduler"]["queue_items"] == completed_queue
+
+
+def test_orchestrator_passes_dependency_outputs_to_later_agent(session: Session, tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    recording_client = RecordingOrchestratorLLMClient()
+    runtime = PromptAggregationService(session, llm_client=recording_client)
+    service = MaestroOrchestratorService(
+        session,
+        runtime=runtime,
+        planner_llm_client=FakeMultiDomainPlannerLLMClient(),
+    )
+    plan = service.create_plan(
+        "Prepare a Praxis partner call workflow and ask Maestro Development to note system gaps."
+    )
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=True)
+
+    assert run.status == "completed"
+    assert len(recording_client.inputs) == 2
+    assert "Dependency context" not in recording_client.inputs[0]
+    assert "Upstream output for wi_praxis" in recording_client.inputs[1]
+    assert "Praxis upstream output for the partner call." in recording_client.inputs[1]
+    parent = session.get(Task, uuid.UUID(plan.parent_task_id))
+    assert parent is not None
+    assert parent.output_payload["execution_stages"] == [
+        ["praxis-planning-agent"],
+        ["maestro-introspection-agent"],
+    ]
+    assert parent.output_payload["scheduler"]["queue_items"][1]["status"] == "completed"
+
+
+def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None:
+    client = _client(session, tmp_path)
+
+    plan_response = client.post(
+        "/maestro/plan",
+        json={
+            "message": (
+                "Coordinate Praxis and Maestro Development on a partner prep workflow, "
+                "and produce a synthesized plan."
+            )
+        },
+    )
+    assert plan_response.status_code == 200
+    plan = plan_response.json()["plan"]
+    assert plan["status"] == "proposed"
+    assert plan["subtasks"]
+    assert plan["execution_stages"]
+    assert "workflow_graph" in plan
+    assert "nodes" in plan["workflow_graph"]
+    assert plan["scheduler"]["queue_items"]
+
+    run_response = client.post(
+        f"/maestro/plans/{plan['parent_task_id']}/run",
+        json={"execute_llm": False},
+    )
+
+    assert run_response.status_code == 200
+    run = run_response.json()["run"]
+    assert run["status"] == "completed"
+    assert run["child_runs"]
+    assert run["staged_artifact_path"]
+    assert "Maestro Synthesis" in run["synthesis"]
+
+
+def test_maestro_api_refines_plan_with_existing_context(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    plan_response = client.post(
+        "/maestro/plan",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    assert plan_response.status_code == 200
+    first_plan = plan_response.json()["plan"]
+
+    refine_response = client.post(
+        f"/maestro/plans/{first_plan['parent_task_id']}/refine",
+        json={"message": "Also include GroundTruth demo technical readiness."},
+    )
+
+    assert refine_response.status_code == 200
+    refined_plan = refine_response.json()["plan"]
+    assert refined_plan["status"] == "proposed"
+    assert refined_plan["plan_id"] != first_plan["plan_id"]
+    refined_task = session.get(Task, uuid.UUID(refined_plan["parent_task_id"]))
+    assert refined_task is not None
+    assert refined_task.input_payload["refined_from_plan_id"] == first_plan["plan_id"]
+    assert "GroundTruth demo technical readiness" in refined_task.input_payload["refinement"]
+
+
+def test_maestro_api_respond_plans_without_active_plan(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "planned"
+    assert payload["message"].startswith("I drafted a plan")
+    assert payload["plan"]["status"] == "proposed"
+    assert payload["chat_plan"] is None
+
+
+def test_maestro_api_respond_refines_active_plan(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    refine_response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Also include GroundTruth demo technical readiness.",
+        },
+    )
+
+    assert refine_response.status_code == 200
+    payload = refine_response.json()
+    assert payload["kind"] == "refined"
+    assert payload["message"]
+    assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+
+
+def test_maestro_api_respond_side_chat_keeps_active_plan(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "What does the workflow order mean?",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["classification"] == "side_chat"
+    assert payload["plan"] is None
+    assert payload["active_plan"]["plan_id"] == first_plan["plan_id"]
+    assert "without changing the proposed workflow" in payload["message"]
+
+
+def test_maestro_api_respond_applies_blocking_rfi_answer(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Coordinate a Praxis partner prep workflow and confirm which follow-up owner "
+                "Chris wants assigned."
+            )
+        },
+    )
+    first_plan = first_response.json()["plan"]
+    assert any(item["blocks_execution"] for item in first_plan["work_items"])
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Chris owns the partner follow-up.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "rfi_answered"
+    assert payload["classification"] == "rfi_answered"
+    assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+    if any(item["blocks_execution"] for item in payload["plan"]["work_items"]):
+        assert "Answer here in chat" in payload["message"]
+
+
+def test_maestro_api_respond_surfaces_blocking_rfi_in_chat(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Coordinate a Praxis partner prep workflow and confirm which follow-up owner "
+                "Chris wants assigned."
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "planned"
+    assert any(item["blocks_execution"] for item in payload["plan"]["work_items"])
+    assert payload["message"].startswith("I need one answer before this can run")
+    assert "Answer here in chat" in payload["message"]
+
+
+def test_maestro_api_respond_routes_context_inside_active_session(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Remember that Jane Smith prefers a short agenda before partner calls.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "routed"
+    assert payload["classification"] == "routed"
+    assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+
+
+def test_maestro_api_marks_direct_chat_plan(session: Session, tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    app = create_app()
+
+    def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeDirectChatPlannerLLMClient(),
+    )
+    plan = service.create_plan("What is Maestro?")
+
+    response = client.get(f"/maestro/plans/{plan.parent_task_id}")
+
+    assert response.status_code == 200
+    payload = response.json()["plan"]
+    assert payload["is_chat_only"] is True
+    assert payload["subtasks"] == []
+    assert payload["direct_response"] == "Maestro can answer that directly without delegating work."
+
+
+def test_maestro_api_respond_returns_chat_only_without_plan(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    app = create_app()
+
+    def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Tell me about Maestro"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["plan"] is None
+    assert payload["chat_plan"]["is_chat_only"] is True
+    assert payload["message"]
+
+
+def test_maestro_api_close_session_stages_transcript_artifact(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/maestro/sessions/close",
+        json={
+            "messages": [
+                {"sender": "user", "content": "Think through a Praxis workflow."},
+                {"sender": "maestro", "content": "I proposed a staged plan."},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    staged_path = Path(response.json()["staged_artifact_path"])
+    assert staged_path.is_file()
+    assert staged_path.parent == tmp_path / "maestro-development" / "inbox"
+    artifact = session.query(Artifact).one()
+    assert artifact.metadata_["canonical_session_artifact"] is True
+
+
+def test_maestro_api_blocks_run_when_plan_needs_chris(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    plan_response = client.post(
+        "/maestro/plan",
+        json={
+            "message": (
+                "Coordinate a Praxis partner prep workflow and confirm which follow-up owner "
+                "Chris wants assigned."
+            )
+        },
+    )
+    plan = plan_response.json()["plan"]
+    assert any(item["blocks_execution"] for item in plan["work_items"])
+
+    run_response = client.post(
+        f"/maestro/plans/{plan['parent_task_id']}/run",
+        json={"execute_llm": False},
+    )
+
+    assert run_response.status_code == 400
+    assert "needs Chris" in run_response.json()["detail"]
+
+
+def test_maestro_planner_schema_requires_every_declared_property() -> None:
+    schema = MaestroPlannerResponse.model_json_schema()
+
+    def assert_required_matches_properties(node: dict) -> None:
+        properties = set(node.get("properties", {}))
+        if properties:
+            assert set(node.get("required", [])) == properties
+        for child in node.get("$defs", {}).values():
+            assert_required_matches_properties(child)
+        for child in node.get("properties", {}).values():
+            if isinstance(child, dict):
+                assert_required_matches_properties(child)
+        items = node.get("items")
+        if isinstance(items, dict):
+            assert_required_matches_properties(items)
+
+    assert_required_matches_properties(schema)
