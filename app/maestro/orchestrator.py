@@ -327,7 +327,11 @@ class MaestroOrchestratorService:
                 f"Plan needs Chris before execution can start: {titles}"
             )
 
-        self._replace_scheduler(parent_task, queue_items=self._queue_with_status(plan.scheduler, "pending"))
+        self._replace_scheduler(
+            parent_task,
+            queue_items=self._queue_with_status(plan.scheduler, "pending"),
+            scheduler_status="pending",
+        )
         for subtask in plan.subtasks:
             if (
                 set(subtask.depends_on_work_item_ids or []) & blocking_dependency_ids
@@ -341,72 +345,98 @@ class MaestroOrchestratorService:
                 )
         parent_task.status = "running"
         parent_task.started_at = datetime.now(UTC)
+        self._set_scheduler_status(parent_task, "running")
         self.session.commit()
 
         child_runs: list[AgentRunResult] = []
         completed_outputs_by_work_item: dict[str, str] = {}
         status = "completed"
         error_message: str | None = None
+        phase_syntheses: list[dict[str, Any]] = []
+        failed_work_item_ids: set[str] = set()
         try:
-            for stage in self._execution_stages(executable_subtasks):
-                for stage_subtask in stage:
+            for stage_index, stage in enumerate(self._execution_stages(executable_subtasks), start=1):
+                runnable_stage = [
+                    subtask
+                    for subtask in stage
+                    if not (set(subtask.depends_on_work_item_ids or []) & failed_work_item_ids)
+                ]
+                blocked_stage = [subtask for subtask in stage if subtask not in runnable_stage]
+                for blocked_subtask in blocked_stage:
+                    self._update_queue_item(
+                        parent_task,
+                        blocked_subtask,
+                        status="blocked",
+                        completed_at=datetime.now(UTC).isoformat(),
+                        error_message="Blocked because an upstream agent task failed.",
+                    )
+                if not runnable_stage:
+                    continue
+                for stage_subtask in runnable_stage:
                     self._update_queue_item(
                         parent_task,
                         stage_subtask,
                         status="ready",
                     )
-                for subtask in stage:
+                for stage_subtask in runnable_stage:
                     self._update_queue_item(
                         parent_task,
-                        subtask,
+                        stage_subtask,
                         status="running",
                         started_at=datetime.now(UTC).isoformat(),
                     )
-                    dependency_context = self._dependency_context(
-                        completed_outputs_by_work_item,
-                        subtask,
-                    )
-                    run = self.runtime.run_agent_once(
-                        PromptPackageRequest(
-                            agent_key=subtask.agent_key,
-                            task_instruction=subtask.objective,
-                            caller="maestro",
-                            user_context=self._child_user_context(plan, dependency_context),
-                            query_text=plan.user_input,
-                            use_semantic=True,
-                        ),
-                        stage_interaction=False,
-                        execute_llm=execute_llm,
-                        parent_task_id=parent_task.id,
-                        source_type="maestro_orchestrator",
-                        workflow_key="maestro.generic.child",
-                        priority=subtask.priority,
-                    )
-                    child_runs.append(run)
-                    self._update_queue_item(
+                stage_runs: list[AgentRunResult] = []
+                for subtask in runnable_stage:
+                    run = self._run_subtask_with_retries(
                         parent_task,
+                        plan,
                         subtask,
-                        status="failed" if run.status == "failed" else "completed",
-                        child_task_id=run.task_id,
-                        child_report_id=run.report_id,
-                        completed_at=datetime.now(UTC).isoformat(),
-                        error_message=run.error_message,
+                        completed_outputs_by_work_item,
+                        execute_llm=execute_llm,
                     )
-                    for work_item_id in subtask.work_item_ids or []:
-                        completed_outputs_by_work_item[work_item_id] = (
-                            run.output_text or run.execution_note
-                        )
-            if any(run.status == "failed" for run in child_runs):
+                    child_runs.extend(run["attempts"])
+                    final_run = run["final"]
+                    stage_runs.append(final_run)
+                    if final_run.status == "failed":
+                        failed_work_item_ids.update(subtask.work_item_ids or [])
+                    else:
+                        for work_item_id in subtask.work_item_ids or []:
+                            completed_outputs_by_work_item[work_item_id] = (
+                                final_run.output_text or final_run.execution_note
+                            )
+                phase_syntheses.append(
+                    self._synthesize_phase(
+                        stage_index=stage_index,
+                        stage=runnable_stage,
+                        child_runs=stage_runs,
+                    )
+                )
+            if failed_work_item_ids:
                 status = "failed"
                 error_message = "One or more delegated agent tasks failed."
             elif len(executable_subtasks) < len(plan.subtasks):
                 status = "blocked"
                 error_message = "Some queue items are waiting for blocking user input."
-            synthesis = self._synthesize(plan, child_runs, status=status)
-            report = self._write_synthesis_report(parent_task, plan, child_runs, synthesis, status)
-            staged = self._stage_workflow_artifact(parent_task, plan, child_runs, synthesis, report)
+            synthesis = self._synthesize(plan, child_runs, status=status, phase_syntheses=phase_syntheses)
+            report = self._write_synthesis_report(
+                parent_task,
+                plan,
+                child_runs,
+                synthesis,
+                status,
+                phase_syntheses=phase_syntheses,
+            )
+            staged = self._stage_workflow_artifact(
+                parent_task,
+                plan,
+                child_runs,
+                synthesis,
+                report,
+                phase_syntheses=phase_syntheses,
+            )
             execution_stages = self._execution_stage_keys(executable_subtasks)
             parent_task.status = status
+            self._set_scheduler_status(parent_task, status)
             parent_task.output_payload = {
                 "plan_id": plan.plan_id,
                 "status": status,
@@ -414,6 +444,7 @@ class MaestroOrchestratorService:
                 "child_report_ids": [run.report_id for run in child_runs if run.report_id],
                 "execution_stages": execution_stages,
                 "scheduler": dict((parent_task.input_payload or {}).get("scheduler", {})),
+                "phase_syntheses": phase_syntheses,
                 "synthesis_report_id": str(report.id),
                 "staged_artifact_path": staged.path,
                 "artifact_id": staged.artifact_id,
@@ -449,6 +480,7 @@ class MaestroOrchestratorService:
             parent_task.status = "failed"
             parent_task.error_message = str(exc)
             parent_task.completed_at = datetime.now(UTC)
+            self._set_scheduler_status(parent_task, "failed")
             self.session.commit()
             raise
 
@@ -643,7 +675,7 @@ class MaestroOrchestratorService:
                     blocks_execution=True,
                     can_log_directly=True,
                     suggested_agent_keys=[],
-                    expected_output="RFI routed for Chris.",
+                    expected_output="RFI routed for your answer.",
                     rationale="The request asks or implies a question.",
                 )
             )
@@ -1266,6 +1298,78 @@ class MaestroOrchestratorService:
             return f"{base}\n\nDependency context:\n{dependency_context}"
         return base
 
+    def _run_subtask_with_retries(
+        self,
+        parent_task: Task,
+        plan: MaestroPlan,
+        subtask: MaestroSubtask,
+        completed_outputs_by_work_item: dict[str, str],
+        *,
+        execute_llm: bool,
+    ) -> dict[str, Any]:
+        max_attempts = 2
+        attempts: list[AgentRunResult] = []
+        final_run: AgentRunResult | None = None
+        for attempt in range(1, max_attempts + 1):
+            dependency_context = self._dependency_context(
+                completed_outputs_by_work_item,
+                subtask,
+            )
+            run = self.runtime.run_agent_once(
+                PromptPackageRequest(
+                    agent_key=subtask.agent_key,
+                    task_instruction=subtask.objective,
+                    caller="maestro",
+                    user_context=self._child_user_context(plan, dependency_context),
+                    query_text=plan.user_input,
+                    use_semantic=True,
+                ),
+                stage_interaction=False,
+                execute_llm=execute_llm,
+                parent_task_id=parent_task.id,
+                source_type="maestro_orchestrator",
+                workflow_key="maestro.generic.child",
+                priority=subtask.priority,
+            )
+            attempts.append(run)
+            final_run = run
+            if run.status != "failed":
+                self._update_queue_item(
+                    parent_task,
+                    subtask,
+                    status="completed",
+                    child_task_id=run.task_id,
+                    child_report_id=run.report_id,
+                    completed_at=datetime.now(UTC).isoformat(),
+                    error_message=None,
+                    retry_count=attempt - 1,
+                )
+                break
+            if attempt < max_attempts:
+                self._update_queue_item(
+                    parent_task,
+                    subtask,
+                    status="retrying",
+                    child_task_id=run.task_id,
+                    child_report_id=run.report_id,
+                    error_message=run.error_message or "Agent task failed; retrying.",
+                    retry_count=attempt,
+                )
+                continue
+            self._update_queue_item(
+                parent_task,
+                subtask,
+                status="failed",
+                child_task_id=run.task_id,
+                child_report_id=run.report_id,
+                completed_at=datetime.now(UTC).isoformat(),
+                error_message=run.error_message,
+                retry_count=attempt - 1,
+            )
+        if final_run is None:
+            raise MaestroOrchestratorError("Subtask did not produce a run result.")
+        return {"attempts": attempts, "final": final_run}
+
     def _plan_summary(
         self,
         user_input: str,
@@ -1317,10 +1421,20 @@ class MaestroOrchestratorService:
             payload["selection_rationale"] = self._subtask_rationale(user_input, agent)
         return payload
 
-    def _scheduler_payload(self, *, queue_items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def _scheduler_payload(
+        self,
+        *,
+        queue_items: list[dict[str, Any]] | None = None,
+        status: str = "queue_foundation",
+    ) -> dict[str, Any]:
         return {
-            "status": "queue_foundation",
-            "policy": "Plan-first execution. Child tasks run sequentially in MVP.",
+            "status": status,
+            "policy": (
+                "Plan-first execution. Queue items are grouped into dependency stages; items "
+                "inside a stage are parallel-ready, retried once on failure, and downstream "
+                "dependents are blocked if retries fail."
+            ),
+            "max_attempts": 2,
             "resource_locks": [],
             "recurring_scheduler": "planned",
             "queue_items": queue_items or [],
@@ -1346,6 +1460,7 @@ class MaestroOrchestratorService:
                         "depends_on_work_item_ids": subtask.depends_on_work_item_ids or [],
                         "child_task_id": None,
                         "child_report_id": None,
+                        "retry_count": 0,
                         "started_at": None,
                         "completed_at": None,
                         "error_message": None,
@@ -1360,6 +1475,7 @@ class MaestroOrchestratorService:
                 "status": status,
                 "child_task_id": None,
                 "child_report_id": None,
+                "retry_count": 0,
                 "started_at": None,
                 "completed_at": None,
                 "error_message": None,
@@ -1367,12 +1483,30 @@ class MaestroOrchestratorService:
             for item in scheduler.get("queue_items", [])
         ]
 
-    def _replace_scheduler(self, task: Task, *, queue_items: list[dict[str, Any]]) -> None:
+    def _replace_scheduler(
+        self,
+        task: Task,
+        *,
+        queue_items: list[dict[str, Any]],
+        scheduler_status: str | None = None,
+    ) -> None:
         payload = dict(task.input_payload or {})
         scheduler = {
             **self._scheduler_payload(),
             **dict(payload.get("scheduler", {})),
             "queue_items": queue_items,
+        }
+        if scheduler_status is not None:
+            scheduler["status"] = scheduler_status
+        payload["scheduler"] = scheduler
+        task.input_payload = payload
+
+    def _set_scheduler_status(self, task: Task, status: str) -> None:
+        payload = dict(task.input_payload or {})
+        scheduler = {
+            **self._scheduler_payload(),
+            **dict(payload.get("scheduler", {})),
+            "status": status,
         }
         payload["scheduler"] = scheduler
         task.input_payload = payload
@@ -1388,6 +1522,7 @@ class MaestroOrchestratorService:
         started_at: str | None = None,
         completed_at: str | None = None,
         error_message: str | None = None,
+        retry_count: int | None = None,
         only_statuses: set[str] | None = None,
     ) -> None:
         payload = dict(task.input_payload or {})
@@ -1407,6 +1542,7 @@ class MaestroOrchestratorService:
                     "status": status,
                     "child_task_id": child_task_id if child_task_id is not None else item.get("child_task_id"),
                     "child_report_id": child_report_id if child_report_id is not None else item.get("child_report_id"),
+                    "retry_count": retry_count if retry_count is not None else item.get("retry_count", 0),
                     "started_at": started_at if started_at is not None else item.get("started_at"),
                     "completed_at": completed_at if completed_at is not None else item.get("completed_at"),
                     "error_message": error_message,
@@ -1484,6 +1620,7 @@ class MaestroOrchestratorService:
         child_runs: list[AgentRunResult],
         *,
         status: str,
+        phase_syntheses: list[dict[str, Any]] | None = None,
     ) -> str:
         lines = [
             f"# Maestro Synthesis: {plan.summary}",
@@ -1504,6 +1641,16 @@ class MaestroOrchestratorService:
                     "",
                 ]
             )
+        if phase_syntheses:
+            lines.extend(["## Phase Syntheses", ""])
+            for phase in phase_syntheses:
+                lines.extend(
+                    [
+                        f"### Stage {phase['stage_index']}",
+                        phase["summary"],
+                        "",
+                    ]
+                )
         lines.extend(
             [
                 "## Next Steps",
@@ -1514,6 +1661,35 @@ class MaestroOrchestratorService:
         )
         return "\n".join(lines)
 
+    def _synthesize_phase(
+        self,
+        *,
+        stage_index: int,
+        stage: list[MaestroSubtask],
+        child_runs: list[AgentRunResult],
+    ) -> dict[str, Any]:
+        completed = [run for run in child_runs if run.status != "failed"]
+        failed = [run for run in child_runs if run.status == "failed"]
+        agent_names = ", ".join(subtask.agent_name for subtask in stage)
+        summary = (
+            f"Stage {stage_index} ran {len(stage)} parallel-ready queue item(s): {agent_names}. "
+            f"{len(completed)} completed and {len(failed)} failed."
+        )
+        if failed:
+            summary += " Failed work will block dependent downstream queue items."
+        return {
+            "stage_index": stage_index,
+            "agent_keys": [subtask.agent_key for subtask in stage],
+            "work_item_ids": [
+                work_item_id
+                for subtask in stage
+                for work_item_id in (subtask.work_item_ids or [])
+            ],
+            "completed_count": len(completed),
+            "failed_count": len(failed),
+            "summary": summary,
+        }
+
     def _write_synthesis_report(
         self,
         parent_task: Task,
@@ -1521,6 +1697,7 @@ class MaestroOrchestratorService:
         child_runs: list[AgentRunResult],
         synthesis: str,
         status: str,
+        phase_syntheses: list[dict[str, Any]] | None = None,
     ) -> Report:
         report = Report(
             task_id=parent_task.id,
@@ -1541,6 +1718,7 @@ class MaestroOrchestratorService:
                     }
                     for run in child_runs
                 ],
+                "phase_syntheses": phase_syntheses or [],
             },
         )
         self.session.add(report)
@@ -1554,6 +1732,7 @@ class MaestroOrchestratorService:
         child_runs: list[AgentRunResult],
         synthesis: str,
         report: Report,
+        phase_syntheses: list[dict[str, Any]] | None = None,
     ):
         package = InteractionArtifactPackager(self.session).build_package(
             domain_key="maestro-development",
@@ -1598,6 +1777,7 @@ class MaestroOrchestratorService:
                 "planner_mode": plan.planner_mode,
                 "work_items": [item.__dict__ for item in plan.work_items],
                 "subtasks": [subtask.__dict__ for subtask in plan.subtasks],
+                "phase_syntheses": phase_syntheses or [],
             },
         )
         staged = InteractionArtifactPackager(self.session).stage_package(package)
@@ -1643,7 +1823,7 @@ _ACTION_BY_WORK_ITEM_TYPE = {
     "contact": "Route as contact or CRM context.",
     "event": "Route as event/calendar context.",
     "decision": "Route as an auditable decision.",
-    "rfi": "Ask Chris or surface as human input needed.",
+    "rfi": "Ask you directly or surface as human input needed.",
     "memory_candidate": "Stage for memory curation at session close.",
     "think_tank": "Capture as a think tank note until it matures.",
     "direct_response": "Respond directly without workflow execution.",

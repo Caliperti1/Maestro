@@ -24,7 +24,7 @@ sequenceDiagram
     Orchestrator-->>UI: Proposed plan, intents, subtasks
     Chris->>UI: Run plan
     UI->>Orchestrator: POST /maestro/plans/{id}/run
-    Orchestrator->>Runtime: Run child agent tasks sequentially
+    Orchestrator->>Runtime: Run stage queue items with retry policy
     Runtime-->>Orchestrator: Agent reports and task traces
     Orchestrator->>Orchestrator: Synthesize workflow result
     Orchestrator->>Memory: Stage one canonical workflow artifact
@@ -99,18 +99,27 @@ Running an approved plan:
 
 - marks the parent task running
 - creates child tasks through the existing agent runtime
-- runs each selected agent sequentially in the MVP
-- groups subtasks into dependency stages so independent work can be identified as parallelizable
+- groups subtasks into dependency stages so independent work can be identified as parallel-ready
+- marks every queue item in the current stage ready/running before execution
+- retries failed queue items once before marking them failed
+- blocks downstream dependents when an upstream queue item exhausts retries
+- continues independent work when it is not blocked by the failed item
 - passes completed upstream work-item outputs into dependent downstream subtasks
+- records a phase synthesis after each execution stage
 - records agent reports and tool calls
 - writes one Maestro synthesis report
-- marks the parent task completed or failed
+- marks the parent task completed, blocked, or failed
 - stages one canonical workflow artifact for memory curation
 
 Agent outputs remain traceable reports, but they are not individually staged into memory by default.
 The canonical workflow artifact is the memory-curation boundary for a workflow session. It includes
 the original user input, decomposition, work items, subtasks, child outputs, synthesis, RFIs, and
 provenance.
+
+The current runner enforces parallel-ready queue semantics, retry policy, dependency blocking, and
+phase synthesis. Actual concurrent worker execution is intentionally left behind the queue contract
+until tool integrations exist and resource locks matter. The scheduler should be able to swap the
+stage executor for a true worker pool without changing the plan, queue, or UI contract.
 
 ## Scheduler And Queue Foundation
 
@@ -119,10 +128,12 @@ The MVP scheduler is a queue foundation, not the final recurring scheduler. It r
 - plan-first execution policy
 - parent task status
 - child task status
-- sequential execution order
+- dependency stages and parallel-ready queue batches
 - plan-level queue items derived from the workflow graph
-- queue item status transitions from pending to ready, running, completed, or failed
+- queue item status transitions from pending to ready, running, retrying, completed, blocked, or failed
+- retry count and error message per queue item
 - child task/report IDs once execution creates durable child tasks
+- per-stage synthesis notes
 - future resource-lock placeholder
 - future recurring-scheduler placeholder
 
@@ -134,10 +145,42 @@ and conflict-aware scheduling.
 Use the Maestro home page:
 
 1. Enter a complex request that mentions at least one domain.
-2. Click **Plan**.
-3. Review detected intents, selected agents, and generated subtasks.
-4. Click **Run plan**.
-5. Confirm child runs complete, a synthesis appears, and a canonical workflow artifact is staged.
+2. Review the proposed workflow map. Each stage shows whether the contained queue items are
+   parallel-ready or single.
+3. Click a workflow node to inspect the assigned agent, work item IDs, dependencies, retry count,
+   rationale, and underlying work item details.
+4. If Maestro asks an RFI in chat, answer in the chat box. The active plan should refine rather
+   than starting a new workflow.
+5. Send a refinement such as "remove that task," "have only the CRM agent do this," "do this first,"
+   or "this belongs in Personal." The active plan should preserve unaffected work while updating
+   the requested part.
+6. Click **Run plan**.
+7. Confirm child runs complete, a synthesis appears, phase synthesis appears in the report, and a
+   canonical workflow artifact is staged.
 
 For a dry run, disable **Execute LLM** before running the plan. This still verifies planning,
 queue/task creation, synthesis, and artifact staging without calling the LLM gateway.
+
+## Hardening Test Scenarios
+
+Use these scenarios before moving from orchestration into tool integration:
+
+- **Parallel-ready plan:** Ask Maestro to prepare a Praxis demo packet with separate narrative,
+  technical readiness, CRM/contact, and follow-up work. Expect stage 1 to contain independent
+  queue items and the final packet to wait on the relevant upstream work.
+- **Blocking RFI loop:** Ask for a workflow with missing attendee/contact/calendar details. Maestro
+  should ask the blocking question in chat. Answer in chat and verify the plan refines in the same
+  session.
+- **Plan refinement preservation:** After a large proposed plan, ask Maestro to remove one task,
+  change one agent assignment, reorder one dependency, or move one item to another domain. The
+  resulting plan should retain the unaffected work.
+- **Retry then recover:** Simulate one failed agent call followed by a successful retry. The queue
+  item should end completed with `retry_count` set to `1`.
+- **Retry exhaustion:** Simulate a persistent upstream failure. Maestro should retry once, mark that
+  queue item failed, block dependent downstream items, and continue anything independent.
+- **Canonical memory boundary:** Run a workflow and verify only one canonical Maestro workflow
+  artifact is staged for memory curation while child agent reports remain traceable.
+- **Side-chat during active plan:** Ask a question about the plan. Maestro should answer directly
+  while preserving the active proposed plan.
+- **Session close:** Use the new-session control and verify the prior conversation is staged as a
+  Maestro Development session artifact.

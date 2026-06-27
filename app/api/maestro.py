@@ -222,7 +222,21 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
         return "new_workflow"
     if any(
         token in lowered
-        for token in ("change the plan", "update the plan", "refine", "instead", "also include", "add ")
+        for token in (
+            "change the plan",
+            "update the plan",
+            "refine",
+            "instead",
+            "also include",
+            "add ",
+            "remove ",
+            "drop ",
+            "only ",
+            "belongs in",
+            "move this",
+            "do this first",
+            "do that first",
+        )
     ):
         return "refined"
     if has_blocking_rfi and not lowered.endswith("?"):

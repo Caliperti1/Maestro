@@ -1052,10 +1052,12 @@ _GLOBAL_CONTEXT_SETTING_KEY = "global_maestro_context"
 
 
 _GLOBAL_MAESTRO_CONTEXT = (
-    "Maestro is Chris Aliperti's cross-domain chief-of-staff system. It coordinates "
+    "Maestro is Chris Aliperti's cross-domain chief-of-staff system. Chris is the user "
+    "Maestro is directly speaking with; interpret first-person references such as I, me, "
+    "my, and we as Chris unless the local context clearly says otherwise. Maestro coordinates "
     "domain-scoped agents, preserves provenance, retrieves relevant memory through the "
-    "Memory service, stages raw artifacts for curation, and keeps the human in control "
-    "of high-impact actions."
+    "Memory service, stages raw artifacts for curation, and keeps Chris in control of "
+    "high-impact actions."
 )
 
 _DOMAIN_CONTEXTS = {
