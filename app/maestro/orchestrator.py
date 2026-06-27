@@ -675,7 +675,7 @@ class MaestroOrchestratorService:
                     blocks_execution=True,
                     can_log_directly=True,
                     suggested_agent_keys=[],
-                    expected_output="RFI routed for Chris.",
+                    expected_output="RFI routed for your answer.",
                     rationale="The request asks or implies a question.",
                 )
             )
@@ -1823,7 +1823,7 @@ _ACTION_BY_WORK_ITEM_TYPE = {
     "contact": "Route as contact or CRM context.",
     "event": "Route as event/calendar context.",
     "decision": "Route as an auditable decision.",
-    "rfi": "Ask Chris or surface as human input needed.",
+    "rfi": "Ask you directly or surface as human input needed.",
     "memory_candidate": "Stage for memory curation at session close.",
     "think_tank": "Capture as a think tank note until it matures.",
     "direct_response": "Respond directly without workflow execution.",

@@ -1046,11 +1046,18 @@ export function App() {
                 }}
               >
                 <MessageSquareText size={18} />
-                <input
+                <textarea
                   value={draftMessage}
                   onChange={(event) => setDraftMessage(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      sendMaestroMessage();
+                    }
+                  }}
                   placeholder="Ask Maestro to plan and coordinate..."
                   aria-label="Message Maestro"
+                  rows={1}
                 />
                 <button type="submit" disabled={maestroBusy || !draftMessage.trim()}>
                   Send
