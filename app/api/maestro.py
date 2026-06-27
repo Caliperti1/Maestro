@@ -177,10 +177,9 @@ def _maestro_response_text(plan: MaestroPlan, *, refined: bool) -> str:
         item for item in plan.work_items if item.needs_user_input and item.blocks_execution
     ]
     if blocking_items:
-        titles = "; ".join(item.title for item in blocking_items)
+        question_text = _rfi_question_text(blocking_items)
         return (
-            f"I need one answer before this can run: {titles}. "
-            "I updated the proposed plan and will refine it when you answer."
+            f"{question_text} Answer here in chat and I will use that to refine this active plan."
         )
     non_blocking_questions = [
         item for item in plan.work_items if item.needs_user_input and not item.blocks_execution
@@ -200,6 +199,18 @@ def _maestro_response_text(plan: MaestroPlan, *, refined: bool) -> str:
         f"{'stage' if stage_count == 1 else 'stages'}.{question_text} "
         "It is ready for review."
     )
+
+
+def _rfi_question_text(blocking_items: list[Any]) -> str:
+    if len(blocking_items) == 1:
+        item = blocking_items[0]
+        detail = item.description.strip() if item.description else item.title
+        return f"I need one answer before this can run: {detail}"
+    questions = [
+        f"{index}. {item.description.strip() if item.description else item.title}"
+        for index, item in enumerate(blocking_items, start=1)
+    ]
+    return "I need these answers before this can run: " + " ".join(questions)
 
 
 def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> str:

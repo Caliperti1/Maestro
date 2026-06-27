@@ -24,8 +24,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-const WORKING_STEPS = ["Classifying", "Planning", "Checking dependencies", "Updating queue"];
-
 type PlannerItem = {
   id: number;
   time: string;
@@ -699,18 +697,6 @@ export function App() {
   const [maestroStatus, setMaestroStatus] = useState("Ready");
   const [executeMaestroLLM, setExecuteMaestroLLM] = useState(true);
   const [maestroBusy, setMaestroBusy] = useState(false);
-  const [workingStepIndex, setWorkingStepIndex] = useState(0);
-
-  useEffect(() => {
-    if (!maestroBusy) {
-      setWorkingStepIndex(0);
-      return;
-    }
-    const timer = window.setInterval(() => {
-      setWorkingStepIndex((index) => (index + 1) % WORKING_STEPS.length);
-    }, 650);
-    return () => window.clearInterval(timer);
-  }, [maestroBusy]);
 
   const highPriorityCount = useMemo(
     () => plannerItems.filter((item) => item.priority === "high").length,
@@ -789,7 +775,7 @@ export function App() {
           active_plan_id: activePlanId,
         }),
       });
-      setMaestroPlan(response.plan);
+      setMaestroPlan(response.plan ?? response.active_plan);
       setMaestroRun(null);
       setChatMessages((messages) => [
         ...messages,
@@ -1059,7 +1045,7 @@ export function App() {
                   <div className="message maestro-message working-message" aria-live="polite">
                     <span>Maestro</span>
                     <p>
-                      Conducting: {WORKING_STEPS[workingStepIndex]}
+                      Conducting
                       <span className="working-dots" aria-hidden="true">
                         <span />
                         <span />
@@ -1123,9 +1109,7 @@ export function App() {
                   Execute LLM
                 </label>
                 <span>
-                  {maestroBusy
-                    ? `Conducting: ${WORKING_STEPS[workingStepIndex]}`
-                    : maestroStatus}
+                  {maestroBusy ? "Conducting" : maestroStatus}
                 </span>
               </div>
 

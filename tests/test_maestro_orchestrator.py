@@ -777,6 +777,32 @@ def test_maestro_api_respond_applies_blocking_rfi_answer(
     assert payload["kind"] == "rfi_answered"
     assert payload["classification"] == "rfi_answered"
     assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+    if any(item["blocks_execution"] for item in payload["plan"]["work_items"]):
+        assert "Answer here in chat" in payload["message"]
+
+
+def test_maestro_api_respond_surfaces_blocking_rfi_in_chat(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Coordinate a Praxis partner prep workflow and confirm which follow-up owner "
+                "Chris wants assigned."
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "planned"
+    assert any(item["blocks_execution"] for item in payload["plan"]["work_items"])
+    assert payload["message"].startswith("I need one answer before this can run")
+    assert "Answer here in chat" in payload["message"]
 
 
 def test_maestro_api_respond_routes_context_inside_active_session(
