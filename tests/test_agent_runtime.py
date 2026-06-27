@@ -234,6 +234,26 @@ def test_tool_manifest_can_attach_domain_connections(session: Session) -> None:
     assert memory_tool.auth_type == "service"
 
 
+def test_tool_manifest_can_inherit_provider_level_github_connection(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro", "env_token_name": "MAESTRO_GITHUB_TOKEN"},
+    )
+
+    spec = registry.get_spec("maestro-introspection-agent")
+    tools = registry.list_tools()
+
+    issue_search = next(tool for tool in spec.allowed_tools if tool.key == "github.issue.search")
+    assert issue_search.connection_id is not None
+    assert issue_search.auth_type == "gh_cli"
+    registry_issue_search = next(tool for tool in tools if tool.key == "github.issue.search")
+    assert "maestro-development" in registry_issue_search.connected_domains
+
+
 def test_seed_agent_merge_adds_github_tool_permissions_to_existing_seed_agent(
     session: Session,
 ) -> None:

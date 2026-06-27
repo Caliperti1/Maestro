@@ -161,10 +161,22 @@ class ToolExecutionService:
             raise ToolExecutionError(f"Agent {agent.key} has invalid permission for {tool_key}.")
 
     def _connection_for(self, domain: Domain, tool_key: str) -> ToolConnection | None:
-        return self.session.scalar(
+        exact = self.session.scalar(
             select(ToolConnection).where(
                 ToolConnection.domain_id == domain.id,
                 ToolConnection.tool_key == tool_key,
+                ToolConnection.is_active.is_(True),
+            )
+        )
+        if exact is not None:
+            return exact
+        provider_key = _provider_key(tool_key)
+        if provider_key == tool_key:
+            return None
+        return self.session.scalar(
+            select(ToolConnection).where(
+                ToolConnection.domain_id == domain.id,
+                ToolConnection.tool_key == provider_key,
                 ToolConnection.is_active.is_(True),
             )
         )
@@ -476,6 +488,12 @@ def _repo_from(connection: ToolConnection | None, payload: dict[str, Any]) -> st
     if "/" not in repo:
         raise ToolExecutionError("GitHub repo must be in owner/name form.")
     return repo
+
+
+def _provider_key(tool_key: str) -> str:
+    if tool_key.startswith("github."):
+        return "github"
+    return tool_key
 
 
 def _github_env(connection: ToolConnection | None) -> dict[str, str]:

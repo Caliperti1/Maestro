@@ -222,10 +222,12 @@ For real domain-specific accounts, prefer an environment-token reference:
 }
 ```
 
-The adapter reads that environment variable and passes it to `gh` as `GH_TOKEN` for only that tool
-process. This avoids storing tokens in the database and avoids mutating the globally active `gh`
-account. `.env` is ignored by Git and is the right local place for these token variables until a
-hardened credential store exists.
+Store this once as the domain connection for the provider key `github`. Every `github.*` tool in
+that domain inherits the shared GitHub connection unless a more specific per-tool connection exists.
+The adapter reads the configured environment variable and passes it to `gh` as `GH_TOKEN` for only
+that tool process. This avoids storing tokens in the database and avoids mutating the globally
+active `gh` account. `.env` is ignored by Git and is the right local place for these token variables
+until a hardened credential store exists.
 
 GitHub write tools are available as separate explicit tool keys. The current runtime can execute
 them when explicitly requested; the next agent-execution layer should add an LLM planning loop,

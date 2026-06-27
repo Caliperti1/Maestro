@@ -1973,8 +1973,11 @@ function ToolsWorkspace() {
   const [statusMessage, setStatusMessage] = useState("Ready");
 
   const selectedTool = tools.find((tool) => tool.key === selectedToolKey) ?? tools[0] ?? null;
+  const selectedConnectionToolKey = selectedTool?.key.startsWith("github.")
+    ? "github"
+    : selectedTool?.key;
   const selectedToolConnections = connections.filter(
-    (connection) => connection.tool_key === selectedTool?.key,
+    (connection) => connection.tool_key === selectedConnectionToolKey,
   );
   const selectedToolAgents = selectedTool?.authorized_agents ?? [];
   const selectedConnection = selectedToolConnections.find(
@@ -1997,7 +2000,8 @@ function ToolsWorkspace() {
     if (!selectedTool) return;
     const existing = connections.find(
       (connection) =>
-        connection.tool_key === selectedTool.key && connection.domain_key === connectionDomain,
+        connection.tool_key === selectedConnectionToolKey &&
+        connection.domain_key === connectionDomain,
     );
     if (existing) {
       setConnectionName(existing.display_name);
@@ -2019,7 +2023,7 @@ function ToolsWorkspace() {
           )
         : "{}",
     );
-  }, [connectionDomain, connections, selectedTool?.key]);
+  }, [connectionDomain, connections, selectedConnectionToolKey, selectedTool?.key]);
 
   useEffect(() => {
     if (!selectedTool) return;
@@ -2044,7 +2048,7 @@ function ToolsWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           domain_key: connectionDomain,
-          tool_key: selectedTool?.key,
+          tool_key: selectedConnectionToolKey,
           display_name: connectionName,
           auth_type: connectionAuthType,
           config,
@@ -2108,6 +2112,12 @@ function ToolsWorkspace() {
         {selectedTool ? (
           <>
             <p className="empty-state">{selectedTool.description}</p>
+            {selectedTool.key.startsWith("github.") && (
+              <p className="memory-status">
+                GitHub tools share one domain connection named <strong>GitHub</strong>. Save repo
+                and token env config once here, then every GitHub tool can inherit it.
+              </p>
+            )}
             <div className="connection-list">
               {Object.entries(domainLabels)
                 .filter(([key]) => key !== "global")

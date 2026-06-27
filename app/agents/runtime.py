@@ -460,6 +460,8 @@ class AgentRegistryService:
             if domain is None:
                 continue
             connected_domains.setdefault(connection.tool_key, set()).add(domain.key)
+            for inherited_tool_key in _inherited_connection_tool_keys(connection.tool_key):
+                connected_domains.setdefault(inherited_tool_key, set()).add(domain.key)
 
         authorized_agents: dict[str, list[dict[str, str]]] = {}
         for agent in self.session.scalars(select(Agent).where(Agent.is_active.is_(True))).all():
@@ -611,6 +613,8 @@ class AgentRegistryService:
                 permission = str(value.get("permission") or "use")
                 description = str(value.get("description") or "")
             connection = connections.get(key)
+            if connection is None:
+                connection = connections.get(_provider_connection_key(key))
             manifest.append(
                 ToolManifestItem(
                     key=key,
@@ -1172,6 +1176,10 @@ _TOOL_DESCRIPTIONS = {
         "name": "LLM Gateway",
         "description": "Call the configured LLM provider through Maestro's shared gateway.",
     },
+    "github": {
+        "name": "GitHub",
+        "description": "Shared GitHub repository credentials/config inherited by GitHub tools.",
+    },
     "github.read": {
         "name": "GitHub Read",
         "description": (
@@ -1219,6 +1227,18 @@ _TOOL_DESCRIPTIONS = {
         "description": "Read CI/check status for a pull request.",
     },
 }
+
+
+def _provider_connection_key(tool_key: str) -> str:
+    if tool_key.startswith("github."):
+        return "github"
+    return tool_key
+
+
+def _inherited_connection_tool_keys(tool_key: str) -> list[str]:
+    if tool_key == "github":
+        return [key for key in _TOOL_DESCRIPTIONS if key.startswith("github.")]
+    return []
 
 _SEED_AGENTS = [
     {
