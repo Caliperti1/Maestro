@@ -14,7 +14,7 @@ from app.core.config import get_settings
 from app.db.models import Artifact, MemoryItem, Task, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
-from app.tools.runtime import GitHubCliToolAdapter, ToolExecutionContext
+from app.tools.runtime import GitHubCliToolAdapter, ToolExecutionContext, _clean_github_search_query
 
 
 def _seed_memory(session: Session) -> None:
@@ -486,6 +486,23 @@ def test_github_adapter_can_resolve_token_ref_from_dotenv(
     assert captured["env"]["GH_TOKEN"] == "dotenv-token"
     assert captured["args"][3] == "Caliperti1/Maestro"
     get_settings.cache_clear()
+
+
+def test_github_search_query_cleanup_removes_repo_placeholders() -> None:
+    assert (
+        _clean_github_search_query(
+            "repo:AUTHORIZED_REPOSITORY is:pr sort:updated-desc",
+            kind="pr",
+        )
+        == "sort:updated-desc"
+    )
+    assert (
+        _clean_github_search_query(
+            "repo:CURRENT is:issue label:test",
+            kind="issue",
+        )
+        == "label:test"
+    )
 
 
 def test_run_agent_once_prepares_prompt_and_optional_staged_artifact(

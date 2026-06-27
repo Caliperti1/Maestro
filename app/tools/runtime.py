@@ -244,7 +244,7 @@ class GitHubCliToolAdapter:
         *,
         env: dict[str, str],
     ) -> dict[str, Any]:
-        query = str(payload.get("query") or "").strip()
+        query = _clean_github_search_query(str(payload.get("query") or ""), kind="issue")
         state = str(payload.get("state") or "open").strip() or "open"
         limit = _bounded_int(payload.get("limit"), default=10, minimum=1, maximum=30)
         args = [
@@ -365,7 +365,7 @@ class GitHubCliToolAdapter:
         env: dict[str, str],
     ) -> dict[str, Any]:
         state = str(payload.get("state") or "open").strip() or "open"
-        query = str(payload.get("query") or "").strip()
+        query = _clean_github_search_query(str(payload.get("query") or ""), kind="pr")
         limit = _bounded_int(payload.get("limit"), default=10, minimum=1, maximum=30)
         args = [
             "pr",
@@ -491,6 +491,23 @@ def _repo_from(connection: ToolConnection | None, payload: dict[str, Any]) -> st
     if "/" not in repo:
         raise ToolExecutionError("GitHub repo must be in owner/name form.")
     return repo
+
+
+def _clean_github_search_query(query: str, *, kind: str) -> str:
+    remove_tokens = {
+        "repo:AUTHORIZED_REPOSITORY",
+        "repo:CURRENT",
+        "repo:CURRENT_REPOSITORY",
+        "repo:AUTHORIZED_REPO",
+        "repo:CONFIGURED_REPOSITORY",
+        "repo:CONFIGURED_REPO",
+    }
+    if kind == "pr":
+        remove_tokens.update({"is:pr", "type:pr"})
+    if kind == "issue":
+        remove_tokens.update({"is:issue", "type:issue"})
+    tokens = [token for token in query.split() if token not in remove_tokens]
+    return " ".join(tokens).strip()
 
 
 def _provider_key(tool_key: str) -> str:

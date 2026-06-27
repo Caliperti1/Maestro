@@ -1387,8 +1387,10 @@ _TOOL_PLANNER_INSTRUCTIONS = (
     "schema. Choose only tools from the allowed manifest. Prefer read-only tools and the smallest "
     "number of calls needed. Do not request write/action tools unless the task explicitly needs "
     "them; those may be blocked until approval. Return tool payloads as JSON strings in "
-    "`payload_json`. For a request like 'check out the latest PR', use GitHub PR search/list tools "
-    "first, then details/checks/diff if useful."
+    "`payload_json`. Do not include repo placeholders such as repo:CURRENT or "
+    "repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies the repo. "
+    "For a request like 'check out the latest PR', use GitHub PR search/list tools first, then "
+    "details/checks/diff if useful."
 )
 
 _TOOL_PLAN_SCHEMA = {
