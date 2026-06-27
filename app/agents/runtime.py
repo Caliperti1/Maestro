@@ -844,9 +844,11 @@ class PromptAggregationService:
                     instructions=(
                         "You are executing as a Maestro domain agent. Follow the provided "
                         "assembled prompt exactly, stay within your domain, respect the tool "
-                        "manifest, and produce the requested structured output. Tool results, "
-                        "when present, have already been executed by Maestro; do not emit "
-                        "synthetic tool-call markup or function-call requests in your answer."
+                        "manifest, and produce the requested structured output. Include a "
+                        "top-level `conversation` field written as a concise plain-English "
+                        "message Maestro can say directly to Chris. Tool results, when present, "
+                        "have already been executed by Maestro; do not emit synthetic "
+                        "tool-call markup or function-call requests in your answer."
                     ),
                     input_text=assembled_prompt,
                 )
@@ -1078,20 +1080,34 @@ class PromptAggregationService:
                 for requested_tool in requested:
                     tool_key = requested_tool["tool_key"]
                     if tool_key not in _AUTO_TOOL_SAFE_TOOL_KEYS:
+                        policy = _TOOL_SAFETY_POLICIES.get(
+                            tool_key,
+                            {
+                                "level": "approval_required",
+                                "reason": "Tool is not approved for autonomous execution.",
+                            },
+                        )
                         blocked = {
                             "tool_key": tool_key,
                             "payload": requested_tool.get("payload") or {},
-                            "reason": "Tool requires explicit approval/manual execution.",
+                            "safety_level": policy["level"],
+                            "reason": policy["reason"],
+                            "rationale": requested_tool.get("rationale"),
                         }
                         iteration_trace["blocked"].append(blocked)
-                        blocked_payload = {
-                            "id": f"blocked-{uuid.uuid4()}",
-                            "tool_name": tool_key,
-                            "status": "blocked",
-                            "error_message": blocked["reason"],
-                            "input_payload": {"payload": requested_tool.get("payload") or {}},
-                            "output_payload": None,
-                        }
+                        proposed = tool_service.propose_for_task(
+                            ToolExecutionRequest(
+                                agent_key=package.agent.key,
+                                tool_key=tool_key,
+                                payload=requested_tool.get("payload") or {},
+                                dry_run=False,
+                            ),
+                            task=task,
+                            rationale=requested_tool.get("rationale"),
+                            safety_level=str(policy["level"]),
+                            reason=str(policy["reason"]),
+                        )
+                        blocked_payload = tool_result_payload(proposed)
                         executed_calls.append(blocked_payload)
                         prior_results.append(blocked_payload)
                         continue
@@ -1153,7 +1169,14 @@ class PromptAggregationService:
                 "name": tool.name,
                 "permission": tool.permission,
                 "description": tool.description,
-                "auto_safe": tool.key in _AUTO_TOOL_SAFE_TOOL_KEYS,
+                "safety": _TOOL_SAFETY_POLICIES.get(
+                    tool.key,
+                    {
+                        "level": "approval_required",
+                        "auto_executable": False,
+                        "reason": "Tool is not approved for autonomous execution.",
+                    },
+                ),
             }
             for tool in package.tool_manifest
         ]
@@ -1368,25 +1391,106 @@ _DOMAIN_CONTEXTS = {
 
 _DEFAULT_OUTPUT_CONTRACT = {
     "format": "structured_report",
-    "required_sections": ["summary", "findings", "open_questions", "next_steps", "artifact_refs"],
+    "required_sections": [
+        "conversation",
+        "summary",
+        "findings",
+        "open_questions",
+        "next_steps",
+        "artifact_refs",
+    ],
+    "section_notes": {
+        "conversation": (
+            "Concise plain-English message Maestro can show directly in chat to Chris. "
+            "Do not use JSON, markdown tables, or provenance lists in this field."
+        )
+    },
     "provenance_required": True,
 }
 
+_TOOL_SAFETY_POLICIES = {
+    "github.repo.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only repository metadata.",
+    },
+    "github.repo.list": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only repository listing.",
+    },
+    "github.file.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only repository file retrieval.",
+    },
+    "github.file.search": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only repository file search.",
+    },
+    "github.issue.search": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only issue search.",
+    },
+    "github.issue.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only issue inspection.",
+    },
+    "github.pr.search": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only pull request search.",
+    },
+    "github.pr.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only pull request inspection.",
+    },
+    "github.pr.diff": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only pull request diff inspection.",
+    },
+    "github.pr.checks": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only pull request check inspection.",
+    },
+    "github.issue.create": {
+        "level": "external_write",
+        "auto_executable": False,
+        "reason": "Creates an external GitHub issue and requires Chris approval.",
+    },
+    "github.repo.create": {
+        "level": "external_write",
+        "auto_executable": False,
+        "reason": "Creates an external GitHub repository and requires Chris approval.",
+    },
+    "github.issue.comment": {
+        "level": "external_write",
+        "auto_executable": False,
+        "reason": "Posts an external GitHub comment and requires Chris approval.",
+    },
+    "github.issue.update": {
+        "level": "external_write",
+        "auto_executable": False,
+        "reason": "Updates external GitHub issue metadata and requires Chris approval.",
+    },
+}
+
 _AUTO_TOOL_SAFE_TOOL_KEYS = {
-    "github.repo.get",
-    "github.issue.search",
-    "github.issue.get",
-    "github.pr.search",
-    "github.pr.get",
-    "github.pr.diff",
-    "github.pr.checks",
+    key for key, policy in _TOOL_SAFETY_POLICIES.items() if policy["auto_executable"]
 }
 
 _TOOL_PLANNER_INSTRUCTIONS = (
     "You are an execution planner for a Maestro domain agent. Return only JSON matching the "
     "schema. Choose only tools from the allowed manifest. Prefer read-only tools and the smallest "
-    "number of calls needed. Do not request write/action tools unless the task explicitly needs "
-    "them; those may be blocked until approval. Return tool payloads as JSON strings in "
+    "number of calls needed. Read-only tools marked safe can run automatically. Write/action "
+    "tools must only be requested when explicitly needed; they will be proposed for Chris approval "
+    "instead of executed automatically. Return tool payloads as JSON strings in "
     "`payload_json`. Do not include repo placeholders such as repo:CURRENT or "
     "repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies the repo. "
     "For a request like 'check out the latest PR', use GitHub PR search/list tools first, then "
@@ -1452,6 +1556,22 @@ _TOOL_DESCRIPTIONS = {
     "github.repo.get": {
         "name": "GitHub Repo Metadata",
         "description": "Read repository metadata through the authorized domain GitHub connection.",
+    },
+    "github.repo.list": {
+        "name": "GitHub Repo List",
+        "description": "List repositories for an authorized owner or organization.",
+    },
+    "github.repo.create": {
+        "name": "GitHub Repo Create",
+        "description": "Create a new GitHub repository after approval.",
+    },
+    "github.file.get": {
+        "name": "GitHub File Read",
+        "description": "Read a specific repository file or directory from an authorized repo/ref.",
+    },
+    "github.file.search": {
+        "name": "GitHub File Search",
+        "description": "Search for files within the authorized repository.",
     },
     "github.issue.search": {
         "name": "GitHub Issue Search",
@@ -1571,6 +1691,22 @@ _SEED_AGENTS = [
             "github.repo.get": {
                 "permission": "read",
                 "description": "Inspect Maestro repository metadata.",
+            },
+            "github.repo.list": {
+                "permission": "read",
+                "description": "List authorized GitHub repositories.",
+            },
+            "github.repo.create": {
+                "permission": "use",
+                "description": "Create GitHub repositories when approved.",
+            },
+            "github.file.get": {
+                "permission": "read",
+                "description": "Read files from authorized GitHub repositories.",
+            },
+            "github.file.search": {
+                "permission": "read",
+                "description": "Search files in authorized GitHub repositories.",
             },
             "github.issue.search": {
                 "permission": "read",

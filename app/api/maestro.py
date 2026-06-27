@@ -2,10 +2,11 @@ from typing import Any
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
     MaestroOrchestratorService,
@@ -27,6 +28,8 @@ class MaestroRespondBody(BaseModel):
 
 class MaestroRunBody(BaseModel):
     execute_llm: bool = True
+    auto_tool_loop: bool = False
+    max_tool_iterations: int = Field(default=2, ge=1, le=4)
 
 
 class MaestroSessionMessage(BaseModel):
@@ -37,6 +40,10 @@ class MaestroSessionMessage(BaseModel):
 class MaestroSessionCloseBody(BaseModel):
     messages: list[MaestroSessionMessage]
     plan_id: uuid.UUID | None = None
+
+
+class MaestroToolRejectBody(BaseModel):
+    reason: str | None = None
 
 
 @router.post("/plan")
@@ -124,10 +131,49 @@ def run_maestro_plan(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     try:
-        run = MaestroOrchestratorService(db).run_plan(plan_id, execute_llm=body.execute_llm)
+        run = MaestroOrchestratorService(db).run_plan(
+            plan_id,
+            execute_llm=body.execute_llm,
+            auto_tool_loop=body.auto_tool_loop,
+            max_tool_iterations=body.max_tool_iterations,
+        )
     except MaestroOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"run": _run_payload(run)}
+
+
+@router.post("/tool-calls/{tool_call_id}/approve")
+def approve_maestro_tool_call(
+    tool_call_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = ToolExecutionService(db).approve_tool_call(tool_call_id)
+    except ToolExecutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "tool_call": tool_result_payload(result),
+        "message": _tool_approval_message(tool_result_payload(result), approved=True),
+    }
+
+
+@router.post("/tool-calls/{tool_call_id}/reject")
+def reject_maestro_tool_call(
+    tool_call_id: uuid.UUID,
+    body: MaestroToolRejectBody | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = ToolExecutionService(db).reject_tool_call(
+            tool_call_id,
+            reason=body.reason if body else None,
+        )
+    except ToolExecutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "tool_call": tool_result_payload(result),
+        "message": _tool_approval_message(tool_result_payload(result), approved=False),
+    }
 
 
 @router.post("/sessions/close")
@@ -279,6 +325,16 @@ def _side_chat_response(message: str, active_plan: MaestroPlan) -> str:
     )
 
 
+def _tool_approval_message(tool_call: dict[str, Any], *, approved: bool) -> str:
+    tool_name = tool_call.get("tool_name")
+    status = tool_call.get("status")
+    if approved and status == "complete":
+        return f"Approved and ran `{tool_name}` successfully."
+    if approved:
+        return f"I tried to run `{tool_name}` after approval, but it finished with status `{status}`: {tool_call.get('error_message') or 'no detail'}"
+    return f"Rejected `{tool_name}`. I did not run it."
+
+
 def _run_payload(run: MaestroRun) -> dict[str, Any]:
     return {
         "plan": _plan_payload(run.plan),
@@ -286,10 +342,12 @@ def _run_payload(run: MaestroRun) -> dict[str, Any]:
         "parent_task_id": run.parent_task_id,
         "synthesis_report_id": run.synthesis_report_id,
         "synthesis": run.synthesis,
+        "chat_summary": run.chat_summary,
         "staged_artifact_path": run.staged_artifact_path,
         "artifact_id": run.artifact_id,
         "scheduler": run.scheduler,
         "execution_stages": run.execution_stages,
+        "tool_activity": run.tool_activity,
         "error_message": run.error_message,
         "child_runs": [
             {
@@ -306,6 +364,7 @@ def _run_payload(run: MaestroRun) -> dict[str, Any]:
                 "output_text": child.output_text,
                 "error_message": child.error_message,
                 "tool_calls": child.tool_calls,
+                "tool_loop": child.tool_loop,
             }
             for child in run.child_runs
         ],

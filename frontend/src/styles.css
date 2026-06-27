@@ -1368,6 +1368,71 @@ h4 {
   font-weight: 800;
 }
 
+.tool-activity-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.tool-activity-list h4 {
+  margin: 0;
+  color: #26352e;
+  font-size: 0.92rem;
+}
+
+.tool-activity-item {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto;
+  gap: 4px 10px;
+  padding: 10px 12px;
+  background: #f8faf7;
+  border: 1px solid #d7ded7;
+  border-radius: 8px;
+}
+
+.tool-activity-complete {
+  background: #f4faf6;
+  border-color: #c7dfce;
+}
+
+.tool-activity-failed {
+  background: #fff7f3;
+  border-color: #edc9b6;
+}
+
+.tool-activity-approval_required {
+  background: #fffaf0;
+  border-color: #e8d39b;
+}
+
+.tool-activity-item strong {
+  color: #1f3429;
+}
+
+.tool-activity-item span {
+  color: #52605a;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+.tool-activity-item p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #405148;
+  line-height: 1.4;
+}
+
+.tool-approval-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-approval-actions button {
+  min-height: 34px;
+}
+
 .activity-dot {
   width: 10px;
   height: 10px;

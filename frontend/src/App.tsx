@@ -357,10 +357,21 @@ type MaestroRun = {
   parent_task_id: string;
   synthesis_report_id: string | null;
   synthesis: string;
+  chat_summary: string;
   staged_artifact_path: string | null;
   artifact_id: string | null;
   error_message: string | null;
   execution_stages: string[][];
+  tool_activity: Array<{
+    tool_call_id: string | null;
+    agent_key: string;
+    agent_name: string;
+    domain_key: string;
+    tool_name: string;
+    status: string;
+    error_message: string | null;
+    details: string;
+  }>;
   child_runs: Array<{
     run_id: string;
     status: string;
@@ -374,6 +385,8 @@ type MaestroRun = {
     execution_note: string;
     output_text: string | null;
     error_message: string | null;
+    tool_calls?: AgentRun["tool_calls"];
+    tool_loop?: Record<string, unknown>;
   }>;
 };
 
@@ -384,6 +397,17 @@ type MaestroRespond = {
   plan: MaestroPlan | null;
   chat_plan: MaestroPlan | null;
   active_plan: MaestroPlan | null;
+};
+
+type MaestroToolCallResponse = {
+  tool_call: {
+    id: string;
+    tool_name: string;
+    status: string;
+    error_message: string | null;
+    output_payload?: Record<string, unknown> | null;
+  };
+  message: string;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -613,7 +637,9 @@ export function App() {
   const [maestroRun, setMaestroRun] = useState<MaestroRun | null>(null);
   const [maestroStatus, setMaestroStatus] = useState("Ready");
   const [executeMaestroLLM, setExecuteMaestroLLM] = useState(true);
+  const [autoMaestroToolLoop, setAutoMaestroToolLoop] = useState(true);
   const [maestroBusy, setMaestroBusy] = useState(false);
+  const [busyToolCallId, setBusyToolCallId] = useState<string | null>(null);
   const [expandedWorkflowNodeId, setExpandedWorkflowNodeId] = useState<string | null>(null);
 
   const maestroPlanStages = useMemo(() => {
@@ -713,6 +739,99 @@ export function App() {
     };
   }, [maestroPlan, maestroRun, queueStages.length]);
 
+  const pendingToolApprovals = useMemo(
+    () =>
+      (maestroRun?.tool_activity ?? []).filter(
+        (activity) => activity.status === "approval_required" && activity.tool_call_id,
+      ),
+    [maestroRun],
+  );
+
+  const isApprovalMessage = (message: string) => {
+    const normalized = message.trim().toLowerCase();
+    return ["approved", "approve", "yes approved", "yes, approved", "go ahead", "run it"].includes(
+      normalized,
+    );
+  };
+
+  const applyToolCallUpdate = (toolCall: MaestroToolCallResponse["tool_call"]) => {
+    setMaestroRun((run) => {
+      if (!run) return run;
+      return {
+        ...run,
+        tool_activity: run.tool_activity.map((activity) =>
+          activity.tool_call_id === toolCall.id
+            ? {
+                ...activity,
+                status: toolCall.status,
+                error_message: toolCall.error_message,
+                details:
+                  toolCall.status === "complete"
+                    ? "Approved and executed."
+                    : toolCall.status === "rejected"
+                      ? "Rejected by Chris."
+                      : activity.details,
+              }
+            : activity,
+        ),
+      };
+    });
+  };
+
+  const approveToolCall = async (toolCallId: string) => {
+    setBusyToolCallId(toolCallId);
+    try {
+      const response = await apiJson<MaestroToolCallResponse>(
+        `/maestro/tool-calls/${toolCallId}/approve`,
+        { method: "POST" },
+      );
+      applyToolCallUpdate(response.tool_call);
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), sender: "maestro", content: response.message },
+      ]);
+      setMaestroStatus(response.tool_call.status === "complete" ? "Tool approved and run." : "Tool approval finished.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Tool approval failed.";
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), sender: "maestro", content: message },
+      ]);
+      setMaestroStatus(message);
+    } finally {
+      setBusyToolCallId(null);
+    }
+  };
+
+  const rejectToolCall = async (toolCallId: string) => {
+    setBusyToolCallId(toolCallId);
+    try {
+      const response = await apiJson<MaestroToolCallResponse>(
+        `/maestro/tool-calls/${toolCallId}/reject`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "Rejected from Maestro UI." }),
+        },
+      );
+      applyToolCallUpdate(response.tool_call);
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), sender: "maestro", content: response.message },
+      ]);
+      setMaestroStatus("Tool rejected.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Tool rejection failed.";
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), sender: "maestro", content: message },
+      ]);
+      setMaestroStatus(message);
+    } finally {
+      setBusyToolCallId(null);
+    }
+  };
+
   const sendMaestroMessage = async () => {
     if (!draftMessage.trim()) return;
     const outgoingMessage: ChatMessage = {
@@ -724,6 +843,24 @@ export function App() {
     setMaestroBusy(true);
     setChatMessages((messages) => [...messages, outgoingMessage]);
     setDraftMessage("");
+    if (isApprovalMessage(outgoingMessage.content) && pendingToolApprovals.length > 0) {
+      if (pendingToolApprovals.length === 1 && pendingToolApprovals[0].tool_call_id) {
+        await approveToolCall(pendingToolApprovals[0].tool_call_id);
+      } else {
+        setChatMessages((messages) => [
+          ...messages,
+          {
+            id: crypto.randomUUID(),
+            sender: "maestro",
+            content:
+              "I found multiple actions waiting for approval. Use the Approve button on the specific tool card you want me to run.",
+          },
+        ]);
+        setMaestroStatus("Multiple approvals pending.");
+      }
+      setMaestroBusy(false);
+      return;
+    }
     try {
       const response = await apiJson<MaestroRespond>("/maestro/respond", {
         method: "POST",
@@ -775,7 +912,11 @@ export function App() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ execute_llm: executeMaestroLLM }),
+          body: JSON.stringify({
+            execute_llm: executeMaestroLLM,
+            auto_tool_loop: autoMaestroToolLoop,
+            max_tool_iterations: 2,
+          }),
         },
       );
       setMaestroRun(response.run);
@@ -787,8 +928,8 @@ export function App() {
           sender: "maestro",
           content:
             response.run.status === "completed"
-              ? "The workflow completed. I synthesized the child agent outputs and staged the canonical workflow artifact for memory curation."
-              : `The workflow finished with status ${response.run.status}. Review the synthesis below.`,
+              ? response.run.chat_summary
+              : `The workflow finished with status ${response.run.status}.\n\n${response.run.chat_summary}`,
         },
       ]);
       setMaestroStatus(
@@ -1080,6 +1221,15 @@ export function App() {
                   />
                   Execute LLM
                 </label>
+                <label className="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={autoMaestroToolLoop}
+                    onChange={(event) => setAutoMaestroToolLoop(event.target.checked)}
+                    disabled={!executeMaestroLLM}
+                  />
+                  Let agents plan safe tools
+                </label>
                 <span>
                   {maestroBusy ? "Conducting" : maestroStatus}
                 </span>
@@ -1269,6 +1419,51 @@ export function App() {
                         <span key={`stage-${index}`}>
                           Stage {index + 1}: {stage.join(", ")}
                         </span>
+                      ))}
+                    </div>
+                  )}
+                  {maestroRun.tool_activity.length > 0 && (
+                    <div className="tool-activity-list">
+                      <h4>Tool activity</h4>
+                      {maestroRun.tool_activity.map((activity, index) => (
+                        <article
+                          className={`tool-activity-item tool-activity-${activity.status}`}
+                          key={`${activity.agent_key}-${activity.tool_name}-${index}`}
+                        >
+                          <strong>{activity.agent_name}</strong>
+                          <span>{activity.tool_name}</span>
+                          <p>
+                            {activity.status === "complete"
+                              ? "Completed"
+                              : activity.status === "approval_required"
+                                ? "Needs approval"
+                              : activity.status === "failed"
+                                ? "Failed"
+                                : activity.status === "rejected"
+                                  ? "Rejected"
+                                  : activity.status}
+                            {activity.details ? ` - ${activity.details}` : ""}
+                            {activity.error_message ? ` - ${activity.error_message}` : ""}
+                          </p>
+                          {activity.status === "approval_required" && activity.tool_call_id && (
+                            <div className="tool-approval-actions">
+                              <button
+                                className="planner-action"
+                                onClick={() => approveToolCall(activity.tool_call_id!)}
+                                disabled={busyToolCallId === activity.tool_call_id}
+                              >
+                                Approve
+                              </button>
+                              <button
+                                className="danger-action"
+                                onClick={() => rejectToolCall(activity.tool_call_id!)}
+                                disabled={busyToolCallId === activity.tool_call_id}
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          )}
+                        </article>
                       ))}
                     </div>
                   )}

@@ -191,13 +191,23 @@ The first autonomous tool loop is intentionally conservative:
    - `github.pr.get`
    - `github.pr.diff`
    - `github.pr.checks`
+   - `github.file.get`
+   - `github.file.search`
+   - `github.repo.list`
 6. Tool outputs are fed back into the final `llm.gateway` report call.
 
-Write/action tools such as `github.issue.create`, `github.issue.comment`, and
-`github.issue.update` are available as explicit tools but are blocked from autonomous execution
-until Maestro has a user-visible approval gate. This means a task like "check out the latest PR"
-can plan and execute read tools, while "create an issue" still needs explicit/manual execution in
-this phase.
+Write/action tools such as `github.issue.create`, `github.issue.comment`,
+`github.issue.update`, and `github.repo.create` are available as explicit tools but are not
+executed autonomously. If an agent-planned loop requests one, the runtime records an
+`approval_required` tool-call entry with the proposed payload and rationale. This means a task like
+"check out the latest PR" or "read the issue template" can plan and execute read tools, while
+"create an issue" or "create a repo" becomes a visible proposed action for Chris to approve before
+a later execution step runs it.
+
+Approval-required calls are durable `tool_calls` rows. They can be approved or rejected from the
+Maestro workflow result card; if exactly one approval is pending, Chris can also approve it from
+chat with a short approval message such as "approved". Approval executes the original proposed
+payload through the same tool adapter and updates the tool activity status.
 
 ### Tool Execution Contract
 
@@ -214,7 +224,7 @@ Persisted tool calls use this envelope:
 - `tool_name`: stable shared tool key, such as `llm.gateway` or `gmail.read`
 - `input_payload`: redacted/request-safe input summary
 - `output_payload`: redacted/result-safe output summary
-- `status`: `running`, `complete`, or `failed`
+- `status`: `running`, `complete`, `failed`, or `approval_required`
 - `error_message`: failure reason, if any
 - `started_at` / `completed_at`: timing/provenance
 
@@ -225,6 +235,10 @@ adapters at execution time without exposing it to prompts or ordinary API respon
 MVP GitHub tools:
 
 - `github.repo.get`: reads repository metadata.
+- `github.repo.list`: lists repositories for an authorized owner or organization.
+- `github.repo.create`: creates a new repository after approval.
+- `github.file.get`: reads a specific file or directory from the configured repository/ref.
+- `github.file.search`: searches for files in the configured repository.
 - `github.issue.search`: searches issues in the configured repository.
 - `github.issue.get`: reads a specific issue.
 - `github.issue.create`: creates an issue.
