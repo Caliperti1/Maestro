@@ -1190,6 +1190,34 @@ _TOOL_DESCRIPTIONS = {
         "name": "GitHub Issue Details",
         "description": "Read a specific GitHub issue from the authorized repository.",
     },
+    "github.issue.create": {
+        "name": "GitHub Issue Create",
+        "description": "Create a GitHub issue in the authorized repository.",
+    },
+    "github.issue.comment": {
+        "name": "GitHub Issue Comment",
+        "description": "Comment on a GitHub issue in the authorized repository.",
+    },
+    "github.issue.update": {
+        "name": "GitHub Issue Update",
+        "description": "Update title, body, labels, assignees, or milestone for a GitHub issue.",
+    },
+    "github.pr.search": {
+        "name": "GitHub PR Search",
+        "description": "Search pull requests in the authorized repository.",
+    },
+    "github.pr.get": {
+        "name": "GitHub PR Details",
+        "description": "Read pull request metadata, reviews, files, comments, and check rollups.",
+    },
+    "github.pr.diff": {
+        "name": "GitHub PR Diff",
+        "description": "Read pull request diff or changed filenames.",
+    },
+    "github.pr.checks": {
+        "name": "GitHub PR Checks",
+        "description": "Read CI/check status for a pull request.",
+    },
 }
 
 _SEED_AGENTS = [
@@ -1268,6 +1296,34 @@ _SEED_AGENTS = [
             "github.issue.get": {
                 "permission": "read",
                 "description": "Read Maestro GitHub issue details.",
+            },
+            "github.issue.create": {
+                "permission": "use",
+                "description": "Create Maestro GitHub issues when approved.",
+            },
+            "github.issue.comment": {
+                "permission": "use",
+                "description": "Comment on Maestro GitHub issues when approved.",
+            },
+            "github.issue.update": {
+                "permission": "use",
+                "description": "Update Maestro GitHub issue metadata when approved.",
+            },
+            "github.pr.search": {
+                "permission": "read",
+                "description": "Search Maestro GitHub pull requests.",
+            },
+            "github.pr.get": {
+                "permission": "read",
+                "description": "Read Maestro GitHub pull request details.",
+            },
+            "github.pr.diff": {
+                "permission": "read",
+                "description": "Read Maestro GitHub pull request diffs.",
+            },
+            "github.pr.checks": {
+                "permission": "read",
+                "description": "Read Maestro GitHub pull request check status.",
             },
         },
     },

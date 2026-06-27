@@ -193,22 +193,44 @@ Domain credentials are resolved through `tool_connections`; agent permissions do
 credentials. A future hardened credential service should provide the actual secret material to tool
 adapters at execution time without exposing it to prompts or ordinary API responses.
 
-MVP GitHub read tools:
+MVP GitHub tools:
 
 - `github.repo.get`: reads repository metadata.
 - `github.issue.search`: searches issues in the configured repository.
 - `github.issue.get`: reads a specific issue.
+- `github.issue.create`: creates an issue.
+- `github.issue.comment`: comments on an issue.
+- `github.issue.update`: updates issue title, body, labels, assignees, or milestone.
+- `github.pr.search`: searches pull requests.
+- `github.pr.get`: reads pull request metadata, files, comments, reviews, and status rollups.
+- `github.pr.diff`: reads pull request diffs or changed filenames.
+- `github.pr.checks`: reads pull request CI/check status.
 
-These currently use the local GitHub CLI session (`auth_type: gh_cli`) and expect a per-domain
-tool connection config like:
+These use the GitHub CLI (`auth_type: gh_cli`). A domain connection can rely on the active local
+`gh` account for quick local testing:
 
 ```json
 {"repo": "Caliperti1/Maestro"}
 ```
 
-This avoids storing a GitHub token in Maestro for the first read-only slice. Write tools, issue
-creation, PR creation, and CI inspection should reuse this contract but add stricter approval and
-credential rules.
+For real domain-specific accounts, prefer an environment-token reference:
+
+```json
+{
+  "repo": "Praxis-Defense/groundtruth",
+  "env_token_name": "PRAXIS_GITHUB_TOKEN"
+}
+```
+
+The adapter reads that environment variable and passes it to `gh` as `GH_TOKEN` for only that tool
+process. This avoids storing tokens in the database and avoids mutating the globally active `gh`
+account. `.env` is ignored by Git and is the right local place for these token variables until a
+hardened credential store exists.
+
+GitHub write tools are available as separate explicit tool keys. The current runtime can execute
+them when explicitly requested; the next agent-execution layer should add an LLM planning loop,
+approval gates for high-impact writes, retry handling, and user-visible proposed tool calls before
+autonomous write execution.
 
 ### Interaction Artifact Packager
 

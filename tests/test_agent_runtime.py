@@ -1,4 +1,5 @@
 from pathlib import Path
+from subprocess import CompletedProcess
 
 from sqlalchemy.orm import Session
 
@@ -10,10 +11,10 @@ from app.agents.runtime import (
     PromptPackageRequest,
 )
 from app.core.config import get_settings
-from app.db.models import Artifact, MemoryItem, ToolConnection
+from app.db.models import Artifact, MemoryItem, Task, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
-from app.tools.runtime import ToolExecutionContext
+from app.tools.runtime import GitHubCliToolAdapter, ToolExecutionContext
 
 
 def _seed_memory(session: Session) -> None:
@@ -254,6 +255,78 @@ def test_seed_agent_merge_adds_github_tool_permissions_to_existing_seed_agent(
     assert "github.issue.search" in [tool.key for tool in refreshed.allowed_tools]
     assert "github.issue.get" in [tool.key for tool in refreshed.allowed_tools]
     assert "github.repo.get" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.issue.create" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.pr.checks" in [tool.key for tool in refreshed.allowed_tools]
+
+
+def test_github_adapter_uses_domain_token_env_for_write_tools(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github.issue.create",
+        display_name="Maestro GitHub issue writer",
+        auth_type="gh_cli",
+        config={
+            "repo": "Caliperti1/Maestro",
+            "env_token_name": "MAESTRO_GITHUB_TOKEN_TEST",
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Create a test issue.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="github.issue.create").one()
+    monkeypatch.setenv("MAESTRO_GITHUB_TOKEN_TEST", "test-token")
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return CompletedProcess(args=args, returncode=0, stdout="https://github.com/x/y/issues/99\n")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = GitHubCliToolAdapter("github.issue.create").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"title": "Tool-generated issue", "body": "Created by a test."},
+    )
+
+    assert output["url"] == "https://github.com/x/y/issues/99"
+    assert captured["args"] == [
+        "gh",
+        "issue",
+        "create",
+        "--repo",
+        "Caliperti1/Maestro",
+        "--title",
+        "Tool-generated issue",
+        "--body",
+        "Created by a test.",
+    ]
+    assert captured["env"]["GH_TOKEN"] == "test-token"
 
 
 def test_run_agent_once_prepares_prompt_and_optional_staged_artifact(

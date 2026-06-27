@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -183,15 +184,30 @@ class GitHubCliToolAdapter:
         if shutil.which("gh") is None:
             raise ToolExecutionError("GitHub CLI (`gh`) is not installed or not on PATH.")
         repo = _repo_from(context.connection, payload)
+        env = _github_env(context.connection)
         if self.key == "github.repo.get":
-            return self._repo_get(repo)
+            return self._repo_get(repo, env=env)
         if self.key == "github.issue.search":
-            return self._issue_search(repo, payload)
+            return self._issue_search(repo, payload, env=env)
         if self.key == "github.issue.get":
-            return self._issue_get(repo, payload)
+            return self._issue_get(repo, payload, env=env)
+        if self.key == "github.issue.create":
+            return self._issue_create(repo, payload, env=env)
+        if self.key == "github.issue.comment":
+            return self._issue_comment(repo, payload, env=env)
+        if self.key == "github.issue.update":
+            return self._issue_update(repo, payload, env=env)
+        if self.key == "github.pr.search":
+            return self._pr_search(repo, payload, env=env)
+        if self.key == "github.pr.get":
+            return self._pr_get(repo, payload, env=env)
+        if self.key == "github.pr.diff":
+            return self._pr_diff(repo, payload, env=env)
+        if self.key == "github.pr.checks":
+            return self._pr_checks(repo, payload, env=env)
         raise ToolExecutionError(f"Unsupported GitHub tool: {self.key}")
 
-    def _repo_get(self, repo: str) -> dict[str, Any]:
+    def _repo_get(self, repo: str, *, env: dict[str, str]) -> dict[str, Any]:
         return {
             "repo": repo,
             "result": _run_gh_json(
@@ -201,11 +217,18 @@ class GitHubCliToolAdapter:
                     repo,
                     "--json",
                     "nameWithOwner,description,defaultBranchRef,url,isPrivate",
-                ]
+                ],
+                env=env,
             ),
         }
 
-    def _issue_search(self, repo: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _issue_search(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
         query = str(payload.get("query") or "").strip()
         state = str(payload.get("state") or "open").strip() or "open"
         limit = _bounded_int(payload.get("limit"), default=10, minimum=1, maximum=30)
@@ -228,10 +251,16 @@ class GitHubCliToolAdapter:
             "query": query,
             "state": state,
             "limit": limit,
-            "issues": _run_gh_json(args),
+            "issues": _run_gh_json(args, env=env),
         }
 
-    def _issue_get(self, repo: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _issue_get(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
         number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
         return {
             "repo": repo,
@@ -245,15 +274,184 @@ class GitHubCliToolAdapter:
                     repo,
                     "--json",
                     "number,title,state,body,labels,url,author,createdAt,updatedAt",
-                ]
+                ],
+                env=env,
             ),
         }
+
+    def _issue_create(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        title = _required_text(payload, "title")
+        body = str(payload.get("body") or "")
+        args = ["issue", "create", "--repo", repo, "--title", title, "--body", body]
+        for label in _string_list(payload.get("labels")):
+            args.extend(["--label", label])
+        for assignee in _string_list(payload.get("assignees")):
+            args.extend(["--assignee", assignee])
+        milestone = str(payload.get("milestone") or "").strip()
+        if milestone:
+            args.extend(["--milestone", milestone])
+        url = _run_gh_text(args, env=env).strip()
+        return {"repo": repo, "url": url, "title": title}
+
+    def _issue_comment(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        body = _required_text(payload, "body")
+        _run_gh_text(["issue", "comment", str(number), "--repo", repo, "--body", body], env=env)
+        return {"repo": repo, "number": number, "commented": True}
+
+    def _issue_update(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        args = ["issue", "edit", str(number), "--repo", repo]
+        title = str(payload.get("title") or "").strip()
+        body = payload.get("body")
+        if title:
+            args.extend(["--title", title])
+        if body is not None:
+            args.extend(["--body", str(body)])
+        for label in _string_list(payload.get("add_labels")):
+            args.extend(["--add-label", label])
+        for label in _string_list(payload.get("remove_labels")):
+            args.extend(["--remove-label", label])
+        for assignee in _string_list(payload.get("add_assignees")):
+            args.extend(["--add-assignee", assignee])
+        for assignee in _string_list(payload.get("remove_assignees")):
+            args.extend(["--remove-assignee", assignee])
+        milestone = str(payload.get("milestone") or "").strip()
+        if milestone:
+            args.extend(["--milestone", milestone])
+        if len(args) <= 5:
+            raise ToolExecutionError("GitHub issue update requires at least one field to change.")
+        _run_gh_text(args, env=env)
+        return {"repo": repo, "number": number, "updated": True}
+
+    def _pr_search(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        state = str(payload.get("state") or "open").strip() or "open"
+        query = str(payload.get("query") or "").strip()
+        limit = _bounded_int(payload.get("limit"), default=10, minimum=1, maximum=30)
+        args = [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            state,
+            "--limit",
+            str(limit),
+            "--json",
+            "number,title,state,isDraft,labels,url,updatedAt,author,headRefName,baseRefName",
+        ]
+        if query:
+            args.extend(["--search", query])
+        return {
+            "repo": repo,
+            "query": query,
+            "state": state,
+            "limit": limit,
+            "prs": _run_gh_json(args, env=env),
+        }
+
+    def _pr_get(self, repo: str, payload: dict[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
+        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        return {
+            "repo": repo,
+            "number": number,
+            "pr": _run_gh_json(
+                [
+                    "pr",
+                    "view",
+                    str(number),
+                    "--repo",
+                    repo,
+                    "--json",
+                    (
+                        "number,title,state,isDraft,body,labels,url,author,createdAt,updatedAt,"
+                        "headRefName,baseRefName,reviewDecision,mergeStateStatus,mergeable,"
+                        "statusCheckRollup,files,comments,reviews"
+                    ),
+                ],
+                env=env,
+            ),
+        }
+
+    def _pr_diff(self, repo: str, payload: dict[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
+        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        args = ["pr", "diff", str(number), "--repo", repo, "--color", "never"]
+        if bool(payload.get("name_only")):
+            args.append("--name-only")
+        elif bool(payload.get("patch")):
+            args.append("--patch")
+        diff = _run_gh_text(args, env=env)
+        max_chars = _bounded_int(payload.get("max_chars"), default=20000, minimum=1000, maximum=60000)
+        return {
+            "repo": repo,
+            "number": number,
+            "truncated": len(diff) > max_chars,
+            "diff": diff[:max_chars],
+        }
+
+    def _pr_checks(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        checks = _run_gh_json(
+            [
+                "pr",
+                "checks",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "bucket,completedAt,description,event,link,name,startedAt,state,workflow",
+            ],
+            env=env,
+            allowed_exit_codes={0, 8},
+        )
+        return {"repo": repo, "number": number, "checks": checks}
 
 
 def default_tool_adapters() -> dict[str, ToolAdapter]:
     return {
         key: GitHubCliToolAdapter(key)
-        for key in ("github.repo.get", "github.issue.search", "github.issue.get")
+        for key in (
+            "github.repo.get",
+            "github.issue.search",
+            "github.issue.get",
+            "github.issue.create",
+            "github.issue.comment",
+            "github.issue.update",
+            "github.pr.search",
+            "github.pr.get",
+            "github.pr.diff",
+            "github.pr.checks",
+        )
     }
 
 
@@ -280,21 +478,55 @@ def _repo_from(connection: ToolConnection | None, payload: dict[str, Any]) -> st
     return repo
 
 
-def _run_gh_json(args: list[str]) -> Any:
+def _github_env(connection: ToolConnection | None) -> dict[str, str]:
+    env = dict(os.environ)
+    if connection is None:
+        return env
+    config = connection.config or {}
+    token_env_name = str(config.get("env_token_name") or "").strip()
+    if token_env_name:
+        token = os.environ.get(token_env_name)
+        if not token:
+            raise ToolExecutionError(f"GitHub token env var is not set: {token_env_name}")
+        env["GH_TOKEN"] = token
+    token = str(config.get("token") or "").strip()
+    if token:
+        env["GH_TOKEN"] = token
+    return env
+
+
+def _run_gh_json(
+    args: list[str],
+    *,
+    env: dict[str, str],
+    allowed_exit_codes: set[int] | None = None,
+) -> Any:
+    output = _run_gh_text(args, env=env, allowed_exit_codes=allowed_exit_codes)
+    if not output.strip():
+        return None
+    return json.loads(output)
+
+
+def _run_gh_text(
+    args: list[str],
+    *,
+    env: dict[str, str],
+    allowed_exit_codes: set[int] | None = None,
+) -> str:
     completed = subprocess.run(
         ["gh", *args],
         check=False,
         capture_output=True,
         text=True,
         timeout=30,
+        env=env,
     )
-    if completed.returncode != 0:
+    allowed = allowed_exit_codes or {0}
+    if completed.returncode not in allowed:
         raise ToolExecutionError(
             (completed.stderr or completed.stdout or "GitHub CLI failed.").strip()
         )
-    if not completed.stdout.strip():
-        return None
-    return json.loads(completed.stdout)
+    return completed.stdout
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -314,3 +546,20 @@ def _redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             redacted[key] = value
     return redacted
+
+
+def _required_text(payload: dict[str, Any], key: str) -> str:
+    value = str(payload.get(key) or "").strip()
+    if not value:
+        raise ToolExecutionError(f"GitHub tool requires `{key}`.")
+    return value
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []

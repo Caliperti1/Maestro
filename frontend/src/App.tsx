@@ -1544,10 +1544,10 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
           role_prompt: rolePrompt,
           current_action: currentAction,
           tool_permissions: Object.fromEntries(
-            Object.entries(toolPermissions).map(([key, permission]) => [
+            Object.keys(toolPermissions).map((key) => [
               key,
               {
-                permission,
+                permission: "use",
                 description: tools.find((tool) => tool.key === key)?.description ?? "",
               },
             ]),
@@ -1834,21 +1834,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
                       />
                       <span>{tool.name}</span>
                     </label>
-                    <select
-                      value={toolPermissions[tool.key] ?? "use"}
-                      disabled={!(tool.key in toolPermissions)}
-                      onChange={(event) =>
-                        setToolPermissions((current) => ({
-                          ...current,
-                          [tool.key]: event.target.value,
-                        }))
-                      }
-                    >
-                      <option value="use">Use</option>
-                      <option value="read">Read</option>
-                      <option value="write">Write</option>
-                      <option value="admin">Admin</option>
-                    </select>
+                    <small>{tool.description}</small>
                   </div>
                 ))}
               </div>
@@ -2023,7 +2009,14 @@ function ToolsWorkspace() {
     setConnectionAuthType(selectedTool.key.startsWith("github.") ? "gh_cli" : "service");
     setConnectionConfig(
       selectedTool.key.startsWith("github.")
-        ? JSON.stringify({ repo: "Caliperti1/Maestro" }, null, 2)
+        ? JSON.stringify(
+            {
+              repo: "Caliperti1/Maestro",
+              env_token_name: "",
+            },
+            null,
+            2,
+          )
         : "{}",
     );
   }, [connectionDomain, connections, selectedTool?.key]);
