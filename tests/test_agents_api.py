@@ -278,6 +278,37 @@ def test_run_once_endpoint_prepares_stubbed_run(
     assert payload["staged_artifact_path"] is not None
 
 
+def test_run_once_endpoint_accepts_explicit_dry_run_tool_request(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/agents/maestro-introspection-agent/run-once",
+        json={
+            "task_instruction": "Check GitHub issues for Maestro tool integration.",
+            "query_text": "GitHub tool integration",
+            "use_semantic": False,
+            "execute_llm": False,
+            "tool_requests": [
+                {
+                    "tool_key": "github.issue.search",
+                    "payload": {"query": "tool integration", "limit": 3},
+                    "dry_run": True,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["run"]
+    assert payload["status"] == "prepared"
+    assert payload["tool_calls"][0]["tool_name"] == "github.issue.search"
+    assert payload["tool_calls"][0]["status"] == "complete"
+    assert payload["tool_calls"][0]["output_payload"]["dry_run"] is True
+
+
 def test_agent_tasks_endpoint_lists_run_once_tasks(
     session: Session,
     tmp_path: Path,

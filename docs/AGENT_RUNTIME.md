@@ -125,7 +125,9 @@ Expected:
 Manual run once is the first execution envelope. It selects an agent, assembles the prompt package,
 retrieves scoped memory, resolves tool access, calls the LLM gateway, records task/tool/report
 provenance, and optionally stages an interaction artifact for memory curation. Set
-`execute_llm: false` to prepare/debug the package without making a provider call.
+`execute_llm: false` to prepare/debug the package without making a provider call. Explicit
+`tool_requests` can be provided for MVP tool execution; the runtime executes those tools first,
+records their `tool_calls`, appends the results to the assembled prompt, and then calls the LLM.
 
 API:
 
@@ -143,7 +145,8 @@ curl -s http://localhost:8000/agents/praxis-planning-agent/run-once \
     "query_text": "Praxis partner brief",
     "use_semantic": true,
     "stage_interaction": true,
-    "execute_llm": true
+    "execute_llm": true,
+    "tool_requests": []
   }'
 ```
 
@@ -154,6 +157,7 @@ Expected:
 - `prompt_package` matches the prompt aggregation contract
 - `task_id` is set for the manual run
 - `tool_calls` includes the `llm.gateway` call when `execute_llm` is true
+- `tool_calls` includes any explicit tools requested before `llm.gateway`
 - `report_id` and `output_text` are set when execution succeeds
 - `scheduler.status` is `stubbed`
 - if `stage_interaction` is true, a package lands in `maestro_dropbox/<domain>/inbox`
@@ -168,7 +172,15 @@ without individual agents fighting over the same capabilities.
 
 ### Tool Execution Contract
 
-Tool calls should use a consistent envelope:
+Tool calls use a consistent adapter contract:
+
+- `ToolExecutionRequest`: agent key, tool key, payload, dry-run flag
+- `ToolExecutionContext`: session, domain, assigned agent, task, domain tool connection
+- `ToolAdapter.execute(context, payload)`: returns a JSON-safe output payload
+- `ToolExecutionService`: validates agent permission, resolves the domain connection, persists the
+  `tool_calls` row, and stores the adapter result or failure
+
+Persisted tool calls use this envelope:
 
 - `tool_name`: stable shared tool key, such as `llm.gateway` or `gmail.read`
 - `input_payload`: redacted/request-safe input summary
@@ -180,6 +192,23 @@ Tool calls should use a consistent envelope:
 Domain credentials are resolved through `tool_connections`; agent permissions do not store or own
 credentials. A future hardened credential service should provide the actual secret material to tool
 adapters at execution time without exposing it to prompts or ordinary API responses.
+
+MVP GitHub read tools:
+
+- `github.repo.get`: reads repository metadata.
+- `github.issue.search`: searches issues in the configured repository.
+- `github.issue.get`: reads a specific issue.
+
+These currently use the local GitHub CLI session (`auth_type: gh_cli`) and expect a per-domain
+tool connection config like:
+
+```json
+{"repo": "Caliperti1/Maestro"}
+```
+
+This avoids storing a GitHub token in Maestro for the first read-only slice. Write tools, issue
+creation, PR creation, and CI inspection should reuse this contract but add stricter approval and
+credential rules.
 
 ### Interaction Artifact Packager
 

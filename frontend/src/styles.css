@@ -961,6 +961,19 @@ h4 {
   line-height: 1.45;
 }
 
+.tool-call-preview {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  background: #ffffff;
+  border: 1px solid #d8e5da;
+  border-radius: 8px;
+}
+
+.tool-call-preview p {
+  margin: 0;
+}
+
 .admin-form textarea,
 .admin-panel textarea {
   min-height: 120px;

@@ -28,6 +28,11 @@ from app.memory.retrieval import (
     MemoryContextBundleRequest,
     MemoryRetrievalService,
 )
+from app.tools.runtime import (
+    ToolExecutionRequest,
+    ToolExecutionService,
+    tool_result_payload,
+)
 
 PromptCaller = Literal["maestro", "user", "system"]
 
@@ -120,6 +125,13 @@ class PromptPackageRequest:
 
 
 @dataclass(frozen=True)
+class AgentToolRequest:
+    tool_key: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    dry_run: bool = False
+
+
+@dataclass(frozen=True)
 class PromptPackage:
     agent: AgentSpec
     task_instruction: str
@@ -194,6 +206,18 @@ class AgentRegistryService:
         for seed in _SEED_AGENTS:
             existing = repo.get_by_key(seed["key"])
             if existing is not None:
+                capabilities = dict(existing.capabilities or {})
+                if not capabilities.get("manual_tool_permissions"):
+                    merged_permissions = dict(existing.tool_permissions or {})
+                    changed = False
+                    for tool_key, permission in seed["tool_permissions"].items():
+                        if tool_key not in merged_permissions:
+                            merged_permissions[tool_key] = permission
+                            changed = True
+                    if changed:
+                        existing.tool_permissions = merged_permissions
+                        self.session.commit()
+                        self.session.refresh(existing)
                 created_or_existing.append(existing)
                 continue
             domain = domain_repo.get_by_key(seed["domain_key"])
@@ -377,6 +401,7 @@ class AgentRegistryService:
             capabilities["scheduled_actions"] = scheduled_actions
         if tool_permissions is not None:
             agent.tool_permissions = tool_permissions
+            capabilities["manual_tool_permissions"] = True
         if is_active is not None:
             agent.is_active = is_active
         agent.capabilities = capabilities
@@ -601,10 +626,17 @@ class AgentRegistryService:
 
 
 class PromptAggregationService:
-    def __init__(self, session: Session, *, llm_client: LLMClient | None = None):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        llm_client: LLMClient | None = None,
+        tool_adapters: dict[str, Any] | None = None,
+    ):
         self.session = session
         self.registry = AgentRegistryService(session)
         self.llm_client = llm_client
+        self.tool_adapters = tool_adapters
 
     def build_prompt_package(self, request: PromptPackageRequest) -> PromptPackage:
         spec = self.registry.get_spec(request.agent_key)
@@ -687,6 +719,7 @@ class PromptAggregationService:
         *,
         stage_interaction: bool = False,
         execute_llm: bool = True,
+        tool_requests: list[AgentToolRequest] | None = None,
         parent_task_id: uuid.UUID | None = None,
         source_type: str = "manual_run_once",
         workflow_key: str = "agent.run_once",
@@ -712,6 +745,13 @@ class PromptAggregationService:
                 "query_text": request.query_text,
                 "execute_llm": execute_llm,
                 "stage_interaction": stage_interaction,
+                "requested_tools": [
+                    {
+                        "tool_key": tool_request.tool_key,
+                        "dry_run": tool_request.dry_run,
+                    }
+                    for tool_request in (tool_requests or [])
+                ],
             },
             started_at=datetime.now(UTC) if execute_llm else None,
         )
@@ -727,8 +767,28 @@ class PromptAggregationService:
         report_id: str | None = None
         status = "prepared"
 
+        if tool_requests:
+            tool_service = ToolExecutionService(self.session, adapters=self.tool_adapters)
+            for tool_request in tool_requests:
+                result = tool_service.execute_for_task(
+                    ToolExecutionRequest(
+                        agent_key=package.agent.key,
+                        tool_key=tool_request.tool_key,
+                        payload=tool_request.payload,
+                        dry_run=tool_request.dry_run,
+                    ),
+                    task=task,
+                )
+                tool_call_payloads.append(tool_result_payload(result))
+
         if execute_llm:
             llm_client = self.llm_client
+            assembled_prompt = package.assembled_prompt
+            if tool_call_payloads:
+                assembled_prompt = (
+                    f"{assembled_prompt}\n\n## Tool Results\n"
+                    f"{json.dumps(tool_call_payloads, indent=2)}"
+                )
             tool_call = ToolCall(
                 task_id=task.id,
                 agent_id=package.agent.id,
@@ -736,7 +796,7 @@ class PromptAggregationService:
                 input_payload={
                     "provider": getattr(llm_client, "provider", "configured"),
                     "model": package.agent.model_profile,
-                    "prompt_chars": len(package.assembled_prompt),
+                    "prompt_chars": len(assembled_prompt),
                 },
                 status="running",
                 started_at=datetime.now(UTC),
@@ -764,7 +824,7 @@ class PromptAggregationService:
                         "assembled prompt exactly, stay within your domain, respect the tool "
                         "manifest, and produce the requested structured output."
                     ),
-                    input_text=package.assembled_prompt,
+                    input_text=assembled_prompt,
                 )
                 tool_call.status = "complete"
                 tool_call.output_payload = {
@@ -841,6 +901,7 @@ class PromptAggregationService:
             task.output_payload = {
                 "run_id": run_id,
                 "prepared_prompt_chars": len(package.assembled_prompt),
+                "tool_call_count": len(tool_call_payloads),
             }
             self._set_agent_current_action(
                 package.agent.key,
@@ -1111,6 +1172,18 @@ _TOOL_DESCRIPTIONS = {
             "Read repository issues, pull requests, files, and CI context when authorized."
         ),
     },
+    "github.repo.get": {
+        "name": "GitHub Repo Metadata",
+        "description": "Read repository metadata through the authorized domain GitHub connection.",
+    },
+    "github.issue.search": {
+        "name": "GitHub Issue Search",
+        "description": "Search GitHub issues in the authorized repository.",
+    },
+    "github.issue.get": {
+        "name": "GitHub Issue Details",
+        "description": "Read a specific GitHub issue from the authorized repository.",
+    },
 }
 
 _SEED_AGENTS = [
@@ -1177,6 +1250,18 @@ _SEED_AGENTS = [
             "github.read": {
                 "permission": "read",
                 "description": "Inspect Maestro GitHub context when authorized.",
+            },
+            "github.repo.get": {
+                "permission": "read",
+                "description": "Inspect Maestro repository metadata.",
+            },
+            "github.issue.search": {
+                "permission": "read",
+                "description": "Search Maestro GitHub issues.",
+            },
+            "github.issue.get": {
+                "permission": "read",
+                "description": "Read Maestro GitHub issue details.",
             },
         },
     },

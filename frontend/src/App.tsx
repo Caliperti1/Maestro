@@ -254,6 +254,7 @@ type AgentRun = {
     tool_name: string;
     status: string;
     error_message: string | null;
+    output_payload?: Record<string, unknown> | null;
   }>;
   scheduler?: {
     status: string;
@@ -1447,6 +1448,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
   const [currentAction, setCurrentAction] = useState("");
   const [toolPermissions, setToolPermissions] = useState<Record<string, string>>({});
   const [promptTask, setPromptTask] = useState("Prepare a concise domain brief.");
+  const [toolRequestJson, setToolRequestJson] = useState("[]");
   const [promptPreview, setPromptPreview] = useState<PromptPackage | null>(null);
   const [runPreview, setRunPreview] = useState<AgentRun | null>(null);
   const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
@@ -1650,6 +1652,10 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     if (!selectedAgent) return;
     setBusy(true);
     try {
+      const parsedToolRequests = JSON.parse(toolRequestJson || "[]");
+      if (!Array.isArray(parsedToolRequests)) {
+        throw new Error("Tool requests JSON must be an array.");
+      }
       const response = await apiJson<{ run: AgentRun }>(`/agents/${selectedAgent.key}/run-once`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1659,6 +1665,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
           use_semantic: true,
           stage_interaction: stageRunArtifact,
           execute_llm: true,
+          tool_requests: parsedToolRequests,
         }),
       });
       setRunPreview(response.run);
@@ -1898,6 +1905,14 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
             Task instruction
             <input value={promptTask} onChange={(event) => setPromptTask(event.target.value)} />
           </label>
+          <label>
+            Tool requests JSON
+            <textarea
+              value={toolRequestJson}
+              onChange={(event) => setToolRequestJson(event.target.value)}
+              placeholder='[{"tool_key":"github.issue.search","payload":{"query":"tool integration","limit":5}}]'
+            />
+          </label>
           <button
             className="planner-action"
             onClick={generatePrompt}
@@ -1930,9 +1945,15 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
             {runPreview.report_id && <p>Report: {runPreview.report_id}</p>}
             <p>Scheduler: {runPreview.scheduler?.status ?? "unknown"}</p>
             {(runPreview.tool_calls ?? []).map((toolCall) => (
-              <p key={toolCall.id}>
-                {toolCall.tool_name}: {toolCall.status}
-              </p>
+              <div key={toolCall.id} className="tool-call-preview">
+                <p>
+                  {toolCall.tool_name}: {toolCall.status}
+                </p>
+                {toolCall.error_message && <p>{toolCall.error_message}</p>}
+                {toolCall.output_payload && (
+                  <pre>{JSON.stringify(toolCall.output_payload, null, 2)}</pre>
+                )}
+              </div>
             ))}
             {runPreview.error_message && <p>{runPreview.error_message}</p>}
             {runPreview.staged_artifact_path && (
@@ -1999,8 +2020,12 @@ function ToolsWorkspace() {
       return;
     }
     setConnectionName(`${domainLabels[connectionDomain] ?? connectionDomain} ${selectedTool.name}`);
-    setConnectionAuthType("service");
-    setConnectionConfig("{}");
+    setConnectionAuthType(selectedTool.key.startsWith("github.") ? "gh_cli" : "service");
+    setConnectionConfig(
+      selectedTool.key.startsWith("github.")
+        ? JSON.stringify({ repo: "Caliperti1/Maestro" }, null, 2)
+        : "{}",
+    );
   }, [connectionDomain, connections, selectedTool?.key]);
 
   useEffect(() => {
@@ -2159,6 +2184,7 @@ function ToolsWorkspace() {
                   onChange={(event) => setConnectionAuthType(event.target.value)}
                 >
                   <option value="service">Service</option>
+                  <option value="gh_cli">GitHub CLI</option>
                   <option value="api_key">API key</option>
                   <option value="oauth">OAuth</option>
                   <option value="login_password">Login + password</option>
