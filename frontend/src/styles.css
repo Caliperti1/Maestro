@@ -356,9 +356,8 @@ h4 {
 .composer textarea {
   min-width: 0;
   min-height: 24px;
-  max-height: 160px;
-  resize: vertical;
-  overflow-y: auto;
+  resize: none;
+  overflow: hidden;
   border: 0;
   outline: 0;
 }

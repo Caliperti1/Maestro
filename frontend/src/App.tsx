@@ -1048,11 +1048,16 @@ export function App() {
                 <MessageSquareText size={18} />
                 <textarea
                   value={draftMessage}
-                  onChange={(event) => setDraftMessage(event.target.value)}
+                  onChange={(event) => {
+                    setDraftMessage(event.target.value);
+                    event.currentTarget.style.height = "auto";
+                    event.currentTarget.style.height = `${event.currentTarget.scrollHeight}px`;
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
                       sendMaestroMessage();
+                      event.currentTarget.style.height = "auto";
                     }
                   }}
                   placeholder="Ask Maestro to plan and coordinate..."
