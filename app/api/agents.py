@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.agents.runtime import (
+    AgentToolRequest,
     AgentRuntimeError,
     AgentRegistryService,
     InteractionArtifactPackager,
@@ -69,9 +70,16 @@ class ToolConnectionBody(BaseModel):
     is_active: bool = True
 
 
+class AgentToolRequestBody(BaseModel):
+    tool_key: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    dry_run: bool = False
+
+
 class AgentRunOnceBody(PromptPackageBody):
     stage_interaction: bool = False
     execute_llm: bool = True
+    tool_requests: list[AgentToolRequestBody] = Field(default_factory=list)
 
 
 class InteractionArtifactBody(BaseModel):
@@ -309,6 +317,14 @@ def run_agent_once(
             ),
             stage_interaction=body.stage_interaction,
             execute_llm=body.execute_llm,
+            tool_requests=[
+                AgentToolRequest(
+                    tool_key=tool_request.tool_key,
+                    payload=tool_request.payload,
+                    dry_run=tool_request.dry_run,
+                )
+                for tool_request in body.tool_requests
+            ],
         )
     except AgentRuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

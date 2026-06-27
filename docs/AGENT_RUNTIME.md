@@ -125,7 +125,9 @@ Expected:
 Manual run once is the first execution envelope. It selects an agent, assembles the prompt package,
 retrieves scoped memory, resolves tool access, calls the LLM gateway, records task/tool/report
 provenance, and optionally stages an interaction artifact for memory curation. Set
-`execute_llm: false` to prepare/debug the package without making a provider call.
+`execute_llm: false` to prepare/debug the package without making a provider call. Explicit
+`tool_requests` can be provided for MVP tool execution; the runtime executes those tools first,
+records their `tool_calls`, appends the results to the assembled prompt, and then calls the LLM.
 
 API:
 
@@ -143,7 +145,8 @@ curl -s http://localhost:8000/agents/praxis-planning-agent/run-once \
     "query_text": "Praxis partner brief",
     "use_semantic": true,
     "stage_interaction": true,
-    "execute_llm": true
+    "execute_llm": true,
+    "tool_requests": []
   }'
 ```
 
@@ -154,6 +157,7 @@ Expected:
 - `prompt_package` matches the prompt aggregation contract
 - `task_id` is set for the manual run
 - `tool_calls` includes the `llm.gateway` call when `execute_llm` is true
+- `tool_calls` includes any explicit tools requested before `llm.gateway`
 - `report_id` and `output_text` are set when execution succeeds
 - `scheduler.status` is `stubbed`
 - if `stage_interaction` is true, a package lands in `maestro_dropbox/<domain>/inbox`
@@ -168,7 +172,15 @@ without individual agents fighting over the same capabilities.
 
 ### Tool Execution Contract
 
-Tool calls should use a consistent envelope:
+Tool calls use a consistent adapter contract:
+
+- `ToolExecutionRequest`: agent key, tool key, payload, dry-run flag
+- `ToolExecutionContext`: session, domain, assigned agent, task, domain tool connection
+- `ToolAdapter.execute(context, payload)`: returns a JSON-safe output payload
+- `ToolExecutionService`: validates agent permission, resolves the domain connection, persists the
+  `tool_calls` row, and stores the adapter result or failure
+
+Persisted tool calls use this envelope:
 
 - `tool_name`: stable shared tool key, such as `llm.gateway` or `gmail.read`
 - `input_payload`: redacted/request-safe input summary
@@ -180,6 +192,47 @@ Tool calls should use a consistent envelope:
 Domain credentials are resolved through `tool_connections`; agent permissions do not store or own
 credentials. A future hardened credential service should provide the actual secret material to tool
 adapters at execution time without exposing it to prompts or ordinary API responses.
+
+MVP GitHub tools:
+
+- `github.repo.get`: reads repository metadata.
+- `github.issue.search`: searches issues in the configured repository.
+- `github.issue.get`: reads a specific issue.
+- `github.issue.create`: creates an issue.
+- `github.issue.comment`: comments on an issue.
+- `github.issue.update`: updates issue title, body, labels, assignees, or milestone.
+- `github.pr.search`: searches pull requests.
+- `github.pr.get`: reads pull request metadata, files, comments, reviews, and status rollups.
+- `github.pr.diff`: reads pull request diffs or changed filenames.
+- `github.pr.checks`: reads pull request CI/check status.
+
+These use the GitHub CLI (`auth_type: gh_cli`). A domain connection can rely on the active local
+`gh` account for quick local testing:
+
+```json
+{"repo": "Caliperti1/Maestro"}
+```
+
+For real domain-specific accounts, prefer an environment-token reference:
+
+```json
+{
+  "repo": "Praxis-Defense/groundtruth",
+  "env_token_name": "PRAXIS_GITHUB_TOKEN"
+}
+```
+
+Store this once as the domain connection for the provider key `github`. Every `github.*` tool in
+that domain inherits the shared GitHub connection unless a more specific per-tool connection exists.
+The adapter reads the configured environment variable and passes it to `gh` as `GH_TOKEN` for only
+that tool process. This avoids storing tokens in the database and avoids mutating the globally
+active `gh` account. `.env` is ignored by Git and is the right local place for these token variables
+until a hardened credential store exists.
+
+GitHub write tools are available as separate explicit tool keys. The current runtime can execute
+them when explicitly requested; the next agent-execution layer should add an LLM planning loop,
+approval gates for high-impact writes, retry handling, and user-visible proposed tool calls before
+autonomous write execution.
 
 ### Interaction Artifact Packager
 

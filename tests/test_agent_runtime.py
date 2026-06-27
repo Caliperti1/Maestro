@@ -1,17 +1,20 @@
 from pathlib import Path
+from subprocess import CompletedProcess
 
 from sqlalchemy.orm import Session
 
 from app.agents.runtime import (
+    AgentToolRequest,
     AgentRegistryService,
     InteractionArtifactPackager,
     PromptAggregationService,
     PromptPackageRequest,
 )
 from app.core.config import get_settings
-from app.db.models import Artifact, MemoryItem, ToolConnection
-from app.db.repositories import DomainRepository
+from app.db.models import Artifact, MemoryItem, Task, ToolConnection
+from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
+from app.tools.runtime import GitHubCliToolAdapter, ToolExecutionContext
 
 
 def _seed_memory(session: Session) -> None:
@@ -70,6 +73,21 @@ class FakeAgentLLMClient:
         return "## Summary\nPraxis partner run completed.\n\n## Next Steps\nSend the brief."
 
 
+class FakeToolAwareAgentLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def structured_response(self, **kwargs):
+        raise AssertionError("Agent run should use text_response.")
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "Tool Results" in input_text
+        assert "already been executed by Maestro" in input_text
+        assert "do not emit synthetic tool-call markup" in instructions
+        assert "Implement GitHub tools" in input_text
+        return "## Summary\nReviewed matching GitHub issues.\n\n## Next Steps\nPick the next issue."
+
+
 class FailingAgentLLMClient:
     provider = "test"
     model = "test-agent-model"
@@ -79,6 +97,29 @@ class FailingAgentLLMClient:
 
     def text_response(self, *, instructions: str, input_text: str) -> str:
         raise RuntimeError("provider rejected the request")
+
+
+class FakeGitHubIssueSearchAdapter:
+    key = "github.issue.search"
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        assert context.domain.key == "maestro-development"
+        assert context.connection is not None
+        assert payload["query"] == "tool integration"
+        return {
+            "repo": context.connection.config["repo"],
+            "issues": [
+                {
+                    "number": 42,
+                    "title": "Implement GitHub tools",
+                    "state": "OPEN",
+                }
+            ],
+        }
 
 
 def test_seed_agent_registry_returns_domain_scoped_specs(session: Session) -> None:
@@ -193,6 +234,201 @@ def test_tool_manifest_can_attach_domain_connections(session: Session) -> None:
     assert memory_tool.auth_type == "service"
 
 
+def test_tool_manifest_can_inherit_provider_level_github_connection(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro", "env_token_name": "MAESTRO_GITHUB_TOKEN"},
+    )
+
+    spec = registry.get_spec("maestro-introspection-agent")
+    tools = registry.list_tools()
+
+    issue_search = next(tool for tool in spec.allowed_tools if tool.key == "github.issue.search")
+    assert issue_search.connection_id is not None
+    assert issue_search.auth_type == "gh_cli"
+    registry_issue_search = next(tool for tool in tools if tool.key == "github.issue.search")
+    assert "maestro-development" in registry_issue_search.connected_domains
+
+
+def test_seed_agent_merge_adds_github_tool_permissions_to_existing_seed_agent(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    assert agent is not None
+    agent.tool_permissions = {
+        "memory.context_bundle": {
+            "permission": "read",
+            "description": "Legacy seed permissions.",
+        }
+    }
+    session.commit()
+
+    refreshed = registry.get_spec("maestro-introspection-agent")
+
+    assert "memory.context_bundle" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.issue.search" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.issue.get" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.repo.get" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.issue.create" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.pr.checks" in [tool.key for tool in refreshed.allowed_tools]
+
+
+def test_github_adapter_uses_domain_token_env_for_write_tools(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github.issue.create",
+        display_name="Maestro GitHub issue writer",
+        auth_type="gh_cli",
+        config={
+            "repo": "Caliperti1/Maestro",
+            "env_token_name": "MAESTRO_GITHUB_TOKEN_TEST",
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Create a test issue.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="github.issue.create").one()
+    monkeypatch.setenv("MAESTRO_GITHUB_TOKEN_TEST", "test-token")
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return CompletedProcess(args=args, returncode=0, stdout="https://github.com/x/y/issues/99\n")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = GitHubCliToolAdapter("github.issue.create").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"title": "Tool-generated issue", "body": "Created by a test."},
+    )
+
+    assert output["url"] == "https://github.com/x/y/issues/99"
+    assert captured["args"] == [
+        "gh",
+        "issue",
+        "create",
+        "--repo",
+        "Caliperti1/Maestro",
+        "--title",
+        "Tool-generated issue",
+        "--body",
+        "Created by a test.",
+    ]
+    assert captured["env"]["GH_TOKEN"] == "test-token"
+
+
+def test_github_adapter_can_resolve_token_ref_from_dotenv(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.chdir(tmp_path)
+    Path(".env").write_text("MAESTRO_GITHUB_TOKEN_TEST=dotenv-token\n", encoding="utf-8")
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={
+            "repo": "Caliperti1/Maestro",
+            "env_token_name": "MAESTRO_GITHUB_TOKEN_TEST",
+        },
+    )
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github.repo.get",
+        display_name="Stale per-tool GitHub repo metadata",
+        auth_type="gh_cli",
+        config={
+            "repo": "Wrong/Repo",
+            "env_token_name": "MISSING_STALE_TOKEN",
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Read repo metadata.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout='{"nameWithOwner":"Caliperti1/Maestro"}\n',
+        )
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeToolAwareAgentLLMClient(),
+        tool_adapters=None,
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Use repo metadata.",
+            use_semantic=False,
+        ),
+        tool_requests=[AgentToolRequest(tool_key="github.repo.get")],
+        execute_llm=False,
+    )
+
+    assert result.tool_calls[0]["status"] == "complete"
+    assert captured["env"]["GH_TOKEN"] == "dotenv-token"
+    assert captured["args"][3] == "Caliperti1/Maestro"
+    get_settings.cache_clear()
+
+
 def test_run_agent_once_prepares_prompt_and_optional_staged_artifact(
     session: Session,
     tmp_path: Path,
@@ -247,6 +483,50 @@ def test_run_agent_once_executes_llm_and_records_task_report_and_tool_call(
     assert result.tool_calls[0]["status"] == "complete"
     assert result.staged_artifact_path is not None
     assert Path(result.staged_artifact_path).is_file()
+
+
+def test_run_agent_once_executes_authorized_tool_before_llm(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    _seed_memory(session)
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github.issue.search",
+        display_name="Maestro GitHub Issues",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeToolAwareAgentLLMClient(),
+        tool_adapters={"github.issue.search": FakeGitHubIssueSearchAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Review GitHub issues related to tool integration.",
+            use_semantic=False,
+        ),
+        tool_requests=[
+            AgentToolRequest(
+                tool_key="github.issue.search",
+                payload={"query": "tool integration", "limit": 3},
+            )
+        ],
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    assert result.tool_calls[0]["tool_name"] == "github.issue.search"
+    assert result.tool_calls[0]["status"] == "complete"
+    assert result.tool_calls[0]["output_payload"]["issues"][0]["number"] == 42
+    assert result.tool_calls[1]["tool_name"] == "llm.gateway"
+    assert "Reviewed matching GitHub issues" in result.output_text
 
 
 def test_run_agent_once_records_failed_llm_call(session: Session) -> None:

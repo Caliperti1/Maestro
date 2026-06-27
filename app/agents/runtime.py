@@ -28,6 +28,11 @@ from app.memory.retrieval import (
     MemoryContextBundleRequest,
     MemoryRetrievalService,
 )
+from app.tools.runtime import (
+    ToolExecutionRequest,
+    ToolExecutionService,
+    tool_result_payload,
+)
 
 PromptCaller = Literal["maestro", "user", "system"]
 
@@ -120,6 +125,13 @@ class PromptPackageRequest:
 
 
 @dataclass(frozen=True)
+class AgentToolRequest:
+    tool_key: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    dry_run: bool = False
+
+
+@dataclass(frozen=True)
 class PromptPackage:
     agent: AgentSpec
     task_instruction: str
@@ -194,6 +206,18 @@ class AgentRegistryService:
         for seed in _SEED_AGENTS:
             existing = repo.get_by_key(seed["key"])
             if existing is not None:
+                capabilities = dict(existing.capabilities or {})
+                if not capabilities.get("manual_tool_permissions"):
+                    merged_permissions = dict(existing.tool_permissions or {})
+                    changed = False
+                    for tool_key, permission in seed["tool_permissions"].items():
+                        if tool_key not in merged_permissions:
+                            merged_permissions[tool_key] = permission
+                            changed = True
+                    if changed:
+                        existing.tool_permissions = merged_permissions
+                        self.session.commit()
+                        self.session.refresh(existing)
                 created_or_existing.append(existing)
                 continue
             domain = domain_repo.get_by_key(seed["domain_key"])
@@ -377,6 +401,7 @@ class AgentRegistryService:
             capabilities["scheduled_actions"] = scheduled_actions
         if tool_permissions is not None:
             agent.tool_permissions = tool_permissions
+            capabilities["manual_tool_permissions"] = True
         if is_active is not None:
             agent.is_active = is_active
         agent.capabilities = capabilities
@@ -435,6 +460,8 @@ class AgentRegistryService:
             if domain is None:
                 continue
             connected_domains.setdefault(connection.tool_key, set()).add(domain.key)
+            for inherited_tool_key in _inherited_connection_tool_keys(connection.tool_key):
+                connected_domains.setdefault(inherited_tool_key, set()).add(domain.key)
 
         authorized_agents: dict[str, list[dict[str, str]]] = {}
         for agent in self.session.scalars(select(Agent).where(Agent.is_active.is_(True))).all():
@@ -586,6 +613,8 @@ class AgentRegistryService:
                 permission = str(value.get("permission") or "use")
                 description = str(value.get("description") or "")
             connection = connections.get(key)
+            if connection is None:
+                connection = connections.get(_provider_connection_key(key))
             manifest.append(
                 ToolManifestItem(
                     key=key,
@@ -601,10 +630,17 @@ class AgentRegistryService:
 
 
 class PromptAggregationService:
-    def __init__(self, session: Session, *, llm_client: LLMClient | None = None):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        llm_client: LLMClient | None = None,
+        tool_adapters: dict[str, Any] | None = None,
+    ):
         self.session = session
         self.registry = AgentRegistryService(session)
         self.llm_client = llm_client
+        self.tool_adapters = tool_adapters
 
     def build_prompt_package(self, request: PromptPackageRequest) -> PromptPackage:
         spec = self.registry.get_spec(request.agent_key)
@@ -687,6 +723,7 @@ class PromptAggregationService:
         *,
         stage_interaction: bool = False,
         execute_llm: bool = True,
+        tool_requests: list[AgentToolRequest] | None = None,
         parent_task_id: uuid.UUID | None = None,
         source_type: str = "manual_run_once",
         workflow_key: str = "agent.run_once",
@@ -712,6 +749,13 @@ class PromptAggregationService:
                 "query_text": request.query_text,
                 "execute_llm": execute_llm,
                 "stage_interaction": stage_interaction,
+                "requested_tools": [
+                    {
+                        "tool_key": tool_request.tool_key,
+                        "dry_run": tool_request.dry_run,
+                    }
+                    for tool_request in (tool_requests or [])
+                ],
             },
             started_at=datetime.now(UTC) if execute_llm else None,
         )
@@ -727,8 +771,32 @@ class PromptAggregationService:
         report_id: str | None = None
         status = "prepared"
 
+        if tool_requests:
+            tool_service = ToolExecutionService(self.session, adapters=self.tool_adapters)
+            for tool_request in tool_requests:
+                result = tool_service.execute_for_task(
+                    ToolExecutionRequest(
+                        agent_key=package.agent.key,
+                        tool_key=tool_request.tool_key,
+                        payload=tool_request.payload,
+                        dry_run=tool_request.dry_run,
+                    ),
+                    task=task,
+                )
+                tool_call_payloads.append(tool_result_payload(result))
+
         if execute_llm:
             llm_client = self.llm_client
+            assembled_prompt = package.assembled_prompt
+            if tool_call_payloads:
+                assembled_prompt = (
+                    f"{assembled_prompt}\n\n## Tool Results\n"
+                    "The following tool calls have already been executed by Maestro. "
+                    "Use these results as evidence in your report. Do not emit tool-call XML, "
+                    "JSON function-call requests, or instructions to call more tools; instead, "
+                    "state any additional tool access needed as an open question or next step.\n\n"
+                    f"{json.dumps(tool_call_payloads, indent=2)}"
+                )
             tool_call = ToolCall(
                 task_id=task.id,
                 agent_id=package.agent.id,
@@ -736,7 +804,7 @@ class PromptAggregationService:
                 input_payload={
                     "provider": getattr(llm_client, "provider", "configured"),
                     "model": package.agent.model_profile,
-                    "prompt_chars": len(package.assembled_prompt),
+                    "prompt_chars": len(assembled_prompt),
                 },
                 status="running",
                 started_at=datetime.now(UTC),
@@ -762,9 +830,11 @@ class PromptAggregationService:
                     instructions=(
                         "You are executing as a Maestro domain agent. Follow the provided "
                         "assembled prompt exactly, stay within your domain, respect the tool "
-                        "manifest, and produce the requested structured output."
+                        "manifest, and produce the requested structured output. Tool results, "
+                        "when present, have already been executed by Maestro; do not emit "
+                        "synthetic tool-call markup or function-call requests in your answer."
                     ),
-                    input_text=package.assembled_prompt,
+                    input_text=assembled_prompt,
                 )
                 tool_call.status = "complete"
                 tool_call.output_payload = {
@@ -841,6 +911,7 @@ class PromptAggregationService:
             task.output_payload = {
                 "run_id": run_id,
                 "prepared_prompt_chars": len(package.assembled_prompt),
+                "tool_call_count": len(tool_call_payloads),
             }
             self._set_agent_current_action(
                 package.agent.key,
@@ -1105,13 +1176,69 @@ _TOOL_DESCRIPTIONS = {
         "name": "LLM Gateway",
         "description": "Call the configured LLM provider through Maestro's shared gateway.",
     },
+    "github": {
+        "name": "GitHub",
+        "description": "Shared GitHub repository credentials/config inherited by GitHub tools.",
+    },
     "github.read": {
         "name": "GitHub Read",
         "description": (
             "Read repository issues, pull requests, files, and CI context when authorized."
         ),
     },
+    "github.repo.get": {
+        "name": "GitHub Repo Metadata",
+        "description": "Read repository metadata through the authorized domain GitHub connection.",
+    },
+    "github.issue.search": {
+        "name": "GitHub Issue Search",
+        "description": "Search GitHub issues in the authorized repository.",
+    },
+    "github.issue.get": {
+        "name": "GitHub Issue Details",
+        "description": "Read a specific GitHub issue from the authorized repository.",
+    },
+    "github.issue.create": {
+        "name": "GitHub Issue Create",
+        "description": "Create a GitHub issue in the authorized repository.",
+    },
+    "github.issue.comment": {
+        "name": "GitHub Issue Comment",
+        "description": "Comment on a GitHub issue in the authorized repository.",
+    },
+    "github.issue.update": {
+        "name": "GitHub Issue Update",
+        "description": "Update title, body, labels, assignees, or milestone for a GitHub issue.",
+    },
+    "github.pr.search": {
+        "name": "GitHub PR Search",
+        "description": "Search pull requests in the authorized repository.",
+    },
+    "github.pr.get": {
+        "name": "GitHub PR Details",
+        "description": "Read pull request metadata, reviews, files, comments, and check rollups.",
+    },
+    "github.pr.diff": {
+        "name": "GitHub PR Diff",
+        "description": "Read pull request diff or changed filenames.",
+    },
+    "github.pr.checks": {
+        "name": "GitHub PR Checks",
+        "description": "Read CI/check status for a pull request.",
+    },
 }
+
+
+def _provider_connection_key(tool_key: str) -> str:
+    if tool_key.startswith("github."):
+        return "github"
+    return tool_key
+
+
+def _inherited_connection_tool_keys(tool_key: str) -> list[str]:
+    if tool_key == "github":
+        return [key for key in _TOOL_DESCRIPTIONS if key.startswith("github.")]
+    return []
 
 _SEED_AGENTS = [
     {
@@ -1177,6 +1304,46 @@ _SEED_AGENTS = [
             "github.read": {
                 "permission": "read",
                 "description": "Inspect Maestro GitHub context when authorized.",
+            },
+            "github.repo.get": {
+                "permission": "read",
+                "description": "Inspect Maestro repository metadata.",
+            },
+            "github.issue.search": {
+                "permission": "read",
+                "description": "Search Maestro GitHub issues.",
+            },
+            "github.issue.get": {
+                "permission": "read",
+                "description": "Read Maestro GitHub issue details.",
+            },
+            "github.issue.create": {
+                "permission": "use",
+                "description": "Create Maestro GitHub issues when approved.",
+            },
+            "github.issue.comment": {
+                "permission": "use",
+                "description": "Comment on Maestro GitHub issues when approved.",
+            },
+            "github.issue.update": {
+                "permission": "use",
+                "description": "Update Maestro GitHub issue metadata when approved.",
+            },
+            "github.pr.search": {
+                "permission": "read",
+                "description": "Search Maestro GitHub pull requests.",
+            },
+            "github.pr.get": {
+                "permission": "read",
+                "description": "Read Maestro GitHub pull request details.",
+            },
+            "github.pr.diff": {
+                "permission": "read",
+                "description": "Read Maestro GitHub pull request diffs.",
+            },
+            "github.pr.checks": {
+                "permission": "read",
+                "description": "Read Maestro GitHub pull request check status.",
             },
         },
     },

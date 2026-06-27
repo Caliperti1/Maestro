@@ -904,7 +904,7 @@ h4 {
 
 .tool-picker-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   padding: 9px;
@@ -930,6 +930,11 @@ h4 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tool-picker-row small {
+  color: #68736d;
+  line-height: 1.35;
 }
 
 .run-preview {
@@ -959,6 +964,19 @@ h4 {
   border-radius: 8px;
   white-space: pre-wrap;
   line-height: 1.45;
+}
+
+.tool-call-preview {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  background: #ffffff;
+  border: 1px solid #d8e5da;
+  border-radius: 8px;
+}
+
+.tool-call-preview p {
+  margin: 0;
 }
 
 .admin-form textarea,
@@ -997,6 +1015,56 @@ h4 {
   gap: 10px;
   padding: 12px;
   background: #f9fbf8;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
+.tool-family-group {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-family-row {
+  grid-template-columns: minmax(0, 1fr) 38px;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+}
+
+.tool-family-main {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: transparent;
+  border: 0;
+}
+
+.tool-family-row > .icon-button {
+  align-self: stretch;
+  width: 38px;
+  height: auto;
+  border: 0;
+  border-left: 1px solid #dfe6df;
+  border-radius: 0;
+  background: #f4f7f3;
+}
+
+.expanded-icon {
+  transform: rotate(90deg);
+}
+
+.tool-family-children {
+  display: grid;
+  gap: 8px;
+  padding-left: 14px;
+  border-left: 2px solid #d9e1d9;
+}
+
+.tool-child-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  background: #ffffff;
   border: 1px solid #dfe6df;
   border-radius: 8px;
 }
