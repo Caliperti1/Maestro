@@ -1095,21 +1095,19 @@ class PromptAggregationService:
                             "rationale": requested_tool.get("rationale"),
                         }
                         iteration_trace["blocked"].append(blocked)
-                        blocked_payload = {
-                            "id": f"blocked-{uuid.uuid4()}",
-                            "tool_name": tool_key,
-                            "status": "approval_required",
-                            "error_message": blocked["reason"],
-                            "input_payload": {
-                                "payload": requested_tool.get("payload") or {},
-                                "rationale": requested_tool.get("rationale"),
-                            },
-                            "output_payload": {
-                                "approval_required": True,
-                                "safety_level": policy["level"],
-                                "reason": policy["reason"],
-                            },
-                        }
+                        proposed = tool_service.propose_for_task(
+                            ToolExecutionRequest(
+                                agent_key=package.agent.key,
+                                tool_key=tool_key,
+                                payload=requested_tool.get("payload") or {},
+                                dry_run=False,
+                            ),
+                            task=task,
+                            rationale=requested_tool.get("rationale"),
+                            safety_level=str(policy["level"]),
+                            reason=str(policy["reason"]),
+                        )
+                        blocked_payload = tool_result_payload(proposed)
                         executed_calls.append(blocked_payload)
                         prior_results.append(blocked_payload)
                         continue

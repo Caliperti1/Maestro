@@ -1787,6 +1787,7 @@ class MaestroOrchestratorService:
                 details = self._tool_activity_details(str(tool_name), output_payload)
                 activity.append(
                     {
+                        "tool_call_id": call.get("id"),
                         "agent_key": run.agent.key,
                         "agent_name": run.agent.name,
                         "domain_key": run.agent.domain_key,

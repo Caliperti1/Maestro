@@ -14,7 +14,12 @@ from app.core.config import get_settings
 from app.db.models import Artifact, MemoryItem, Task, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
-from app.tools.runtime import GitHubCliToolAdapter, ToolExecutionContext, _clean_github_search_query
+from app.tools.runtime import (
+    GitHubCliToolAdapter,
+    ToolExecutionContext,
+    ToolExecutionService,
+    _clean_github_search_query,
+)
 
 
 def _seed_memory(session: Session) -> None:
@@ -202,6 +207,23 @@ class FakeGitHubPrSearchAdapter:
                     "url": "https://github.com/Caliperti1/Maestro/pull/44",
                 }
             ],
+        }
+
+
+class FakeGitHubIssueCreateAdapter:
+    key = "github.issue.create"
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        assert context.domain.key == "maestro-development"
+        assert payload["title"] == "Test issue"
+        return {
+            "repo": context.connection.config["repo"] if context.connection else "Caliperti1/Maestro",
+            "url": "https://github.com/Caliperti1/Maestro/issues/123",
+            "title": payload["title"],
         }
 
 
@@ -934,6 +956,14 @@ def test_run_agent_once_blocks_auto_planned_write_tools_for_approval(
     assert blocked["status"] == "approval_required"
     assert blocked["output_payload"]["approval_required"] is True
     assert result.tool_loop["iterations"][0]["blocked"][0]["safety_level"] == "external_write"
+
+    approved = ToolExecutionService(
+        session,
+        adapters={"github.issue.create": FakeGitHubIssueCreateAdapter()},
+    ).approve_tool_call(blocked["id"])
+
+    assert approved.status == "complete"
+    assert approved.output["url"] == "https://github.com/Caliperti1/Maestro/issues/123"
 
 
 def test_run_agent_once_records_failed_llm_call(session: Session) -> None:

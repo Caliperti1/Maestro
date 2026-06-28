@@ -204,6 +204,11 @@ executed autonomously. If an agent-planned loop requests one, the runtime record
 "create an issue" or "create a repo" becomes a visible proposed action for Chris to approve before
 a later execution step runs it.
 
+Approval-required calls are durable `tool_calls` rows. They can be approved or rejected from the
+Maestro workflow result card; if exactly one approval is pending, Chris can also approve it from
+chat with a short approval message such as "approved". Approval executes the original proposed
+payload through the same tool adapter and updates the tool activity status.
+
 ### Tool Execution Contract
 
 Tool calls use a consistent adapter contract:
