@@ -124,6 +124,30 @@ class FakeAutoToolLoopLLMClient:
         return "## Summary\nLatest PR reviewed.\n\n## Findings\nPR #44 is ready for inspection."
 
 
+class FakeAutoWriteToolLoopLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        assert "proposed for Chris approval" in instructions
+        return {
+            "plan_summary": "Create a GitHub issue for Chris to approve.",
+            "requires_final_answer": True,
+            "tool_calls": [
+                {
+                    "tool_key": "github.issue.create",
+                    "payload_json": '{"title":"Test issue","body":"Created by agent"}',
+                    "rationale": "The task asks for a new GitHub issue.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "approval_required" in input_text
+        assert "github.issue.create" in input_text
+        return "## Summary\nI proposed a GitHub issue creation for approval."
+
+
 class FailingAgentLLMClient:
     provider = "test"
     model = "test-agent-model"
@@ -334,7 +358,11 @@ def test_seed_agent_merge_adds_github_tool_permissions_to_existing_seed_agent(
     assert "github.issue.search" in [tool.key for tool in refreshed.allowed_tools]
     assert "github.issue.get" in [tool.key for tool in refreshed.allowed_tools]
     assert "github.repo.get" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.repo.list" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.file.get" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.file.search" in [tool.key for tool in refreshed.allowed_tools]
     assert "github.issue.create" in [tool.key for tool in refreshed.allowed_tools]
+    assert "github.repo.create" in [tool.key for tool in refreshed.allowed_tools]
     assert "github.pr.checks" in [tool.key for tool in refreshed.allowed_tools]
 
 
@@ -406,6 +434,239 @@ def test_github_adapter_uses_domain_token_env_for_write_tools(
         "Created by a test.",
     ]
     assert captured["env"]["GH_TOKEN"] == "test-token"
+
+
+def test_github_adapter_reads_specific_file_from_repo(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Read issue template.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=(
+                '{"type":"file","name":"issue_template.md","path":".github/issue_template.md",'
+                '"sha":"abc123","size":16,"encoding":"base64","content":"SGVsbG8gdGVtcGxhdGU="}'
+            ),
+        )
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = GitHubCliToolAdapter("github.file.get").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"path": ".github/issue_template.md", "ref": "main"},
+    )
+
+    assert output["content"] == "Hello template"
+    assert output["path"] == ".github/issue_template.md"
+    assert captured["args"] == [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        "repos/Caliperti1/Maestro/contents/.github/issue_template.md?ref=main",
+    ]
+
+
+def test_github_adapter_searches_files_in_repo(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Search files.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=(
+                '{"total_count":1,"items":[{"name":"issue_template.md",'
+                '"path":".github/issue_template.md","sha":"abc123","html_url":"https://github/x",'
+                '"repository":{"full_name":"Caliperti1/Maestro"}}]}'
+            ),
+        )
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = GitHubCliToolAdapter("github.file.search").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"query": "issue_template", "path": ".github", "limit": 3},
+    )
+
+    assert output["files"][0]["path"] == ".github/issue_template.md"
+    assert captured["args"] == [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        "search/code",
+        "-f",
+        "q=issue_template repo:Caliperti1/Maestro path:.github",
+        "-f",
+        "per_page=3",
+    ]
+
+
+def test_github_adapter_lists_and_creates_repos_with_provider_connection(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"owner": "Caliperti1"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Manage repos.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["repo", "list"]:
+            return CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout='[{"name":"Maestro","nameWithOwner":"Caliperti1/Maestro"}]',
+            )
+        return CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="https://github.com/Caliperti1/new-irad\n",
+        )
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    listed = GitHubCliToolAdapter("github.repo.list").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"limit": 5},
+    )
+    created = GitHubCliToolAdapter("github.repo.create").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"name": "new-irad", "description": "Personal IRAD sandbox", "private": True},
+    )
+
+    assert listed["repos"][0]["nameWithOwner"] == "Caliperti1/Maestro"
+    assert created["repo"] == "Caliperti1/new-irad"
+    assert calls[0] == [
+        "gh",
+        "repo",
+        "list",
+        "Caliperti1",
+        "--limit",
+        "5",
+        "--json",
+        "name,nameWithOwner,description,isPrivate,url,updatedAt",
+    ]
+    assert calls[1] == [
+        "gh",
+        "repo",
+        "create",
+        "Caliperti1/new-irad",
+        "--private",
+        "--description",
+        "Personal IRAD sandbox",
+    ]
 
 
 def test_github_adapter_can_resolve_token_ref_from_dotenv(
@@ -638,6 +899,41 @@ def test_run_agent_once_can_auto_plan_safe_tool_calls_before_final_report(
     assert any(call["tool_name"] == "github.pr.search" for call in result.tool_calls)
     assert result.output_text is not None
     assert "Latest PR reviewed" in result.output_text
+
+
+def test_run_agent_once_blocks_auto_planned_write_tools_for_approval(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeAutoWriteToolLoopLLMClient(),
+        tool_adapters={},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Create a GitHub issue for the next tool platform task.",
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    blocked = [
+        call for call in result.tool_calls if call["tool_name"] == "github.issue.create"
+    ][0]
+    assert blocked["status"] == "approval_required"
+    assert blocked["output_payload"]["approval_required"] is True
+    assert result.tool_loop["iterations"][0]["blocked"][0]["safety_level"] == "external_write"
 
 
 def test_run_agent_once_records_failed_llm_call(session: Session) -> None:

@@ -2,7 +2,7 @@ from typing import Any
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -27,6 +27,8 @@ class MaestroRespondBody(BaseModel):
 
 class MaestroRunBody(BaseModel):
     execute_llm: bool = True
+    auto_tool_loop: bool = False
+    max_tool_iterations: int = Field(default=2, ge=1, le=4)
 
 
 class MaestroSessionMessage(BaseModel):
@@ -124,7 +126,12 @@ def run_maestro_plan(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     try:
-        run = MaestroOrchestratorService(db).run_plan(plan_id, execute_llm=body.execute_llm)
+        run = MaestroOrchestratorService(db).run_plan(
+            plan_id,
+            execute_llm=body.execute_llm,
+            auto_tool_loop=body.auto_tool_loop,
+            max_tool_iterations=body.max_tool_iterations,
+        )
     except MaestroOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"run": _run_payload(run)}
@@ -286,10 +293,12 @@ def _run_payload(run: MaestroRun) -> dict[str, Any]:
         "parent_task_id": run.parent_task_id,
         "synthesis_report_id": run.synthesis_report_id,
         "synthesis": run.synthesis,
+        "chat_summary": run.chat_summary,
         "staged_artifact_path": run.staged_artifact_path,
         "artifact_id": run.artifact_id,
         "scheduler": run.scheduler,
         "execution_stages": run.execution_stages,
+        "tool_activity": run.tool_activity,
         "error_message": run.error_message,
         "child_runs": [
             {
@@ -306,6 +315,7 @@ def _run_payload(run: MaestroRun) -> dict[str, Any]:
                 "output_text": child.output_text,
                 "error_message": child.error_message,
                 "tool_calls": child.tool_calls,
+                "tool_loop": child.tool_loop,
             }
             for child in run.child_runs
         ],

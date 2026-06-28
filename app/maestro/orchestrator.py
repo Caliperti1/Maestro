@@ -1,3 +1,4 @@
+import json
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -111,10 +112,12 @@ class MaestroRun:
     child_runs: list[AgentRunResult]
     synthesis_report_id: str | None
     synthesis: str
+    chat_summary: str
     staged_artifact_path: str | None
     artifact_id: str | None
     scheduler: dict[str, Any]
     execution_stages: list[list[str]]
+    tool_activity: list[dict[str, Any]]
     error_message: str | None = None
 
 
@@ -289,7 +292,14 @@ class MaestroOrchestratorService:
             self.session.commit()
         return staged.path
 
-    def run_plan(self, plan_id: uuid.UUID | str, *, execute_llm: bool = True) -> MaestroRun:
+    def run_plan(
+        self,
+        plan_id: uuid.UUID | str,
+        *,
+        execute_llm: bool = True,
+        auto_tool_loop: bool = False,
+        max_tool_iterations: int = 2,
+    ) -> MaestroRun:
         plan = self.get_plan(plan_id)
         parent_task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
         if parent_task is None:
@@ -393,6 +403,8 @@ class MaestroOrchestratorService:
                         subtask,
                         completed_outputs_by_work_item,
                         execute_llm=execute_llm,
+                        auto_tool_loop=auto_tool_loop,
+                        max_tool_iterations=max_tool_iterations,
                     )
                     child_runs.extend(run["attempts"])
                     final_run = run["final"]
@@ -417,7 +429,20 @@ class MaestroOrchestratorService:
             elif len(executable_subtasks) < len(plan.subtasks):
                 status = "blocked"
                 error_message = "Some queue items are waiting for blocking user input."
-            synthesis = self._synthesize(plan, child_runs, status=status, phase_syntheses=phase_syntheses)
+            tool_activity = self._tool_activity(child_runs)
+            chat_summary = self._chat_summary(
+                plan,
+                child_runs,
+                status=status,
+                tool_activity=tool_activity,
+            )
+            synthesis = self._synthesize(
+                plan,
+                child_runs,
+                status=status,
+                phase_syntheses=phase_syntheses,
+                tool_activity=tool_activity,
+            )
             report = self._write_synthesis_report(
                 parent_task,
                 plan,
@@ -425,6 +450,7 @@ class MaestroOrchestratorService:
                 synthesis,
                 status,
                 phase_syntheses=phase_syntheses,
+                tool_activity=tool_activity,
             )
             staged = self._stage_workflow_artifact(
                 parent_task,
@@ -445,6 +471,8 @@ class MaestroOrchestratorService:
                 "execution_stages": execution_stages,
                 "scheduler": dict((parent_task.input_payload or {}).get("scheduler", {})),
                 "phase_syntheses": phase_syntheses,
+                "tool_activity": tool_activity,
+                "chat_summary": chat_summary,
                 "synthesis_report_id": str(report.id),
                 "staged_artifact_path": staged.path,
                 "artifact_id": staged.artifact_id,
@@ -461,10 +489,12 @@ class MaestroOrchestratorService:
                 child_runs=child_runs,
                 synthesis_report_id=str(report.id),
                 synthesis=synthesis,
+                chat_summary=chat_summary,
                 staged_artifact_path=staged.path,
                 artifact_id=staged.artifact_id,
                 scheduler=dict((parent_task.input_payload or {}).get("scheduler", {})),
                 execution_stages=execution_stages,
+                tool_activity=tool_activity,
                 error_message=error_message,
             )
         except Exception as exc:
@@ -543,7 +573,7 @@ class MaestroOrchestratorService:
                 ),
                 planner_mode,
             )
-        except LLMClientError:
+        except Exception:
             return self._deterministic_decomposition(user_input, registry_snapshot), "deterministic"
 
     def _planning_memory_context(self, user_input: str) -> dict[str, Any]:
@@ -1306,6 +1336,8 @@ class MaestroOrchestratorService:
         completed_outputs_by_work_item: dict[str, str],
         *,
         execute_llm: bool,
+        auto_tool_loop: bool,
+        max_tool_iterations: int,
     ) -> dict[str, Any]:
         max_attempts = 2
         attempts: list[AgentRunResult] = []
@@ -1326,6 +1358,8 @@ class MaestroOrchestratorService:
                 ),
                 stage_interaction=False,
                 execute_llm=execute_llm,
+                auto_tool_loop=auto_tool_loop,
+                max_tool_iterations=max_tool_iterations,
                 parent_task_id=parent_task.id,
                 source_type="maestro_orchestrator",
                 workflow_key="maestro.generic.child",
@@ -1621,6 +1655,7 @@ class MaestroOrchestratorService:
         *,
         status: str,
         phase_syntheses: list[dict[str, Any]] | None = None,
+        tool_activity: list[dict[str, Any]] | None = None,
     ) -> str:
         lines = [
             f"# Maestro Synthesis: {plan.summary}",
@@ -1641,6 +1676,19 @@ class MaestroOrchestratorService:
                     "",
                 ]
             )
+        if tool_activity:
+            lines.extend(["## Tool Activity", ""])
+            for item in tool_activity:
+                details = item.get("details") or ""
+                lines.extend(
+                    [
+                        (
+                            f"- {item['agent_name']} used `{item['tool_name']}` "
+                            f"with status `{item['status']}`.{(' ' + details) if details else ''}"
+                        )
+                    ]
+                )
+            lines.append("")
         if phase_syntheses:
             lines.extend(["## Phase Syntheses", ""])
             for phase in phase_syntheses:
@@ -1698,6 +1746,7 @@ class MaestroOrchestratorService:
         synthesis: str,
         status: str,
         phase_syntheses: list[dict[str, Any]] | None = None,
+        tool_activity: list[dict[str, Any]] | None = None,
     ) -> Report:
         report = Report(
             task_id=parent_task.id,
@@ -1719,11 +1768,243 @@ class MaestroOrchestratorService:
                     for run in child_runs
                 ],
                 "phase_syntheses": phase_syntheses or [],
+                "tool_activity": tool_activity or [],
             },
         )
         self.session.add(report)
         self.session.flush()
         return report
+
+    def _tool_activity(self, child_runs: list[AgentRunResult]) -> list[dict[str, Any]]:
+        activity: list[dict[str, Any]] = []
+        for run in child_runs:
+            for call in run.tool_calls:
+                tool_name = call.get("tool_name")
+                if tool_name in {None, "llm.gateway"}:
+                    continue
+                raw_output_payload = call.get("output_payload") or {}
+                output_payload = raw_output_payload if isinstance(raw_output_payload, dict) else {}
+                details = self._tool_activity_details(str(tool_name), output_payload)
+                activity.append(
+                    {
+                        "agent_key": run.agent.key,
+                        "agent_name": run.agent.name,
+                        "domain_key": run.agent.domain_key,
+                        "tool_name": tool_name,
+                        "status": call.get("status"),
+                        "error_message": call.get("error_message"),
+                        "details": details,
+                    }
+                )
+        return activity
+
+    def _tool_activity_details(self, tool_name: str, output_payload: dict[str, Any]) -> str:
+        if tool_name == "llm.tool_planner":
+            summary = output_payload.get("plan_summary")
+            count = output_payload.get("tool_call_count")
+            if summary:
+                return f"Planner: {summary}"
+            if count is not None:
+                return f"Planner requested {count} tool call(s)."
+        if tool_name == "github.pr.search":
+            prs = output_payload.get("prs")
+            if isinstance(prs, list):
+                return f"Found {len(prs)} PR(s)."
+        if tool_name == "github.pr.get":
+            pr = output_payload.get("pr")
+            if isinstance(pr, dict):
+                number = pr.get("number")
+                title = pr.get("title")
+                if number and title:
+                    return f"Read PR #{number}: {title}."
+                if number:
+                    return f"Read PR #{number}."
+        if tool_name == "github.pr.diff":
+            files = output_payload.get("files")
+            if isinstance(files, list):
+                return f"Read diff for {len(files)} changed file(s)."
+            diff = output_payload.get("diff")
+            if isinstance(diff, str):
+                return f"Read diff ({len(diff)} chars)."
+        if tool_name == "github.pr.checks":
+            checks = output_payload.get("checks")
+            if isinstance(checks, list):
+                return f"Read {len(checks)} check(s)."
+            conclusion = output_payload.get("conclusion") or output_payload.get("state")
+            if conclusion:
+                return f"Checks: {conclusion}."
+        if tool_name == "github.issue.search":
+            issues = output_payload.get("issues")
+            if isinstance(issues, list):
+                return f"Found {len(issues)} issue(s)."
+        if tool_name == "github.issue.get":
+            issue = output_payload.get("issue")
+            if isinstance(issue, dict):
+                number = issue.get("number")
+                title = issue.get("title")
+                if number and title:
+                    return f"Read issue #{number}: {title}."
+        if output_payload.get("approval_required"):
+            reason = output_payload.get("reason")
+            return str(reason or "Requires Chris approval before execution.")
+        if tool_name == "github.repo.get":
+            repo = output_payload.get("name") or output_payload.get("repo")
+            if repo:
+                return f"Repository: {repo}."
+        if tool_name == "github.repo.list":
+            repos = output_payload.get("repos")
+            owner = output_payload.get("owner")
+            if isinstance(repos, list):
+                return f"Listed {len(repos)} repo(s){f' for {owner}' if owner else ''}."
+        if tool_name == "github.repo.create":
+            repo = output_payload.get("repo")
+            if repo:
+                return f"Repository creation proposed for {repo}."
+        if tool_name == "github.file.get":
+            path = output_payload.get("path")
+            file_type = output_payload.get("type")
+            if path:
+                return f"Read {file_type or 'file'} `{path}`."
+        if tool_name == "github.file.search":
+            files = output_payload.get("files")
+            if isinstance(files, list):
+                return f"Found {len(files)} matching file(s)."
+        return ""
+
+    def _chat_summary(
+        self,
+        plan: MaestroPlan,
+        child_runs: list[AgentRunResult],
+        *,
+        status: str,
+        tool_activity: list[dict[str, Any]],
+    ) -> str:
+        if not child_runs:
+            return f"I finished the workflow with status `{status}`, but no child agents produced reports."
+
+        parsed_outputs = [
+            parsed
+            for parsed in (self._parse_agent_output(run.output_text) for run in child_runs)
+            if parsed is not None
+        ]
+        primary = parsed_outputs[0] if parsed_outputs else {}
+        conversation = self._conversation_from_output(primary)
+        summary = primary.get("summary") if isinstance(primary.get("summary"), dict) else {}
+        latest_pr = summary.get("latest_pr") if isinstance(summary.get("latest_pr"), dict) else {}
+        change_summary = summary.get("change_summary")
+        ci_status = summary.get("ci_status")
+        manual_test = self._manual_test_summary(primary)
+        failed_tools = [
+            item
+            for item in tool_activity
+            if item.get("status") == "failed" and item.get("tool_name") != "llm.tool_planner"
+        ]
+        approval_tools = [
+            item
+            for item in tool_activity
+            if item.get("status") == "approval_required"
+        ]
+
+        lines: list[str] = []
+        if conversation:
+            lines.append(conversation)
+        elif latest_pr:
+            number = latest_pr.get("number")
+            title = latest_pr.get("title")
+            status_text = latest_pr.get("status")
+            if number and title:
+                line = f"I checked PR #{number}, `{title}`"
+                if status_text:
+                    line += f" ({status_text})"
+                line += "."
+                lines.append(line)
+        if not lines:
+            completed = sum(1 for run in child_runs if run.status == "completed")
+            lines.append(
+                f"I ran {len(child_runs)} delegated agent task(s); {completed} completed and the workflow status is `{status}`."
+            )
+
+        if conversation:
+            pass
+        elif isinstance(change_summary, str) and change_summary.strip():
+            lines.append(change_summary.strip())
+        else:
+            agent_summaries = [
+                (run.output_text or run.execution_note or "").strip()
+                for run in child_runs
+                if (run.output_text or run.execution_note)
+                and not self._looks_like_json(run.output_text or "")
+            ]
+            if agent_summaries:
+                lines.append(self._plain_text_preview(agent_summaries[0], max_chars=450))
+
+        if isinstance(ci_status, str) and ci_status.strip():
+            lines.append(f"Validation note: {ci_status.strip()}")
+        elif failed_tools:
+            failed = "; ".join(
+                f"{item.get('tool_name')}: {item.get('error_message')}"
+                for item in failed_tools[:3]
+            )
+            lines.append(f"Tool note: {failed}")
+
+        if approval_tools:
+            proposed = ", ".join(str(item.get("tool_name")) for item in approval_tools[:3])
+            lines.append(f"I did not run {proposed}; those actions need your approval first.")
+
+        if manual_test:
+            lines.append(f"Manual test I recommend: {manual_test}")
+
+        return "\n\n".join(lines)
+
+    def _conversation_from_output(self, parsed_output: dict[str, Any]) -> str | None:
+        for key in ("conversation", "conversational_summary", "chat_summary"):
+            value = parsed_output.get(key)
+            if isinstance(value, str) and value.strip():
+                return self._plain_text_preview(value.strip(), max_chars=900)
+        return None
+
+    def _parse_agent_output(self, output_text: str | None) -> dict[str, Any] | None:
+        if not output_text:
+            return None
+        try:
+            parsed = json.loads(output_text)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _manual_test_summary(self, parsed_output: dict[str, Any]) -> str | None:
+        next_steps = parsed_output.get("next_steps")
+        if not isinstance(next_steps, list):
+            return None
+        for item in next_steps:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "")
+            if "manual" not in title.lower() and "test" not in title.lower():
+                continue
+            steps = item.get("steps")
+            expected = item.get("expected_outcome")
+            step_text = ""
+            if isinstance(steps, list) and steps:
+                step_text = " ".join(str(step).strip() for step in steps[:3] if str(step).strip())
+            expected_text = ""
+            if isinstance(expected, list) and expected:
+                expected_text = " Expect " + "; ".join(
+                    str(outcome).strip() for outcome in expected[:2] if str(outcome).strip()
+                )
+            summary = f"{title}. {step_text}{expected_text}".strip()
+            return self._plain_text_preview(summary, max_chars=600) if summary else None
+        return None
+
+    def _looks_like_json(self, value: str) -> bool:
+        stripped = value.strip()
+        return stripped.startswith("{") or stripped.startswith("[")
+
+    def _plain_text_preview(self, value: str, *, max_chars: int) -> str:
+        text = " ".join(value.replace("```", "").split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1].rstrip() + "…"
 
     def _stage_workflow_artifact(
         self,
