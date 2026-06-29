@@ -586,8 +586,10 @@ class GitHubCliToolAdapter:
     ) -> dict[str, Any]:
         title = _required_text(payload, "title")
         body = str(payload.get("body") or "")
+        requested_labels = _string_list(payload.get("labels"))
+        labels = self._existing_labels(repo, requested_labels, env=env)
         args = ["issue", "create", "--repo", repo, "--title", title, "--body", body]
-        for label in _string_list(payload.get("labels")):
+        for label in labels["existing"]:
             args.extend(["--label", label])
         for assignee in _string_list(payload.get("assignees")):
             args.extend(["--assignee", assignee])
@@ -595,7 +597,49 @@ class GitHubCliToolAdapter:
         if milestone:
             args.extend(["--milestone", milestone])
         url = _run_gh_text(args, env=env).strip()
-        return {"repo": repo, "url": url, "title": title}
+        return {
+            "repo": repo,
+            "url": url,
+            "title": title,
+            "labels": labels["existing"],
+            "skipped_labels": labels["missing"],
+        }
+
+    def _existing_labels(
+        self,
+        repo: str,
+        requested_labels: list[str],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, list[str]]:
+        if not requested_labels:
+            return {"existing": [], "missing": []}
+        raw_labels = _run_gh_json(
+            [
+                "label",
+                "list",
+                "--repo",
+                repo,
+                "--limit",
+                "200",
+                "--json",
+                "name",
+            ],
+            env=env,
+        )
+        existing_names = {
+            str(item.get("name") or "").lower()
+            for item in raw_labels or []
+            if isinstance(item, dict)
+        }
+        existing: list[str] = []
+        missing: list[str] = []
+        for label in requested_labels:
+            if label.lower() in existing_names:
+                existing.append(label)
+            else:
+                missing.append(label)
+        return {"existing": existing, "missing": missing}
 
     def _issue_comment(
         self,

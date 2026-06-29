@@ -2034,6 +2034,14 @@ class MaestroOrchestratorService:
                 title = issue.get("title")
                 if number and title:
                     return f"Read issue #{number}: {title}."
+        if tool_name == "github.issue.create":
+            url = output_payload.get("url")
+            skipped_labels = output_payload.get("skipped_labels")
+            if url:
+                details = f"Created issue: {url}."
+                if isinstance(skipped_labels, list) and skipped_labels:
+                    details += f" Skipped missing label(s): {', '.join(str(label) for label in skipped_labels)}."
+                return details
         if output_payload.get("approval_required"):
             reason = output_payload.get("reason")
             return str(reason or "Requires Chris approval before execution.")

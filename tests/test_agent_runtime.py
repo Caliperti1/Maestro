@@ -458,6 +458,74 @@ def test_github_adapter_uses_domain_token_env_for_write_tools(
     assert captured["env"]["GH_TOKEN"] == "test-token"
 
 
+def test_github_adapter_skips_missing_issue_labels(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github.issue.create",
+        display_name="Maestro GitHub issue writer",
+        auth_type="gh_cli",
+        config={
+            "repo": "Caliperti1/Maestro",
+            "env_token_name": "MAESTRO_GITHUB_TOKEN_TEST",
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Create a test issue.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="github.issue.create").one()
+    monkeypatch.setenv("MAESTRO_GITHUB_TOKEN_TEST", "test-token")
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured_create_args: list[str] = []
+
+    def fake_run(args, **kwargs):
+        if args[:3] == ["gh", "label", "list"]:
+            return CompletedProcess(args=args, returncode=0, stdout='[{"name":"enhancement"}]')
+        captured_create_args.extend(args)
+        return CompletedProcess(args=args, returncode=0, stdout="https://github.com/x/y/issues/99\n")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = GitHubCliToolAdapter("github.issue.create").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {
+            "title": "Tool-generated issue",
+            "body": "Created by a test.",
+            "labels": ["enhancement", "maestro-development"],
+        },
+    )
+
+    assert output["url"] == "https://github.com/x/y/issues/99"
+    assert output["labels"] == ["enhancement"]
+    assert output["skipped_labels"] == ["maestro-development"]
+    assert "--label" in captured_create_args
+    assert "enhancement" in captured_create_args
+    assert "maestro-development" not in captured_create_args
+
+
 def test_github_adapter_reads_specific_file_from_repo(
     session: Session,
     monkeypatch,
