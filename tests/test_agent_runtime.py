@@ -949,7 +949,7 @@ def test_run_agent_once_blocks_auto_planned_write_tools_for_approval(
         execute_llm=True,
     )
 
-    assert result.status == "completed"
+    assert result.status == "blocked"
     blocked = [
         call for call in result.tool_calls if call["tool_name"] == "github.issue.create"
     ][0]

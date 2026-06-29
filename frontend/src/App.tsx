@@ -408,6 +408,7 @@ type MaestroToolCallResponse = {
     output_payload?: Record<string, unknown> | null;
   };
   message: string;
+  run?: MaestroRun | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -783,14 +784,32 @@ export function App() {
     try {
       const response = await apiJson<MaestroToolCallResponse>(
         `/maestro/tool-calls/${toolCallId}/approve`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            execute_llm: true,
+            auto_tool_loop: true,
+            max_tool_iterations: 2,
+          }),
+        },
       );
       applyToolCallUpdate(response.tool_call);
+      if (response.run) {
+        setMaestroRun(response.run);
+        setMaestroPlan(response.run.plan);
+      }
       setChatMessages((messages) => [
         ...messages,
         { id: crypto.randomUUID(), sender: "maestro", content: response.message },
       ]);
-      setMaestroStatus(response.tool_call.status === "complete" ? "Tool approved and run." : "Tool approval finished.");
+      setMaestroStatus(
+        response.run
+          ? `Workflow ${response.run.status}.`
+          : response.tool_call.status === "complete"
+            ? "Tool approved and run."
+            : "Tool approval finished.",
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Tool approval failed.";
       setChatMessages((messages) => [

@@ -46,6 +46,12 @@ class MaestroToolRejectBody(BaseModel):
     reason: str | None = None
 
 
+class MaestroToolApproveBody(BaseModel):
+    execute_llm: bool = True
+    auto_tool_loop: bool = True
+    max_tool_iterations: int = Field(default=2, ge=1, le=4)
+
+
 @router.post("/plan")
 def create_maestro_plan(body: MaestroPlanBody, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -145,15 +151,27 @@ def run_maestro_plan(
 @router.post("/tool-calls/{tool_call_id}/approve")
 def approve_maestro_tool_call(
     tool_call_id: uuid.UUID,
+    body: MaestroToolApproveBody | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     try:
-        result = ToolExecutionService(db).approve_tool_call(tool_call_id)
-    except ToolExecutionError as exc:
+        options = body or MaestroToolApproveBody()
+        result, run = MaestroOrchestratorService(db).approve_tool_call_and_resume(
+            tool_call_id,
+            execute_llm=options.execute_llm,
+            auto_tool_loop=options.auto_tool_loop,
+            max_tool_iterations=options.max_tool_iterations,
+        )
+    except (ToolExecutionError, MaestroOrchestratorError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result_payload = tool_result_payload(result)
+    message = _tool_approval_message(result_payload, approved=True)
+    if run is not None:
+        message = f"{message}\n\n{run.chat_summary}"
     return {
-        "tool_call": tool_result_payload(result),
-        "message": _tool_approval_message(tool_result_payload(result), approved=True),
+        "tool_call": result_payload,
+        "message": message,
+        "run": _run_payload(run) if run is not None else None,
     }
 
 

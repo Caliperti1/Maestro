@@ -207,7 +207,10 @@ a later execution step runs it.
 Approval-required calls are durable `tool_calls` rows. They can be approved or rejected from the
 Maestro workflow result card; if exactly one approval is pending, Chris can also approve it from
 chat with a short approval message such as "approved". Approval executes the original proposed
-payload through the same tool adapter and updates the tool activity status.
+payload through the same tool adapter and updates the tool activity status. When the call belongs
+to a Maestro workflow, approval also reopens the blocked queue lane, passes the approved tool
+result back into the assigned agent as prior tool context, and resumes remaining unblocked
+workflow work.
 
 ### Tool Execution Contract
 

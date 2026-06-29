@@ -14,7 +14,7 @@ from app.agents.runtime import (
     PromptAggregationService,
     PromptPackageRequest,
 )
-from app.db.models import Artifact, Report, Task
+from app.db.models import Artifact, Report, Task, ToolCall
 from app.core.config import get_settings
 from app.llm.client import LLMClient, LLMClientError, OpenAILLMClient
 from app.maestro.planner import (
@@ -23,6 +23,7 @@ from app.maestro.planner import (
     PlannerWorkItem,
 )
 from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
+from app.tools.runtime import ToolExecutionResult, ToolExecutionService, tool_result_payload
 
 IntentType = Literal[
     "direct_chat",
@@ -299,12 +300,18 @@ class MaestroOrchestratorService:
         execute_llm: bool = True,
         auto_tool_loop: bool = False,
         max_tool_iterations: int = 2,
+        resume: bool = False,
+        approved_tool_results_by_child_task: dict[str, list[dict[str, Any]]] | None = None,
     ) -> MaestroRun:
+        approved_tool_results_by_child_task = approved_tool_results_by_child_task or {}
         plan = self.get_plan(plan_id)
         parent_task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
         if parent_task is None:
             raise MaestroOrchestratorError(f"Plan parent task was not found: {plan.parent_task_id}")
-        if parent_task.status not in {"proposed", "queued", "failed"}:
+        runnable_parent_statuses = {"proposed", "queued", "failed"}
+        if resume:
+            runnable_parent_statuses.add("blocked")
+        if parent_task.status not in runnable_parent_statuses:
             raise MaestroOrchestratorError(
                 f"Plan cannot be run from status {parent_task.status}."
             )
@@ -327,6 +334,25 @@ class MaestroOrchestratorService:
                 or set(subtask.work_item_ids or []) & blocking_dependency_ids
             )
         ]
+        if resume:
+            self._mark_approved_queue_items_ready(
+                parent_task,
+                approved_tool_results_by_child_task,
+            )
+            executable_subtasks = [
+                subtask
+                for subtask in executable_subtasks
+                if self._queue_item_status(parent_task, subtask) != "completed"
+                and self._queue_item_status(parent_task, subtask) != "failed"
+                and not (
+                    self._queue_item_status(parent_task, subtask) == "blocked"
+                    and not self._queue_item_has_approved_tool_result(
+                        parent_task,
+                        subtask,
+                        approved_tool_results_by_child_task,
+                    )
+                )
+            ]
         if blocking_dependency_ids and (not executable_subtasks or not has_attached_blocking_dependency):
             titles = ", ".join(
                 item.title
@@ -337,11 +363,12 @@ class MaestroOrchestratorService:
                 f"Plan needs Chris before execution can start: {titles}"
             )
 
-        self._replace_scheduler(
-            parent_task,
-            queue_items=self._queue_with_status(plan.scheduler, "pending"),
-            scheduler_status="pending",
-        )
+        if not resume:
+            self._replace_scheduler(
+                parent_task,
+                queue_items=self._queue_with_status(plan.scheduler, "pending"),
+                scheduler_status="pending",
+            )
         for subtask in plan.subtasks:
             if (
                 set(subtask.depends_on_work_item_ids or []) & blocking_dependency_ids
@@ -364,6 +391,8 @@ class MaestroOrchestratorService:
         error_message: str | None = None
         phase_syntheses: list[dict[str, Any]] = []
         failed_work_item_ids: set[str] = set()
+        pending_approval_work_item_ids: set[str] = set()
+        completed_outputs_by_work_item.update(self._completed_outputs_from_scheduler(parent_task))
         try:
             for stage_index, stage in enumerate(self._execution_stages(executable_subtasks), start=1):
                 runnable_stage = [
@@ -405,12 +434,19 @@ class MaestroOrchestratorService:
                         execute_llm=execute_llm,
                         auto_tool_loop=auto_tool_loop,
                         max_tool_iterations=max_tool_iterations,
+                        initial_tool_results=self._approved_tool_results_for_subtask(
+                            parent_task,
+                            subtask,
+                            approved_tool_results_by_child_task,
+                        ),
                     )
                     child_runs.extend(run["attempts"])
                     final_run = run["final"]
                     stage_runs.append(final_run)
                     if final_run.status == "failed":
                         failed_work_item_ids.update(subtask.work_item_ids or [])
+                    elif self._run_has_pending_approval(final_run):
+                        pending_approval_work_item_ids.update(subtask.work_item_ids or [])
                     else:
                         for work_item_id in subtask.work_item_ids or []:
                             completed_outputs_by_work_item[work_item_id] = (
@@ -426,9 +462,15 @@ class MaestroOrchestratorService:
             if failed_work_item_ids:
                 status = "failed"
                 error_message = "One or more delegated agent tasks failed."
-            elif len(executable_subtasks) < len(plan.subtasks):
+            elif pending_approval_work_item_ids:
+                status = "blocked"
+                error_message = "Some queue items are waiting for Chris to approve tool use."
+            elif not resume and len(executable_subtasks) < len(plan.subtasks):
                 status = "blocked"
                 error_message = "Some queue items are waiting for blocking user input."
+            elif self._scheduler_has_incomplete_queue(parent_task):
+                status = "blocked"
+                error_message = "Some queue items are still waiting to run."
             tool_activity = self._tool_activity(child_runs)
             chat_summary = self._chat_summary(
                 plan,
@@ -513,6 +555,41 @@ class MaestroOrchestratorService:
             self._set_scheduler_status(parent_task, "failed")
             self.session.commit()
             raise
+
+    def approve_tool_call_and_resume(
+        self,
+        tool_call_id: uuid.UUID | str,
+        *,
+        execute_llm: bool = True,
+        auto_tool_loop: bool = True,
+        max_tool_iterations: int = 2,
+    ) -> tuple[ToolExecutionResult, MaestroRun | None]:
+        result = ToolExecutionService(
+            self.session,
+            adapters=self.runtime.tool_adapters,
+        ).approve_tool_call(tool_call_id)
+        tool_call = self.session.get(ToolCall, uuid.UUID(str(tool_call_id)))
+        if tool_call is None or tool_call.task_id is None:
+            return result, None
+        child_task = self.session.get(Task, tool_call.task_id)
+        if child_task is None or child_task.parent_task_id is None:
+            return result, None
+        parent_task = self.session.get(Task, child_task.parent_task_id)
+        if parent_task is None or parent_task.workflow_key != "maestro.generic":
+            return result, None
+        if result.status != "complete":
+            return result, None
+        run = self.run_plan(
+            parent_task.id,
+            execute_llm=execute_llm,
+            auto_tool_loop=auto_tool_loop,
+            max_tool_iterations=max_tool_iterations,
+            resume=True,
+            approved_tool_results_by_child_task={
+                str(child_task.id): [tool_result_payload(result)],
+            },
+        )
+        return result, run
 
     def _select_agents(self, user_input: str, agents) -> list:
         lowered = user_input.lower()
@@ -1338,6 +1415,7 @@ class MaestroOrchestratorService:
         execute_llm: bool,
         auto_tool_loop: bool,
         max_tool_iterations: int,
+        initial_tool_results: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         max_attempts = 2
         attempts: list[AgentRunResult] = []
@@ -1358,6 +1436,7 @@ class MaestroOrchestratorService:
                 ),
                 stage_interaction=False,
                 execute_llm=execute_llm,
+                initial_tool_results=initial_tool_results if attempt == 1 else None,
                 auto_tool_loop=auto_tool_loop,
                 max_tool_iterations=max_tool_iterations,
                 parent_task_id=parent_task.id,
@@ -1368,6 +1447,17 @@ class MaestroOrchestratorService:
             attempts.append(run)
             final_run = run
             if run.status != "failed":
+                if self._run_has_pending_approval(run):
+                    self._update_queue_item(
+                        parent_task,
+                        subtask,
+                        status="blocked",
+                        child_task_id=run.task_id,
+                        child_report_id=run.report_id,
+                        error_message="Waiting for Chris to approve tool use.",
+                        retry_count=attempt - 1,
+                    )
+                    break
                 self._update_queue_item(
                     parent_task,
                     subtask,
@@ -1403,6 +1493,105 @@ class MaestroOrchestratorService:
         if final_run is None:
             raise MaestroOrchestratorError("Subtask did not produce a run result.")
         return {"attempts": attempts, "final": final_run}
+
+    def _run_has_pending_approval(self, run: AgentRunResult) -> bool:
+        return any(call.get("status") == "approval_required" for call in run.tool_calls)
+
+    def _queue_item_for_subtask(
+        self,
+        task: Task,
+        subtask: MaestroSubtask,
+    ) -> dict[str, Any] | None:
+        scheduler = dict((task.input_payload or {}).get("scheduler", {}))
+        for item in scheduler.get("queue_items", []):
+            if (
+                item.get("agent_key") == subtask.agent_key
+                and item.get("work_item_ids") == (subtask.work_item_ids or [])
+            ):
+                return item
+        return None
+
+    def _queue_item_status(self, task: Task, subtask: MaestroSubtask) -> str | None:
+        item = self._queue_item_for_subtask(task, subtask)
+        return str(item.get("status")) if item else None
+
+    def _queue_item_has_approved_tool_result(
+        self,
+        task: Task,
+        subtask: MaestroSubtask,
+        approved_tool_results_by_child_task: dict[str, list[dict[str, Any]]],
+    ) -> bool:
+        item = self._queue_item_for_subtask(task, subtask)
+        if not item:
+            return False
+        child_task_id = item.get("child_task_id")
+        return bool(child_task_id and approved_tool_results_by_child_task.get(str(child_task_id)))
+
+    def _approved_tool_results_for_subtask(
+        self,
+        task: Task,
+        subtask: MaestroSubtask,
+        approved_tool_results_by_child_task: dict[str, list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        item = self._queue_item_for_subtask(task, subtask)
+        if not item:
+            return []
+        child_task_id = item.get("child_task_id")
+        if not child_task_id:
+            return []
+        return list(approved_tool_results_by_child_task.get(str(child_task_id), []))
+
+    def _mark_approved_queue_items_ready(
+        self,
+        task: Task,
+        approved_tool_results_by_child_task: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        if not approved_tool_results_by_child_task:
+            return
+        payload = dict(task.input_payload or {})
+        scheduler = {
+            **self._scheduler_payload(),
+            **dict(payload.get("scheduler", {})),
+        }
+        approved_child_ids = set(approved_tool_results_by_child_task)
+        queue_items = []
+        changed = False
+        for item in scheduler.get("queue_items", []):
+            if str(item.get("child_task_id")) in approved_child_ids and item.get("status") == "blocked":
+                item = {
+                    **item,
+                    "status": "pending",
+                    "error_message": None,
+                    "completed_at": None,
+                }
+                changed = True
+            queue_items.append(item)
+        if changed:
+            scheduler["queue_items"] = queue_items
+            payload["scheduler"] = scheduler
+            task.input_payload = payload
+            self.session.commit()
+
+    def _completed_outputs_from_scheduler(self, task: Task) -> dict[str, str]:
+        scheduler = dict((task.input_payload or {}).get("scheduler", {}))
+        outputs: dict[str, str] = {}
+        for item in scheduler.get("queue_items", []):
+            if item.get("status") != "completed":
+                continue
+            report_id = item.get("child_report_id")
+            body = ""
+            if report_id:
+                report = self.session.get(Report, uuid.UUID(str(report_id)))
+                if report is not None:
+                    body = report.body_markdown or report.summary or ""
+            for work_item_id in item.get("work_item_ids") or []:
+                outputs[str(work_item_id)] = body or "Completed in an earlier workflow stage."
+        return outputs
+
+    def _scheduler_has_incomplete_queue(self, task: Task) -> bool:
+        scheduler = dict((task.input_payload or {}).get("scheduler", {}))
+        queue_items = scheduler.get("queue_items", [])
+        return any(item.get("status") != "completed" for item in queue_items)
 
     def _plan_summary(
         self,

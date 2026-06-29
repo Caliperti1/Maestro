@@ -240,6 +240,41 @@ class FakeMaestroGithubPlannerLLMClient:
         raise AssertionError("Planner should use structured_response.")
 
 
+class FakeMaestroIssueCreatePlannerLLMClient:
+    provider = "test"
+    model = "test-maestro-issue-create-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Ask Maestro Development to create a GitHub issue.",
+            "direct_response": None,
+            "planner_notes": "Fake GitHub issue creation planner response.",
+            "work_items": [
+                {
+                    "id": "wi_create_issue",
+                    "type": "workflow_task",
+                    "title": "Create Maestro GitHub issue",
+                    "description": "Create a GitHub issue using the repository story template.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["system introspection", "github issue creation"],
+                    "required_tools": ["github.issue.create"],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-introspection-agent"],
+                    "expected_output": "Created GitHub issue URL and summary.",
+                    "rationale": "Maestro Development owns issue creation.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
 class FakeOrchestratedToolLoopLLMClient:
     provider = "test"
     model = "test-orchestrated-tool-loop-agent"
@@ -303,6 +338,54 @@ class FakeOrchestratedToolLoopLLMClient:
         )
 
 
+class FakeOrchestratedIssueCreateToolLoopLLMClient:
+    provider = "test"
+    model = "test-orchestrated-issue-create-agent"
+
+    def __init__(self) -> None:
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        assert "execution planner" in instructions
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Create the requested GitHub issue after Chris approves.",
+                "requires_final_answer": True,
+                "tool_calls": [
+                    {
+                        "tool_key": "github.issue.create",
+                        "payload_json": '{"title":"Test issue","body":"Created by Maestro"}',
+                        "rationale": "The task asks for a new GitHub issue.",
+                    }
+                ],
+            }
+        assert "github.issue.create" in input_text
+        assert "https://github.com/Caliperti1/Maestro/issues/123" in input_text
+        return {
+            "plan_summary": "The approved GitHub issue creation result is enough to report.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "Tool Results" in input_text
+        assert "github.issue.create" in input_text
+        assert "https://github.com/Caliperti1/Maestro/issues/123" in input_text
+        return json.dumps(
+            {
+                "conversation": "I created the GitHub issue after your approval.",
+                "summary": {
+                    "change_summary": "Created GitHub issue #123 for the requested Maestro work.",
+                },
+                "findings": [],
+                "open_questions": [],
+                "next_steps": [],
+                "artifact_refs": [],
+            }
+        )
+
+
 class FakeGitHubPrSearchAdapter:
     key = "github.pr.search"
 
@@ -320,6 +403,20 @@ class FakeGitHubPrSearchAdapter:
                     "url": "https://github.com/Caliperti1/Maestro/pull/47",
                 }
             ],
+        }
+
+
+class FakeGitHubIssueCreateAdapter:
+    key = "github.issue.create"
+
+    def execute(self, context, payload: dict[str, object]) -> dict[str, object]:
+        assert context.domain.key == "maestro-development"
+        assert payload["title"] == "Test issue"
+        return {
+            "repo": context.connection.config["repo"] if context.connection else "Caliperti1/Maestro",
+            "url": "https://github.com/Caliperti1/Maestro/issues/123",
+            "number": 123,
+            "title": payload["title"],
         }
 
 
@@ -811,6 +908,69 @@ def test_orchestrator_can_delegate_agent_planned_safe_tool_loop(
     parent = session.get(Task, uuid.UUID(plan.parent_task_id))
     assert parent is not None
     assert parent.output_payload["tool_activity"][0]["tool_name"] == "llm.tool_planner"
+
+
+def test_orchestrator_resumes_workflow_after_tool_approval(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.memory_dropbox_root = str(tmp_path)
+    AgentRegistryService(session).upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    llm_client = FakeOrchestratedIssueCreateToolLoopLLMClient()
+    runtime = PromptAggregationService(
+        session,
+        llm_client=llm_client,
+        tool_adapters={"github.issue.create": FakeGitHubIssueCreateAdapter()},
+    )
+    service = MaestroOrchestratorService(
+        session,
+        runtime=runtime,
+        planner_llm_client=FakeMaestroIssueCreatePlannerLLMClient(),
+    )
+    plan = service.create_plan("Add a GitHub issue for the next Maestro tool platform task.")
+
+    blocked_run = service.run_plan(
+        plan.parent_task_id,
+        execute_llm=True,
+        auto_tool_loop=True,
+        max_tool_iterations=2,
+    )
+
+    assert blocked_run.status == "blocked"
+    approval = [
+        item
+        for item in blocked_run.tool_activity
+        if item["tool_name"] == "github.issue.create"
+    ][0]
+    assert approval["status"] == "approval_required"
+    parent = session.get(Task, uuid.UUID(plan.parent_task_id))
+    assert parent is not None
+    assert parent.input_payload["scheduler"]["queue_items"][0]["status"] == "blocked"
+
+    result, resumed_run = service.approve_tool_call_and_resume(
+        approval["tool_call_id"],
+        execute_llm=True,
+        auto_tool_loop=True,
+        max_tool_iterations=2,
+    )
+
+    assert result.status == "complete"
+    assert resumed_run is not None
+    assert resumed_run.status == "completed"
+    assert "I created the GitHub issue after your approval." in resumed_run.chat_summary
+    assert llm_client.structured_calls == 2
+    parent = session.get(Task, uuid.UUID(plan.parent_task_id))
+    assert parent is not None
+    assert parent.input_payload["scheduler"]["queue_items"][0]["status"] == "completed"
+    assert parent.output_payload["tool_activity"][0]["status"] == "complete"
 
 
 def test_orchestrator_retries_failed_queue_item_before_marking_complete(
