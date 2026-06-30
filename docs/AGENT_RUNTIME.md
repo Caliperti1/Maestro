@@ -268,6 +268,43 @@ For real domain-specific accounts, prefer an environment-token reference:
 }
 ```
 
+MVP Codex tools:
+
+- `codex.task.run`: runs a local Codex CLI task in an authorized target directory and returns the
+  Codex session id, final message, changed files seen in the event stream, event counts, sandbox,
+  and stderr tail.
+
+`codex.task.run` is approval-required because it can inspect or modify a local repository. It uses
+the local Codex CLI and therefore can reuse the machine's existing Codex authentication instead of
+requiring Maestro to call the OpenAI API directly. The first implementation uses `codex exec
+--json`; app-server/SDK streaming can replace the adapter internals later without changing the
+agent-facing tool contract.
+
+Configure a domain-level `codex` connection in the Tools tab:
+
+```json
+{
+  "codex_bin": "codex",
+  "default_cwd": "/Users/christopheraliperti/Maestro",
+  "allowed_roots": ["/Users/christopheraliperti/Maestro"]
+}
+```
+
+Typical agent-planned payload:
+
+```json
+{
+  "target_path": "/Users/christopheraliperti/Maestro",
+  "sandbox": "workspace-write",
+  "prompt": "Implement GitHub issue #50. Keep the change scoped and run the relevant tests.",
+  "timeout_seconds": 1200
+}
+```
+
+The seeded `maestro-coding-agent` is the default Maestro Development agent intended to use this
+tool. Existing hand-created Maestro Development agents need `codex.task.run` added to their tool
+permissions before they can request it.
+
 Store this once as the domain connection for the provider key `github`. Every `github.*` tool in
 that domain inherits the shared GitHub connection unless a more specific per-tool connection exists.
 The adapter reads the configured environment variable and passes it to `gh` as `GH_TOKEN` for only

@@ -681,10 +681,34 @@ class MaestroOrchestratorService:
         lowered = user_input.lower()
         domain_key = self._domain_for_input(lowered, registry_snapshot)
         work_items: list[PlannerWorkItem] = []
-        if any(token in lowered for token in ("plan", "prepare", "coordinate", "workflow")):
+        if any(
+            token in lowered
+            for token in ("implement", "code", "coding", "fix", "action issue", "work issue")
+        ):
             work_items.append(
                 PlannerWorkItem(
                     id="wi_1",
+                    type="workflow_task",
+                    title="Execute scoped Maestro coding work",
+                    description=user_input,
+                    domain_key="maestro-development",
+                    priority="high",
+                    required_capabilities=["software implementation", "repository editing", "test execution"],
+                    required_tools=["codex.task.run"],
+                    dependencies=[],
+                    needs_agent=True,
+                    needs_user_input=False,
+                    blocks_execution=False,
+                    can_log_directly=False,
+                    suggested_agent_keys=["maestro-coding-agent"],
+                    expected_output="Codex task result with changed files, validation run, and follow-up risks.",
+                    rationale="The request asks Maestro to execute coding work.",
+                )
+            )
+        if any(token in lowered for token in ("plan", "prepare", "coordinate", "workflow")):
+            work_items.append(
+                PlannerWorkItem(
+                    id=f"wi_{len(work_items) + 1}",
                     type="workflow_task",
                     title="Coordinate requested workflow",
                     description=user_input,
@@ -2067,6 +2091,18 @@ class MaestroOrchestratorService:
             files = output_payload.get("files")
             if isinstance(files, list):
                 return f"Found {len(files)} matching file(s)."
+        if tool_name == "codex.task.run":
+            changed_files = output_payload.get("changed_files")
+            session_id = output_payload.get("session_id")
+            final_message = str(output_payload.get("final_message") or "").strip()
+            details = "Ran a local Codex coding task"
+            if isinstance(changed_files, list):
+                details += f" with {len(changed_files)} changed file(s)"
+            if session_id:
+                details += f" in session {session_id}"
+            if final_message:
+                details += f": {final_message[:180]}"
+            return details + "."
         return ""
 
     def _chat_summary(

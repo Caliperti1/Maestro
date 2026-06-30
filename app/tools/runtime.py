@@ -1,8 +1,10 @@
 import base64
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -779,8 +781,129 @@ class GitHubCliToolAdapter:
         return {"repo": repo, "number": number, "checks": checks}
 
 
+class CodexCliToolAdapter:
+    def __init__(self, key: str):
+        self.key = key
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.key != "codex.task.run":
+            raise ToolExecutionError(f"Unsupported Codex tool: {self.key}")
+        if context.dry_run:
+            return {"dry_run": True, "tool": self.key, "payload": payload}
+        codex_bin = self._codex_bin(context.connection)
+        if shutil.which(codex_bin) is None and not Path(codex_bin).exists():
+            raise ToolExecutionError("Codex CLI is not installed or not on PATH.")
+        target_path = self._target_path(context.connection, payload)
+        prompt = _required_text(payload, "prompt")
+        sandbox = str(payload.get("sandbox") or "workspace-write").strip()
+        if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+            raise ToolExecutionError("Codex sandbox must be read-only, workspace-write, or danger-full-access.")
+        timeout_seconds = _bounded_int(
+            payload.get("timeout_seconds"),
+            default=900,
+            minimum=30,
+            maximum=3600,
+        )
+        model = str(payload.get("model") or "").strip()
+        profile = str(payload.get("profile") or "").strip()
+        extra_context = str(payload.get("context") or "").strip()
+        full_prompt = prompt if not extra_context else f"{prompt}\n\nAdditional context:\n{extra_context}"
+
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as output_file:
+            output_path = output_file.name
+        try:
+            args = [
+                codex_bin,
+                "exec",
+                "--json",
+                "--cd",
+                str(target_path),
+                "--sandbox",
+                sandbox,
+                "--output-last-message",
+                output_path,
+            ]
+            if model:
+                args.extend(["--model", model])
+            if profile:
+                args.extend(["--profile", profile])
+            if bool(payload.get("ephemeral", False)):
+                args.append("--ephemeral")
+            args.append(full_prompt)
+            completed = subprocess.run(
+                args,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(target_path),
+                env=os.environ.copy(),
+            )
+            events = _parse_jsonl(completed.stdout)
+            final_message = ""
+            try:
+                final_message = Path(output_path).read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                final_message = ""
+            if not final_message:
+                final_message = _last_agent_message(events)
+            result = {
+                "target_path": str(target_path),
+                "sandbox": sandbox,
+                "model": model or None,
+                "profile": profile or None,
+                "returncode": completed.returncode,
+                "session_id": _codex_session_id(events),
+                "final_message": final_message,
+                "changed_files": _codex_changed_files(events),
+                "event_counts": _codex_event_counts(events),
+                "stderr_tail": completed.stderr[-4000:],
+            }
+            if completed.returncode != 0:
+                raise ToolExecutionError(
+                    completed.stderr.strip()
+                    or final_message
+                    or f"Codex exited with status {completed.returncode}."
+                )
+            return result
+        except subprocess.TimeoutExpired as exc:
+            raise ToolExecutionError(f"Codex task timed out after {timeout_seconds} seconds.") from exc
+        finally:
+            try:
+                Path(output_path).unlink()
+            except FileNotFoundError:
+                pass
+
+    def _codex_bin(self, connection: ToolConnection | None) -> str:
+        configured = ""
+        if connection is not None:
+            configured = str((connection.config or {}).get("codex_bin") or "").strip()
+        return configured or "codex"
+
+    def _target_path(self, connection: ToolConnection | None, payload: dict[str, Any]) -> Path:
+        configured_default = ""
+        allowed_roots: list[str] = []
+        if connection is not None:
+            config = connection.config or {}
+            configured_default = str(config.get("default_cwd") or "").strip()
+            allowed_roots = _string_list(config.get("allowed_roots"))
+        raw_target = str(payload.get("target_path") or configured_default or os.getcwd()).strip()
+        target = Path(raw_target).expanduser().resolve()
+        if not target.exists() or not target.is_dir():
+            raise ToolExecutionError(f"Codex target path is not a directory: {target}")
+        roots = [Path(root).expanduser().resolve() for root in allowed_roots] if allowed_roots else [target]
+        if not any(target == root or root in target.parents for root in roots):
+            allowed = ", ".join(str(root) for root in roots)
+            raise ToolExecutionError(f"Codex target path must be inside an allowed root: {allowed}")
+        return target
+
+
 def default_tool_adapters() -> dict[str, ToolAdapter]:
-    return {
+    adapters: dict[str, ToolAdapter] = {
         key: GitHubCliToolAdapter(key)
         for key in (
             "github.repo.get",
@@ -799,6 +922,8 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
             "github.pr.checks",
         )
     }
+    adapters["codex.task.run"] = CodexCliToolAdapter("codex.task.run")
+    return adapters
 
 
 def tool_result_payload(result: ToolExecutionResult) -> dict[str, Any]:
@@ -860,6 +985,8 @@ def _clean_github_search_query(query: str, *, kind: str) -> str:
 def _provider_key(tool_key: str) -> str:
     if tool_key.startswith("github."):
         return "github"
+    if tool_key.startswith("codex."):
+        return "codex"
     return tool_key
 
 
@@ -935,6 +1062,76 @@ def _run_gh_text(
             (completed.stderr or completed.stdout or "GitHub CLI failed.").strip()
         )
     return completed.stdout
+
+
+def _parse_jsonl(text: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            value = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            events.append(value)
+    return events
+
+
+def _codex_session_id(events: list[dict[str, Any]]) -> str | None:
+    for event in events:
+        for key in ("thread_id", "session_id"):
+            value = event.get(key)
+            if value:
+                return str(value)
+        item = event.get("item")
+        if isinstance(item, dict):
+            value = item.get("thread_id") or item.get("session_id")
+            if value:
+                return str(value)
+    return None
+
+
+def _last_agent_message(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        item = event.get("item")
+        if isinstance(item, dict):
+            text = item.get("text") or item.get("message")
+            if item.get("type") == "agent_message" and text:
+                return str(text).strip()
+        text = event.get("text") or event.get("message")
+        if event.get("type") in {"agent_message", "item.completed"} and text:
+            return str(text).strip()
+    return ""
+
+
+def _codex_changed_files(events: list[dict[str, Any]]) -> list[str]:
+    files: set[str] = set()
+    for event in events:
+        item = event.get("item")
+        candidates = []
+        if isinstance(item, dict):
+            candidates.extend([item.get("path"), item.get("file"), item.get("filename")])
+            changes = item.get("changes") or item.get("files")
+            if isinstance(changes, list):
+                candidates.extend(
+                    change.get("path") if isinstance(change, dict) else change
+                    for change in changes
+                )
+        candidates.extend([event.get("path"), event.get("file"), event.get("filename")])
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                files.add(candidate.strip())
+    return sorted(files)
+
+
+def _codex_event_counts(events: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        event_type = str(event.get("type") or "unknown")
+        counts[event_type] = counts.get(event_type, 0) + 1
+    return counts
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:

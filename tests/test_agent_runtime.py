@@ -15,6 +15,7 @@ from app.db.models import Artifact, MemoryItem, Task, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
 from app.tools.runtime import (
+    CodexCliToolAdapter,
     GitHubCliToolAdapter,
     ToolExecutionContext,
     ToolExecutionService,
@@ -238,6 +239,9 @@ def test_seed_agent_registry_returns_domain_scoped_specs(session: Session) -> No
         "llm.gateway",
         "memory.context_bundle",
     ]
+    coding = next(spec for spec in specs if spec.key == "maestro-coding-agent")
+    assert coding.domain_key == "maestro-development"
+    assert "codex.task.run" in [tool.key for tool in coding.allowed_tools]
 
 
 def test_prompt_aggregation_includes_scoped_memory_and_tools(session: Session) -> None:
@@ -386,6 +390,27 @@ def test_seed_agent_merge_adds_github_tool_permissions_to_existing_seed_agent(
     assert "github.issue.create" in [tool.key for tool in refreshed.allowed_tools]
     assert "github.repo.create" in [tool.key for tool in refreshed.allowed_tools]
     assert "github.pr.checks" in [tool.key for tool in refreshed.allowed_tools]
+    assert "codex.task.run" in [tool.key for tool in refreshed.allowed_tools]
+
+
+def test_codex_tool_manifest_inherits_codex_connection(session: Session, tmp_path: Path) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="codex",
+        display_name="Local Codex",
+        auth_type="local_cli",
+        config={
+            "default_cwd": str(tmp_path),
+            "allowed_roots": [str(tmp_path)],
+        },
+    )
+
+    spec = registry.get_spec("maestro-introspection-agent")
+    tool = next(tool for tool in spec.allowed_tools if tool.key == "codex.task.run")
+
+    assert tool.connection_id is not None
+    assert tool.auth_type == "local_cli"
 
 
 def test_github_adapter_uses_domain_token_env_for_write_tools(
@@ -592,6 +617,148 @@ def test_github_adapter_reads_specific_file_from_repo(
         "GET",
         "repos/Caliperti1/Maestro/contents/.github/issue_template.md?ref=main",
     ]
+
+
+def test_codex_adapter_runs_local_codex_exec_json(
+    session: Session,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="codex",
+        display_name="Local Codex",
+        auth_type="local_cli",
+        config={
+            "codex_bin": "codex",
+            "default_cwd": str(tmp_path),
+            "allowed_roots": [str(tmp_path)],
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="codex").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.codex",
+        objective="Run a Codex task.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/codex")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["cwd"] = kwargs["cwd"]
+        output_path = args[args.index("--output-last-message") + 1]
+        Path(output_path).write_text("Implemented the requested change.", encoding="utf-8")
+        stdout = "\n".join(
+            [
+                '{"type":"thread.started","thread_id":"codex-session-1"}',
+                '{"type":"item.completed","item":{"type":"file_change","path":"app/example.py"}}',
+                '{"type":"turn.completed"}',
+            ]
+        )
+        return CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = CodexCliToolAdapter("codex.task.run").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {
+            "prompt": "Implement issue #50.",
+            "sandbox": "workspace-write",
+            "target_path": str(tmp_path),
+        },
+    )
+
+    assert output["session_id"] == "codex-session-1"
+    assert output["final_message"] == "Implemented the requested change."
+    assert output["changed_files"] == ["app/example.py"]
+    assert output["returncode"] == 0
+    assert captured["cwd"] == str(tmp_path)
+    assert captured["args"][:6] == [
+        "codex",
+        "exec",
+        "--json",
+        "--cd",
+        str(tmp_path),
+        "--sandbox",
+    ]
+
+
+def test_codex_adapter_rejects_target_outside_allowed_roots(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="codex",
+        display_name="Local Codex",
+        auth_type="local_cli",
+        config={
+            "default_cwd": str(allowed),
+            "allowed_roots": [str(allowed)],
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="codex").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.codex",
+        objective="Run a Codex task.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+
+    try:
+        CodexCliToolAdapter("codex.task.run").execute(
+            ToolExecutionContext(
+                session=session,
+                agent=agent,
+                domain=domain,
+                task=task,
+                connection=connection,
+            ),
+            {
+                "prompt": "Implement issue #50.",
+                "target_path": str(outside),
+            },
+        )
+    except Exception as exc:
+        assert "allowed root" in str(exc)
+    else:
+        raise AssertionError("Codex target outside allowed roots should fail.")
 
 
 def test_github_adapter_searches_files_in_repo(

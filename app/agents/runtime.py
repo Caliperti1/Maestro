@@ -1503,6 +1503,11 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": False,
         "reason": "Updates external GitHub issue metadata and requires Chris approval.",
     },
+    "codex.task.run": {
+        "level": "local_code_execution",
+        "auto_executable": False,
+        "reason": "Runs a local Codex coding task that can inspect or modify a repository and requires Chris approval.",
+    },
 }
 
 _AUTO_TOOL_SAFE_TOOL_KEYS = {
@@ -1633,18 +1638,33 @@ _TOOL_DESCRIPTIONS = {
         "name": "GitHub PR Checks",
         "description": "Read CI/check status for a pull request.",
     },
+    "codex": {
+        "name": "Codex",
+        "description": "Shared local Codex CLI configuration inherited by Codex tools.",
+    },
+    "codex.task.run": {
+        "name": "Codex Task Run",
+        "description": (
+            "Run a local Codex coding task in an authorized target directory and return "
+            "session output, changed files, and final summary."
+        ),
+    },
 }
 
 
 def _provider_connection_key(tool_key: str) -> str:
     if tool_key.startswith("github."):
         return "github"
+    if tool_key.startswith("codex."):
+        return "codex"
     return tool_key
 
 
 def _inherited_connection_tool_keys(tool_key: str) -> list[str]:
     if tool_key == "github":
         return [key for key in _TOOL_DESCRIPTIONS if key.startswith("github.")]
+    if tool_key == "codex":
+        return [key for key in _TOOL_DESCRIPTIONS if key.startswith("codex.")]
     return []
 
 _SEED_AGENTS = [
@@ -1767,6 +1787,55 @@ _SEED_AGENTS = [
             "github.pr.checks": {
                 "permission": "read",
                 "description": "Read Maestro GitHub pull request check status.",
+            },
+            "codex.task.run": {
+                "permission": "use",
+                "description": "Run approved local Codex coding tasks for Maestro development work.",
+            },
+        },
+    },
+    {
+        "domain_key": "maestro-development",
+        "key": "maestro-coding-agent",
+        "name": "Maestro Coding Agent",
+        "agent_type": "domain_agent",
+        "role_summary": (
+            "Executes scoped Maestro coding tasks through the local Codex tool and reports "
+            "implementation results back to Maestro."
+        ),
+        "role_prompt": (
+            "You are the Maestro Coding Agent. Work only inside the Maestro Development domain. "
+            "Use the local Codex task tool for implementation work after Chris approves the tool "
+            "call. Keep coding tasks scoped, preserve unrelated work, run the requested validation "
+            "when practical, and return a concise report with changed files, tests, and follow-up "
+            "risks."
+        ),
+        "memory_profile": "agent_prompt",
+        "model_profile": "default",
+        "tool_permissions": {
+            "memory.context_bundle": {
+                "permission": "read",
+                "description": "Retrieve Maestro-development memory bundles.",
+            },
+            "artifact.stage_interaction": {
+                "permission": "write",
+                "description": "Stage coding task outputs for curation.",
+            },
+            "llm.gateway": {
+                "permission": "use",
+                "description": "Use Maestro's shared LLM gateway.",
+            },
+            "github.issue.get": {
+                "permission": "read",
+                "description": "Read Maestro GitHub issue details before implementation.",
+            },
+            "github.file.get": {
+                "permission": "read",
+                "description": "Read repository files when preparing implementation context.",
+            },
+            "codex.task.run": {
+                "permission": "use",
+                "description": "Run approved local Codex coding tasks in authorized workspaces.",
             },
         },
     },
