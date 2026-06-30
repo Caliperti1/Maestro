@@ -1422,6 +1422,17 @@ h4 {
   line-height: 1.4;
 }
 
+.tool-approval-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-approval-actions button {
+  min-height: 34px;
+}
+
 .activity-dot {
   width: 10px;
   height: 10px;

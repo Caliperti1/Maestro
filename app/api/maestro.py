@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
     MaestroOrchestratorService,
@@ -39,6 +40,16 @@ class MaestroSessionMessage(BaseModel):
 class MaestroSessionCloseBody(BaseModel):
     messages: list[MaestroSessionMessage]
     plan_id: uuid.UUID | None = None
+
+
+class MaestroToolRejectBody(BaseModel):
+    reason: str | None = None
+
+
+class MaestroToolApproveBody(BaseModel):
+    execute_llm: bool = True
+    auto_tool_loop: bool = True
+    max_tool_iterations: int = Field(default=2, ge=1, le=4)
 
 
 @router.post("/plan")
@@ -135,6 +146,52 @@ def run_maestro_plan(
     except MaestroOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"run": _run_payload(run)}
+
+
+@router.post("/tool-calls/{tool_call_id}/approve")
+def approve_maestro_tool_call(
+    tool_call_id: uuid.UUID,
+    body: MaestroToolApproveBody | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        options = body or MaestroToolApproveBody()
+        result, run = MaestroOrchestratorService(db).approve_tool_call_and_resume(
+            tool_call_id,
+            execute_llm=options.execute_llm,
+            auto_tool_loop=options.auto_tool_loop,
+            max_tool_iterations=options.max_tool_iterations,
+        )
+    except (ToolExecutionError, MaestroOrchestratorError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result_payload = tool_result_payload(result)
+    message = _tool_approval_message(result_payload, approved=True)
+    if run is not None:
+        message = f"{message}\n\n{run.chat_summary}"
+    return {
+        "tool_call": result_payload,
+        "message": message,
+        "run": _run_payload(run) if run is not None else None,
+    }
+
+
+@router.post("/tool-calls/{tool_call_id}/reject")
+def reject_maestro_tool_call(
+    tool_call_id: uuid.UUID,
+    body: MaestroToolRejectBody | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = ToolExecutionService(db).reject_tool_call(
+            tool_call_id,
+            reason=body.reason if body else None,
+        )
+    except ToolExecutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "tool_call": tool_result_payload(result),
+        "message": _tool_approval_message(tool_result_payload(result), approved=False),
+    }
 
 
 @router.post("/sessions/close")
@@ -284,6 +341,16 @@ def _side_chat_response(message: str, active_plan: MaestroPlan) -> str:
         "I can answer that here without changing the proposed workflow. "
         f"The active plan is still `{active_plan.summary}`."
     )
+
+
+def _tool_approval_message(tool_call: dict[str, Any], *, approved: bool) -> str:
+    tool_name = tool_call.get("tool_name")
+    status = tool_call.get("status")
+    if approved and status == "complete":
+        return f"Approved and ran `{tool_name}` successfully."
+    if approved:
+        return f"I tried to run `{tool_name}` after approval, but it finished with status `{status}`: {tool_call.get('error_message') or 'no detail'}"
+    return f"Rejected `{tool_name}`. I did not run it."
 
 
 def _run_payload(run: MaestroRun) -> dict[str, Any]:

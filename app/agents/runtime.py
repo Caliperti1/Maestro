@@ -725,6 +725,7 @@ class PromptAggregationService:
         stage_interaction: bool = False,
         execute_llm: bool = True,
         tool_requests: list[AgentToolRequest] | None = None,
+        initial_tool_results: list[dict[str, Any]] | None = None,
         auto_tool_loop: bool = False,
         max_tool_iterations: int = 2,
         parent_task_id: uuid.UUID | None = None,
@@ -761,6 +762,11 @@ class PromptAggregationService:
                     }
                     for tool_request in (tool_requests or [])
                 ],
+                "initial_tool_result_ids": [
+                    result.get("id")
+                    for result in (initial_tool_results or [])
+                    if result.get("id")
+                ],
             },
             started_at=datetime.now(UTC) if execute_llm else None,
         )
@@ -772,7 +778,7 @@ class PromptAggregationService:
         execution_note = "Manual run prepared."
         output_text: str | None = None
         error_message: str | None = None
-        tool_call_payloads: list[dict[str, Any]] = []
+        tool_call_payloads: list[dict[str, Any]] = list(initial_tool_results or [])
         tool_loop_trace: dict[str, Any] = {"enabled": auto_tool_loop, "iterations": []}
         report_id: str | None = None
         status = "prepared"
@@ -809,121 +815,139 @@ class PromptAggregationService:
                 )
                 tool_call_payloads.extend(loop_results["tool_calls"])
                 tool_loop_trace = loop_results["trace"]
-            assembled_prompt = package.assembled_prompt
-            if tool_call_payloads:
-                assembled_prompt = (
-                    f"{assembled_prompt}\n\n## Tool Results\n"
-                    "The following tool calls have already been executed by Maestro. "
-                    "Use these results as evidence in your report. Do not emit tool-call XML, "
-                    "JSON function-call requests, or instructions to call more tools; instead, "
-                    "state any additional tool access needed as an open question or next step.\n\n"
-                    f"{json.dumps(tool_call_payloads, indent=2)}"
-                )
-            tool_call = ToolCall(
-                task_id=task.id,
-                agent_id=package.agent.id,
-                tool_name="llm.gateway",
-                input_payload={
-                    "provider": getattr(llm_client, "provider", "configured"),
-                    "model": package.agent.model_profile,
-                    "prompt_chars": len(assembled_prompt),
-                },
-                status="running",
-                started_at=datetime.now(UTC),
-            )
-            self.session.add(tool_call)
-            self.session.commit()
-            self.session.refresh(tool_call)
-            try:
-                tool_call.input_payload = {
-                    **tool_call.input_payload,
-                    "provider": getattr(llm_client, "provider", "unknown"),
-                    "model": getattr(llm_client, "model", package.agent.model_profile),
-                }
-                output_text = llm_client.text_response(
-                    instructions=(
-                        "You are executing as a Maestro domain agent. Follow the provided "
-                        "assembled prompt exactly, stay within your domain, respect the tool "
-                        "manifest, and produce the requested structured output. Include a "
-                        "top-level `conversation` field written as a concise plain-English "
-                        "message Maestro can say directly to Chris. Tool results, when present, "
-                        "have already been executed by Maestro; do not emit synthetic "
-                        "tool-call markup or function-call requests in your answer."
-                    ),
-                    input_text=assembled_prompt,
-                )
-                tool_call.status = "complete"
-                tool_call.output_payload = {
-                    "output_chars": len(output_text),
-                    "output_preview": output_text[:500],
-                }
-                tool_call.completed_at = datetime.now(UTC)
-                report = Report(
-                    task_id=task.id,
-                    domain_id=domain.id,
-                    agent_id=package.agent.id,
-                    title=f"{package.agent.name} run",
-                    report_type="agent_run_once",
-                    summary=output_text[:500],
-                    body_markdown=output_text,
-                    structured_data={
-                        "run_id": run_id,
-                        "prompt_created_at": package.created_at,
-                        "memory_included_count": package.memory_context.included_count,
-                        "semantic_status": package.memory_context.semantic_status,
-                        "tool_loop": tool_loop_trace,
-                    },
-                )
-                self.session.add(report)
-                self.session.flush()
-                task.status = "completed"
+            if any(call.get("status") == "approval_required" for call in tool_call_payloads):
+                task.status = "blocked"
                 task.output_payload = {
                     "run_id": run_id,
-                    "report_id": str(report.id),
-                    "output_preview": output_text[:500],
+                    "tool_call_count": len(tool_call_payloads),
+                    "approval_required": True,
                 }
-                task.completed_at = datetime.now(UTC)
+                task.error_message = "Waiting for Chris to approve tool use."
                 self._set_agent_current_action(
                     package.agent.key,
-                    f"Completed: {request.task_instruction[:160]}",
-                    commit=False,
-                )
-                execution_note = "Manual run completed through the LLM gateway."
-                status = "completed"
-                self.session.commit()
-                self.session.refresh(report)
-                self.session.refresh(tool_call)
-                self.session.refresh(task)
-                report_id = str(report.id)
-            except Exception as exc:
-                error_message = str(exc)
-                tool_call.status = "failed"
-                tool_call.error_message = error_message
-                tool_call.completed_at = datetime.now(UTC)
-                task.status = "failed"
-                task.error_message = error_message
-                task.completed_at = datetime.now(UTC)
-                self._set_agent_current_action(
-                    package.agent.key,
-                    f"Failed: {request.task_instruction[:160]}",
+                    f"Waiting for approval: {request.task_instruction[:160]}",
                     commit=False,
                 )
                 self.session.commit()
-                self.session.refresh(tool_call)
                 self.session.refresh(task)
-                execution_note = "Manual run failed while calling the LLM gateway."
-                status = "failed"
+                execution_note = "Agent run paused while waiting for Chris to approve tool use."
+                status = "blocked"
+            else:
+                assembled_prompt = package.assembled_prompt
+                if tool_call_payloads:
+                    assembled_prompt = (
+                        f"{assembled_prompt}\n\n## Tool Results\n"
+                        "The following tool calls have already been executed by Maestro. "
+                        "Use these results as evidence in your report. Do not emit tool-call XML, "
+                        "JSON function-call requests, or instructions to call more tools; instead, "
+                        "state any additional tool access needed as an open question or next step.\n\n"
+                        f"{json.dumps(tool_call_payloads, indent=2)}"
+                    )
+                tool_call = ToolCall(
+                    task_id=task.id,
+                    agent_id=package.agent.id,
+                    tool_name="llm.gateway",
+                    input_payload={
+                        "provider": getattr(llm_client, "provider", "configured"),
+                        "model": package.agent.model_profile,
+                        "prompt_chars": len(assembled_prompt),
+                    },
+                    status="running",
+                    started_at=datetime.now(UTC),
+                )
+                self.session.add(tool_call)
+                self.session.commit()
+                self.session.refresh(tool_call)
+                try:
+                    tool_call.input_payload = {
+                        **tool_call.input_payload,
+                        "provider": getattr(llm_client, "provider", "unknown"),
+                        "model": getattr(llm_client, "model", package.agent.model_profile),
+                    }
+                    output_text = llm_client.text_response(
+                        instructions=(
+                            "You are executing as a Maestro domain agent. Follow the provided "
+                            "assembled prompt exactly, stay within your domain, respect the tool "
+                            "manifest, and produce the requested structured output. Include a "
+                            "top-level `conversation` field written as a concise plain-English "
+                            "message Maestro can say directly to Chris. Tool results, when present, "
+                            "have already been executed by Maestro; do not emit synthetic "
+                            "tool-call markup or function-call requests in your answer."
+                        ),
+                        input_text=assembled_prompt,
+                    )
+                    tool_call.status = "complete"
+                    tool_call.output_payload = {
+                        "output_chars": len(output_text),
+                        "output_preview": output_text[:500],
+                    }
+                    tool_call.completed_at = datetime.now(UTC)
+                    report = Report(
+                        task_id=task.id,
+                        domain_id=domain.id,
+                        agent_id=package.agent.id,
+                        title=f"{package.agent.name} run",
+                        report_type="agent_run_once",
+                        summary=output_text[:500],
+                        body_markdown=output_text,
+                        structured_data={
+                            "run_id": run_id,
+                            "prompt_created_at": package.created_at,
+                            "memory_included_count": package.memory_context.included_count,
+                            "semantic_status": package.memory_context.semantic_status,
+                            "tool_loop": tool_loop_trace,
+                        },
+                    )
+                    self.session.add(report)
+                    self.session.flush()
+                    task.status = "completed"
+                    task.output_payload = {
+                        "run_id": run_id,
+                        "report_id": str(report.id),
+                        "output_preview": output_text[:500],
+                    }
+                    task.completed_at = datetime.now(UTC)
+                    self._set_agent_current_action(
+                        package.agent.key,
+                        f"Completed: {request.task_instruction[:160]}",
+                        commit=False,
+                    )
+                    execution_note = "Manual run completed through the LLM gateway."
+                    status = "completed"
+                    self.session.commit()
+                    self.session.refresh(report)
+                    self.session.refresh(tool_call)
+                    self.session.refresh(task)
+                    report_id = str(report.id)
+                except Exception as exc:
+                    error_message = str(exc)
+                    tool_call.status = "failed"
+                    tool_call.error_message = error_message
+                    tool_call.completed_at = datetime.now(UTC)
+                    task.status = "failed"
+                    task.error_message = error_message
+                    task.completed_at = datetime.now(UTC)
+                    self._set_agent_current_action(
+                        package.agent.key,
+                        f"Failed: {request.task_instruction[:160]}",
+                        commit=False,
+                    )
+                    self.session.commit()
+                    self.session.refresh(tool_call)
+                    self.session.refresh(task)
+                    execution_note = "Manual run failed while calling the LLM gateway."
+                    status = "failed"
 
-            tool_call_payloads.append(
-                {
-                    "id": str(tool_call.id),
-                    "tool_name": tool_call.tool_name,
-                    "status": tool_call.status,
-                    "error_message": tool_call.error_message,
-                    "input_payload": tool_call.input_payload,
-                    "output_payload": tool_call.output_payload,
-                }
-            )
+                tool_call_payloads.append(
+                    {
+                        "id": str(tool_call.id),
+                        "tool_name": tool_call.tool_name,
+                        "status": tool_call.status,
+                        "error_message": tool_call.error_message,
+                        "input_payload": tool_call.input_payload,
+                        "output_payload": tool_call.output_payload,
+                    }
+                )
         else:
             task.output_payload = {
                 "run_id": run_id,
@@ -1095,21 +1119,19 @@ class PromptAggregationService:
                             "rationale": requested_tool.get("rationale"),
                         }
                         iteration_trace["blocked"].append(blocked)
-                        blocked_payload = {
-                            "id": f"blocked-{uuid.uuid4()}",
-                            "tool_name": tool_key,
-                            "status": "approval_required",
-                            "error_message": blocked["reason"],
-                            "input_payload": {
-                                "payload": requested_tool.get("payload") or {},
-                                "rationale": requested_tool.get("rationale"),
-                            },
-                            "output_payload": {
-                                "approval_required": True,
-                                "safety_level": policy["level"],
-                                "reason": policy["reason"],
-                            },
-                        }
+                        proposed = tool_service.propose_for_task(
+                            ToolExecutionRequest(
+                                agent_key=package.agent.key,
+                                tool_key=tool_key,
+                                payload=requested_tool.get("payload") or {},
+                                dry_run=False,
+                            ),
+                            task=task,
+                            rationale=requested_tool.get("rationale"),
+                            safety_level=str(policy["level"]),
+                            reason=str(policy["reason"]),
+                        )
+                        blocked_payload = tool_result_payload(proposed)
                         executed_calls.append(blocked_payload)
                         prior_results.append(blocked_payload)
                         continue
