@@ -561,7 +561,12 @@ class GitHubCliToolAdapter:
         *,
         env: dict[str, str],
     ) -> dict[str, Any]:
-        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        number = _bounded_int(
+            payload.get("number") or payload.get("issue_number"),
+            default=0,
+            minimum=1,
+            maximum=1_000_000,
+        )
         return {
             "repo": repo,
             "number": number,

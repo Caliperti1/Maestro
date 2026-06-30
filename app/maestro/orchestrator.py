@@ -681,7 +681,11 @@ class MaestroOrchestratorService:
         lowered = user_input.lower()
         domain_key = self._domain_for_input(lowered, registry_snapshot)
         work_items: list[PlannerWorkItem] = []
-        if any(
+        planning_only = any(
+            token in lowered
+            for token in ("plan only", "minimal plan", "no code changes", "do not make code")
+        )
+        if not planning_only and any(
             token in lowered
             for token in ("implement", "code", "coding", "fix", "action issue", "work issue")
         ):
@@ -1092,16 +1096,24 @@ class MaestroOrchestratorService:
                 key for key in item.suggested_agent_keys if key in active_agent_keys
             ]
             if valid_suggested_keys:
-                if agent.key in valid_suggested_keys:
+                if agent.key == valid_suggested_keys[0]:
                     assigned.append(item)
                 continue
             score = self._agent_work_item_score(item, agent)
-            candidates = [
-                self._agent_work_item_score(item, candidate)
-                for candidate in specs
-                if item.domain_key is None or candidate.domain_key == item.domain_key
-            ]
-            top_score = max(candidates) if candidates else score
+            candidates = sorted(
+                [
+                    (self._agent_work_item_score(item, candidate), candidate.key)
+                    for candidate in specs
+                    if item.domain_key is None or candidate.domain_key == item.domain_key
+                ],
+                key=lambda pair: (-pair[0], pair[1]),
+            )
+            best_score, best_agent_key = candidates[0] if candidates else (score, agent.key)
+            if item.required_tools:
+                if score > 0 and agent.key == best_agent_key and best_score >= 2.0:
+                    assigned.append(item)
+                continue
+            top_score = best_score
             if score > 0 and score >= max(2.0, top_score * 0.5) and (
                 top_score <= 3.5 or score > 3.0
             ):
