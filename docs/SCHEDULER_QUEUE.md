@@ -83,6 +83,8 @@ the active pointer and creates a fresh conversation.
 The foundation includes the service/API primitives the worker process will use:
 
 - `POST /scheduler/triggers/enqueue-due`: enqueue due scheduled/recurring definitions.
+- `POST /scheduler/triggers/event`: enqueue event-triggered definitions, such as a new email event.
+- `POST /scheduler/tick`: enqueue due definitions and claim runnable work in one scheduler cycle.
 - `POST /scheduler/worker/claim`: claim currently runnable queue items, acquire locks, and set leases.
 - `POST /scheduler/queue-items/{id}/complete`: mark work complete and unblock dependents.
 - `POST /scheduler/queue-items/{id}/fail`: retry or fail work based on attempt count.
@@ -90,3 +92,43 @@ The foundation includes the service/API primitives the worker process will use:
 
 The current PR does not start a background daemon inside the API process. That is intentional: the
 worker should run with its own database session lifecycle and process supervision.
+
+## Trigger Examples
+
+Time-based workflow:
+
+```json
+{
+  "key": "daily-before-eight",
+  "name": "Daily Before 8",
+  "trigger_type": "recurring",
+  "trigger_config": {
+    "time_of_day": "07:55",
+    "interval_minutes": 1440
+  },
+  "workflow_spec": {
+    "queue_items": [
+      {"id": "brief", "objective": "Prepare the daily brief.", "domain_key": "personal"}
+    ]
+  }
+}
+```
+
+Event-based workflow:
+
+```json
+{
+  "key": "praxis-email-triage",
+  "name": "Praxis Email Triage",
+  "trigger_type": "event",
+  "trigger_config": {
+    "event_type": "gmail.message.received",
+    "filters": {"domain_key": "praxis"}
+  },
+  "workflow_spec": {
+    "queue_items": [
+      {"id": "triage", "objective": "Triage the new Praxis email.", "domain_key": "praxis"}
+    ]
+  }
+}
+```

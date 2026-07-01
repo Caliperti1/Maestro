@@ -318,3 +318,74 @@ def test_scheduler_enqueues_due_recurring_definitions_once(session: Session) -> 
     session.refresh(definition)
     assert definition.trigger_config["last_enqueued_at"]
     assert definition.trigger_config["next_run_at"] != (now - timedelta(minutes=1)).isoformat()
+
+
+def test_scheduler_enqueues_event_triggered_workflows_with_filters(session: Session) -> None:
+    SchedulerService(session).upsert_definition(
+        key="praxis-email-triage",
+        name="Praxis Email Triage",
+        trigger_type="event",
+        trigger_config={
+            "event_type": "gmail.message.received",
+            "filters": {"domain_key": "praxis", "labels.primary": True},
+        },
+        workflow_spec={
+            "queue_items": [
+                {
+                    "id": "triage",
+                    "objective": "Triage the new Praxis email.",
+                    "domain_key": "praxis",
+                    "required_tools": ["gmail.message.get"],
+                }
+            ]
+        },
+        fairness_group="praxis",
+    )
+
+    ignored = SchedulerService(session).enqueue_event_workflows(
+        event_type="gmail.message.received",
+        event_id="msg-ignored",
+        event_payload={"domain_key": "ophi", "labels": {"primary": True}},
+    )
+    runs = SchedulerService(session).enqueue_event_workflows(
+        event_type="gmail.message.received",
+        event_id="msg-1",
+        event_payload={"domain_key": "praxis", "labels": {"primary": True}},
+    )
+    duplicate = SchedulerService(session).enqueue_event_workflows(
+        event_type="gmail.message.received",
+        event_id="msg-1",
+        event_payload={"domain_key": "praxis", "labels": {"primary": True}},
+    )
+
+    assert ignored == []
+    assert len(runs) == 1
+    assert duplicate == runs
+    assert runs[0].source_type == "event"
+    assert runs[0].input_payload["event"]["event_id"] == "msg-1"
+
+
+def test_scheduler_tick_enqueues_due_work_and_claims_ready_items(session: Session) -> None:
+    now = datetime.now(UTC)
+    SchedulerService(session).upsert_definition(
+        key="before-eight-standup",
+        name="Before 8 AM Standup",
+        trigger_type="recurring",
+        trigger_config={
+            "next_run_at": (now - timedelta(minutes=5)).isoformat(),
+            "interval_minutes": 1440,
+        },
+        workflow_spec={
+            "queue_items": [
+                {"id": "brief", "objective": "Build the daily brief.", "domain_key": "personal"}
+            ]
+        },
+        fairness_group="personal",
+    )
+
+    result = SchedulerService(session).tick(owner="tick-test", claim_limit=2, now=now)
+
+    assert len(result["enqueued"]) == 1
+    assert len(result["claimed"]) == 1
+    assert result["claimed"][0]["external_key"] == "brief"
+    assert result["claimed"][0]["lease_owner"] == "tick-test"

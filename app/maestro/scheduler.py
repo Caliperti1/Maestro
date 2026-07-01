@@ -54,6 +54,12 @@ class SchedulerService:
         self.session.refresh(definition)
         return definition
 
+    def list_definitions(self, *, active_only: bool = False) -> list[WorkflowDefinition]:
+        query = select(WorkflowDefinition).order_by(WorkflowDefinition.created_at.desc())
+        if active_only:
+            query = query.where(WorkflowDefinition.is_active.is_(True))
+        return list(self.session.scalars(query).all())
+
     def enqueue_maestro_plan(self, parent_task: Task) -> WorkflowRun:
         existing = self.session.scalar(
             select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task.id)
@@ -99,6 +105,7 @@ class SchedulerService:
 
     def enqueue_due_workflows(self, *, now: datetime | None = None) -> list[WorkflowRun]:
         now = now or datetime.now(UTC)
+        self._normalize_definition_schedules(now=now)
         definitions = self.session.scalars(
             select(WorkflowDefinition).where(
                 WorkflowDefinition.is_active.is_(True),
@@ -123,14 +130,63 @@ class SchedulerService:
             self.session.commit()
         return runs
 
+    def enqueue_event_workflows(
+        self,
+        *,
+        event_type: str,
+        event_payload: dict[str, Any] | None = None,
+        event_id: str | None = None,
+        now: datetime | None = None,
+    ) -> list[WorkflowRun]:
+        now = now or datetime.now(UTC)
+        event_payload = event_payload or {}
+        definitions = self.session.scalars(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.is_active.is_(True),
+                WorkflowDefinition.trigger_type == "event",
+            )
+        ).all()
+        runs: list[WorkflowRun] = []
+        for definition in definitions:
+            trigger_config = definition.trigger_config or {}
+            if trigger_config.get("event_type") != event_type:
+                continue
+            if not self._event_matches_filters(event_payload, trigger_config.get("filters") or {}):
+                continue
+            suffix = event_id or str(event_payload.get("id") or uuid.uuid4())
+            run = self.enqueue_definition_run(
+                definition,
+                scheduled_for=now,
+                source_type="event",
+                idempotency_suffix=f"event:{event_type}:{suffix}",
+                event_payload={"event_type": event_type, "event_id": suffix, "payload": event_payload},
+            )
+            definition.trigger_config = {
+                **trigger_config,
+                "last_enqueued_at": now.isoformat(),
+                "last_event_type": event_type,
+                "last_event_id": suffix,
+            }
+            runs.append(run)
+        if runs:
+            self.session.commit()
+        return runs
+
     def enqueue_definition_run(
         self,
         definition: WorkflowDefinition,
         *,
         scheduled_for: datetime | None = None,
+        source_type: str = "scheduled",
+        idempotency_suffix: str | None = None,
+        event_payload: dict[str, Any] | None = None,
     ) -> WorkflowRun:
         scheduled_for = scheduled_for or datetime.now(UTC)
-        idempotency_key = f"workflow-definition:{definition.id}:{scheduled_for.isoformat()}"
+        idempotency_key = (
+            f"workflow-definition:{definition.id}:{idempotency_suffix}"
+            if idempotency_suffix
+            else f"workflow-definition:{definition.id}:{scheduled_for.isoformat()}"
+        )
         existing = self.session.scalar(
             select(WorkflowRun).where(WorkflowRun.idempotency_key == idempotency_key)
         )
@@ -141,7 +197,7 @@ class SchedulerService:
         run = WorkflowRun(
             workflow_definition_id=definition.id,
             domain_id=definition.domain_id,
-            source_type="scheduled",
+            source_type=source_type,
             status="queued",
             priority=definition.priority,
             fairness_group=definition.fairness_group,
@@ -150,6 +206,7 @@ class SchedulerService:
                 "definition_key": definition.key,
                 "summary": definition.name,
                 "workflow_spec": spec,
+                "event": event_payload,
             },
             scheduled_for=scheduled_for,
         )
@@ -166,6 +223,26 @@ class SchedulerService:
         self.session.commit()
         self.session.refresh(run)
         return run
+
+    def tick(
+        self,
+        *,
+        owner: str = "maestro-worker",
+        claim_limit: int = 4,
+        lease_seconds: int = 900,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        enqueued = self.enqueue_due_workflows(now=now)
+        claimed = self.claim_ready_items(
+            owner=owner,
+            limit=claim_limit,
+            lease_seconds=lease_seconds,
+        )
+        return {
+            "enqueued": [self.workflow_run_payload(run) for run in enqueued],
+            "claimed": [self.queue_item_payload(item) for item in claimed],
+            "runnable_batches": self.runnable_batches(),
+        }
 
     def sync_run_status_from_task(self, parent_task: Task) -> WorkflowRun | None:
         run = self.session.scalar(select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task.id))
@@ -347,6 +424,10 @@ class SchedulerService:
             select(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(20)
         ).all()
         return {
+            "definitions": [
+                self.workflow_definition_payload(definition)
+                for definition in self.list_definitions(active_only=False)
+            ],
             "runs": [self.workflow_run_payload(run) for run in runs],
             "runnable_batches": self.runnable_batches(),
             "active_locks": [
@@ -436,6 +517,24 @@ class SchedulerService:
             "queue_items": [
                 self.queue_item_payload(item) for item in self._queue_items_for_run(run.id)
             ],
+        }
+
+    def workflow_definition_payload(self, definition: WorkflowDefinition) -> dict[str, Any]:
+        domain = self.session.get(Domain, definition.domain_id) if definition.domain_id else None
+        return {
+            "id": str(definition.id),
+            "domain_key": domain.key if domain else None,
+            "key": definition.key,
+            "name": definition.name,
+            "description": definition.description,
+            "trigger_type": definition.trigger_type,
+            "trigger_config": definition.trigger_config,
+            "workflow_spec": definition.workflow_spec,
+            "priority": definition.priority,
+            "fairness_group": definition.fairness_group,
+            "is_active": definition.is_active,
+            "created_at": definition.created_at.isoformat() if definition.created_at else None,
+            "updated_at": definition.updated_at.isoformat() if definition.updated_at else None,
         }
 
     def queue_item_payload(self, item: WorkflowQueueItem) -> dict[str, Any]:
@@ -592,6 +691,61 @@ class SchedulerService:
             item.input_payload = dict(raw)
         if commit:
             self.session.commit()
+
+    def _normalize_definition_schedules(self, *, now: datetime) -> None:
+        changed = False
+        definitions = self.session.scalars(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.is_active.is_(True),
+                WorkflowDefinition.trigger_type.in_(["scheduled", "recurring"]),
+            )
+        ).all()
+        for definition in definitions:
+            trigger_config = definition.trigger_config or {}
+            if trigger_config.get("next_run_at"):
+                continue
+            time_of_day = trigger_config.get("time_of_day")
+            if not time_of_day:
+                continue
+            next_run = self._next_daily_time(now, str(time_of_day))
+            definition.trigger_config = {
+                **trigger_config,
+                "interval_minutes": int(trigger_config.get("interval_minutes") or 1440),
+                "next_run_at": next_run.isoformat(),
+            }
+            changed = True
+        if changed:
+            self.session.commit()
+
+    def _next_daily_time(self, now: datetime, time_of_day: str) -> datetime:
+        hour_text, minute_text = (time_of_day.split(":", 1) + ["0"])[:2]
+        candidate = now.replace(
+            hour=int(hour_text),
+            minute=int(minute_text),
+            second=0,
+            microsecond=0,
+        )
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        return candidate
+
+    def _event_matches_filters(
+        self,
+        event_payload: dict[str, Any],
+        filters: dict[str, Any],
+    ) -> bool:
+        for key, expected in filters.items():
+            actual: Any = event_payload
+            for part in str(key).split("."):
+                if not isinstance(actual, dict) or part not in actual:
+                    return False
+                actual = actual[part]
+            if isinstance(expected, list):
+                if actual not in expected:
+                    return False
+            elif actual != expected:
+                return False
+        return True
 
     def _queue_items_for_run(self, run_id: uuid.UUID) -> list[WorkflowQueueItem]:
         return list(

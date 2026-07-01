@@ -71,7 +71,21 @@ type SchedulerRun = {
   queue_items: SchedulerQueueItem[];
 };
 
+type SchedulerDefinition = {
+  id: string;
+  domain_key: string | null;
+  key: string;
+  name: string;
+  description: string | null;
+  trigger_type: string;
+  trigger_config: Record<string, unknown>;
+  priority: string;
+  fairness_group: string | null;
+  is_active: boolean;
+};
+
 type SchedulerDashboard = {
+  definitions: SchedulerDefinition[];
   runs: SchedulerRun[];
   runnable_batches: Array<{
     workflow_run_id: string;
@@ -1906,6 +1920,34 @@ export function App() {
                       </article>
                     );
                   })}
+                </div>
+              )}
+              {schedulerDashboard && schedulerDashboard.definitions.length > 0 && (
+                <div className="scheduler-run-list" aria-label="Scheduled workflow definitions">
+                  <div className="workflow-detail-heading">
+                    <div>
+                      <span>Triggers</span>
+                      <h4>Recurring and event workflows</h4>
+                    </div>
+                    <span>{schedulerDashboard.definitions.length} configured</span>
+                  </div>
+                  {schedulerDashboard.definitions.slice(0, 5).map((definition) => (
+                    <article className="workflow-summary-card compact-run-card" key={definition.id}>
+                      <span>{definition.trigger_type}</span>
+                      <h4>{definition.name}</h4>
+                      <div className="preview-meta">
+                        <span>{definition.is_active ? "active" : "paused"}</span>
+                        <span>{definition.priority}</span>
+                        <span>{definition.fairness_group || definition.domain_key || "global"} fairness</span>
+                        {typeof definition.trigger_config.next_run_at === "string" && (
+                          <span>Next {definition.trigger_config.next_run_at}</span>
+                        )}
+                        {typeof definition.trigger_config.event_type === "string" && (
+                          <span>{definition.trigger_config.event_type}</span>
+                        )}
+                      </div>
+                    </article>
+                  ))}
                 </div>
               )}
             </section>
