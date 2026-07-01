@@ -1159,10 +1159,12 @@ class CodexCliToolAdapter:
         profile = str(payload.get("profile") or "").strip()
         extra_context = str(payload.get("context") or "").strip()
         full_prompt = prompt if not extra_context else f"{prompt}\n\nAdditional context:\n{extra_context}"
+        branch_workflow = _bool_setting(payload, context.connection, "branch_workflow", default=True)
 
         with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as output_file:
             output_path = output_file.name
         try:
+            git_context = self._prepare_branch_workflow(context, payload, target_path) if branch_workflow else None
             args = [
                 codex_bin,
                 "exec",
@@ -1216,10 +1218,23 @@ class CodexCliToolAdapter:
                     or final_message
                     or f"Codex exited with status {completed.returncode}."
                 )
+            if git_context is not None:
+                result.update(
+                    self._complete_branch_workflow(
+                        context,
+                        payload,
+                        target_path,
+                        git_context,
+                        final_message=final_message,
+                        changed_files=result["changed_files"],
+                    )
+                )
             return result
         except subprocess.TimeoutExpired as exc:
             raise ToolExecutionError(f"Codex task timed out after {timeout_seconds} seconds.") from exc
         finally:
+            if "git_context" in locals() and git_context is not None:
+                self._restore_branch(target_path, git_context)
             try:
                 Path(output_path).unlink()
             except FileNotFoundError:
@@ -1271,6 +1286,168 @@ class CodexCliToolAdapter:
             allowed = ", ".join(str(root) for root in roots)
             raise ToolExecutionError(f"Codex target path must be inside an allowed root: {allowed}")
         return target
+
+    def _prepare_branch_workflow(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+        target_path: Path,
+    ) -> dict[str, Any]:
+        if not (target_path / ".git").exists():
+            raise ToolExecutionError("Codex branch workflow requires a Git repository target.")
+        allow_dirty = _bool_setting(payload, context.connection, "allow_dirty", default=False)
+        status = _run_local_text(["git", "status", "--porcelain"], cwd=target_path).strip()
+        if status and not allow_dirty:
+            raise ToolExecutionError(
+                "Codex branch workflow requires a clean working tree. Commit, stash, or set allow_dirty intentionally."
+            )
+        original_branch = _run_local_text(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=target_path,
+        ).strip()
+        if not original_branch or original_branch == "HEAD":
+            raise ToolExecutionError("Codex branch workflow requires a named starting branch.")
+        base_branch = str(
+            payload.get("base_branch")
+            or _connection_config(context.connection).get("base_branch")
+            or _connection_config(context.connection).get("default_base_branch")
+            or "main"
+        ).strip()
+        branch_name = str(payload.get("branch_name") or "").strip()
+        if not branch_name:
+            branch_name = self._generated_branch_name(context, payload)
+        _run_local_text(["git", "checkout", base_branch], cwd=target_path)
+        _run_local_text(["git", "checkout", "-B", branch_name], cwd=target_path)
+        return {
+            "original_branch": original_branch,
+            "base_branch": base_branch,
+            "branch_name": branch_name,
+            "allow_dirty": allow_dirty,
+        }
+
+    def _complete_branch_workflow(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+        target_path: Path,
+        git_context: dict[str, Any],
+        *,
+        final_message: str,
+        changed_files: list[str],
+    ) -> dict[str, Any]:
+        branch_name = str(git_context["branch_name"])
+        base_branch = str(git_context["base_branch"])
+        status = _run_local_text(["git", "status", "--porcelain"], cwd=target_path).strip()
+        changed_paths = _git_changed_paths(target_path)
+        commit_sha = None
+        if status:
+            _run_local_text(["git", "add", "-A"], cwd=target_path)
+            commit_message = _codex_commit_message(payload)
+            _run_local_text(["git", "commit", "-m", commit_message], cwd=target_path, timeout=120)
+            commit_sha = _run_local_text(["git", "rev-parse", "HEAD"], cwd=target_path).strip()
+        create_pr = _bool_setting(payload, context.connection, "create_pr", default=True)
+        push_branch = _bool_setting(payload, context.connection, "push_branch", default=create_pr)
+        pr_payload: dict[str, Any] | None = None
+        if push_branch and commit_sha:
+            _run_local_text(["git", "push", "-u", "origin", branch_name], cwd=target_path, timeout=180)
+        if create_pr and commit_sha:
+            pr_payload = self._create_or_get_pr(
+                context,
+                payload,
+                target_path,
+                branch_name=branch_name,
+                base_branch=base_branch,
+                final_message=final_message,
+                changed_paths=changed_paths,
+            )
+        diff_summary = _run_local_text(
+            ["git", "diff", "--stat", f"{base_branch}...{branch_name}"],
+            cwd=target_path,
+        ).strip()
+        return {
+            "branch_workflow": True,
+            "branch": branch_name,
+            "base_branch": base_branch,
+            "commit_sha": commit_sha,
+            "changed_files": changed_paths or changed_files,
+            "diff_summary": diff_summary,
+            "pr": pr_payload,
+            "pr_url": pr_payload.get("url") if pr_payload else None,
+            "pr_number": pr_payload.get("number") if pr_payload else None,
+            "review_status": "pr_opened" if pr_payload else ("no_changes" if not commit_sha else "branch_pushed"),
+        }
+
+    def _create_or_get_pr(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+        target_path: Path,
+        *,
+        branch_name: str,
+        base_branch: str,
+        final_message: str,
+        changed_paths: list[str],
+    ) -> dict[str, Any]:
+        github_connection = self._github_connection(context)
+        repo = _optional_repo_from(github_connection, payload) or _optional_repo_from(context.connection, payload)
+        title = str(payload.get("pr_title") or payload.get("task_title") or "").strip()
+        if not title:
+            title = _single_line_preview(str(payload.get("task") or payload.get("prompt") or "Maestro coding task"), max_chars=90)
+        body = str(payload.get("pr_body") or "").strip()
+        if not body:
+            body = _codex_pr_body(
+                title=title,
+                final_message=final_message,
+                changed_paths=changed_paths,
+            )
+        args = ["pr", "create", "--base", base_branch, "--head", branch_name, "--title", title, "--body", body]
+        if repo:
+            args.extend(["--repo", repo])
+        env = _github_env(github_connection or context.connection)
+        try:
+            url = _run_gh_text(args, env=env).strip()
+        except ToolExecutionError as exc:
+            if "already exists" not in str(exc).lower():
+                raise
+            view_args = ["pr", "view", branch_name, "--json", "number,title,body,url,headRefName,baseRefName"]
+            if repo:
+                view_args.extend(["--repo", repo])
+            existing = _run_gh_json(view_args, env=env)
+            return _normalized_pr_payload(repo, existing, body)
+        view_args = ["pr", "view", url, "--json", "number,title,body,url,headRefName,baseRefName"]
+        if repo:
+            view_args.extend(["--repo", repo])
+        pr = _run_gh_json(view_args, env=env)
+        return _normalized_pr_payload(repo, pr, body)
+
+    def _restore_branch(self, target_path: Path, git_context: dict[str, Any]) -> None:
+        original_branch = str(git_context.get("original_branch") or "").strip()
+        if original_branch:
+            try:
+                _run_local_text(["git", "checkout", original_branch], cwd=target_path)
+            except ToolExecutionError:
+                pass
+
+    def _github_connection(self, context: ToolExecutionContext) -> ToolConnection | None:
+        return context.session.scalar(
+            select(ToolConnection).where(
+                ToolConnection.domain_id == context.domain.id,
+                ToolConnection.tool_key == "github",
+                ToolConnection.is_active.is_(True),
+            )
+        )
+
+    def _generated_branch_name(self, context: ToolExecutionContext, payload: dict[str, Any]) -> str:
+        prefix = str(
+            payload.get("branch_prefix")
+            or _connection_config(context.connection).get("branch_prefix")
+            or "maestro/codex"
+        ).strip().strip("/")
+        issue_number = str(payload.get("issue_number") or payload.get("number") or "").strip()
+        title = str(payload.get("task_title") or payload.get("title") or payload.get("task") or payload.get("prompt") or "task")
+        slug = _slug_text(title, max_chars=42)
+        suffix = f"issue-{issue_number}-{slug}" if issue_number else slug
+        return f"{prefix}/{suffix}-{str(context.task.id)[:8]}"
 
 
 def default_tool_adapters() -> dict[str, ToolAdapter]:
@@ -1450,6 +1627,39 @@ def _optional_repo_from(connection: ToolConnection | None, payload: dict[str, An
         return None
 
 
+def _connection_config(connection: ToolConnection | None) -> dict[str, Any]:
+    return dict(connection.config or {}) if connection is not None else {}
+
+
+def _bool_setting(
+    payload: dict[str, Any],
+    connection: ToolConnection | None,
+    key: str,
+    *,
+    default: bool,
+) -> bool:
+    if key in payload:
+        return _as_bool(payload.get(key), default=default)
+    config = _connection_config(connection)
+    if key in config:
+        return _as_bool(config.get(key), default=default)
+    return default
+
+
+def _as_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
 def _github_issue_number_from_url(url: str) -> int | None:
     tail = url.rstrip("/").rsplit("/", 1)[-1]
     try:
@@ -1552,6 +1762,104 @@ def _repo_parts(repo: str) -> tuple[str | None, str | None]:
         return None, repo or None
     owner, name = repo.split("/", 1)
     return owner or None, name or None
+
+
+def _slug_text(value: str, *, max_chars: int = 60) -> str:
+    slug = "".join(char.lower() if char.isalnum() else "-" for char in value)
+    slug = "-".join(part for part in slug.split("-") if part)
+    return (slug[:max_chars].strip("-") or "task")
+
+
+def _run_local_text(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: int = 60,
+    env: dict[str, str] | None = None,
+) -> str:
+    completed = subprocess.run(
+        args,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(cwd),
+        env=env or os.environ.copy(),
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "command failed"
+        raise ToolExecutionError(f"{' '.join(args)} failed: {detail}")
+    return completed.stdout
+
+
+def _git_changed_paths(target_path: Path) -> list[str]:
+    output = _run_local_text(["git", "status", "--porcelain"], cwd=target_path)
+    paths: list[str] = []
+    for line in output.splitlines():
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[-1]
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _codex_commit_message(payload: dict[str, Any]) -> str:
+    explicit = str(payload.get("commit_message") or "").strip()
+    if explicit:
+        return explicit
+    issue_number = str(payload.get("issue_number") or payload.get("number") or "").strip()
+    title = str(payload.get("task_title") or payload.get("title") or "").strip()
+    if issue_number and title:
+        return f"Implement issue #{issue_number}: {_single_line_preview(title, max_chars=60)}"
+    if issue_number:
+        return f"Implement issue #{issue_number}"
+    return f"Implement Maestro coding task: {_single_line_preview(str(payload.get('task') or payload.get('prompt') or 'Codex changes'), max_chars=60)}"
+
+
+def _codex_pr_body(
+    *,
+    title: str,
+    final_message: str,
+    changed_paths: list[str],
+) -> str:
+    changed = "\n".join(f"- `{path}`" for path in changed_paths) or "- No file changes detected."
+    report = final_message.strip() or "Codex completed without a final message."
+    return (
+        "## Maestro Coding Agent Summary\n"
+        f"{report}\n\n"
+        "## Changed Files\n"
+        f"{changed}\n\n"
+        "## Review Notes\n"
+        "- Review the diff before merge.\n"
+        "- Merge and hot reload require explicit Chris approval."
+    )
+
+
+def _normalized_pr_payload(
+    repo: str | None,
+    pr: Any,
+    fallback_body: str,
+) -> dict[str, Any]:
+    payload = pr if isinstance(pr, dict) else {}
+    url = str(payload.get("url") or "").strip()
+    repo_owner, repo_name = _repo_parts(repo or "")
+    return {
+        "repo": repo,
+        "owner": repo_owner,
+        "name": repo_name,
+        "repo_name": repo_name,
+        "number": payload.get("number"),
+        "pr_number": payload.get("number"),
+        "url": url or None,
+        "pr_url": url or None,
+        "html_url": url or None,
+        "title": payload.get("title"),
+        "body": payload.get("body") or fallback_body,
+        "head_ref": payload.get("headRefName"),
+        "base_ref": payload.get("baseRefName"),
+    }
+
 
 
 def _repo_owner(connection: ToolConnection | None, payload: dict[str, Any]) -> str:

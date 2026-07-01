@@ -318,14 +318,25 @@ Follow-up contract for template-driven issue creation:
 MVP Codex tools:
 
 - `codex.task.run`: runs a local Codex CLI task in an authorized target directory and returns the
-  Codex session id, final message, changed files seen in the event stream, event counts, sandbox,
-  and stderr tail.
+  Codex session id, final message, changed files, event counts, sandbox, branch metadata, commit
+  metadata, diff summary, and PR review metadata.
 
-`codex.task.run` is approval-required because it can inspect or modify a local repository. It uses
-the local Codex CLI and therefore can reuse the machine's existing Codex authentication instead of
-requiring Maestro to call the OpenAI API directly. The first implementation uses `codex exec
---json`; app-server/SDK streaming can replace the adapter internals later without changing the
-agent-facing tool contract.
+`codex.task.run` uses the local Codex CLI and therefore can reuse the machine's existing Codex
+authentication instead of requiring Maestro to call the OpenAI API directly. By default the tool
+runs as a branch/PR workflow:
+
+1. Validate the target path is inside an allowed root.
+2. Require a clean working tree unless `allow_dirty` is explicitly set.
+3. Check out the configured base branch.
+4. Create an isolated feature branch.
+5. Run `codex exec --json` on that branch.
+6. Commit changes if files changed.
+7. Push the branch and open a PR.
+8. Return the local checkout to the original branch.
+
+This branch/PR workflow can run without a separate approval gate because the coding agent is acting
+like a human SWE working inside a feature branch. The review boundary is the PR. Merge to main,
+deployment, and hot reload remain approval-gated actions.
 
 Configure a domain-level `codex` connection in the Tools tab:
 
@@ -333,7 +344,12 @@ Configure a domain-level `codex` connection in the Tools tab:
 {
   "codex_bin": "codex",
   "default_cwd": "/Users/christopheraliperti/Maestro",
-  "allowed_roots": ["/Users/christopheraliperti/Maestro"]
+  "allowed_roots": ["/Users/christopheraliperti/Maestro"],
+  "base_branch": "main",
+  "branch_prefix": "maestro/codex",
+  "branch_workflow": true,
+  "create_pr": true,
+  "push_branch": true
 }
 ```
 
@@ -344,9 +360,19 @@ Typical agent-planned payload:
   "target_path": "/Users/christopheraliperti/Maestro",
   "sandbox": "workspace-write",
   "prompt": "Implement GitHub issue #50. Keep the change scoped and run the relevant tests.",
+  "issue_number": 50,
+  "task_title": "Harden GitHub tool suite",
   "timeout_seconds": 1200
 }
 ```
+
+Useful result fields:
+
+- `branch`, `base_branch`, `commit_sha`
+- `changed_files`, `diff_summary`
+- `pr`, `pr_url`, `pr_number`
+- `review_status`
+- `final_message`
 
 The seeded `maestro-coding-agent` is the default Maestro Development agent intended to use this
 tool. Existing hand-created Maestro Development agents need `codex.task.run` added to their tool

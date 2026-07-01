@@ -376,6 +376,7 @@ type MaestroRun = {
     status: string;
     error_message: string | null;
     details: string;
+    output_payload?: Record<string, unknown>;
   }>;
   child_runs: Array<{
     run_id: string;
@@ -752,6 +753,34 @@ export function App() {
       ),
     [maestroRun],
   );
+
+  const codexReviewPayload = (activity: MaestroRun["tool_activity"][number]) => {
+    const payload = activity.output_payload ?? {};
+    const pr = payload.pr && typeof payload.pr === "object" ? (payload.pr as Record<string, unknown>) : {};
+    const prUrl = String(payload.pr_url ?? pr.pr_url ?? pr.url ?? "");
+    const prNumber = payload.pr_number ?? pr.pr_number ?? pr.number;
+    const prTitle = String(pr.title ?? "");
+    const prBody = String(pr.body ?? "");
+    const branch = String(payload.branch ?? "");
+    const baseBranch = String(payload.base_branch ?? "");
+    const diffSummary = String(payload.diff_summary ?? "");
+    const finalMessage = String(payload.final_message ?? "");
+    const changedFiles = Array.isArray(payload.changed_files)
+      ? payload.changed_files.map((item) => String(item))
+      : [];
+    return {
+      prUrl,
+      prNumber,
+      prTitle,
+      prBody,
+      branch,
+      baseBranch,
+      diffSummary,
+      finalMessage,
+      changedFiles,
+      hasReview: Boolean(prUrl || changedFiles.length > 0 || diffSummary || prBody),
+    };
+  };
 
   const isApprovalMessage = (message: string) => {
     const normalized = message.trim().toLowerCase();
@@ -1537,6 +1566,54 @@ export function App() {
                               </button>
                             </div>
                           )}
+                          {activity.tool_name === "codex.task.run" &&
+                            (() => {
+                              const review = codexReviewPayload(activity);
+                              if (!review.hasReview) return null;
+                              return (
+                                <div className="tool-review-panel">
+                                  <div className="preview-meta">
+                                    {review.prNumber ? <span>PR #{String(review.prNumber)}</span> : null}
+                                    {review.branch ? <span>{review.branch}</span> : null}
+                                    {review.baseBranch ? <span>base {review.baseBranch}</span> : null}
+                                  </div>
+                                  {review.prTitle && <strong>{review.prTitle}</strong>}
+                                  {review.prUrl && (
+                                    <a href={review.prUrl} target="_blank" rel="noreferrer">
+                                      Open PR
+                                    </a>
+                                  )}
+                                  {review.prBody && (
+                                    <details>
+                                      <summary>PR body</summary>
+                                      <pre>{review.prBody}</pre>
+                                    </details>
+                                  )}
+                                  {review.changedFiles.length > 0 && (
+                                    <details>
+                                      <summary>{review.changedFiles.length} changed files</summary>
+                                      <ul>
+                                        {review.changedFiles.map((file) => (
+                                          <li key={file}>{file}</li>
+                                        ))}
+                                      </ul>
+                                    </details>
+                                  )}
+                                  {review.diffSummary && (
+                                    <details>
+                                      <summary>Diff summary</summary>
+                                      <pre>{review.diffSummary}</pre>
+                                    </details>
+                                  )}
+                                  {review.finalMessage && (
+                                    <details>
+                                      <summary>Codex report</summary>
+                                      <pre>{review.finalMessage}</pre>
+                                    </details>
+                                  )}
+                                </div>
+                              );
+                            })()}
                         </article>
                       ))}
                     </div>

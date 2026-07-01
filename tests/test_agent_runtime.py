@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from subprocess import CompletedProcess
 
 from sqlalchemy.orm import Session
@@ -1048,6 +1049,7 @@ def test_codex_adapter_runs_local_codex_exec_json(
             "task": "Implement issue #50.",
             "sandbox_mode": "workspace-write",
             "target_directory": ".",
+            "branch_workflow": False,
         },
     )
 
@@ -1064,6 +1066,131 @@ def test_codex_adapter_runs_local_codex_exec_json(
         str(tmp_path),
         "--sandbox",
     ]
+
+
+def test_codex_adapter_runs_branch_workflow_and_returns_pr_metadata(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="codex",
+        display_name="Local Codex",
+        auth_type="local_cli",
+        config={
+            "default_cwd": str(tmp_path),
+            "allowed_roots": [str(tmp_path)],
+            "branch_prefix": "maestro/test",
+        },
+    )
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="codex").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.codex",
+        objective="Run a Codex task.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/codex")
+    calls: list[list[str]] = []
+    status_calls = 0
+
+    def fake_run(args, **kwargs):
+        nonlocal status_calls
+        calls.append(args)
+        if args[0] == "git":
+            if args[1:3] == ["status", "--porcelain"]:
+                status_calls += 1
+                return CompletedProcess(args=args, returncode=0, stdout="" if status_calls == 1 else " M app/example.py\n", stderr="")
+            if args[1:4] == ["rev-parse", "--abbrev-ref", "HEAD"]:
+                return CompletedProcess(args=args, returncode=0, stdout="main\n", stderr="")
+            if args[1:3] == ["rev-parse", "HEAD"]:
+                return CompletedProcess(args=args, returncode=0, stdout="abc123\n", stderr="")
+            if args[1] == "diff":
+                return CompletedProcess(args=args, returncode=0, stdout=" app/example.py | 1 +\n", stderr="")
+            return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        if args[0] == "gh":
+            if args[1:3] == ["pr", "create"]:
+                return CompletedProcess(args=args, returncode=0, stdout="https://github.com/Caliperti1/Maestro/pull/77\n", stderr="")
+            if args[1:3] == ["pr", "view"]:
+                return CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "number": 77,
+                            "title": "Implement issue #50",
+                            "body": "PR body",
+                            "url": "https://github.com/Caliperti1/Maestro/pull/77",
+                            "headRefName": "maestro/test/issue-50-implement-issue-50-",
+                            "baseRefName": "main",
+                        }
+                    ),
+                    stderr="",
+                )
+        output_path = args[args.index("--output-last-message") + 1]
+        Path(output_path).write_text("Implemented the requested change.", encoding="utf-8")
+        stdout = "\n".join(
+            [
+                '{"type":"thread.started","thread_id":"codex-session-1"}',
+                '{"type":"item.completed","item":{"type":"file_change","path":"app/example.py"}}',
+                '{"type":"turn.completed"}',
+            ]
+        )
+        return CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = CodexCliToolAdapter("codex.task.run").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {
+            "task": "Implement issue #50.",
+            "task_title": "Implement issue #50",
+            "issue_number": 50,
+            "sandbox_mode": "workspace-write",
+            "target_directory": ".",
+        },
+    )
+
+    assert output["branch_workflow"] is True
+    assert output["base_branch"] == "main"
+    assert output["branch"].startswith("maestro/test/issue-50-implement-issue-50")
+    assert output["commit_sha"] == "abc123"
+    assert output["changed_files"] == ["app/example.py"]
+    assert output["diff_summary"] == "app/example.py | 1 +"
+    assert output["pr_number"] == 77
+    assert output["pr_url"] == "https://github.com/Caliperti1/Maestro/pull/77"
+    assert output["review_status"] == "pr_opened"
+    assert any(call[:3] == ["git", "checkout", "-B"] for call in calls)
+    assert any(call[:3] == ["git", "push", "-u"] for call in calls)
+    assert any(call[:3] == ["gh", "pr", "create"] for call in calls)
+    assert calls[-1] == ["git", "checkout", "main"]
 
 
 def test_codex_adapter_rejects_target_outside_allowed_roots(

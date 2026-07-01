@@ -2052,9 +2052,44 @@ class MaestroOrchestratorService:
                         "status": call.get("status"),
                         "error_message": call.get("error_message"),
                         "details": details,
+                        "output_payload": self._tool_activity_output_payload(
+                            str(tool_name),
+                            output_payload,
+                        ),
                     }
                 )
         return activity
+
+    def _tool_activity_output_payload(
+        self,
+        tool_name: str,
+        output_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if tool_name == "codex.task.run":
+            return {
+                key: output_payload.get(key)
+                for key in (
+                    "branch_workflow",
+                    "branch",
+                    "base_branch",
+                    "commit_sha",
+                    "changed_files",
+                    "diff_summary",
+                    "final_message",
+                    "pr",
+                    "pr_url",
+                    "pr_number",
+                    "review_status",
+                )
+                if key in output_payload
+            }
+        if tool_name.startswith("github.pr."):
+            return {
+                key: output_payload.get(key)
+                for key in ("pr", "pr_url", "pr_number", "diff", "checks", "summary")
+                if key in output_payload
+            }
+        return {}
 
     def _tool_activity_details(self, tool_name: str, output_payload: dict[str, Any]) -> str:
         if tool_name == "llm.tool_planner":
@@ -2149,10 +2184,13 @@ class MaestroOrchestratorService:
         if tool_name == "codex.task.run":
             changed_files = output_payload.get("changed_files")
             session_id = output_payload.get("session_id")
+            pr_url = output_payload.get("pr_url")
             final_message = str(output_payload.get("final_message") or "").strip()
             details = "Ran a local Codex coding task"
             if isinstance(changed_files, list):
                 details += f" with {len(changed_files)} changed file(s)"
+            if pr_url:
+                details += f" and opened PR {pr_url}"
             if session_id:
                 details += f" in session {session_id}"
             if final_message:

@@ -1514,9 +1514,12 @@ _TOOL_SAFETY_POLICIES = {
         "reason": "Updates external GitHub issue metadata and requires Chris approval.",
     },
     "codex.task.run": {
-        "level": "local_code_execution",
-        "auto_executable": False,
-        "reason": "Runs a local Codex coding task that can inspect or modify a repository and requires Chris approval.",
+        "level": "branch_sandbox_code_execution",
+        "auto_executable": True,
+        "reason": (
+            "Runs a local Codex coding task on an isolated feature branch and opens a PR. "
+            "Merge/deploy still require Chris approval."
+        ),
     },
 }
 
@@ -1527,9 +1530,11 @@ _AUTO_TOOL_SAFE_TOOL_KEYS = {
 _TOOL_PLANNER_INSTRUCTIONS = (
     "You are an execution planner for a Maestro domain agent. Return only JSON matching the "
     "schema. Choose only tools from the allowed manifest. Prefer read-only tools and the smallest "
-    "number of calls needed. Read-only tools marked safe can run automatically. Write/action "
-    "tools must only be requested when explicitly needed; they will be proposed for Chris approval "
-    "instead of executed automatically. Return tool payloads as JSON strings in "
+    "number of calls needed. Read-only tools marked safe can run automatically. `codex.task.run` "
+    "can run automatically because it works on an isolated feature branch and returns a PR for "
+    "Chris review; do not ask for approval before requesting it. Other write/action tools must "
+    "only be requested when explicitly needed; they will be proposed for Chris approval instead "
+    "of executed automatically. Return tool payloads as JSON strings in "
     "`payload_json`. Do not include repo placeholders such as repo:CURRENT or "
     "repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies the repo. "
     "For a request like 'check out the latest PR', use GitHub PR search/list tools first, then "
@@ -1659,8 +1664,8 @@ _TOOL_DESCRIPTIONS = {
     "codex.task.run": {
         "name": "Codex Task Run",
         "description": (
-            "Run a local Codex coding task in an authorized target directory and return "
-            "session output, changed files, and final summary."
+            "Run a local Codex coding task on an isolated feature branch, then return "
+            "session output, changed files, final summary, and PR review metadata."
         ),
     },
 }
