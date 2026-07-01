@@ -287,6 +287,16 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
     if any(
         token in lowered
         for token in (
+            "merge the pr",
+            "merge pr",
+            "merge this pr",
+            "merge it",
+            "merge that",
+            "merge and reload",
+            "hot reload",
+            "reload the app",
+            "make it live",
+            "ship it",
             "change the plan",
             "update the plan",
             "refine",

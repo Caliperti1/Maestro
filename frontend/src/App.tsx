@@ -933,7 +933,7 @@ export function App() {
       sender: "user",
       content: draftMessage.trim(),
     };
-    const activePlanId = maestroPlan && maestroRun === null ? maestroPlan.parent_task_id : null;
+    const activePlanId = maestroPlan ? maestroPlan.parent_task_id : null;
     setMaestroBusy(true);
     setChatMessages((messages) => [...messages, outgoingMessage]);
     setDraftMessage("");

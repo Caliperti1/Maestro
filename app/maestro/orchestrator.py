@@ -1853,6 +1853,7 @@ class MaestroOrchestratorService:
             f"- {subtask.agent_key}: {subtask.objective}"
             for subtask in previous_plan.subtasks
         ]
+        previous_run_context_lines = self._previous_run_context_lines(previous_plan)
         return "\n".join(
             [
                 "Refine the existing Maestro plan using the new user message.",
@@ -1869,6 +1870,9 @@ class MaestroOrchestratorService:
                 "Previous subtasks:",
                 *(subtask_lines or ["- none"]),
                 "",
+                "Previous run context:",
+                *(previous_run_context_lines or ["- no completed run context available"]),
+                "",
                 "New user refinement:",
                 refinement,
                 "",
@@ -1876,6 +1880,55 @@ class MaestroOrchestratorService:
                 "and incorporates the refinement without treating this as an unrelated new session.",
             ]
         )
+
+    def _previous_run_context_lines(self, previous_plan: MaestroPlan) -> list[str]:
+        try:
+            parent_task = self.session.get(Task, uuid.UUID(previous_plan.parent_task_id))
+        except (TypeError, ValueError):
+            return []
+        if parent_task is None:
+            return []
+        payload = parent_task.output_payload or {}
+        if not isinstance(payload, dict):
+            return []
+
+        lines: list[str] = []
+        chat_summary = str(payload.get("chat_summary") or "").strip()
+        if chat_summary:
+            lines.append(f"- Last user-facing summary: {chat_summary}")
+
+        synthesis_report_id = payload.get("synthesis_report_id")
+        if synthesis_report_id:
+            lines.append(f"- Last synthesis report id: {synthesis_report_id}")
+
+        for item in payload.get("tool_activity") or []:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool_name") or "unknown tool")
+            status = str(item.get("status") or "unknown")
+            details = str(item.get("details") or "").strip()
+            output_payload = item.get("output_payload") if isinstance(item.get("output_payload"), dict) else {}
+            fragments = [f"- Tool {tool_name} finished with status {status}"]
+            if details:
+                fragments.append(f"details: {details}")
+            pr_number = output_payload.get("pr_number") or output_payload.get("number")
+            pr_url = output_payload.get("pr_url")
+            branch = output_payload.get("branch")
+            base_branch = output_payload.get("base_branch")
+            changed_files = output_payload.get("changed_files")
+            if pr_number:
+                fragments.append(f"PR number: {pr_number}")
+            if pr_url:
+                fragments.append(f"PR URL: {pr_url}")
+            if branch:
+                fragments.append(f"branch: {branch}")
+            if base_branch:
+                fragments.append(f"base branch: {base_branch}")
+            if changed_files:
+                fragments.append(f"changed files: {changed_files}")
+            lines.append("; ".join(fragments))
+
+        return lines
 
     def _plan_from_task(self, task: Task) -> MaestroPlan:
         payload = task.input_payload or {}
