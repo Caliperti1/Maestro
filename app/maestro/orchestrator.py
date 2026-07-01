@@ -22,6 +22,7 @@ from app.maestro.planner import (
     MaestroPlannerResponse,
     PlannerWorkItem,
 )
+from app.maestro.scheduler import SchedulerService
 from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
 from app.tools.runtime import ToolExecutionResult, ToolExecutionService, tool_result_payload
 
@@ -139,7 +140,12 @@ class MaestroOrchestratorService:
         self.runtime = runtime or PromptAggregationService(session)
         self.planner_llm_client = planner_llm_client
 
-    def create_plan(self, user_input: str) -> MaestroPlan:
+    def create_plan(
+        self,
+        user_input: str,
+        *,
+        conversation_id: uuid.UUID | None = None,
+    ) -> MaestroPlan:
         cleaned_input = user_input.strip()
         if not cleaned_input:
             raise MaestroOrchestratorError("Maestro input cannot be blank.")
@@ -165,6 +171,7 @@ class MaestroOrchestratorService:
         summary = decomposition.plan_summary or self._plan_summary(cleaned_input, intents, subtasks)
         plan_id = str(uuid.uuid4())
         parent_task = Task(
+            conversation_id=conversation_id,
             status="proposed",
             priority="high" if any(subtask.priority == "high" for subtask in subtasks) else "normal",
             source_type="maestro_chat",
@@ -195,6 +202,7 @@ class MaestroOrchestratorService:
         self.session.add(parent_task)
         self.session.commit()
         self.session.refresh(parent_task)
+        SchedulerService(self.session).enqueue_maestro_plan(parent_task)
         return self._plan_from_task(parent_task)
 
     def get_plan(self, plan_id: uuid.UUID | str) -> MaestroPlan:
@@ -221,8 +229,12 @@ class MaestroOrchestratorService:
         if not cleaned_refinement:
             raise MaestroOrchestratorError("Maestro refinement cannot be blank.")
         previous_plan = self.get_plan(plan_id)
+        previous_task = self.session.get(Task, uuid.UUID(previous_plan.parent_task_id))
         refined_input = self._refined_plan_input(previous_plan, cleaned_refinement)
-        plan = self.create_plan(refined_input)
+        plan = self.create_plan(
+            refined_input,
+            conversation_id=previous_task.conversation_id if previous_task else None,
+        )
         task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
         if task is not None:
             task.input_payload = {
@@ -522,6 +534,7 @@ class MaestroOrchestratorService:
             parent_task.error_message = error_message
             parent_task.completed_at = datetime.now(UTC)
             self.session.commit()
+            SchedulerService(self.session).sync_run_status_from_task(parent_task)
             self.session.refresh(report)
             self.session.refresh(parent_task)
             return MaestroRun(
@@ -554,6 +567,7 @@ class MaestroOrchestratorService:
             parent_task.completed_at = datetime.now(UTC)
             self._set_scheduler_status(parent_task, "failed")
             self.session.commit()
+            SchedulerService(self.session).sync_run_status_from_task(parent_task)
             raise
 
     def approve_tool_call_and_resume(

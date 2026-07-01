@@ -21,6 +21,9 @@ from app.db.models import (
     ToolCall,
     ToolConnection,
     User,
+    WorkflowDefinition,
+    WorkflowQueueItem,
+    WorkflowRun,
 )
 
 ModelT = TypeVar("ModelT")
@@ -201,3 +204,50 @@ class ScheduledRunRepository(Repository[ScheduledRun]):
 
     def list_active(self) -> Sequence[ScheduledRun]:
         return self.session.scalars(select(ScheduledRun).where(ScheduledRun.is_active.is_(True))).all()
+
+
+class WorkflowDefinitionRepository(Repository[WorkflowDefinition]):
+    def __init__(self, session: Session):
+        super().__init__(session, WorkflowDefinition)
+
+    def get_by_key(self, key: str) -> WorkflowDefinition | None:
+        return self.session.scalar(select(WorkflowDefinition).where(WorkflowDefinition.key == key))
+
+    def list_active(self) -> Sequence[WorkflowDefinition]:
+        return self.session.scalars(
+            select(WorkflowDefinition).where(WorkflowDefinition.is_active.is_(True))
+        ).all()
+
+
+class WorkflowRunRepository(Repository[WorkflowRun]):
+    def __init__(self, session: Session):
+        super().__init__(session, WorkflowRun)
+
+    def list_recent(self, *, limit: int = 25) -> Sequence[WorkflowRun]:
+        return self.session.scalars(
+            select(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(limit)
+        ).all()
+
+    def list_active(self) -> Sequence[WorkflowRun]:
+        return self.session.scalars(
+            select(WorkflowRun)
+            .where(WorkflowRun.status.in_(["queued", "ready", "running", "blocked"]))
+            .order_by(WorkflowRun.created_at.desc())
+        ).all()
+
+    def get_by_parent_task(self, parent_task_id: uuid.UUID) -> WorkflowRun | None:
+        return self.session.scalar(
+            select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task_id)
+        )
+
+
+class WorkflowQueueItemRepository(Repository[WorkflowQueueItem]):
+    def __init__(self, session: Session):
+        super().__init__(session, WorkflowQueueItem)
+
+    def list_by_run(self, workflow_run_id: uuid.UUID) -> Sequence[WorkflowQueueItem]:
+        return self.session.scalars(
+            select(WorkflowQueueItem)
+            .where(WorkflowQueueItem.workflow_run_id == workflow_run_id)
+            .order_by(WorkflowQueueItem.stage_index, WorkflowQueueItem.position)
+        ).all()

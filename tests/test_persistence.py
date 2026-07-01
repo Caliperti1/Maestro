@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy.orm import Session
 
 from app.db.repositories import (
@@ -16,8 +18,11 @@ from app.db.repositories import (
     ToolCallRepository,
     ToolConnectionRepository,
     UserRepository,
+    WorkflowQueueItemRepository,
+    WorkflowRunRepository,
 )
 from app.db.seed import DEFAULT_DOMAINS, seed_default_domains
+from app.maestro.scheduler import SchedulerService
 
 
 def test_default_domain_seed_is_idempotent(session: Session) -> None:
@@ -191,3 +196,196 @@ def test_scheduled_run_repository(session: Session) -> None:
     )
 
     assert ScheduledRunRepository(session).list_active() == [run]
+
+
+def test_scheduler_persists_workflow_run_queue_and_parallel_batches(session: Session) -> None:
+    seed_default_domains(session)
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert domain is not None
+    task = TaskRepository(session).create(
+        domain_id=domain.id,
+        status="proposed",
+        priority="high",
+        source_type="maestro_chat",
+        workflow_key="maestro.generic",
+        objective="Prepare partner workflow.",
+        input_payload={
+            "plan_id": "plan-1",
+            "scheduler": {
+                "policy": "test",
+                "queue_items": [
+                    {
+                        "id": "q1",
+                        "stage_index": 1,
+                        "position": 1,
+                        "status": "pending",
+                        "domain_key": "praxis",
+                        "objective": "Research partner.",
+                    },
+                    {
+                        "id": "q2",
+                        "stage_index": 1,
+                        "position": 2,
+                        "status": "pending",
+                        "domain_key": "ophi",
+                        "objective": "Check product implications.",
+                    },
+                    {
+                        "id": "q3",
+                        "stage_index": 2,
+                        "position": 1,
+                        "status": "pending",
+                        "domain_key": "praxis",
+                        "objective": "Synthesize brief.",
+                        "depends_on_work_item_ids": ["q1"],
+                    },
+                ],
+            },
+        },
+    )
+
+    run = SchedulerService(session).enqueue_maestro_plan(task)
+
+    assert WorkflowRunRepository(session).get_by_parent_task(task.id) == run
+    queue_items = WorkflowQueueItemRepository(session).list_by_run(run.id)
+    assert [item.external_key for item in queue_items] == ["q1", "q2", "q3"]
+    batches = SchedulerService(session).runnable_batches()
+    assert len(batches) == 1
+    assert {item["external_key"] for item in batches[0]["parallel_ready"]} == {"q1", "q2"}
+
+
+def test_scheduler_claims_completes_and_unblocks_dependent_work(session: Session) -> None:
+    seed_default_domains(session)
+    definition = SchedulerService(session).upsert_definition(
+        key="daily-standup",
+        name="Daily Standup",
+        trigger_type="manual",
+        workflow_spec={
+            "queue_items": [
+                {
+                    "id": "collect",
+                    "stage_index": 1,
+                    "objective": "Collect domain updates.",
+                    "domain_key": "praxis",
+                    "required_tools": ["github.pr.search"],
+                },
+                {
+                    "id": "synthesize",
+                    "stage_index": 2,
+                    "objective": "Synthesize daily plan.",
+                    "domain_key": "maestro-development",
+                    "depends_on": ["collect"],
+                },
+            ]
+        },
+    )
+    run = SchedulerService(session).enqueue_definition_run(definition)
+
+    claimed = SchedulerService(session).claim_ready_items(owner="test-worker", limit=4)
+
+    assert [item.external_key for item in claimed] == ["collect"]
+    assert claimed[0].status == "running"
+    assert claimed[0].lease_owner == "test-worker"
+    SchedulerService(session).complete_queue_item(claimed[0].id, output_payload={"ok": True})
+    batches = SchedulerService(session).runnable_batches()
+    assert batches[0]["workflow_run_id"] == str(run.id)
+    assert [item["external_key"] for item in batches[0]["parallel_ready"]] == ["synthesize"]
+
+
+def test_scheduler_enqueues_due_recurring_definitions_once(session: Session) -> None:
+    now = datetime.now(UTC)
+    definition = SchedulerService(session).upsert_definition(
+        key="morning-standup",
+        name="Morning Standup",
+        trigger_type="recurring",
+        trigger_config={
+            "next_run_at": (now - timedelta(minutes=1)).isoformat(),
+            "interval_minutes": 60,
+        },
+        workflow_spec={
+            "queue_items": [
+                {"id": "standup", "objective": "Prepare standup.", "domain_key": "personal"}
+            ]
+        },
+        fairness_group="personal",
+    )
+
+    runs = SchedulerService(session).enqueue_due_workflows(now=now)
+    second_runs = SchedulerService(session).enqueue_due_workflows(now=now)
+
+    assert len(runs) == 1
+    assert second_runs == []
+    session.refresh(definition)
+    assert definition.trigger_config["last_enqueued_at"]
+    assert definition.trigger_config["next_run_at"] != (now - timedelta(minutes=1)).isoformat()
+
+
+def test_scheduler_enqueues_event_triggered_workflows_with_filters(session: Session) -> None:
+    SchedulerService(session).upsert_definition(
+        key="praxis-email-triage",
+        name="Praxis Email Triage",
+        trigger_type="event",
+        trigger_config={
+            "event_type": "gmail.message.received",
+            "filters": {"domain_key": "praxis", "labels.primary": True},
+        },
+        workflow_spec={
+            "queue_items": [
+                {
+                    "id": "triage",
+                    "objective": "Triage the new Praxis email.",
+                    "domain_key": "praxis",
+                    "required_tools": ["gmail.message.get"],
+                }
+            ]
+        },
+        fairness_group="praxis",
+    )
+
+    ignored = SchedulerService(session).enqueue_event_workflows(
+        event_type="gmail.message.received",
+        event_id="msg-ignored",
+        event_payload={"domain_key": "ophi", "labels": {"primary": True}},
+    )
+    runs = SchedulerService(session).enqueue_event_workflows(
+        event_type="gmail.message.received",
+        event_id="msg-1",
+        event_payload={"domain_key": "praxis", "labels": {"primary": True}},
+    )
+    duplicate = SchedulerService(session).enqueue_event_workflows(
+        event_type="gmail.message.received",
+        event_id="msg-1",
+        event_payload={"domain_key": "praxis", "labels": {"primary": True}},
+    )
+
+    assert ignored == []
+    assert len(runs) == 1
+    assert duplicate == runs
+    assert runs[0].source_type == "event"
+    assert runs[0].input_payload["event"]["event_id"] == "msg-1"
+
+
+def test_scheduler_tick_enqueues_due_work_and_claims_ready_items(session: Session) -> None:
+    now = datetime.now(UTC)
+    SchedulerService(session).upsert_definition(
+        key="before-eight-standup",
+        name="Before 8 AM Standup",
+        trigger_type="recurring",
+        trigger_config={
+            "next_run_at": (now - timedelta(minutes=5)).isoformat(),
+            "interval_minutes": 1440,
+        },
+        workflow_spec={
+            "queue_items": [
+                {"id": "brief", "objective": "Build the daily brief.", "domain_key": "personal"}
+            ]
+        },
+        fairness_group="personal",
+    )
+
+    result = SchedulerService(session).tick(owner="tick-test", claim_limit=2, now=now)
+
+    assert len(result["enqueued"]) == 1
+    assert len(result["claimed"]) == 1
+    assert result["claimed"][0]["external_key"] == "brief"
+    assert result["claimed"][0]["lease_owner"] == "tick-test"
