@@ -755,6 +755,13 @@ class PromptAggregationService:
                 "stage_interaction": stage_interaction,
                 "auto_tool_loop": auto_tool_loop,
                 "max_tool_iterations": max_tool_iterations,
+                "prompt_context": {
+                    "task_instruction": request.task_instruction,
+                    "user_context": request.user_context,
+                    "assembled_prompt_chars": len(package.assembled_prompt),
+                    "memory_included_count": package.memory_context.included_count,
+                    "semantic_status": package.memory_context.semantic_status,
+                },
                 "requested_tools": [
                     {
                         "tool_key": tool_request.tool_key,

@@ -18,6 +18,7 @@ from app.tools.runtime import (
     CodexCliToolAdapter,
     GitHubCliToolAdapter,
     ToolExecutionContext,
+    ToolExecutionRequest,
     ToolExecutionService,
     _clean_github_search_query,
 )
@@ -549,6 +550,188 @@ def test_github_adapter_skips_missing_issue_labels(
     assert "--label" in captured_create_args
     assert "enhancement" in captured_create_args
     assert "maestro-development" not in captured_create_args
+
+
+def test_github_adapter_applies_configured_preferred_issue_labels(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={
+            "repo": "Caliperti1/Maestro",
+            "preferred_issue_labels": ["enhancement", "tooling"],
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Create a test issue.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured_create_args: list[str] = []
+
+    def fake_run(args, **kwargs):
+        if args[:3] == ["gh", "label", "list"]:
+            return CompletedProcess(args=args, returncode=0, stdout='[{"name":"enhancement"}]')
+        captured_create_args.extend(args)
+        return CompletedProcess(args=args, returncode=0, stdout="https://github.com/x/y/issues/99\n")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = GitHubCliToolAdapter("github.issue.create").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"title": "Tool-generated issue", "body": "Created by a test."},
+    )
+
+    assert output["issue_number"] == 99
+    assert output["issue_url"] == "https://github.com/x/y/issues/99"
+    assert output["labels_applied"] == ["enhancement"]
+    assert output["labels_skipped"] == ["tooling"]
+    assert output["preferred_labels"] == ["enhancement", "tooling"]
+    assert output["write_status"] == "created"
+    assert "enhancement" in captured_create_args
+    assert "tooling" not in captured_create_args
+
+
+def test_github_adapter_blocks_missing_required_issue_labels(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={
+            "repo": "Caliperti1/Maestro",
+            "issue_labels": {"required": ["security-review"]},
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Create a test issue.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        if args[:3] == ["gh", "label", "list"]:
+            return CompletedProcess(args=args, returncode=0, stdout='[{"name":"enhancement"}]')
+        raise AssertionError("Issue creation should not run when a required label is missing.")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    try:
+        GitHubCliToolAdapter("github.issue.create").execute(
+            ToolExecutionContext(
+                session=session,
+                agent=agent,
+                domain=domain,
+                task=task,
+                connection=connection,
+            ),
+            {"title": "Tool-generated issue", "body": "Created by a test."},
+        )
+    except Exception as exc:
+        assert "Required GitHub issue label(s) are missing" in str(exc)
+    else:
+        raise AssertionError("Expected required missing label to block issue creation.")
+
+
+def test_github_issue_create_approval_preview_is_human_readable(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={
+            "repo": "Caliperti1/Maestro",
+            "preferred_issue_labels": ["enhancement"],
+            "required_issue_labels": ["triage"],
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Create a test issue.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+
+    proposed = ToolExecutionService(session).propose_for_task(
+        ToolExecutionRequest(
+            agent_key="maestro-introspection-agent",
+            tool_key="github.issue.create",
+            payload={
+                "title": "Harden issue creation",
+                "body": "Line one.\n\nLine two.",
+                "labels": ["bug"],
+            },
+        ),
+        task=task,
+        rationale="The user asked for a follow-up issue.",
+        safety_level="external_write",
+        reason="Creates an external GitHub issue and requires Chris approval.",
+    )
+
+    preview = proposed.output["approval_preview"]
+    assert proposed.output["write_status"] == "awaiting_approval"
+    assert preview["repo"] == "Caliperti1/Maestro"
+    assert preview["title"] == "Harden issue creation"
+    assert preview["body_preview"] == "Line one.\n\nLine two."
+    assert preview["labels_to_apply"] == ["bug", "enhancement", "triage"]
+    assert preview["labels_required"] == ["triage"]
+    assert "Target repo: Caliperti1/Maestro" in preview["summary"]
+    assert "No GitHub issue is created" in " ".join(preview["notable_uncertainty"])
 
 
 def test_github_adapter_reads_specific_file_from_repo(

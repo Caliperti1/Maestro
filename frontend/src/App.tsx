@@ -345,7 +345,12 @@ type MaestroPlan = {
   is_chat_only: boolean;
   selected_agents: Array<Record<string, unknown>>;
   approval_required: boolean;
-  scheduler: Record<string, unknown> & { queue_items?: MaestroQueueItem[] };
+  scheduler: Record<string, unknown> & {
+    queue_items?: MaestroQueueItem[];
+    current_step?: string;
+    active_queue_item_id?: string | null;
+    active_stage_index?: number | null;
+  };
   created_at: string;
   direct_response: string | null;
   planner_notes: string | null;
@@ -779,8 +784,48 @@ export function App() {
     });
   };
 
+  const markToolApprovalRunning = (toolCallId: string) => {
+    let approvalAgentKey: string | null = null;
+    setMaestroRun((run) => {
+      if (!run) return run;
+      return {
+        ...run,
+        tool_activity: run.tool_activity.map((activity) => {
+          if (activity.tool_call_id !== toolCallId) return activity;
+          approvalAgentKey = activity.agent_key;
+          return {
+            ...activity,
+            status: "running",
+            details: "Approved; running the tool now.",
+            error_message: null,
+          };
+        }),
+      };
+    });
+    setMaestroPlan((plan) => {
+      if (!plan || !approvalAgentKey) return plan;
+      const queueItems = (plan.scheduler.queue_items ?? []).map((item) =>
+        item.agent_key === approvalAgentKey && item.status === "blocked"
+          ? { ...item, status: "running", error_message: null }
+          : item,
+      );
+      return {
+        ...plan,
+        scheduler: {
+          ...plan.scheduler,
+          status: "running",
+          current_step: `Running approved tool for ${approvalAgentKey}.`,
+          queue_items: queueItems,
+        },
+      };
+    });
+  };
+
   const approveToolCall = async (toolCallId: string) => {
     setBusyToolCallId(toolCallId);
+    setMaestroBusy(true);
+    markToolApprovalRunning(toolCallId);
+    setMaestroStatus("Running approved tool. This can take a few minutes for Codex tasks.");
     try {
       const response = await apiJson<MaestroToolCallResponse>(
         `/maestro/tool-calls/${toolCallId}/approve`,
@@ -819,6 +864,7 @@ export function App() {
       setMaestroStatus(message);
     } finally {
       setBusyToolCallId(null);
+      setMaestroBusy(false);
     }
   };
 
@@ -1164,8 +1210,8 @@ export function App() {
                 {maestroBusy && (
                   <div className="message maestro-message working-message" aria-live="polite">
                     <span>Maestro</span>
-                    <p>
-                      Conducting
+                  <p>
+                      {busyToolCallId ? "Running approved tool" : "Conducting"}
                       <span className="working-dots" aria-hidden="true">
                         <span />
                         <span />
@@ -1250,7 +1296,11 @@ export function App() {
                   Let agents plan safe tools
                 </label>
                 <span>
-                  {maestroBusy ? "Conducting" : maestroStatus}
+                  {maestroBusy
+                    ? busyToolCallId
+                      ? "Running approved tool. Long Codex tasks may take a few minutes."
+                      : "Conducting"
+                    : maestroPlan?.scheduler.current_step || maestroStatus}
                 </span>
               </div>
 
@@ -1285,6 +1335,9 @@ export function App() {
                     <span>{maestroPlanStages.length} stages</span>
                     <span>{maestroPlan.workflow_graph.edges?.length ?? 0} edges</span>
                     <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
+                    {maestroPlan.scheduler.current_step && (
+                      <span>{maestroPlan.scheduler.current_step}</span>
+                    )}
                   </div>
                   {queueStages.length > 0 && (
                     <div className="workflow-map" aria-label="Workflow dependency map">
@@ -1454,6 +1507,8 @@ export function App() {
                           <p>
                             {activity.status === "complete"
                               ? "Completed"
+                              : activity.status === "running"
+                                ? "Running"
                               : activity.status === "approval_required"
                                 ? "Needs approval"
                               : activity.status === "failed"

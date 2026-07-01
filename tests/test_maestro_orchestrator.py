@@ -3,6 +3,7 @@ import json
 import uuid
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.runtime import PromptAggregationService
@@ -928,6 +929,7 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     child_tasks = session.query(Task).filter(Task.parent_task_id == parent_task_id).all()
     assert len(child_tasks) == len(run.child_runs)
     assert all(task.source_type == "maestro_orchestrator" for task in child_tasks)
+    assert all((task.input_payload or {}).get("prompt_context") for task in child_tasks)
     artifacts = session.query(Artifact).all()
     assert len(artifacts) == 1
     assert artifacts[0].metadata_["canonical_workflow_artifact"] is True
@@ -965,6 +967,11 @@ def test_orchestrator_passes_dependency_outputs_to_later_agent(session: Session,
     assert "Dependency context" not in recording_client.inputs[0]
     assert "Upstream output for wi_praxis" in recording_client.inputs[1]
     assert "Praxis upstream output for the partner call." in recording_client.inputs[1]
+    child_tasks = session.scalars(
+        select(Task).where(Task.parent_task_id == uuid.UUID(plan.parent_task_id)).order_by(Task.created_at)
+    ).all()
+    assert "Dependency context" not in child_tasks[0].input_payload["prompt_context"]["user_context"]
+    assert "Upstream output for wi_praxis" in child_tasks[1].input_payload["prompt_context"]["user_context"]
     parent = session.get(Task, uuid.UUID(plan.parent_task_id))
     assert parent is not None
     assert parent.output_payload["execution_stages"] == [

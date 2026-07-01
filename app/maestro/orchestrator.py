@@ -1696,6 +1696,9 @@ class MaestroOrchestratorService:
             "max_attempts": 2,
             "resource_locks": [],
             "recurring_scheduler": "planned",
+            "active_stage_index": None,
+            "active_queue_item_id": None,
+            "current_step": "Not started.",
             "queue_items": queue_items or [],
         }
 
@@ -1757,16 +1760,19 @@ class MaestroOrchestratorService:
         }
         if scheduler_status is not None:
             scheduler["status"] = scheduler_status
+        scheduler.update(self._current_scheduler_step(queue_items))
         payload["scheduler"] = scheduler
         task.input_payload = payload
 
     def _set_scheduler_status(self, task: Task, status: str) -> None:
         payload = dict(task.input_payload or {})
+        existing_scheduler = dict(payload.get("scheduler", {}))
         scheduler = {
             **self._scheduler_payload(),
-            **dict(payload.get("scheduler", {})),
+            **existing_scheduler,
             "status": status,
         }
+        scheduler.update(self._current_scheduler_step(existing_scheduler.get("queue_items", [])))
         payload["scheduler"] = scheduler
         task.input_payload = payload
 
@@ -1808,9 +1814,35 @@ class MaestroOrchestratorService:
                 }
             queue_items.append(item)
         scheduler["queue_items"] = queue_items
+        scheduler.update(self._current_scheduler_step(queue_items))
         payload["scheduler"] = scheduler
         task.input_payload = payload
         self.session.commit()
+
+    def _current_scheduler_step(self, queue_items: list[dict[str, Any]]) -> dict[str, Any]:
+        priority_statuses = ("running", "retrying", "ready", "blocked", "pending", "failed")
+        for status in priority_statuses:
+            item = next((item for item in queue_items if item.get("status") == status), None)
+            if item:
+                agent_name = item.get("agent_name") or item.get("agent_key") or "agent"
+                if status == "blocked":
+                    current_step = f"Waiting on {agent_name}: {item.get('error_message') or 'blocked'}"
+                elif status == "pending":
+                    current_step = f"Queued: {agent_name}"
+                elif status == "failed":
+                    current_step = f"Failed: {agent_name}"
+                else:
+                    current_step = f"{status.title()}: {agent_name}"
+                return {
+                    "active_stage_index": item.get("stage_index"),
+                    "active_queue_item_id": item.get("id"),
+                    "current_step": current_step,
+                }
+        return {
+            "active_stage_index": None,
+            "active_queue_item_id": None,
+            "current_step": "Workflow complete.",
+        }
 
     def _refined_plan_input(self, previous_plan: MaestroPlan, refinement: str) -> str:
         work_item_lines = [
@@ -2071,12 +2103,20 @@ class MaestroOrchestratorService:
                 if number and title:
                     return f"Read issue #{number}: {title}."
         if tool_name == "github.issue.create":
-            url = output_payload.get("url")
-            skipped_labels = output_payload.get("skipped_labels")
+            preview = output_payload.get("approval_preview")
+            if isinstance(preview, dict):
+                summary = str(preview.get("summary") or "").strip()
+                if summary:
+                    return summary.replace("\n", " ")
+            url = output_payload.get("issue_url") or output_payload.get("url")
+            skipped_labels = output_payload.get("labels_skipped") or output_payload.get(
+                "skipped_labels"
+            )
             if url:
                 details = f"Created issue: {url}."
                 if isinstance(skipped_labels, list) and skipped_labels:
-                    details += f" Skipped missing label(s): {', '.join(str(label) for label in skipped_labels)}."
+                    skipped = ", ".join(str(label) for label in skipped_labels)
+                    details += f" Skipped missing label(s): {skipped}."
                 return details
         if output_payload.get("approval_required"):
             reason = output_payload.get("reason")

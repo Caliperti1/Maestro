@@ -62,6 +62,16 @@ class ToolAdapter(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class GitHubIssueLabelPlan:
+    requested: list[str]
+    preferred: list[str]
+    required: list[str]
+    to_apply: list[str]
+    required_missing: list[str]
+    optional_missing: list[str]
+
+
 class ToolExecutionService:
     def __init__(
         self,
@@ -193,11 +203,41 @@ class ToolExecutionService:
                 "approval_required": True,
                 "safety_level": safety_level,
                 "reason": reason,
+                "write_status": "awaiting_approval",
+                "approval": {
+                    "tool_call_id": None,
+                    "required": True,
+                    "approved": False,
+                    "rejected": False,
+                    "safety_level": safety_level,
+                    "reason": reason,
+                },
             },
             status="approval_required",
             started_at=datetime.now(UTC),
         )
         self.session.add(tool_call)
+        self.session.commit()
+        self.session.refresh(tool_call)
+        preview = _approval_preview(
+            request.tool_key,
+            domain=domain,
+            connection=connection,
+            payload=request.payload,
+            safety_level=safety_level,
+            reason=reason,
+            rationale=rationale,
+            tool_call_id=str(tool_call.id),
+        )
+        tool_call.output_payload = {
+            **(tool_call.output_payload or {}),
+            "approval": {
+                **((tool_call.output_payload or {}).get("approval") or {}),
+                "tool_call_id": str(tool_call.id),
+            },
+            "approval_preview": preview,
+            "preview_summary": preview.get("summary"),
+        }
         self.session.commit()
         self.session.refresh(tool_call)
         return ToolExecutionResult(
@@ -238,8 +278,41 @@ class ToolExecutionService:
             connection=connection,
             dry_run=bool((tool_call.input_payload or {}).get("dry_run")),
         )
+        tool_call.status = "running"
+        tool_call.output_payload = {
+            **(tool_call.output_payload or {}),
+            "approval_required": False,
+            "write_status": "running",
+            "approval": {
+                **((tool_call.output_payload or {}).get("approval") or {}),
+                "tool_call_id": str(tool_call.id),
+                "required": True,
+                "approved": True,
+                "rejected": False,
+                "approved_at": datetime.now(UTC).isoformat(),
+            },
+        }
+        self.session.commit()
+        self.session.refresh(tool_call)
         try:
             output = adapter.execute(context, payload)
+            proposed_output = tool_call.output_payload or {}
+            if isinstance(output, dict):
+                output = {
+                    **output,
+                    "approval": {
+                        **(
+                            (proposed_output.get("approval") or {})
+                            if isinstance(proposed_output, dict)
+                            else {}
+                        ),
+                        "tool_call_id": str(tool_call.id),
+                        "required": True,
+                        "approved": True,
+                        "rejected": False,
+                        "approved_at": datetime.now(UTC).isoformat(),
+                    },
+                }
             tool_call.status = "complete"
             tool_call.output_payload = output
             tool_call.error_message = None
@@ -270,6 +343,15 @@ class ToolExecutionService:
             **(tool_call.output_payload or {}),
             "approval_required": False,
             "rejected": True,
+            "write_status": "rejected",
+            "approval": {
+                **((tool_call.output_payload or {}).get("approval") or {}),
+                "tool_call_id": str(tool_call.id),
+                "required": True,
+                "approved": False,
+                "rejected": True,
+                "rejected_at": datetime.now(UTC).isoformat(),
+            },
             "reason": tool_call.error_message,
         }
         tool_call.completed_at = datetime.now(UTC)
@@ -351,7 +433,7 @@ class GitHubCliToolAdapter:
         if self.key == "github.issue.get":
             return self._issue_get(repo, payload, env=env)
         if self.key == "github.issue.create":
-            return self._issue_create(repo, payload, env=env)
+            return self._issue_create(context.connection, repo, payload, env=env)
         if self.key == "github.issue.comment":
             return self._issue_comment(repo, payload, env=env)
         if self.key == "github.issue.update":
@@ -367,18 +449,25 @@ class GitHubCliToolAdapter:
         raise ToolExecutionError(f"Unsupported GitHub tool: {self.key}")
 
     def _repo_get(self, repo: str, *, env: dict[str, str]) -> dict[str, Any]:
+        result = _run_gh_json(
+            [
+                "repo",
+                "view",
+                repo,
+                "--json",
+                "nameWithOwner,description,defaultBranchRef,url,isPrivate",
+            ],
+            env=env,
+        )
         return {
             "repo": repo,
-            "result": _run_gh_json(
-                [
-                    "repo",
-                    "view",
-                    repo,
-                    "--json",
-                    "nameWithOwner,description,defaultBranchRef,url,isPrivate",
-                ],
-                env=env,
-            ),
+            "result": result,
+            "summary": {
+                "type": "github_repo",
+                "repo": repo,
+                "repo_url": result.get("url") if isinstance(result, dict) else None,
+                "private": result.get("isPrivate") if isinstance(result, dict) else None,
+            },
         }
 
     def _repo_list(
@@ -402,11 +491,18 @@ class GitHubCliToolAdapter:
         ]
         if visibility in {"public", "private"}:
             args.extend(["--visibility", visibility])
+        repos = _run_gh_json(args, env=env)
         return {
             "owner": owner,
             "limit": limit,
             "visibility": visibility,
-            "repos": _run_gh_json(args, env=env),
+            "repos": repos,
+            "summary": {
+                "type": "github_repo_list",
+                "owner": owner,
+                "count": len(repos) if isinstance(repos, list) else 0,
+                "visibility": visibility,
+            },
         }
 
     def _repo_create(
@@ -427,7 +523,21 @@ class GitHubCliToolAdapter:
         if bool(payload.get("add_readme")):
             args.append("--add-readme")
         url = _run_gh_text(args, env=env).strip()
-        return {"repo": full_name, "url": url, "private": private, "description": description}
+        return {
+            "repo": full_name,
+            "url": url,
+            "repo_url": url,
+            "private": private,
+            "description": description,
+            "write_status": "created",
+            "summary": {
+                "type": "github_repo",
+                "repo": full_name,
+                "repo_url": url,
+                "private": private,
+                "write_status": "created",
+            },
+        }
 
     def _file_get(self, repo: str, payload: dict[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
         path = _required_text(payload, "path").lstrip("/")
@@ -546,12 +656,20 @@ class GitHubCliToolAdapter:
         ]
         if query:
             args.extend(["--search", query])
+        issues = _run_gh_json(args, env=env)
         return {
             "repo": repo,
             "query": query,
             "state": state,
             "limit": limit,
-            "issues": _run_gh_json(args, env=env),
+            "issues": issues,
+            "summary": {
+                "type": "github_issue_list",
+                "repo": repo,
+                "count": len(issues) if isinstance(issues, list) else 0,
+                "state": state,
+                "query": query,
+            },
         }
 
     def _issue_get(
@@ -567,25 +685,38 @@ class GitHubCliToolAdapter:
             minimum=1,
             maximum=1_000_000,
         )
+        issue = _run_gh_json(
+            [
+                "issue",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "number,title,state,body,labels,url,author,createdAt,updatedAt",
+            ],
+            env=env,
+        )
         return {
             "repo": repo,
             "number": number,
-            "issue": _run_gh_json(
-                [
-                    "issue",
-                    "view",
-                    str(number),
-                    "--repo",
-                    repo,
-                    "--json",
-                    "number,title,state,body,labels,url,author,createdAt,updatedAt",
-                ],
-                env=env,
-            ),
+            "issue_number": number,
+            "issue": issue,
+            "issue_url": issue.get("url") if isinstance(issue, dict) else None,
+            "title": issue.get("title") if isinstance(issue, dict) else None,
+            "summary": {
+                "type": "github_issue",
+                "repo": repo,
+                "issue_number": number,
+                "issue_url": issue.get("url") if isinstance(issue, dict) else None,
+                "title": issue.get("title") if isinstance(issue, dict) else None,
+                "state": issue.get("state") if isinstance(issue, dict) else None,
+            },
         }
 
     def _issue_create(
         self,
+        connection: ToolConnection | None,
         repo: str,
         payload: dict[str, Any],
         *,
@@ -593,10 +724,28 @@ class GitHubCliToolAdapter:
     ) -> dict[str, Any]:
         title = _required_text(payload, "title")
         body = str(payload.get("body") or "")
-        requested_labels = _string_list(payload.get("labels"))
-        labels = self._existing_labels(repo, requested_labels, env=env)
+        label_policy = _github_issue_label_policy(connection)
+        requested_labels = _dedupe_strings(
+            [
+                *_string_list(payload.get("labels")),
+                *label_policy["preferred"],
+                *label_policy["required"],
+            ]
+        )
+        labels = self._existing_labels(
+            repo,
+            requested_labels,
+            required_labels=label_policy["required"],
+            preferred_labels=label_policy["preferred"],
+            env=env,
+        )
+        if labels.required_missing:
+            missing = ", ".join(labels.required_missing)
+            raise ToolExecutionError(
+                f"Required GitHub issue label(s) are missing in {repo}: {missing}"
+            )
         args = ["issue", "create", "--repo", repo, "--title", title, "--body", body]
-        for label in labels["existing"]:
+        for label in labels.to_apply:
             args.extend(["--label", label])
         for assignee in _string_list(payload.get("assignees")):
             args.extend(["--assignee", assignee])
@@ -604,12 +753,33 @@ class GitHubCliToolAdapter:
         if milestone:
             args.extend(["--milestone", milestone])
         url = _run_gh_text(args, env=env).strip()
+        issue_number = _github_issue_number_from_url(url)
         return {
             "repo": repo,
+            "issue_number": issue_number,
+            "number": issue_number,
+            "issue_url": url,
             "url": url,
             "title": title,
-            "labels": labels["existing"],
-            "skipped_labels": labels["missing"],
+            "labels": labels.to_apply,
+            "labels_applied": labels.to_apply,
+            "labels_skipped": labels.optional_missing,
+            "skipped_labels": labels.optional_missing,
+            "required_labels": labels.required,
+            "required_labels_missing": labels.required_missing,
+            "requested_labels": labels.requested,
+            "preferred_labels": labels.preferred,
+            "write_status": "created",
+            "summary": {
+                "type": "github_issue",
+                "repo": repo,
+                "issue_number": issue_number,
+                "issue_url": url,
+                "title": title,
+                "labels_applied": labels.to_apply,
+                "labels_skipped": labels.optional_missing,
+                "write_status": "created",
+            },
         }
 
     def _existing_labels(
@@ -618,9 +788,13 @@ class GitHubCliToolAdapter:
         requested_labels: list[str],
         *,
         env: dict[str, str],
-    ) -> dict[str, list[str]]:
+        required_labels: list[str] | None = None,
+        preferred_labels: list[str] | None = None,
+    ) -> GitHubIssueLabelPlan:
+        required = _dedupe_strings(required_labels or [])
+        preferred = _dedupe_strings(preferred_labels or [])
         if not requested_labels:
-            return {"existing": [], "missing": []}
+            return GitHubIssueLabelPlan([], preferred, required, [], required, [])
         raw_labels = _run_gh_json(
             [
                 "label",
@@ -640,13 +814,23 @@ class GitHubCliToolAdapter:
             if isinstance(item, dict)
         }
         existing: list[str] = []
-        missing: list[str] = []
+        required_missing: list[str] = []
+        optional_missing: list[str] = []
         for label in requested_labels:
             if label.lower() in existing_names:
                 existing.append(label)
+            elif label.lower() in {item.lower() for item in required}:
+                required_missing.append(label)
             else:
-                missing.append(label)
-        return {"existing": existing, "missing": missing}
+                optional_missing.append(label)
+        return GitHubIssueLabelPlan(
+            requested=_dedupe_strings(requested_labels),
+            preferred=preferred,
+            required=required,
+            to_apply=existing,
+            required_missing=required_missing,
+            optional_missing=optional_missing,
+        )
 
     def _issue_comment(
         self,
@@ -658,7 +842,13 @@ class GitHubCliToolAdapter:
         number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
         body = _required_text(payload, "body")
         _run_gh_text(["issue", "comment", str(number), "--repo", repo, "--body", body], env=env)
-        return {"repo": repo, "number": number, "commented": True}
+        return {
+            "repo": repo,
+            "number": number,
+            "issue_number": number,
+            "commented": True,
+            "write_status": "commented",
+        }
 
     def _issue_update(
         self,
@@ -689,7 +879,13 @@ class GitHubCliToolAdapter:
         if len(args) <= 5:
             raise ToolExecutionError("GitHub issue update requires at least one field to change.")
         _run_gh_text(args, env=env)
-        return {"repo": repo, "number": number, "updated": True}
+        return {
+            "repo": repo,
+            "number": number,
+            "issue_number": number,
+            "updated": True,
+            "write_status": "updated",
+        }
 
     def _pr_search(
         self,
@@ -715,35 +911,56 @@ class GitHubCliToolAdapter:
         ]
         if query:
             args.extend(["--search", query])
+        prs = _run_gh_json(args, env=env)
         return {
             "repo": repo,
             "query": query,
             "state": state,
             "limit": limit,
-            "prs": _run_gh_json(args, env=env),
+            "prs": prs,
+            "summary": {
+                "type": "github_pr_list",
+                "repo": repo,
+                "count": len(prs) if isinstance(prs, list) else 0,
+                "state": state,
+                "query": query,
+            },
         }
 
     def _pr_get(self, repo: str, payload: dict[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
         number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        pr = _run_gh_json(
+            [
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                (
+                    "number,title,state,isDraft,body,labels,url,author,createdAt,updatedAt,"
+                    "headRefName,baseRefName,reviewDecision,mergeStateStatus,mergeable,"
+                    "statusCheckRollup,files,comments,reviews"
+                ),
+            ],
+            env=env,
+        )
         return {
             "repo": repo,
             "number": number,
-            "pr": _run_gh_json(
-                [
-                    "pr",
-                    "view",
-                    str(number),
-                    "--repo",
-                    repo,
-                    "--json",
-                    (
-                        "number,title,state,isDraft,body,labels,url,author,createdAt,updatedAt,"
-                        "headRefName,baseRefName,reviewDecision,mergeStateStatus,mergeable,"
-                        "statusCheckRollup,files,comments,reviews"
-                    ),
-                ],
-                env=env,
-            ),
+            "pr_number": number,
+            "pr": pr,
+            "pr_url": pr.get("url") if isinstance(pr, dict) else None,
+            "title": pr.get("title") if isinstance(pr, dict) else None,
+            "summary": {
+                "type": "github_pr",
+                "repo": repo,
+                "pr_number": number,
+                "pr_url": pr.get("url") if isinstance(pr, dict) else None,
+                "title": pr.get("title") if isinstance(pr, dict) else None,
+                "state": pr.get("state") if isinstance(pr, dict) else None,
+                "review_decision": pr.get("reviewDecision") if isinstance(pr, dict) else None,
+            },
         }
 
     def _pr_diff(self, repo: str, payload: dict[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
@@ -758,8 +975,16 @@ class GitHubCliToolAdapter:
         return {
             "repo": repo,
             "number": number,
+            "pr_number": number,
             "truncated": len(diff) > max_chars,
             "diff": diff[:max_chars],
+            "summary": {
+                "type": "github_pr_diff",
+                "repo": repo,
+                "pr_number": number,
+                "truncated": len(diff) > max_chars,
+                "returned_chars": min(len(diff), max_chars),
+            },
         }
 
     def _pr_checks(
@@ -783,7 +1008,18 @@ class GitHubCliToolAdapter:
             env=env,
             allowed_exit_codes={0, 8},
         )
-        return {"repo": repo, "number": number, "checks": checks}
+        return {
+            "repo": repo,
+            "number": number,
+            "pr_number": number,
+            "checks": checks,
+            "summary": {
+                "type": "github_pr_checks",
+                "repo": repo,
+                "pr_number": number,
+                "count": len(checks) if isinstance(checks, list) else 0,
+            },
+        }
 
 
 class CodexCliToolAdapter:
@@ -965,6 +1201,165 @@ def tool_result_payload(result: ToolExecutionResult) -> dict[str, Any]:
         "output_payload": result.output,
         "connection_id": result.connection_id,
     }
+
+
+def _approval_preview(
+    tool_key: str,
+    *,
+    domain: Domain,
+    connection: ToolConnection | None,
+    payload: dict[str, Any],
+    safety_level: str,
+    reason: str,
+    rationale: str | None,
+    tool_call_id: str,
+) -> dict[str, Any]:
+    if tool_key == "github.issue.create":
+        return _github_issue_create_preview(
+            domain=domain,
+            connection=connection,
+            payload=payload,
+            safety_level=safety_level,
+            reason=reason,
+            rationale=rationale,
+            tool_call_id=tool_call_id,
+        )
+    return {
+        "tool_key": tool_key,
+        "tool_call_id": tool_call_id,
+        "domain_key": domain.key,
+        "summary": f"Approve `{tool_key}` for domain `{domain.key}`.",
+        "safety_level": safety_level,
+        "reason": reason,
+        "rationale": rationale,
+        "notable_uncertainty": ["No specialized preview is available for this tool yet."],
+    }
+
+
+def _github_issue_create_preview(
+    *,
+    domain: Domain,
+    connection: ToolConnection | None,
+    payload: dict[str, Any],
+    safety_level: str,
+    reason: str,
+    rationale: str | None,
+    tool_call_id: str,
+) -> dict[str, Any]:
+    repo = _optional_repo_from(connection, payload)
+    label_policy = _github_issue_label_policy(connection)
+    payload_labels = _string_list(payload.get("labels"))
+    labels_to_apply = _dedupe_strings(
+        [*payload_labels, *label_policy["preferred"], *label_policy["required"]]
+    )
+    body = str(payload.get("body") or "")
+    body_preview = _preview_text(body, max_chars=700)
+    labels_skipped: list[str] = []
+    labels_create: list[str] = []
+    required_missing = [] if label_policy["required"] else []
+    uncertainty = [
+        (
+            "Label existence is verified at approval time with GitHub; optional missing "
+            "labels will be skipped."
+        ),
+        "No GitHub issue is created until this approval is accepted.",
+    ]
+    if label_policy["required"]:
+        uncertainty.append(
+            "Configured required labels must exist in the target repository or creation will block."
+        )
+    if not repo:
+        uncertainty.append("Target repo is not configured or provided in the payload.")
+    title = str(payload.get("title") or "").strip()
+    summary_lines = [
+        "GitHub issue creation approval",
+        f"Target repo: {repo or 'unknown'}",
+        f"Title: {title or '(missing title)'}",
+    ]
+    if labels_to_apply:
+        summary_lines.append(f"Labels to apply if present: {', '.join(labels_to_apply)}")
+    if label_policy["required"]:
+        summary_lines.append(f"Required labels: {', '.join(label_policy['required'])}")
+    if labels_skipped:
+        summary_lines.append(f"Labels skipped: {', '.join(labels_skipped)}")
+    return {
+        "tool_key": "github.issue.create",
+        "tool_call_id": tool_call_id,
+        "domain_key": domain.key,
+        "repo": repo,
+        "title": title,
+        "body_preview": body_preview,
+        "body_truncated": len(body.strip()) > 700,
+        "labels_requested": payload_labels,
+        "labels_preferred": label_policy["preferred"],
+        "labels_required": label_policy["required"],
+        "labels_to_apply": labels_to_apply,
+        "labels_skipped": labels_skipped,
+        "labels_create": labels_create,
+        "required_labels_missing": required_missing,
+        "notable_uncertainty": uncertainty,
+        "safety_level": safety_level,
+        "reason": reason,
+        "rationale": rationale,
+        "summary": "\n".join(summary_lines),
+    }
+
+
+def _github_issue_label_policy(connection: ToolConnection | None) -> dict[str, list[str]]:
+    config = connection.config if connection is not None else {}
+    config = config or {}
+    issue_labels = config.get("issue_labels")
+    issue_label_config = issue_labels if isinstance(issue_labels, dict) else {}
+    preferred = _dedupe_strings(
+        [
+            *_string_list(config.get("preferred_issue_labels")),
+            *_string_list(config.get("preferred_labels")),
+            *_string_list(issue_label_config.get("preferred")),
+            *_string_list(issue_label_config.get("optional")),
+        ]
+    )
+    required = _dedupe_strings(
+        [
+            *_string_list(config.get("required_issue_labels")),
+            *_string_list(issue_label_config.get("required")),
+        ]
+    )
+    return {"preferred": preferred, "required": required}
+
+
+def _optional_repo_from(connection: ToolConnection | None, payload: dict[str, Any]) -> str | None:
+    try:
+        return _repo_from(connection, payload)
+    except ToolExecutionError:
+        return None
+
+
+def _github_issue_number_from_url(url: str) -> int | None:
+    tail = url.rstrip("/").rsplit("/", 1)[-1]
+    try:
+        return int(tail)
+    except ValueError:
+        return None
+
+
+def _preview_text(value: str, *, max_chars: int) -> str:
+    stripped = value.strip()
+    if len(stripped) <= max_chars:
+        return stripped
+    return stripped[: max_chars - 3].rstrip() + "..."
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        label = str(value).strip()
+        lowered = label.lower()
+        if not label or lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(label)
+    return result
 
 
 def _repo_from(connection: ToolConnection | None, payload: dict[str, Any]) -> str:

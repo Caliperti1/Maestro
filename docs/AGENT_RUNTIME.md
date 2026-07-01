@@ -268,6 +268,27 @@ For real domain-specific accounts, prefer an environment-token reference:
 }
 ```
 
+Issue creation can inherit repo/domain label preferences from the same GitHub connection config.
+These keys avoid hard-coded labels in tool code:
+
+```json
+{
+  "repo": "Caliperti1/Maestro",
+  "preferred_issue_labels": ["enhancement"],
+  "required_issue_labels": ["triage"],
+  "issue_labels": {
+    "preferred": ["backend"],
+    "required": ["approved"]
+  }
+}
+```
+
+Preferred labels are best effort: the adapter checks repository labels at approval-time execution,
+applies labels that exist, and reports missing optional labels in `labels_skipped`. Required labels
+block issue creation if they are configured but missing from the repository. Approval-required write
+proposals include `approval_preview` and `preview_summary` so the UI/report layer can show a
+human-readable target repo, title, body preview, labels, and uncertainty before Chris approves.
+
 MVP Codex tools:
 
 - `codex.task.run`: runs a local Codex CLI task in an authorized target directory and returns the
@@ -312,10 +333,9 @@ that tool process. This avoids storing tokens in the database and avoids mutatin
 active `gh` account. `.env` is ignored by Git and is the right local place for these token variables
 until a hardened credential store exists.
 
-GitHub write tools are available as separate explicit tool keys. The current runtime can execute
-them when explicitly requested; the next agent-execution layer should add an LLM planning loop,
-approval gates for high-impact writes, retry handling, and user-visible proposed tool calls before
-autonomous write execution.
+GitHub write tools are available as separate explicit tool keys. Agent-planned write tools are
+stored as approval-required tool calls with preview metadata, then executed only after Chris
+approves them.
 
 ### Interaction Artifact Packager
 
