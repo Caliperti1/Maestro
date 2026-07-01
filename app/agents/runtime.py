@@ -1493,6 +1493,11 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": True,
         "reason": "Read-only pull request check inspection.",
     },
+    "github.pr.merge": {
+        "level": "external_write",
+        "auto_executable": False,
+        "reason": "Merges a GitHub pull request and requires Chris approval.",
+    },
     "github.issue.create": {
         "level": "external_write",
         "auto_executable": False,
@@ -1520,6 +1525,11 @@ _TOOL_SAFETY_POLICIES = {
             "Runs a local Codex coding task on an isolated feature branch and opens a PR. "
             "Merge/deploy still require Chris approval."
         ),
+    },
+    "local.app.reload": {
+        "level": "local_app_update",
+        "auto_executable": False,
+        "reason": "Updates/reloads a local application checkout and requires Chris approval.",
     },
 }
 
@@ -1657,6 +1667,10 @@ _TOOL_DESCRIPTIONS = {
         "name": "GitHub PR Checks",
         "description": "Read CI/check status for a pull request with normalized status fields.",
     },
+    "github.pr.merge": {
+        "name": "GitHub PR Merge",
+        "description": "Merge an approved GitHub pull request after Chris approval.",
+    },
     "codex": {
         "name": "Codex",
         "description": "Shared local Codex CLI configuration inherited by Codex tools.",
@@ -1666,6 +1680,12 @@ _TOOL_DESCRIPTIONS = {
         "description": (
             "Run a local Codex coding task on an isolated feature branch, then return "
             "session output, changed files, final summary, and PR review metadata."
+        ),
+    },
+    "local.app.reload": {
+        "name": "Local App Reload",
+        "description": (
+            "Update a configured local application checkout and run approved reload commands."
         ),
     },
 }
@@ -1807,9 +1827,17 @@ _SEED_AGENTS = [
                 "permission": "read",
                 "description": "Read Maestro GitHub pull request check status.",
             },
+            "github.pr.merge": {
+                "permission": "use",
+                "description": "Merge Maestro GitHub pull requests when approved.",
+            },
             "codex.task.run": {
                 "permission": "use",
-                "description": "Run approved local Codex coding tasks for Maestro development work.",
+                "description": "Run local Codex coding tasks in isolated branch/PR worktrees.",
+            },
+            "local.app.reload": {
+                "permission": "use",
+                "description": "Reload configured local Maestro app surfaces when approved.",
             },
         },
     },
@@ -1825,7 +1853,7 @@ _SEED_AGENTS = [
         "role_prompt": (
             "You are the Maestro Coding Agent. Work only inside the Maestro Development domain. "
             "Use the local Codex task tool for implementation work after Chris approves the tool "
-            "call. Keep coding tasks scoped, preserve unrelated work, run the requested validation "
+            "plan. Keep coding tasks scoped, preserve unrelated work, run the requested validation "
             "when practical, and return a concise report with changed files, tests, and follow-up "
             "risks."
         ),
@@ -1854,7 +1882,15 @@ _SEED_AGENTS = [
             },
             "codex.task.run": {
                 "permission": "use",
-                "description": "Run approved local Codex coding tasks in authorized workspaces.",
+                "description": "Run local Codex coding tasks in isolated branch/PR worktrees.",
+            },
+            "github.pr.merge": {
+                "permission": "use",
+                "description": "Merge Maestro GitHub pull requests when approved.",
+            },
+            "local.app.reload": {
+                "permission": "use",
+                "description": "Reload configured local Maestro app surfaces when approved.",
             },
         },
     },

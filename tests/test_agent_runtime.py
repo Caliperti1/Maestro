@@ -18,6 +18,7 @@ from app.db.seed import seed_default_domains
 from app.tools.runtime import (
     CodexCliToolAdapter,
     GitHubCliToolAdapter,
+    LocalAppReloadAdapter,
     ToolExecutionContext,
     ToolExecutionRequest,
     ToolExecutionService,
@@ -1113,10 +1114,11 @@ def test_codex_adapter_runs_branch_workflow_and_returns_pr_metadata(
     session.commit()
     monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/codex")
     calls: list[list[str]] = []
+    pr_create_body = ""
     status_calls = 0
 
     def fake_run(args, **kwargs):
-        nonlocal status_calls
+        nonlocal status_calls, pr_create_body
         calls.append(args)
         if args[0] == "git":
             if args[1:3] == ["status", "--porcelain"]:
@@ -1131,6 +1133,7 @@ def test_codex_adapter_runs_branch_workflow_and_returns_pr_metadata(
             return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
         if args[0] == "gh":
             if args[1:3] == ["pr", "create"]:
+                pr_create_body = args[args.index("--body") + 1]
                 return CompletedProcess(args=args, returncode=0, stdout="https://github.com/Caliperti1/Maestro/pull/77\n", stderr="")
             if args[1:3] == ["pr", "view"]:
                 return CompletedProcess(
@@ -1187,10 +1190,11 @@ def test_codex_adapter_runs_branch_workflow_and_returns_pr_metadata(
     assert output["pr_number"] == 77
     assert output["pr_url"] == "https://github.com/Caliperti1/Maestro/pull/77"
     assert output["review_status"] == "pr_opened"
-    assert any(call[:3] == ["git", "checkout", "-B"] for call in calls)
+    assert any(call[:3] == ["git", "worktree", "add"] for call in calls)
     assert any(call[:3] == ["git", "push", "-u"] for call in calls)
     assert any(call[:3] == ["gh", "pr", "create"] for call in calls)
-    assert calls[-1] == ["git", "checkout", "main"]
+    assert any(call[:4] == ["git", "worktree", "remove", "--force"] for call in calls)
+    assert "Closes #50" in pr_create_body
 
 
 def test_codex_adapter_rejects_target_outside_allowed_roots(
@@ -1249,6 +1253,128 @@ def test_codex_adapter_rejects_target_outside_allowed_roots(
         assert "allowed root" in str(exc)
     else:
         raise AssertionError("Codex target outside allowed roots should fail.")
+
+
+def test_github_pr_merge_runs_approved_merge_command(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Merge a PR.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = GitHubCliToolAdapter("github.pr.merge").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"pr_number": 77, "method": "squash", "delete_branch": True},
+    )
+
+    assert output["merged"] is True
+    assert output["pr_number"] == 77
+    assert captured["args"] == [
+        "gh",
+        "pr",
+        "merge",
+        "77",
+        "--repo",
+        "Caliperti1/Maestro",
+        "--squash",
+        "--delete-branch",
+    ]
+
+
+def test_local_app_reload_runs_configured_commands(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="local.app.reload",
+        display_name="Maestro Local Reload",
+        auth_type="local",
+        config={
+            "default_cwd": str(tmp_path),
+            "allowed_roots": [str(tmp_path)],
+            "reload_commands": [["npm", "run", "build"]],
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="local.app.reload").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.reload",
+        objective="Reload app.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = LocalAppReloadAdapter("local.app.reload").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"pull_latest": True},
+    )
+
+    assert output["write_status"] == "reloaded"
+    assert calls == [["git", "pull", "--ff-only"], ["npm", "run", "build"]]
 
 
 def test_github_adapter_searches_files_in_repo(

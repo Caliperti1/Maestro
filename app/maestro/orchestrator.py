@@ -2129,6 +2129,12 @@ class MaestroOrchestratorService:
             conclusion = output_payload.get("conclusion") or output_payload.get("state")
             if conclusion:
                 return f"Checks: {conclusion}."
+        if tool_name == "github.pr.merge":
+            number = output_payload.get("pr_number") or output_payload.get("number")
+            method = output_payload.get("merge_method")
+            if number:
+                return f"Merged PR #{number}{f' with {method}' if method else ''}."
+            return "Merged a GitHub pull request."
         if tool_name == "github.issue.search":
             issues = output_payload.get("issues")
             if isinstance(issues, list):
@@ -2196,6 +2202,12 @@ class MaestroOrchestratorService:
             if final_message:
                 details += f": {final_message[:180]}"
             return details + "."
+        if tool_name == "local.app.reload":
+            commands = output_payload.get("commands")
+            target = output_payload.get("target_path")
+            if isinstance(commands, list):
+                return f"Reloaded local app at {target or 'configured target'} with {len(commands)} command(s)."
+            return "Reloaded local app."
         return ""
 
     def _chat_summary(

@@ -251,6 +251,7 @@ MVP GitHub tools:
 - `github.pr.get`: reads pull request metadata, files, comments, reviews, and status rollups.
 - `github.pr.diff`: reads pull request diffs or changed filenames.
 - `github.pr.checks`: reads pull request CI/check status.
+- `github.pr.merge`: merges a pull request after approval.
 
 These use the GitHub CLI (`auth_type: gh_cli`). A domain connection can rely on the active local
 `gh` account for quick local testing:
@@ -373,6 +374,31 @@ Useful result fields:
 - `pr`, `pr_url`, `pr_number`
 - `review_status`
 - `final_message`
+
+When an `issue_number` is present, the generated PR body includes `Closes #<issue_number>` so
+GitHub closes the source issue when the PR merges.
+
+MVP local app tools:
+
+- `local.app.reload`: approval-gated local update/reload action. By default it runs
+  `git pull --ff-only` in the configured target path. A domain can configure additional
+  `reload_commands` for its own app/process manager without changing the agent-facing contract.
+
+Example Maestro reload connection:
+
+```json
+{
+  "default_cwd": "/Users/christopheraliperti/Maestro",
+  "allowed_roots": ["/Users/christopheraliperti/Maestro"],
+  "branch": "main",
+  "pull_latest": true,
+  "reload_commands": []
+}
+```
+
+`local.app.reload` does not invoke a shell; command strings are parsed with `shlex`, and list-form
+commands are preferred. True backend process restart should be configured through a deliberate
+local process manager command once the scheduler/resource-lock layer is ready.
 
 The seeded `maestro-coding-agent` is the default Maestro Development agent intended to use this
 tool. Existing hand-created Maestro Development agents need `codex.task.run` added to their tool

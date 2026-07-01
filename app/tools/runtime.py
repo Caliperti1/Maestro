@@ -2,6 +2,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -446,6 +447,8 @@ class GitHubCliToolAdapter:
             return self._pr_diff(repo, payload, env=env)
         if self.key == "github.pr.checks":
             return self._pr_checks(repo, payload, env=env)
+        if self.key == "github.pr.merge":
+            return self._pr_merge(repo, payload, env=env)
         raise ToolExecutionError(f"Unsupported GitHub tool: {self.key}")
 
     def _repo_get(self, repo: str, *, env: dict[str, str]) -> dict[str, Any]:
@@ -1127,6 +1130,53 @@ class GitHubCliToolAdapter:
             },
         }
 
+    def _pr_merge(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        number = _required_int(payload, ("number", "pr_number"), label="GitHub PR number")
+        method = str(payload.get("method") or "squash").strip().lower()
+        if method not in {"merge", "squash", "rebase"}:
+            raise ToolExecutionError("GitHub PR merge method must be merge, squash, or rebase.")
+        delete_branch = _as_bool(payload.get("delete_branch"), default=True)
+        args = ["pr", "merge", str(number), "--repo", repo, f"--{method}"]
+        if delete_branch:
+            args.append("--delete-branch")
+        subject = str(payload.get("subject") or payload.get("title") or "").strip()
+        body = str(payload.get("body") or "").strip()
+        if subject:
+            args.extend(["--subject", subject])
+        if body:
+            args.extend(["--body", body])
+        _run_gh_text(args, env=env, timeout=120)
+        owner, name = _repo_parts(repo)
+        return {
+            "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
+            "number": number,
+            "pr_number": number,
+            "merged": True,
+            "merge_method": method,
+            "delete_branch": delete_branch,
+            "write_status": "merged",
+            "summary": {
+                "type": "github_pr_merge",
+                "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
+                "pr_number": number,
+                "merged": True,
+                "merge_method": method,
+                "delete_branch": delete_branch,
+            },
+        }
+
 
 class CodexCliToolAdapter:
     def __init__(self, key: str):
@@ -1160,17 +1210,32 @@ class CodexCliToolAdapter:
         extra_context = str(payload.get("context") or "").strip()
         full_prompt = prompt if not extra_context else f"{prompt}\n\nAdditional context:\n{extra_context}"
         branch_workflow = _bool_setting(payload, context.connection, "branch_workflow", default=True)
+        if branch_workflow:
+            full_prompt = (
+                f"{full_prompt}\n\n"
+                "Maestro branch workflow guardrails:\n"
+                "- You are already running inside an isolated Maestro-managed worktree.\n"
+                "- Edit files and run validation only.\n"
+                "- Do not create branches, commit, push, open pull requests, merge, deploy, hot reload, "
+                "or post GitHub comments; Maestro performs those steps after your run.\n"
+                "- Return a concise final report with changed files, validation results, and follow-ups."
+            )
 
         with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as output_file:
             output_path = output_file.name
         try:
             git_context = self._prepare_branch_workflow(context, payload, target_path) if branch_workflow else None
+            execution_path = (
+                Path(str(git_context["worktree_path"]))
+                if git_context is not None
+                else target_path
+            )
             args = [
                 codex_bin,
                 "exec",
                 "--json",
                 "--cd",
-                str(target_path),
+                str(execution_path),
                 "--sandbox",
                 sandbox,
                 "--output-last-message",
@@ -1189,7 +1254,7 @@ class CodexCliToolAdapter:
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
-                cwd=str(target_path),
+                cwd=str(execution_path),
                 env=os.environ.copy(),
             )
             events = _parse_jsonl(completed.stdout)
@@ -1201,7 +1266,8 @@ class CodexCliToolAdapter:
             if not final_message:
                 final_message = _last_agent_message(events)
             result = {
-                "target_path": str(target_path),
+                "target_path": str(execution_path),
+                "source_repo_path": str(target_path),
                 "sandbox": sandbox,
                 "model": model or None,
                 "profile": profile or None,
@@ -1223,7 +1289,7 @@ class CodexCliToolAdapter:
                     self._complete_branch_workflow(
                         context,
                         payload,
-                        target_path,
+                        execution_path,
                         git_context,
                         final_message=final_message,
                         changed_files=result["changed_files"],
@@ -1234,7 +1300,7 @@ class CodexCliToolAdapter:
             raise ToolExecutionError(f"Codex task timed out after {timeout_seconds} seconds.") from exc
         finally:
             if "git_context" in locals() and git_context is not None:
-                self._restore_branch(target_path, git_context)
+                self._cleanup_worktree(target_path, git_context)
             try:
                 Path(output_path).unlink()
             except FileNotFoundError:
@@ -1316,12 +1382,20 @@ class CodexCliToolAdapter:
         branch_name = str(payload.get("branch_name") or "").strip()
         if not branch_name:
             branch_name = self._generated_branch_name(context, payload)
-        _run_local_text(["git", "checkout", base_branch], cwd=target_path)
-        _run_local_text(["git", "checkout", "-B", branch_name], cwd=target_path)
+        worktree_path = self._worktree_path(context, payload, target_path, branch_name)
+        if worktree_path.exists():
+            _run_local_text(["git", "worktree", "remove", "--force", str(worktree_path)], cwd=target_path)
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        _run_local_text(
+            ["git", "worktree", "add", "-B", branch_name, str(worktree_path), base_branch],
+            cwd=target_path,
+            timeout=120,
+        )
         return {
             "original_branch": original_branch,
             "base_branch": base_branch,
             "branch_name": branch_name,
+            "worktree_path": str(worktree_path),
             "allow_dirty": allow_dirty,
         }
 
@@ -1399,6 +1473,7 @@ class CodexCliToolAdapter:
                 title=title,
                 final_message=final_message,
                 changed_paths=changed_paths,
+                issue_number=str(payload.get("issue_number") or payload.get("number") or "").strip(),
             )
         args = ["pr", "create", "--base", base_branch, "--head", branch_name, "--title", title, "--body", body]
         if repo:
@@ -1420,11 +1495,12 @@ class CodexCliToolAdapter:
         pr = _run_gh_json(view_args, env=env)
         return _normalized_pr_payload(repo, pr, body)
 
-    def _restore_branch(self, target_path: Path, git_context: dict[str, Any]) -> None:
-        original_branch = str(git_context.get("original_branch") or "").strip()
-        if original_branch:
+    def _cleanup_worktree(self, target_path: Path, git_context: dict[str, Any]) -> None:
+        worktree_path = str(git_context.get("worktree_path") or "").strip()
+        if worktree_path:
             try:
-                _run_local_text(["git", "checkout", original_branch], cwd=target_path)
+                _run_local_text(["git", "worktree", "remove", "--force", worktree_path], cwd=target_path)
+                _run_local_text(["git", "worktree", "prune"], cwd=target_path)
             except ToolExecutionError:
                 pass
 
@@ -1449,6 +1525,69 @@ class CodexCliToolAdapter:
         suffix = f"issue-{issue_number}-{slug}" if issue_number else slug
         return f"{prefix}/{suffix}-{str(context.task.id)[:8]}"
 
+    def _worktree_path(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+        target_path: Path,
+        branch_name: str,
+    ) -> Path:
+        configured_root = str(
+            payload.get("worktree_root")
+            or _connection_config(context.connection).get("worktree_root")
+            or ""
+        ).strip()
+        root = Path(configured_root).expanduser() if configured_root else target_path.parent / ".maestro_worktrees"
+        return (root / _slug_text(branch_name, max_chars=90)).resolve()
+
+
+class LocalAppReloadAdapter:
+    def __init__(self, key: str):
+        self.key = key
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.key != "local.app.reload":
+            raise ToolExecutionError(f"Unsupported local app tool: {self.key}")
+        target_path = _local_target_path(context.connection, payload)
+        pull_latest = _bool_setting(payload, context.connection, "pull_latest", default=True)
+        commands: list[list[str]] = []
+        if pull_latest:
+            branch = str(payload.get("branch") or _connection_config(context.connection).get("branch") or "").strip()
+            if branch:
+                commands.append(["git", "checkout", branch])
+            commands.append(["git", "pull", "--ff-only"])
+        commands.extend(_reload_commands(context.connection, payload))
+        if not commands:
+            raise ToolExecutionError("Reload tool has no configured commands to run.")
+        results = []
+        for command in commands:
+            started_at = datetime.now(UTC).isoformat()
+            output = _run_local_text(command, cwd=target_path, timeout=300)
+            results.append(
+                {
+                    "command": command,
+                    "started_at": started_at,
+                    "completed_at": datetime.now(UTC).isoformat(),
+                    "output_tail": output[-2000:],
+                }
+            )
+        return {
+            "target_path": str(target_path),
+            "pull_latest": pull_latest,
+            "commands": results,
+            "write_status": "reloaded",
+            "summary": {
+                "type": "local_app_reload",
+                "target_path": str(target_path),
+                "command_count": len(results),
+                "pull_latest": pull_latest,
+            },
+        }
+
 
 def default_tool_adapters() -> dict[str, ToolAdapter]:
     adapters: dict[str, ToolAdapter] = {
@@ -1468,9 +1607,11 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
             "github.pr.get",
             "github.pr.diff",
             "github.pr.checks",
+            "github.pr.merge",
         )
     }
     adapters["codex.task.run"] = CodexCliToolAdapter("codex.task.run")
+    adapters["local.app.reload"] = LocalAppReloadAdapter("local.app.reload")
     return adapters
 
 
@@ -1822,9 +1963,11 @@ def _codex_pr_body(
     title: str,
     final_message: str,
     changed_paths: list[str],
+    issue_number: str = "",
 ) -> str:
     changed = "\n".join(f"- `{path}`" for path in changed_paths) or "- No file changes detected."
     report = final_message.strip() or "Codex completed without a final message."
+    closes = f"\n\nCloses #{issue_number}" if issue_number else ""
     return (
         "## Maestro Coding Agent Summary\n"
         f"{report}\n\n"
@@ -1833,6 +1976,7 @@ def _codex_pr_body(
         "## Review Notes\n"
         "- Review the diff before merge.\n"
         "- Merge and hot reload require explicit Chris approval."
+        f"{closes}"
     )
 
 
@@ -1859,6 +2003,43 @@ def _normalized_pr_payload(
         "head_ref": payload.get("headRefName"),
         "base_ref": payload.get("baseRefName"),
     }
+
+
+def _local_target_path(connection: ToolConnection | None, payload: dict[str, Any]) -> Path:
+    config = _connection_config(connection)
+    raw_target = str(
+        payload.get("target_path")
+        or payload.get("target_directory")
+        or payload.get("cwd")
+        or config.get("default_cwd")
+        or config.get("target_path")
+        or os.getcwd()
+    ).strip()
+    target = Path(raw_target).expanduser().resolve()
+    if not target.exists() or not target.is_dir():
+        raise ToolExecutionError(f"Reload target path is not a directory: {target}")
+    allowed_roots = _string_list(config.get("allowed_roots"))
+    roots = [Path(root).expanduser().resolve() for root in allowed_roots] if allowed_roots else [target]
+    if not any(target == root or root in target.parents for root in roots):
+        allowed = ", ".join(str(root) for root in roots)
+        raise ToolExecutionError(f"Reload target path must be inside an allowed root: {allowed}")
+    return target
+
+
+def _reload_commands(connection: ToolConnection | None, payload: dict[str, Any]) -> list[list[str]]:
+    config = _connection_config(connection)
+    raw_commands = payload.get("commands") or payload.get("reload_commands") or config.get("reload_commands") or []
+    commands: list[list[str]] = []
+    for raw in raw_commands if isinstance(raw_commands, list) else [raw_commands]:
+        if isinstance(raw, str):
+            command = shlex.split(raw)
+        elif isinstance(raw, list):
+            command = [str(part) for part in raw if str(part).strip()]
+        else:
+            continue
+        if command:
+            commands.append(command)
+    return commands
 
 
 
@@ -1948,8 +2129,9 @@ def _run_gh_json(
     *,
     env: dict[str, str],
     allowed_exit_codes: set[int] | None = None,
+    timeout: int = 30,
 ) -> Any:
-    output = _run_gh_text(args, env=env, allowed_exit_codes=allowed_exit_codes)
+    output = _run_gh_text(args, env=env, allowed_exit_codes=allowed_exit_codes, timeout=timeout)
     if not output.strip():
         return None
     return json.loads(output)
@@ -1960,13 +2142,14 @@ def _run_gh_text(
     *,
     env: dict[str, str],
     allowed_exit_codes: set[int] | None = None,
+    timeout: int = 30,
 ) -> str:
     completed = subprocess.run(
         ["gh", *args],
         check=False,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
         env=env,
     )
     allowed = allowed_exit_codes or {0}
