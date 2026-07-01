@@ -1160,17 +1160,32 @@ class CodexCliToolAdapter:
         extra_context = str(payload.get("context") or "").strip()
         full_prompt = prompt if not extra_context else f"{prompt}\n\nAdditional context:\n{extra_context}"
         branch_workflow = _bool_setting(payload, context.connection, "branch_workflow", default=True)
+        if branch_workflow:
+            full_prompt = (
+                f"{full_prompt}\n\n"
+                "Maestro branch workflow guardrails:\n"
+                "- You are already running inside an isolated Maestro-managed worktree.\n"
+                "- Edit files and run validation only.\n"
+                "- Do not create branches, commit, push, open pull requests, merge, deploy, hot reload, "
+                "or post GitHub comments; Maestro performs those steps after your run.\n"
+                "- Return a concise final report with changed files, validation results, and follow-ups."
+            )
 
         with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as output_file:
             output_path = output_file.name
         try:
             git_context = self._prepare_branch_workflow(context, payload, target_path) if branch_workflow else None
+            execution_path = (
+                Path(str(git_context["worktree_path"]))
+                if git_context is not None
+                else target_path
+            )
             args = [
                 codex_bin,
                 "exec",
                 "--json",
                 "--cd",
-                str(target_path),
+                str(execution_path),
                 "--sandbox",
                 sandbox,
                 "--output-last-message",
@@ -1189,7 +1204,7 @@ class CodexCliToolAdapter:
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
-                cwd=str(target_path),
+                cwd=str(execution_path),
                 env=os.environ.copy(),
             )
             events = _parse_jsonl(completed.stdout)
@@ -1201,7 +1216,8 @@ class CodexCliToolAdapter:
             if not final_message:
                 final_message = _last_agent_message(events)
             result = {
-                "target_path": str(target_path),
+                "target_path": str(execution_path),
+                "source_repo_path": str(target_path),
                 "sandbox": sandbox,
                 "model": model or None,
                 "profile": profile or None,
@@ -1223,7 +1239,7 @@ class CodexCliToolAdapter:
                     self._complete_branch_workflow(
                         context,
                         payload,
-                        target_path,
+                        execution_path,
                         git_context,
                         final_message=final_message,
                         changed_files=result["changed_files"],
@@ -1234,7 +1250,7 @@ class CodexCliToolAdapter:
             raise ToolExecutionError(f"Codex task timed out after {timeout_seconds} seconds.") from exc
         finally:
             if "git_context" in locals() and git_context is not None:
-                self._restore_branch(target_path, git_context)
+                self._cleanup_worktree(target_path, git_context)
             try:
                 Path(output_path).unlink()
             except FileNotFoundError:
@@ -1316,12 +1332,20 @@ class CodexCliToolAdapter:
         branch_name = str(payload.get("branch_name") or "").strip()
         if not branch_name:
             branch_name = self._generated_branch_name(context, payload)
-        _run_local_text(["git", "checkout", base_branch], cwd=target_path)
-        _run_local_text(["git", "checkout", "-B", branch_name], cwd=target_path)
+        worktree_path = self._worktree_path(context, payload, target_path, branch_name)
+        if worktree_path.exists():
+            _run_local_text(["git", "worktree", "remove", "--force", str(worktree_path)], cwd=target_path)
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        _run_local_text(
+            ["git", "worktree", "add", "-B", branch_name, str(worktree_path), base_branch],
+            cwd=target_path,
+            timeout=120,
+        )
         return {
             "original_branch": original_branch,
             "base_branch": base_branch,
             "branch_name": branch_name,
+            "worktree_path": str(worktree_path),
             "allow_dirty": allow_dirty,
         }
 
@@ -1420,11 +1444,12 @@ class CodexCliToolAdapter:
         pr = _run_gh_json(view_args, env=env)
         return _normalized_pr_payload(repo, pr, body)
 
-    def _restore_branch(self, target_path: Path, git_context: dict[str, Any]) -> None:
-        original_branch = str(git_context.get("original_branch") or "").strip()
-        if original_branch:
+    def _cleanup_worktree(self, target_path: Path, git_context: dict[str, Any]) -> None:
+        worktree_path = str(git_context.get("worktree_path") or "").strip()
+        if worktree_path:
             try:
-                _run_local_text(["git", "checkout", original_branch], cwd=target_path)
+                _run_local_text(["git", "worktree", "remove", "--force", worktree_path], cwd=target_path)
+                _run_local_text(["git", "worktree", "prune"], cwd=target_path)
             except ToolExecutionError:
                 pass
 
@@ -1448,6 +1473,21 @@ class CodexCliToolAdapter:
         slug = _slug_text(title, max_chars=42)
         suffix = f"issue-{issue_number}-{slug}" if issue_number else slug
         return f"{prefix}/{suffix}-{str(context.task.id)[:8]}"
+
+    def _worktree_path(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+        target_path: Path,
+        branch_name: str,
+    ) -> Path:
+        configured_root = str(
+            payload.get("worktree_root")
+            or _connection_config(context.connection).get("worktree_root")
+            or ""
+        ).strip()
+        root = Path(configured_root).expanduser() if configured_root else target_path.parent / ".maestro_worktrees"
+        return (root / _slug_text(branch_name, max_chars=90)).resolve()
 
 
 def default_tool_adapters() -> dict[str, ToolAdapter]:

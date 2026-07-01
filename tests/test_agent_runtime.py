@@ -1187,10 +1187,10 @@ def test_codex_adapter_runs_branch_workflow_and_returns_pr_metadata(
     assert output["pr_number"] == 77
     assert output["pr_url"] == "https://github.com/Caliperti1/Maestro/pull/77"
     assert output["review_status"] == "pr_opened"
-    assert any(call[:3] == ["git", "checkout", "-B"] for call in calls)
+    assert any(call[:3] == ["git", "worktree", "add"] for call in calls)
     assert any(call[:3] == ["git", "push", "-u"] for call in calls)
     assert any(call[:3] == ["gh", "pr", "create"] for call in calls)
-    assert calls[-1] == ["git", "checkout", "main"]
+    assert any(call[:4] == ["git", "worktree", "remove", "--force"] for call in calls)
 
 
 def test_codex_adapter_rejects_target_outside_allowed_roots(
