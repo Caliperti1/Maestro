@@ -2,6 +2,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -446,6 +447,8 @@ class GitHubCliToolAdapter:
             return self._pr_diff(repo, payload, env=env)
         if self.key == "github.pr.checks":
             return self._pr_checks(repo, payload, env=env)
+        if self.key == "github.pr.merge":
+            return self._pr_merge(repo, payload, env=env)
         raise ToolExecutionError(f"Unsupported GitHub tool: {self.key}")
 
     def _repo_get(self, repo: str, *, env: dict[str, str]) -> dict[str, Any]:
@@ -1127,6 +1130,53 @@ class GitHubCliToolAdapter:
             },
         }
 
+    def _pr_merge(
+        self,
+        repo: str,
+        payload: dict[str, Any],
+        *,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        number = _required_int(payload, ("number", "pr_number"), label="GitHub PR number")
+        method = str(payload.get("method") or "squash").strip().lower()
+        if method not in {"merge", "squash", "rebase"}:
+            raise ToolExecutionError("GitHub PR merge method must be merge, squash, or rebase.")
+        delete_branch = _as_bool(payload.get("delete_branch"), default=True)
+        args = ["pr", "merge", str(number), "--repo", repo, f"--{method}"]
+        if delete_branch:
+            args.append("--delete-branch")
+        subject = str(payload.get("subject") or payload.get("title") or "").strip()
+        body = str(payload.get("body") or "").strip()
+        if subject:
+            args.extend(["--subject", subject])
+        if body:
+            args.extend(["--body", body])
+        _run_gh_text(args, env=env, timeout=120)
+        owner, name = _repo_parts(repo)
+        return {
+            "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
+            "number": number,
+            "pr_number": number,
+            "merged": True,
+            "merge_method": method,
+            "delete_branch": delete_branch,
+            "write_status": "merged",
+            "summary": {
+                "type": "github_pr_merge",
+                "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
+                "pr_number": number,
+                "merged": True,
+                "merge_method": method,
+                "delete_branch": delete_branch,
+            },
+        }
+
 
 class CodexCliToolAdapter:
     def __init__(self, key: str):
@@ -1423,6 +1473,7 @@ class CodexCliToolAdapter:
                 title=title,
                 final_message=final_message,
                 changed_paths=changed_paths,
+                issue_number=str(payload.get("issue_number") or payload.get("number") or "").strip(),
             )
         args = ["pr", "create", "--base", base_branch, "--head", branch_name, "--title", title, "--body", body]
         if repo:
@@ -1490,6 +1541,54 @@ class CodexCliToolAdapter:
         return (root / _slug_text(branch_name, max_chars=90)).resolve()
 
 
+class LocalAppReloadAdapter:
+    def __init__(self, key: str):
+        self.key = key
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.key != "local.app.reload":
+            raise ToolExecutionError(f"Unsupported local app tool: {self.key}")
+        target_path = _local_target_path(context.connection, payload)
+        pull_latest = _bool_setting(payload, context.connection, "pull_latest", default=True)
+        commands: list[list[str]] = []
+        if pull_latest:
+            branch = str(payload.get("branch") or _connection_config(context.connection).get("branch") or "").strip()
+            if branch:
+                commands.append(["git", "checkout", branch])
+            commands.append(["git", "pull", "--ff-only"])
+        commands.extend(_reload_commands(context.connection, payload))
+        if not commands:
+            raise ToolExecutionError("Reload tool has no configured commands to run.")
+        results = []
+        for command in commands:
+            started_at = datetime.now(UTC).isoformat()
+            output = _run_local_text(command, cwd=target_path, timeout=300)
+            results.append(
+                {
+                    "command": command,
+                    "started_at": started_at,
+                    "completed_at": datetime.now(UTC).isoformat(),
+                    "output_tail": output[-2000:],
+                }
+            )
+        return {
+            "target_path": str(target_path),
+            "pull_latest": pull_latest,
+            "commands": results,
+            "write_status": "reloaded",
+            "summary": {
+                "type": "local_app_reload",
+                "target_path": str(target_path),
+                "command_count": len(results),
+                "pull_latest": pull_latest,
+            },
+        }
+
+
 def default_tool_adapters() -> dict[str, ToolAdapter]:
     adapters: dict[str, ToolAdapter] = {
         key: GitHubCliToolAdapter(key)
@@ -1508,9 +1607,11 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
             "github.pr.get",
             "github.pr.diff",
             "github.pr.checks",
+            "github.pr.merge",
         )
     }
     adapters["codex.task.run"] = CodexCliToolAdapter("codex.task.run")
+    adapters["local.app.reload"] = LocalAppReloadAdapter("local.app.reload")
     return adapters
 
 
@@ -1862,9 +1963,11 @@ def _codex_pr_body(
     title: str,
     final_message: str,
     changed_paths: list[str],
+    issue_number: str = "",
 ) -> str:
     changed = "\n".join(f"- `{path}`" for path in changed_paths) or "- No file changes detected."
     report = final_message.strip() or "Codex completed without a final message."
+    closes = f"\n\nCloses #{issue_number}" if issue_number else ""
     return (
         "## Maestro Coding Agent Summary\n"
         f"{report}\n\n"
@@ -1873,6 +1976,7 @@ def _codex_pr_body(
         "## Review Notes\n"
         "- Review the diff before merge.\n"
         "- Merge and hot reload require explicit Chris approval."
+        f"{closes}"
     )
 
 
@@ -1899,6 +2003,43 @@ def _normalized_pr_payload(
         "head_ref": payload.get("headRefName"),
         "base_ref": payload.get("baseRefName"),
     }
+
+
+def _local_target_path(connection: ToolConnection | None, payload: dict[str, Any]) -> Path:
+    config = _connection_config(connection)
+    raw_target = str(
+        payload.get("target_path")
+        or payload.get("target_directory")
+        or payload.get("cwd")
+        or config.get("default_cwd")
+        or config.get("target_path")
+        or os.getcwd()
+    ).strip()
+    target = Path(raw_target).expanduser().resolve()
+    if not target.exists() or not target.is_dir():
+        raise ToolExecutionError(f"Reload target path is not a directory: {target}")
+    allowed_roots = _string_list(config.get("allowed_roots"))
+    roots = [Path(root).expanduser().resolve() for root in allowed_roots] if allowed_roots else [target]
+    if not any(target == root or root in target.parents for root in roots):
+        allowed = ", ".join(str(root) for root in roots)
+        raise ToolExecutionError(f"Reload target path must be inside an allowed root: {allowed}")
+    return target
+
+
+def _reload_commands(connection: ToolConnection | None, payload: dict[str, Any]) -> list[list[str]]:
+    config = _connection_config(connection)
+    raw_commands = payload.get("commands") or payload.get("reload_commands") or config.get("reload_commands") or []
+    commands: list[list[str]] = []
+    for raw in raw_commands if isinstance(raw_commands, list) else [raw_commands]:
+        if isinstance(raw, str):
+            command = shlex.split(raw)
+        elif isinstance(raw, list):
+            command = [str(part) for part in raw if str(part).strip()]
+        else:
+            continue
+        if command:
+            commands.append(command)
+    return commands
 
 
 
@@ -1988,8 +2129,9 @@ def _run_gh_json(
     *,
     env: dict[str, str],
     allowed_exit_codes: set[int] | None = None,
+    timeout: int = 30,
 ) -> Any:
-    output = _run_gh_text(args, env=env, allowed_exit_codes=allowed_exit_codes)
+    output = _run_gh_text(args, env=env, allowed_exit_codes=allowed_exit_codes, timeout=timeout)
     if not output.strip():
         return None
     return json.loads(output)
@@ -2000,13 +2142,14 @@ def _run_gh_text(
     *,
     env: dict[str, str],
     allowed_exit_codes: set[int] | None = None,
+    timeout: int = 30,
 ) -> str:
     completed = subprocess.run(
         ["gh", *args],
         check=False,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
         env=env,
     )
     allowed = allowed_exit_codes or {0}
