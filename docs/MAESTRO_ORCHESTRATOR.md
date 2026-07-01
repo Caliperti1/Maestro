@@ -133,7 +133,8 @@ stage executor for a true worker pool without changing the plan, queue, or UI co
 
 ## Scheduler And Queue Foundation
 
-The MVP scheduler is a queue foundation, not the final recurring scheduler. It records:
+The MVP scheduler now has a durable queue foundation, not the final recurring/background scheduler.
+The detailed contract lives in [SCHEDULER_QUEUE.md](SCHEDULER_QUEUE.md). It records:
 
 - plan-first execution policy
 - parent task status
@@ -144,8 +145,11 @@ The MVP scheduler is a queue foundation, not the final recurring scheduler. It r
 - retry count and error message per queue item
 - child task/report IDs once execution creates durable child tasks
 - per-stage synthesis notes
-- future resource-lock placeholder
-- future recurring-scheduler placeholder
+- durable workflow runs and queue items
+- resource-lock requests and lock leases
+- scheduler events for queue observability
+- parallel-ready runnable batches
+- future recurring trigger execution placeholder
 
 Future work should add resource locks, priority override, recurring workflows, exclusive tool queues,
 and conflict-aware scheduling.

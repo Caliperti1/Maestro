@@ -16,8 +16,11 @@ from app.db.repositories import (
     ToolCallRepository,
     ToolConnectionRepository,
     UserRepository,
+    WorkflowQueueItemRepository,
+    WorkflowRunRepository,
 )
 from app.db.seed import DEFAULT_DOMAINS, seed_default_domains
+from app.maestro.scheduler import SchedulerService
 
 
 def test_default_domain_seed_is_idempotent(session: Session) -> None:
@@ -191,3 +194,59 @@ def test_scheduled_run_repository(session: Session) -> None:
     )
 
     assert ScheduledRunRepository(session).list_active() == [run]
+
+
+def test_scheduler_persists_workflow_run_queue_and_parallel_batches(session: Session) -> None:
+    seed_default_domains(session)
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert domain is not None
+    task = TaskRepository(session).create(
+        domain_id=domain.id,
+        status="proposed",
+        priority="high",
+        source_type="maestro_chat",
+        workflow_key="maestro.generic",
+        objective="Prepare partner workflow.",
+        input_payload={
+            "plan_id": "plan-1",
+            "scheduler": {
+                "policy": "test",
+                "queue_items": [
+                    {
+                        "id": "q1",
+                        "stage_index": 1,
+                        "position": 1,
+                        "status": "pending",
+                        "domain_key": "praxis",
+                        "objective": "Research partner.",
+                    },
+                    {
+                        "id": "q2",
+                        "stage_index": 1,
+                        "position": 2,
+                        "status": "pending",
+                        "domain_key": "ophi",
+                        "objective": "Check product implications.",
+                    },
+                    {
+                        "id": "q3",
+                        "stage_index": 2,
+                        "position": 1,
+                        "status": "pending",
+                        "domain_key": "praxis",
+                        "objective": "Synthesize brief.",
+                        "depends_on_work_item_ids": ["q1"],
+                    },
+                ],
+            },
+        },
+    )
+
+    run = SchedulerService(session).enqueue_maestro_plan(task)
+
+    assert WorkflowRunRepository(session).get_by_parent_task(task.id) == run
+    queue_items = WorkflowQueueItemRepository(session).list_by_run(run.id)
+    assert [item.external_key for item in queue_items] == ["q1", "q2", "q3"]
+    batches = SchedulerService(session).runnable_batches()
+    assert len(batches) == 1
+    assert {item["external_key"] for item in batches[0]["parallel_ready"]} == {"q1", "q2"}

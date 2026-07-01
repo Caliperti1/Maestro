@@ -22,6 +22,7 @@ from app.maestro.planner import (
     MaestroPlannerResponse,
     PlannerWorkItem,
 )
+from app.maestro.scheduler import SchedulerService
 from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
 from app.tools.runtime import ToolExecutionResult, ToolExecutionService, tool_result_payload
 
@@ -195,6 +196,7 @@ class MaestroOrchestratorService:
         self.session.add(parent_task)
         self.session.commit()
         self.session.refresh(parent_task)
+        SchedulerService(self.session).enqueue_maestro_plan(parent_task)
         return self._plan_from_task(parent_task)
 
     def get_plan(self, plan_id: uuid.UUID | str) -> MaestroPlan:
@@ -522,6 +524,7 @@ class MaestroOrchestratorService:
             parent_task.error_message = error_message
             parent_task.completed_at = datetime.now(UTC)
             self.session.commit()
+            SchedulerService(self.session).sync_run_status_from_task(parent_task)
             self.session.refresh(report)
             self.session.refresh(parent_task)
             return MaestroRun(
@@ -554,6 +557,7 @@ class MaestroOrchestratorService:
             parent_task.completed_at = datetime.now(UTC)
             self._set_scheduler_status(parent_task, "failed")
             self.session.commit()
+            SchedulerService(self.session).sync_run_status_from_task(parent_task)
             raise
 
     def approve_tool_call_and_resume(

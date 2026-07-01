@@ -32,7 +32,53 @@ type MaestroSessionSummary = {
   id: string;
   title: string;
   messages: ChatMessage[];
+  message_count?: number;
+  created_at?: string | null;
+  updated_at?: string | null;
   stagedArtifactPath: string | null;
+};
+
+type SchedulerQueueItem = {
+  id: string;
+  workflow_run_id: string;
+  external_key: string;
+  status: string;
+  priority: string;
+  stage_index: number;
+  position: number;
+  objective: string;
+  dependency_keys: string[];
+  resource_locks: Array<Record<string, unknown>>;
+  fairness_group: string | null;
+  domain_key: string | null;
+  agent_key: string | null;
+  agent_name: string | null;
+  lease_owner: string | null;
+  error_message: string | null;
+};
+
+type SchedulerRun = {
+  id: string;
+  parent_task_id: string | null;
+  conversation_id: string | null;
+  source_type: string;
+  status: string;
+  priority: string;
+  fairness_group: string | null;
+  summary: string | null;
+  created_at: string | null;
+  queue_items: SchedulerQueueItem[];
+};
+
+type SchedulerDashboard = {
+  runs: SchedulerRun[];
+  runnable_batches: Array<{
+    workflow_run_id: string;
+    status: string;
+    fairness_group: string | null;
+    parallel_ready: SchedulerQueueItem[];
+  }>;
+  active_locks: Array<Record<string, unknown>>;
 };
 
 type DropboxDomain = {
@@ -403,6 +449,7 @@ type MaestroRespond = {
   plan: MaestroPlan | null;
   chat_plan: MaestroPlan | null;
   active_plan: MaestroPlan | null;
+  conversation: MaestroSessionSummary;
 };
 
 type MaestroToolCallResponse = {
@@ -639,6 +686,8 @@ export function App() {
   );
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [sessionHistory, setSessionHistory] = useState<MaestroSessionSummary[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [schedulerDashboard, setSchedulerDashboard] = useState<SchedulerDashboard | null>(null);
   const [draftMessage, setDraftMessage] = useState("");
   const [maestroPlan, setMaestroPlan] = useState<MaestroPlan | null>(null);
   const [maestroRun, setMaestroRun] = useState<MaestroRun | null>(null);
@@ -789,6 +838,36 @@ export function App() {
     );
   };
 
+  const loadSessionHistory = useCallback(async () => {
+    const response = await apiJson<{ sessions: MaestroSessionSummary[] }>("/maestro/sessions");
+    setSessionHistory(response.sessions);
+  }, []);
+
+  const applyConversation = useCallback((conversation: MaestroSessionSummary) => {
+    setActiveConversationId(conversation.id);
+    setChatMessages(conversation.messages ?? []);
+  }, []);
+
+  const loadActiveSession = useCallback(async () => {
+    const response = await apiJson<{ conversation: MaestroSessionSummary }>(
+      "/maestro/sessions/active",
+    );
+    applyConversation(response.conversation);
+  }, [applyConversation]);
+
+  const loadSchedulerDashboard = useCallback(async () => {
+    const response = await apiJson<SchedulerDashboard>("/scheduler/dashboard");
+    setSchedulerDashboard(response);
+  }, []);
+
+  useEffect(() => {
+    loadActiveSession().catch(() => {
+      setMaestroStatus("Could not restore active Maestro session.");
+    });
+    loadSessionHistory().catch(() => undefined);
+    loadSchedulerDashboard().catch(() => undefined);
+  }, [loadActiveSession, loadSchedulerDashboard, loadSessionHistory]);
+
   const applyToolCallUpdate = (toolCall: MaestroToolCallResponse["tool_call"]) => {
     setMaestroRun((run) => {
       if (!run) return run;
@@ -865,6 +944,7 @@ export function App() {
             execute_llm: true,
             auto_tool_loop: true,
             max_tool_iterations: 2,
+            conversation_id: activeConversationId,
           }),
         },
       );
@@ -884,6 +964,8 @@ export function App() {
             ? "Tool approved and run."
             : "Tool approval finished.",
       );
+      loadSessionHistory().catch(() => undefined);
+      loadSchedulerDashboard().catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Tool approval failed.";
       setChatMessages((messages) => [
@@ -905,7 +987,10 @@ export function App() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reason: "Rejected from Maestro UI." }),
+          body: JSON.stringify({
+            reason: "Rejected from Maestro UI.",
+            conversation_id: activeConversationId,
+          }),
         },
       );
       applyToolCallUpdate(response.tool_call);
@@ -914,6 +999,8 @@ export function App() {
         { id: crypto.randomUUID(), sender: "maestro", content: response.message },
       ]);
       setMaestroStatus("Tool rejected.");
+      loadSessionHistory().catch(() => undefined);
+      loadSchedulerDashboard().catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Tool rejection failed.";
       setChatMessages((messages) => [
@@ -962,10 +1049,12 @@ export function App() {
         body: JSON.stringify({
           message: outgoingMessage.content,
           active_plan_id: activePlanId,
+          conversation_id: activeConversationId,
         }),
       });
       setMaestroPlan(response.plan ?? response.active_plan);
       setMaestroRun(null);
+      if (response.conversation) setActiveConversationId(response.conversation.id);
       setChatMessages((messages) => [
         ...messages,
         {
@@ -985,6 +1074,8 @@ export function App() {
             ? "Plan refined."
             : "Proposed plan ready for approval.",
       );
+      loadSessionHistory().catch(() => undefined);
+      loadSchedulerDashboard().catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Maestro planning failed.";
       setChatMessages((messages) => [
@@ -1010,6 +1101,7 @@ export function App() {
             execute_llm: executeMaestroLLM,
             auto_tool_loop: autoMaestroToolLoop,
             max_tool_iterations: 2,
+            conversation_id: activeConversationId,
           }),
         },
       );
@@ -1029,6 +1121,8 @@ export function App() {
       setMaestroStatus(
         response.run.status === "completed" ? "Workflow completed." : "Workflow finished.",
       );
+      loadSessionHistory().catch(() => undefined);
+      loadSchedulerDashboard().catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Maestro workflow failed.";
       setChatMessages((messages) => [
@@ -1054,6 +1148,7 @@ export function App() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               plan_id: maestroPlan?.parent_task_id ?? null,
+              conversation_id: activeConversationId,
               messages: chatMessages.map((message) => ({
                 sender: message.sender,
                 content: message.content,
@@ -1063,20 +1158,15 @@ export function App() {
         );
         stagedArtifactPath = response.staged_artifact_path;
       }
-      setSessionHistory((sessions) => [
-        {
-          id: crypto.randomUUID(),
-          title: chatMessages.find((message) => message.sender === "user")?.content.slice(0, 72) ||
-            "Maestro session",
-          messages: chatMessages,
-          stagedArtifactPath,
-        },
-        ...sessions,
-      ]);
+      const started = await apiJson<{ conversation: MaestroSessionSummary }>("/maestro/sessions/start", {
+        method: "POST",
+      });
+      setActiveConversationId(started.conversation.id);
       setChatMessages([]);
       setDraftMessage("");
       setMaestroPlan(null);
       setMaestroRun(null);
+      loadSessionHistory().catch(() => undefined);
       setMaestroStatus(
         stagedArtifactPath
           ? "Previous session staged for memory curation."
@@ -1258,8 +1348,11 @@ export function App() {
                     <button
                       type="button"
                       key={session.id}
-                      onClick={() => {
-                        setChatMessages(session.messages);
+                      onClick={async () => {
+                        const response = await apiJson<{ conversation: MaestroSessionSummary }>(
+                          `/maestro/sessions/${session.id}`,
+                        );
+                        applyConversation(response.conversation);
                         setMaestroPlan(null);
                         setMaestroRun(null);
                         setMaestroStatus(
@@ -1765,6 +1858,40 @@ export function App() {
                   No scheduled or running workflows yet. Maestro workflows will appear here after
                   they are proposed, queued, or executed.
                 </p>
+              )}
+              {schedulerDashboard && schedulerDashboard.runs.length > 0 && (
+                <div className="scheduler-run-list" aria-label="Durable scheduler runs">
+                  <div className="workflow-detail-heading">
+                    <div>
+                      <span>Durable queue</span>
+                      <h4>Scheduled and recent workflows</h4>
+                    </div>
+                    <span>{schedulerDashboard.runnable_batches.length} runnable batch(es)</span>
+                  </div>
+                  {schedulerDashboard.runs.slice(0, 5).map((run) => {
+                    const completed = run.queue_items.filter((item) => item.status === "completed").length;
+                    const blocked = run.queue_items.filter((item) => item.status === "blocked").length;
+                    const runnableBatch = schedulerDashboard.runnable_batches.find(
+                      (batch) => batch.workflow_run_id === run.id,
+                    );
+                    return (
+                      <article className="workflow-summary-card compact-run-card" key={run.id}>
+                        <span>{run.status}</span>
+                        <h4>{run.summary || "Maestro workflow"}</h4>
+                        <div className="preview-meta">
+                          <span>{run.priority}</span>
+                          <span>{run.fairness_group || "global"} fairness</span>
+                          <span>{run.queue_items.length} queued</span>
+                          <span>{completed} complete</span>
+                          {blocked > 0 && <span>{blocked} blocked</span>}
+                          {runnableBatch && (
+                            <span>{runnableBatch.parallel_ready.length} parallel-ready</span>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
               )}
             </section>
 

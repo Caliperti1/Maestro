@@ -1240,6 +1240,33 @@ def test_maestro_api_respond_plans_without_active_plan(
     assert payload["chat_plan"] is None
 
 
+def test_maestro_api_persists_active_session_history(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    assert response.status_code == 200
+    conversation = response.json()["conversation"]
+
+    active = client.get("/maestro/sessions/active")
+    assert active.status_code == 200
+    active_conversation = active.json()["conversation"]
+    assert active_conversation["id"] == conversation["id"]
+    assert [message["sender"] for message in active_conversation["messages"]] == [
+        "user",
+        "maestro",
+    ]
+    assert active_conversation["messages"][0]["content"] == "Prepare a Praxis partner call workflow."
+
+    sessions = client.get("/maestro/sessions")
+    assert sessions.status_code == 200
+    assert sessions.json()["sessions"][0]["id"] == conversation["id"]
+
+
 def test_maestro_api_respond_refines_active_plan(
     session: Session,
     tmp_path: Path,
