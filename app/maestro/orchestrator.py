@@ -582,7 +582,7 @@ class MaestroOrchestratorService:
         run = self.run_plan(
             parent_task.id,
             execute_llm=execute_llm,
-            auto_tool_loop=auto_tool_loop,
+            auto_tool_loop=False,
             max_tool_iterations=max_tool_iterations,
             resume=True,
             approved_tool_results_by_child_task={
@@ -2086,7 +2086,10 @@ class MaestroOrchestratorService:
                 return f"Read diff ({len(diff)} chars)."
         if tool_name == "github.pr.checks":
             checks = output_payload.get("checks")
+            check_status = output_payload.get("check_status")
             if isinstance(checks, list):
+                if check_status:
+                    return f"Read {len(checks)} check(s): {check_status}."
                 return f"Read {len(checks)} check(s)."
             conclusion = output_payload.get("conclusion") or output_payload.get("state")
             if conclusion:

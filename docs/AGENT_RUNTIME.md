@@ -287,7 +287,33 @@ Preferred labels are best effort: the adapter checks repository labels at approv
 applies labels that exist, and reports missing optional labels in `labels_skipped`. Required labels
 block issue creation if they are configured but missing from the repository. Approval-required write
 proposals include `approval_preview` and `preview_summary` so the UI/report layer can show a
-human-readable target repo, title, body preview, labels, and uncertainty before Chris approves.
+human-readable target repo, title, body preview, labels to apply, labels that may be skipped,
+labels proposed for creation, and uncertainty before Chris approves. This slice does not create
+repository labels during issue creation; missing optional labels are skipped and reported, while
+missing configured required labels block the write.
+
+GitHub adapter outputs expose stable top-level fields for downstream reports where applicable:
+`repo`, `owner`, `repo_name`, `name`, `issue_number`, `issue_url`, `html_url`, `state`,
+`status`, `pr_number`, `pr_url`, `check_status`, `check_counts`, `failed_checks`,
+`pending_checks`, `labels_applied`, `labels_skipped`, `write_status`, and approval metadata when
+the result came from an approval-gated write. Consumers should prefer `repo_name` when they need
+the repository name specifically, because file/check payloads may use `name` for the file or check
+name.
+
+Follow-up contract for template-driven issue creation:
+
+- Tool key: `github.issue.create_from_template`.
+- Inputs: `repo` (optional when supplied by the GitHub connection), `template_path` or
+  `template_name`, `title`, `fields` as a JSON object keyed by template field id, optional
+  `labels`, `assignees`, and `milestone`.
+- Behavior: read the repository issue template, validate required template fields, render a
+  Markdown body, merge configured preferred/required labels with payload labels, and reuse the same
+  approval preview plus result schema as `github.issue.create`.
+- Result fields: all `github.issue.create` stable fields plus `template_path`, `template_name`,
+  `template_fields`, and `template_fields_missing`.
+- Approval: always approval-required; preview must show the rendered title, template identifier,
+  required field validation, body preview, labels to apply, labels that may be skipped, and the fact
+  that repository labels are not created implicitly.
 
 MVP Codex tools:
 

@@ -449,6 +449,7 @@ class GitHubCliToolAdapter:
         raise ToolExecutionError(f"Unsupported GitHub tool: {self.key}")
 
     def _repo_get(self, repo: str, *, env: dict[str, str]) -> dict[str, Any]:
+        owner, name = _repo_parts(repo)
         result = _run_gh_json(
             [
                 "repo",
@@ -461,10 +462,16 @@ class GitHubCliToolAdapter:
         )
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "result": result,
             "summary": {
                 "type": "github_repo",
                 "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
                 "repo_url": result.get("url") if isinstance(result, dict) else None,
                 "private": result.get("isPrivate") if isinstance(result, dict) else None,
             },
@@ -523,8 +530,12 @@ class GitHubCliToolAdapter:
         if bool(payload.get("add_readme")):
             args.append("--add-readme")
         url = _run_gh_text(args, env=env).strip()
+        owner_name, repo_name = _repo_parts(full_name)
         return {
             "repo": full_name,
+            "owner": owner_name,
+            "name": repo_name,
+            "repo_name": repo_name,
             "url": url,
             "repo_url": url,
             "private": private,
@@ -533,6 +544,9 @@ class GitHubCliToolAdapter:
             "summary": {
                 "type": "github_repo",
                 "repo": full_name,
+                "owner": owner_name,
+                "name": repo_name,
+                "repo_name": repo_name,
                 "repo_url": url,
                 "private": private,
                 "write_status": "created",
@@ -547,9 +561,13 @@ class GitHubCliToolAdapter:
         if ref:
             endpoint = f"{endpoint}?ref={quote(ref)}"
         result = _run_gh_json(["api", "--method", "GET", endpoint], env=env)
+        owner, name = _repo_parts(repo)
         if isinstance(result, list):
             return {
                 "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
                 "path": path,
                 "ref": ref or None,
                 "type": "directory",
@@ -573,6 +591,8 @@ class GitHubCliToolAdapter:
                 content = base64.b64decode(encoded).decode("utf-8", errors="replace")
         return {
             "repo": repo,
+            "owner": owner,
+            "repo_name": name,
             "path": path,
             "ref": ref or None,
             "type": result.get("type"),
@@ -611,8 +631,12 @@ class GitHubCliToolAdapter:
             env=env,
         )
         items = result.get("items", []) if isinstance(result, dict) else []
+        owner, name = _repo_parts(repo)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "query": query,
             "path": path or None,
             "limit": limit,
@@ -657,8 +681,12 @@ class GitHubCliToolAdapter:
         if query:
             args.extend(["--search", query])
         issues = _run_gh_json(args, env=env)
+        owner, name = _repo_parts(repo)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "query": query,
             "state": state,
             "limit": limit,
@@ -666,6 +694,9 @@ class GitHubCliToolAdapter:
             "summary": {
                 "type": "github_issue_list",
                 "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
                 "count": len(issues) if isinstance(issues, list) else 0,
                 "state": state,
                 "query": query,
@@ -697,20 +728,32 @@ class GitHubCliToolAdapter:
             ],
             env=env,
         )
+        owner, name = _repo_parts(repo)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "number": number,
             "issue_number": number,
             "issue": issue,
             "issue_url": issue.get("url") if isinstance(issue, dict) else None,
+            "html_url": issue.get("url") if isinstance(issue, dict) else None,
             "title": issue.get("title") if isinstance(issue, dict) else None,
+            "state": issue.get("state") if isinstance(issue, dict) else None,
+            "status": issue.get("state") if isinstance(issue, dict) else None,
             "summary": {
                 "type": "github_issue",
                 "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
                 "issue_number": number,
                 "issue_url": issue.get("url") if isinstance(issue, dict) else None,
+                "html_url": issue.get("url") if isinstance(issue, dict) else None,
                 "title": issue.get("title") if isinstance(issue, dict) else None,
                 "state": issue.get("state") if isinstance(issue, dict) else None,
+                "status": issue.get("state") if isinstance(issue, dict) else None,
             },
         }
 
@@ -754,11 +797,16 @@ class GitHubCliToolAdapter:
             args.extend(["--milestone", milestone])
         url = _run_gh_text(args, env=env).strip()
         issue_number = _github_issue_number_from_url(url)
+        owner, name = _repo_parts(repo)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "issue_number": issue_number,
             "number": issue_number,
             "issue_url": url,
+            "html_url": url,
             "url": url,
             "title": title,
             "labels": labels.to_apply,
@@ -773,8 +821,12 @@ class GitHubCliToolAdapter:
             "summary": {
                 "type": "github_issue",
                 "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
                 "issue_number": issue_number,
                 "issue_url": url,
+                "html_url": url,
                 "title": title,
                 "labels_applied": labels.to_apply,
                 "labels_skipped": labels.optional_missing,
@@ -839,11 +891,15 @@ class GitHubCliToolAdapter:
         *,
         env: dict[str, str],
     ) -> dict[str, Any]:
-        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        number = _required_int(payload, ("number", "issue_number"), label="GitHub issue number")
         body = _required_text(payload, "body")
         _run_gh_text(["issue", "comment", str(number), "--repo", repo, "--body", body], env=env)
+        owner, name = _repo_parts(repo)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "number": number,
             "issue_number": number,
             "commented": True,
@@ -857,7 +913,7 @@ class GitHubCliToolAdapter:
         *,
         env: dict[str, str],
     ) -> dict[str, Any]:
-        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        number = _required_int(payload, ("number", "issue_number"), label="GitHub issue number")
         args = ["issue", "edit", str(number), "--repo", repo]
         title = str(payload.get("title") or "").strip()
         body = payload.get("body")
@@ -879,8 +935,12 @@ class GitHubCliToolAdapter:
         if len(args) <= 5:
             raise ToolExecutionError("GitHub issue update requires at least one field to change.")
         _run_gh_text(args, env=env)
+        owner, name = _repo_parts(repo)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "number": number,
             "issue_number": number,
             "updated": True,
@@ -912,8 +972,12 @@ class GitHubCliToolAdapter:
         if query:
             args.extend(["--search", query])
         prs = _run_gh_json(args, env=env)
+        owner, name = _repo_parts(repo)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "query": query,
             "state": state,
             "limit": limit,
@@ -921,6 +985,9 @@ class GitHubCliToolAdapter:
             "summary": {
                 "type": "github_pr_list",
                 "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
                 "count": len(prs) if isinstance(prs, list) else 0,
                 "state": state,
                 "query": query,
@@ -928,7 +995,7 @@ class GitHubCliToolAdapter:
         }
 
     def _pr_get(self, repo: str, payload: dict[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
-        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        number = _required_int(payload, ("number", "pr_number"), label="GitHub PR number")
         pr = _run_gh_json(
             [
                 "pr",
@@ -945,26 +1012,38 @@ class GitHubCliToolAdapter:
             ],
             env=env,
         )
+        owner, name = _repo_parts(repo)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "number": number,
             "pr_number": number,
             "pr": pr,
             "pr_url": pr.get("url") if isinstance(pr, dict) else None,
+            "html_url": pr.get("url") if isinstance(pr, dict) else None,
             "title": pr.get("title") if isinstance(pr, dict) else None,
+            "state": pr.get("state") if isinstance(pr, dict) else None,
+            "status": pr.get("state") if isinstance(pr, dict) else None,
             "summary": {
                 "type": "github_pr",
                 "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
                 "pr_number": number,
                 "pr_url": pr.get("url") if isinstance(pr, dict) else None,
+                "html_url": pr.get("url") if isinstance(pr, dict) else None,
                 "title": pr.get("title") if isinstance(pr, dict) else None,
                 "state": pr.get("state") if isinstance(pr, dict) else None,
+                "status": pr.get("state") if isinstance(pr, dict) else None,
                 "review_decision": pr.get("reviewDecision") if isinstance(pr, dict) else None,
             },
         }
 
     def _pr_diff(self, repo: str, payload: dict[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
-        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        number = _required_int(payload, ("number", "pr_number"), label="GitHub PR number")
         args = ["pr", "diff", str(number), "--repo", repo, "--color", "never"]
         if bool(payload.get("name_only")):
             args.append("--name-only")
@@ -972,8 +1051,12 @@ class GitHubCliToolAdapter:
             args.append("--patch")
         diff = _run_gh_text(args, env=env)
         max_chars = _bounded_int(payload.get("max_chars"), default=20000, minimum=1000, maximum=60000)
+        owner, name = _repo_parts(repo)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "number": number,
             "pr_number": number,
             "truncated": len(diff) > max_chars,
@@ -981,6 +1064,9 @@ class GitHubCliToolAdapter:
             "summary": {
                 "type": "github_pr_diff",
                 "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
                 "pr_number": number,
                 "truncated": len(diff) > max_chars,
                 "returned_chars": min(len(diff), max_chars),
@@ -994,7 +1080,7 @@ class GitHubCliToolAdapter:
         *,
         env: dict[str, str],
     ) -> dict[str, Any]:
-        number = _bounded_int(payload.get("number"), default=0, minimum=1, maximum=1_000_000)
+        number = _required_int(payload, ("number", "pr_number"), label="GitHub PR number")
         checks = _run_gh_json(
             [
                 "pr",
@@ -1008,16 +1094,36 @@ class GitHubCliToolAdapter:
             env=env,
             allowed_exit_codes={0, 8},
         )
+        owner, name = _repo_parts(repo)
+        check_summary = _github_check_summary(checks)
         return {
             "repo": repo,
+            "owner": owner,
+            "name": name,
+            "repo_name": name,
             "number": number,
             "pr_number": number,
             "checks": checks,
+            "check_status": check_summary["check_status"],
+            "status": check_summary["check_status"],
+            "state": check_summary["check_status"],
+            "check_counts": check_summary["check_counts"],
+            "failed_checks": check_summary["failed_checks"],
+            "pending_checks": check_summary["pending_checks"],
             "summary": {
                 "type": "github_pr_checks",
                 "repo": repo,
+                "owner": owner,
+                "name": name,
+                "repo_name": name,
                 "pr_number": number,
                 "count": len(checks) if isinstance(checks, list) else 0,
+                "check_status": check_summary["check_status"],
+                "status": check_summary["check_status"],
+                "state": check_summary["check_status"],
+                "check_counts": check_summary["check_counts"],
+                "failed_checks": check_summary["failed_checks"],
+                "pending_checks": check_summary["pending_checks"],
             },
         }
 
@@ -1256,12 +1362,16 @@ def _github_issue_create_preview(
     body_preview = _preview_text(body, max_chars=700)
     labels_skipped: list[str] = []
     labels_create: list[str] = []
+    labels_may_skip = _dedupe_strings(
+        [*payload_labels, *label_policy["preferred"]]
+    )
     required_missing = [] if label_policy["required"] else []
     uncertainty = [
         (
             "Label existence is verified at approval time with GitHub; optional missing "
             "labels will be skipped."
         ),
+        "This write will not create repository labels; missing optional labels are reported only.",
         "No GitHub issue is created until this approval is accepted.",
     ]
     if label_policy["required"]:
@@ -1276,12 +1386,16 @@ def _github_issue_create_preview(
         f"Target repo: {repo or 'unknown'}",
         f"Title: {title or '(missing title)'}",
     ]
+    if body_preview:
+        summary_lines.append(f"Body preview: {_single_line_preview(body_preview, max_chars=220)}")
     if labels_to_apply:
         summary_lines.append(f"Labels to apply if present: {', '.join(labels_to_apply)}")
+    if labels_may_skip:
+        summary_lines.append(f"Optional labels that may be skipped: {', '.join(labels_may_skip)}")
     if label_policy["required"]:
         summary_lines.append(f"Required labels: {', '.join(label_policy['required'])}")
-    if labels_skipped:
-        summary_lines.append(f"Labels skipped: {', '.join(labels_skipped)}")
+    summary_lines.append("Labels proposed for creation: none.")
+    summary_lines.append("Missing optional labels: skipped and reported at execution.")
     return {
         "tool_key": "github.issue.create",
         "tool_call_id": tool_call_id,
@@ -1295,6 +1409,8 @@ def _github_issue_create_preview(
         "labels_required": label_policy["required"],
         "labels_to_apply": labels_to_apply,
         "labels_skipped": labels_skipped,
+        "labels_may_skip": labels_may_skip,
+        "labels_missing_optional": labels_skipped,
         "labels_create": labels_create,
         "required_labels_missing": required_missing,
         "notable_uncertainty": uncertainty,
@@ -1342,11 +1458,69 @@ def _github_issue_number_from_url(url: str) -> int | None:
         return None
 
 
+def _github_check_summary(checks: Any) -> dict[str, Any]:
+    counts = {"passed": 0, "failed": 0, "pending": 0, "skipped": 0, "unknown": 0}
+    failed_checks: list[str] = []
+    pending_checks: list[str] = []
+    if not isinstance(checks, list):
+        return {
+            "check_status": "unknown",
+            "check_counts": counts,
+            "failed_checks": failed_checks,
+            "pending_checks": pending_checks,
+        }
+
+    for check in checks:
+        if not isinstance(check, dict):
+            counts["unknown"] += 1
+            continue
+        raw_state = str(check.get("state") or check.get("bucket") or "").strip().lower()
+        name = str(check.get("name") or check.get("workflow") or "").strip()
+        if raw_state in {"pass", "passed", "success", "successful", "completed"}:
+            counts["passed"] += 1
+        elif raw_state in {"fail", "failed", "failure", "error", "cancelled", "timed_out"}:
+            counts["failed"] += 1
+            if name:
+                failed_checks.append(name)
+        elif raw_state in {"pending", "queued", "in_progress", "waiting", "requested"}:
+            counts["pending"] += 1
+            if name:
+                pending_checks.append(name)
+        elif raw_state in {"skipping", "skipped", "neutral"}:
+            counts["skipped"] += 1
+        else:
+            counts["unknown"] += 1
+
+    if counts["failed"]:
+        status = "failed"
+    elif counts["pending"]:
+        status = "pending"
+    elif counts["unknown"]:
+        status = "unknown"
+    elif checks:
+        status = "passed"
+    else:
+        status = "none"
+    return {
+        "check_status": status,
+        "check_counts": counts,
+        "failed_checks": failed_checks,
+        "pending_checks": pending_checks,
+    }
+
+
 def _preview_text(value: str, *, max_chars: int) -> str:
     stripped = value.strip()
     if len(stripped) <= max_chars:
         return stripped
     return stripped[: max_chars - 3].rstrip() + "..."
+
+
+def _single_line_preview(value: str, *, max_chars: int) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 3].rstrip() + "..."
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:
@@ -1371,6 +1545,13 @@ def _repo_from(connection: ToolConnection | None, payload: dict[str, Any]) -> st
     if "/" not in repo:
         raise ToolExecutionError("GitHub repo must be in owner/name form.")
     return repo
+
+
+def _repo_parts(repo: str) -> tuple[str | None, str | None]:
+    if "/" not in repo:
+        return None, repo or None
+    owner, name = repo.split("/", 1)
+    return owner or None, name or None
 
 
 def _repo_owner(connection: ToolConnection | None, payload: dict[str, Any]) -> str:
@@ -1564,6 +1745,29 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _required_int(
+    payload: dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    label: str,
+    minimum: int = 1,
+    maximum: int = 1_000_000,
+) -> int:
+    for key in keys:
+        value = payload.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError(f"{label} must be an integer.") from exc
+        if parsed < minimum or parsed > maximum:
+            raise ToolExecutionError(f"{label} must be between {minimum} and {maximum}.")
+        return parsed
+    choices = "`, `".join(keys)
+    raise ToolExecutionError(f"GitHub tool requires `{choices}`.")
 
 
 def _redact_payload(payload: dict[str, Any]) -> dict[str, Any]:

@@ -1219,7 +1219,10 @@ class PromptAggregationService:
                     f"Iteration: {iteration}\n"
                     "Choose zero or more allowed tools that are necessary before producing the "
                     "final report. Prefer the smallest useful read-only tool set. If the task can "
-                    "be answered with existing context, return no tool calls."
+                    "be answered with existing context, return no tool calls. If prior tool "
+                    "results already include a completed approved write/action tool, do not "
+                    "request follow-on write/action tools in this same turn; produce the final "
+                    "report and let Maestro propose additional external actions separately."
                 ),
                 "## Allowed Tool Manifest\n" + json.dumps(allowed_tools, indent=2),
                 "## Prior Tool Results\n" + json.dumps(prior_results, indent=2),
@@ -1619,7 +1622,11 @@ _TOOL_DESCRIPTIONS = {
     },
     "github.issue.create": {
         "name": "GitHub Issue Create",
-        "description": "Create a GitHub issue in the authorized repository.",
+        "description": (
+            "Create a GitHub issue in the authorized repository after approval. Configured "
+            "preferred labels are applied when present, missing optional labels are skipped, "
+            "and configured required labels block creation if absent."
+        ),
     },
     "github.issue.comment": {
         "name": "GitHub Issue Comment",
@@ -1643,7 +1650,7 @@ _TOOL_DESCRIPTIONS = {
     },
     "github.pr.checks": {
         "name": "GitHub PR Checks",
-        "description": "Read CI/check status for a pull request.",
+        "description": "Read CI/check status for a pull request with normalized status fields.",
     },
     "codex": {
         "name": "Codex",

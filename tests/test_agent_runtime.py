@@ -609,6 +609,10 @@ def test_github_adapter_applies_configured_preferred_issue_labels(
 
     assert output["issue_number"] == 99
     assert output["issue_url"] == "https://github.com/x/y/issues/99"
+    assert output["html_url"] == "https://github.com/x/y/issues/99"
+    assert output["owner"] == "Caliperti1"
+    assert output["name"] == "Maestro"
+    assert output["repo_name"] == "Maestro"
     assert output["labels_applied"] == ["enhancement"]
     assert output["labels_skipped"] == ["tooling"]
     assert output["preferred_labels"] == ["enhancement", "tooling"]
@@ -731,7 +735,122 @@ def test_github_issue_create_approval_preview_is_human_readable(session: Session
     assert preview["labels_to_apply"] == ["bug", "enhancement", "triage"]
     assert preview["labels_required"] == ["triage"]
     assert "Target repo: Caliperti1/Maestro" in preview["summary"]
+    assert "Body preview: Line one. Line two." in preview["summary"]
+    assert preview["labels_may_skip"] == ["bug", "enhancement"]
+    assert preview["labels_create"] == []
+    assert "Optional labels that may be skipped: bug, enhancement" in preview["summary"]
+    assert "Labels proposed for creation: none." in preview["summary"]
+    assert "Missing optional labels: skipped and reported at execution." in preview["summary"]
     assert "No GitHub issue is created" in " ".join(preview["notable_uncertainty"])
+    assert "will not create repository labels" in " ".join(preview["notable_uncertainty"])
+
+
+def test_github_issue_comment_requires_explicit_issue_number(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Comment on a test issue.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        raise AssertionError("GitHub CLI should not run without an issue number.")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    try:
+        GitHubCliToolAdapter("github.issue.comment").execute(
+            ToolExecutionContext(
+                session=session,
+                agent=agent,
+                domain=domain,
+                task=task,
+                connection=connection,
+            ),
+            {"body": "This should not post."},
+        )
+    except Exception as exc:
+        assert "GitHub tool requires `number`, `issue_number`." in str(exc)
+    else:
+        raise AssertionError("Expected issue comment without number to fail.")
+
+
+def test_github_issue_update_requires_explicit_issue_number(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Update a test issue.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        raise AssertionError("GitHub CLI should not run without an issue number.")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    try:
+        GitHubCliToolAdapter("github.issue.update").execute(
+            ToolExecutionContext(
+                session=session,
+                agent=agent,
+                domain=domain,
+                task=task,
+                connection=connection,
+            ),
+            {"title": "This should not update."},
+        )
+    except Exception as exc:
+        assert "GitHub tool requires `number`, `issue_number`." in str(exc)
+    else:
+        raise AssertionError("Expected issue update without number to fail.")
 
 
 def test_github_adapter_reads_specific_file_from_repo(
@@ -793,6 +912,8 @@ def test_github_adapter_reads_specific_file_from_repo(
 
     assert output["content"] == "Hello template"
     assert output["path"] == ".github/issue_template.md"
+    assert output["name"] == "issue_template.md"
+    assert output["repo_name"] == "Maestro"
     assert captured["args"] == [
         "gh",
         "api",
@@ -1073,6 +1194,152 @@ def test_github_adapter_searches_files_in_repo(
         "-f",
         "per_page=3",
     ]
+
+
+def test_github_search_outputs_include_stable_repo_fields(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Search GitHub.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        if args[:3] == ["gh", "issue", "list"]:
+            return CompletedProcess(args=args, returncode=0, stdout="[]")
+        if args[:3] == ["gh", "pr", "list"]:
+            return CompletedProcess(args=args, returncode=0, stdout="[]")
+        raise AssertionError(f"Unexpected GitHub command: {args}")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+    context = ToolExecutionContext(
+        session=session,
+        agent=agent,
+        domain=domain,
+        task=task,
+        connection=connection,
+    )
+
+    issue_output = GitHubCliToolAdapter("github.issue.search").execute(
+        context,
+        {"query": "label hardening"},
+    )
+    pr_output = GitHubCliToolAdapter("github.pr.search").execute(
+        context,
+        {"query": "label hardening"},
+    )
+
+    assert issue_output["owner"] == "Caliperti1"
+    assert issue_output["name"] == "Maestro"
+    assert issue_output["repo_name"] == "Maestro"
+    assert issue_output["summary"]["owner"] == "Caliperti1"
+    assert issue_output["summary"]["name"] == "Maestro"
+    assert issue_output["summary"]["repo_name"] == "Maestro"
+    assert pr_output["owner"] == "Caliperti1"
+    assert pr_output["name"] == "Maestro"
+    assert pr_output["repo_name"] == "Maestro"
+    assert pr_output["summary"]["owner"] == "Caliperti1"
+    assert pr_output["summary"]["name"] == "Maestro"
+    assert pr_output["summary"]["repo_name"] == "Maestro"
+
+
+def test_github_pr_checks_output_includes_normalized_status_fields(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="github").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Read PR checks.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        assert args[:4] == ["gh", "pr", "checks", "50"]
+        return CompletedProcess(
+            args=args,
+            returncode=8,
+            stdout=(
+                "["
+                '{"name":"unit tests","state":"PASS"},'
+                '{"name":"lint","state":"FAIL"},'
+                '{"name":"integration","state":"PENDING"}'
+                "]"
+            ),
+        )
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = GitHubCliToolAdapter("github.pr.checks").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"number": 50},
+    )
+
+    assert output["pr_number"] == 50
+    assert output["check_status"] == "failed"
+    assert output["status"] == "failed"
+    assert output["state"] == "failed"
+    assert output["check_counts"] == {
+        "passed": 1,
+        "failed": 1,
+        "pending": 1,
+        "skipped": 0,
+        "unknown": 0,
+    }
+    assert output["failed_checks"] == ["lint"]
+    assert output["pending_checks"] == ["integration"]
+    assert output["summary"]["check_status"] == "failed"
 
 
 def test_github_adapter_lists_and_creates_repos_with_provider_connection(

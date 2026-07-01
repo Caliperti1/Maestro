@@ -1087,7 +1087,7 @@ def test_orchestrator_resumes_workflow_after_tool_approval(
     assert resumed_run is not None
     assert resumed_run.status == "completed"
     assert "I created the GitHub issue after your approval." in resumed_run.chat_summary
-    assert llm_client.structured_calls == 2
+    assert llm_client.structured_calls == 1
     parent = session.get(Task, uuid.UUID(plan.parent_task_id))
     assert parent is not None
     assert parent.input_payload["scheduler"]["queue_items"][0]["status"] == "completed"
