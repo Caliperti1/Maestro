@@ -36,6 +36,7 @@ type MaestroSessionSummary = {
   created_at?: string | null;
   updated_at?: string | null;
   stagedArtifactPath: string | null;
+  active_plan?: MaestroPlan | null;
 };
 
 type SchedulerQueueItem = {
@@ -688,6 +689,7 @@ export function App() {
   const [sessionHistory, setSessionHistory] = useState<MaestroSessionSummary[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [schedulerDashboard, setSchedulerDashboard] = useState<SchedulerDashboard | null>(null);
+  const [showSessionHistory, setShowSessionHistory] = useState(false);
   const [draftMessage, setDraftMessage] = useState("");
   const [maestroPlan, setMaestroPlan] = useState<MaestroPlan | null>(null);
   const [maestroRun, setMaestroRun] = useState<MaestroRun | null>(null);
@@ -846,6 +848,8 @@ export function App() {
   const applyConversation = useCallback((conversation: MaestroSessionSummary) => {
     setActiveConversationId(conversation.id);
     setChatMessages(conversation.messages ?? []);
+    setMaestroPlan(conversation.active_plan ?? null);
+    setMaestroRun(null);
   }, []);
 
   const loadActiveSession = useCallback(async () => {
@@ -1297,15 +1301,27 @@ export function App() {
                   <p className="eyebrow">Maestro chat</p>
                   <h3 id="chat-heading">Command thread</h3>
                 </div>
-                <button
-                  className="icon-button"
-                  aria-label="New session"
-                  title="New session"
-                  onClick={startNewMaestroSession}
-                  disabled={maestroBusy || (chatMessages.length === 0 && !maestroPlan && !maestroRun)}
-                >
-                  <Plus size={18} />
-                </button>
+                <div className="chat-actions">
+                  <button
+                    className="icon-button"
+                    aria-label="Previous sessions"
+                    title="Previous sessions"
+                    type="button"
+                    onClick={() => setShowSessionHistory((visible) => !visible)}
+                    disabled={sessionHistory.length === 0}
+                  >
+                    <Clock3 size={18} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label="New session"
+                    title="New session"
+                    onClick={startNewMaestroSession}
+                    disabled={maestroBusy || (chatMessages.length === 0 && !maestroPlan && !maestroRun)}
+                  >
+                    <Plus size={18} />
+                  </button>
+                </div>
               </div>
 
               <div className="thread">
@@ -1341,10 +1357,10 @@ export function App() {
                 )}
               </div>
 
-              {sessionHistory.length > 0 && (
+              {showSessionHistory && sessionHistory.length > 0 && (
                 <div className="session-history" aria-label="Previous Maestro sessions">
                   <span>Previous sessions</span>
-                  {sessionHistory.slice(0, 3).map((session) => (
+                  {sessionHistory.slice(0, 8).map((session) => (
                     <button
                       type="button"
                       key={session.id}
@@ -1353,11 +1369,10 @@ export function App() {
                           `/maestro/sessions/${session.id}`,
                         );
                         applyConversation(response.conversation);
-                        setMaestroPlan(null);
-                        setMaestroRun(null);
+                        setShowSessionHistory(false);
                         setMaestroStatus(
-                          session.stagedArtifactPath
-                            ? "Viewing previous session. Artifact was staged for memory curation."
+                          response.conversation.active_plan
+                            ? "Viewing previous session with its workflow restored."
                             : "Viewing previous session.",
                         );
                       }}

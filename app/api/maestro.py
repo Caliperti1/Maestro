@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Conversation, Message, RuntimeSetting
+from app.db.models import Conversation, Message, RuntimeSetting, Task
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
@@ -96,7 +96,7 @@ def respond_to_maestro(
                     "conversation": _conversation_payload(db, conversation),
                 }
             if classification == "new_workflow":
-                plan = service.create_plan(body.message)
+                plan = service.create_plan(body.message, conversation_id=conversation.id)
                 kind = "chat_only" if plan.is_chat_only else "planned"
             else:
                 plan = service.refine_plan(
@@ -105,7 +105,7 @@ def respond_to_maestro(
                 )
                 kind = "chat_only" if plan.is_chat_only else classification
         else:
-            plan = service.create_plan(body.message)
+            plan = service.create_plan(body.message, conversation_id=conversation.id)
             kind = "chat_only" if plan.is_chat_only else "planned"
             classification = kind
     except MaestroOrchestratorError as exc:
@@ -394,6 +394,7 @@ def _conversation_payload(
 ) -> dict[str, Any]:
     messages = _conversation_messages(db, conversation.id) if include_messages else []
     message_count = len(messages) if include_messages else len(_conversation_messages(db, conversation.id))
+    plan = _latest_conversation_plan(db, conversation.id)
     return {
         "id": str(conversation.id),
         "title": conversation.title or "Maestro session",
@@ -409,7 +410,26 @@ def _conversation_payload(
             }
             for message in messages
         ],
+        "active_plan": _plan_payload(plan) if plan is not None else None,
     }
+
+
+def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> MaestroPlan | None:
+    task = db.scalar(
+        select(Task)
+        .where(
+            Task.conversation_id == conversation_id,
+            Task.workflow_key == "maestro.generic",
+        )
+        .order_by(Task.created_at.desc(), Task.id.desc())
+        .limit(1)
+    )
+    if task is None:
+        return None
+    try:
+        return MaestroOrchestratorService(db).get_plan(task.id)
+    except MaestroOrchestratorError:
+        return None
 
 
 def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:

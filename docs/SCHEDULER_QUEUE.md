@@ -71,8 +71,22 @@ the active pointer and creates a fresh conversation.
 
 ## Next Slices
 
-- Background worker loop with separate DB sessions and leases.
-- Recurring trigger evaluator for `workflow_definitions`.
-- Queue editing operations for Maestro priority overrides.
+- Background worker process that repeatedly calls the claim/complete/fail primitives with separate
+  DB sessions.
+- Deeper recurring trigger UI for `workflow_definitions`.
+- Rich queue editing UI for Maestro priority overrides.
 - UI drill-down for scheduler events and locks.
 - Resource policy registry per tool family.
+
+## Worker Primitives
+
+The foundation includes the service/API primitives the worker process will use:
+
+- `POST /scheduler/triggers/enqueue-due`: enqueue due scheduled/recurring definitions.
+- `POST /scheduler/worker/claim`: claim currently runnable queue items, acquire locks, and set leases.
+- `POST /scheduler/queue-items/{id}/complete`: mark work complete and unblock dependents.
+- `POST /scheduler/queue-items/{id}/fail`: retry or fail work based on attempt count.
+- `PATCH /scheduler/queue-items/{id}`: edit status, priority, or fairness group.
+
+The current PR does not start a background daemon inside the API process. That is intentional: the
+worker should run with its own database session lifecycle and process supervision.

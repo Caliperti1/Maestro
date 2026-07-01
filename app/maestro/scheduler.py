@@ -97,6 +97,76 @@ class SchedulerService:
         self.session.refresh(run)
         return run
 
+    def enqueue_due_workflows(self, *, now: datetime | None = None) -> list[WorkflowRun]:
+        now = now or datetime.now(UTC)
+        definitions = self.session.scalars(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.is_active.is_(True),
+                WorkflowDefinition.trigger_type.in_(["scheduled", "recurring"]),
+            )
+        ).all()
+        runs: list[WorkflowRun] = []
+        for definition in definitions:
+            trigger_config = definition.trigger_config or {}
+            next_run_at = self._datetime_or_none(trigger_config.get("next_run_at"))
+            if next_run_at is None or next_run_at > now:
+                continue
+            run = self.enqueue_definition_run(definition, scheduled_for=next_run_at)
+            interval_minutes = int(trigger_config.get("interval_minutes") or 1440)
+            definition.trigger_config = {
+                **trigger_config,
+                "last_enqueued_at": now.isoformat(),
+                "next_run_at": (next_run_at + timedelta(minutes=interval_minutes)).isoformat(),
+            }
+            runs.append(run)
+        if runs:
+            self.session.commit()
+        return runs
+
+    def enqueue_definition_run(
+        self,
+        definition: WorkflowDefinition,
+        *,
+        scheduled_for: datetime | None = None,
+    ) -> WorkflowRun:
+        scheduled_for = scheduled_for or datetime.now(UTC)
+        idempotency_key = f"workflow-definition:{definition.id}:{scheduled_for.isoformat()}"
+        existing = self.session.scalar(
+            select(WorkflowRun).where(WorkflowRun.idempotency_key == idempotency_key)
+        )
+        if existing is not None:
+            return existing
+        spec = definition.workflow_spec or {}
+        queue_items = spec.get("queue_items") if isinstance(spec.get("queue_items"), list) else []
+        run = WorkflowRun(
+            workflow_definition_id=definition.id,
+            domain_id=definition.domain_id,
+            source_type="scheduled",
+            status="queued",
+            priority=definition.priority,
+            fairness_group=definition.fairness_group,
+            idempotency_key=idempotency_key,
+            input_payload={
+                "definition_key": definition.key,
+                "summary": definition.name,
+                "workflow_spec": spec,
+            },
+            scheduled_for=scheduled_for,
+        )
+        self.session.add(run)
+        self.session.flush()
+        self._sync_definition_queue_items(run, definition, queue_items, commit=False)
+        self.record_event(
+            run,
+            event_type="workflow_enqueued",
+            message=f"Scheduled workflow `{definition.key}` was enqueued.",
+            payload={"queue_item_count": len(queue_items)},
+            commit=False,
+        )
+        self.session.commit()
+        self.session.refresh(run)
+        return run
+
     def sync_run_status_from_task(self, parent_task: Task) -> WorkflowRun | None:
         run = self.session.scalar(select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task.id))
         if run is None:
@@ -156,6 +226,122 @@ class SchedulerService:
                 )
         return batches
 
+    def claim_ready_items(
+        self,
+        *,
+        owner: str,
+        limit: int = 4,
+        lease_seconds: int = 900,
+    ) -> list[WorkflowQueueItem]:
+        claimed: list[WorkflowQueueItem] = []
+        for batch in self.runnable_batches():
+            for item_payload in batch["parallel_ready"]:
+                if len(claimed) >= limit:
+                    self.session.commit()
+                    return claimed
+                item = self.session.get(WorkflowQueueItem, uuid.UUID(item_payload["id"]))
+                if item is None or item.status not in {"queued", "pending", "ready", "retrying"}:
+                    continue
+                self.acquire_locks(item, owner=owner, lease_seconds=lease_seconds, commit=False)
+                item.status = "running"
+                item.attempt_count += 1
+                item.lease_owner = owner
+                item.lease_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
+                item.started_at = datetime.now(UTC)
+                run = self.session.get(WorkflowRun, item.workflow_run_id)
+                if run is not None:
+                    run.status = "running"
+                    run.started_at = run.started_at or datetime.now(UTC)
+                self.record_event(
+                    run,
+                    queue_item=item,
+                    event_type="queue_item_claimed",
+                    message=f"Queue item `{item.external_key}` claimed by {owner}.",
+                    payload={"owner": owner},
+                    commit=False,
+                )
+                claimed.append(item)
+        self.session.commit()
+        return claimed
+
+    def complete_queue_item(
+        self,
+        queue_item_id: uuid.UUID,
+        *,
+        output_payload: dict[str, Any] | None = None,
+    ) -> WorkflowQueueItem:
+        item = self._require_queue_item(queue_item_id)
+        item.status = "completed"
+        item.output_payload = {**(item.output_payload or {}), **(output_payload or {})}
+        item.completed_at = datetime.now(UTC)
+        self.release_locks(item, commit=False)
+        run = self.session.get(WorkflowRun, item.workflow_run_id)
+        self._refresh_run_status(run)
+        self.record_event(
+            run,
+            queue_item=item,
+            event_type="queue_item_completed",
+            message=f"Queue item `{item.external_key}` completed.",
+            commit=False,
+        )
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
+    def fail_queue_item(
+        self,
+        queue_item_id: uuid.UUID,
+        *,
+        error_message: str,
+    ) -> WorkflowQueueItem:
+        item = self._require_queue_item(queue_item_id)
+        item.status = "retrying" if item.attempt_count < item.max_attempts else "failed"
+        item.error_message = error_message
+        item.completed_at = datetime.now(UTC) if item.status == "failed" else None
+        self.release_locks(item, commit=False)
+        run = self.session.get(WorkflowRun, item.workflow_run_id)
+        self._refresh_run_status(run)
+        self.record_event(
+            run,
+            queue_item=item,
+            event_type="queue_item_failed",
+            message=f"Queue item `{item.external_key}` failed with status {item.status}.",
+            payload={"error_message": error_message},
+            commit=False,
+        )
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
+    def update_queue_item(
+        self,
+        queue_item_id: uuid.UUID,
+        *,
+        status: str | None = None,
+        priority: str | None = None,
+        fairness_group: str | None = None,
+    ) -> WorkflowQueueItem:
+        item = self._require_queue_item(queue_item_id)
+        if status is not None:
+            item.status = status
+        if priority is not None:
+            item.priority = priority
+        if fairness_group is not None:
+            item.fairness_group = fairness_group
+        run = self.session.get(WorkflowRun, item.workflow_run_id)
+        self._refresh_run_status(run)
+        self.record_event(
+            run,
+            queue_item=item,
+            event_type="queue_item_updated",
+            message=f"Queue item `{item.external_key}` was edited.",
+            payload={"status": status, "priority": priority, "fairness_group": fairness_group},
+            commit=False,
+        )
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
     def dashboard(self) -> dict[str, Any]:
         runs = self.session.scalars(
             select(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(20)
@@ -179,6 +365,7 @@ class SchedulerService:
         *,
         owner: str,
         lease_seconds: int = 900,
+        commit: bool = True,
     ) -> list[SchedulerResourceLock]:
         requested = self._lock_keys(queue_item)
         if requested & self._active_lock_keys():
@@ -207,10 +394,11 @@ class SchedulerService:
             payload={"locks": [list(item) for item in requested]},
             commit=False,
         )
-        self.session.commit()
+        if commit:
+            self.session.commit()
         return locks
 
-    def release_locks(self, queue_item: WorkflowQueueItem) -> None:
+    def release_locks(self, queue_item: WorkflowQueueItem, *, commit: bool = True) -> None:
         locks = self.session.scalars(
             select(SchedulerResourceLock).where(
                 SchedulerResourceLock.queue_item_id == queue_item.id,
@@ -228,7 +416,8 @@ class SchedulerService:
             message=f"Released {len(locks)} resource lock(s).",
             commit=False,
         )
-        self.session.commit()
+        if commit:
+            self.session.commit()
 
     def workflow_run_payload(self, run: WorkflowRun) -> dict[str, Any]:
         return {
@@ -362,6 +551,48 @@ class SchedulerService:
         if commit:
             self.session.commit()
 
+    def _sync_definition_queue_items(
+        self,
+        run: WorkflowRun,
+        definition: WorkflowDefinition,
+        queue_items: list[dict[str, Any]],
+        *,
+        commit: bool = True,
+    ) -> None:
+        existing = {
+            item.external_key: item
+            for item in self.session.scalars(
+                select(WorkflowQueueItem).where(WorkflowQueueItem.workflow_run_id == run.id)
+            ).all()
+        }
+        for position, raw in enumerate(queue_items, start=1):
+            external_key = str(raw.get("id") or raw.get("external_key") or f"item-{position}")
+            item = existing.get(external_key)
+            if item is None:
+                item = WorkflowQueueItem(
+                    workflow_run_id=run.id,
+                    external_key=external_key,
+                    objective=str(raw.get("objective") or definition.name),
+                )
+                self.session.add(item)
+            agent = self.session.scalar(select(Agent).where(Agent.key == raw.get("agent_key")))
+            domain_key = raw.get("domain_key")
+            domain = self.session.scalar(select(Domain).where(Domain.key == domain_key)) if domain_key else None
+            item.agent_id = agent.id if agent else None
+            item.domain_id = domain.id if domain else definition.domain_id
+            item.status = str(raw.get("status") or "queued")
+            item.priority = str(raw.get("priority") or definition.priority)
+            item.stage_index = int(raw.get("stage_index") or 1)
+            item.position = int(raw.get("position") or position)
+            item.objective = str(raw.get("objective") or definition.name)
+            item.dependency_keys = [str(value) for value in raw.get("dependency_keys") or raw.get("depends_on") or []]
+            item.resource_locks = list(raw.get("resource_locks") or self._resource_locks_for_queue_item(raw))
+            item.fairness_group = str(raw.get("fairness_group") or definition.fairness_group or domain_key or "global")
+            item.max_attempts = int(raw.get("max_attempts") or 2)
+            item.input_payload = dict(raw)
+        if commit:
+            self.session.commit()
+
     def _queue_items_for_run(self, run_id: uuid.UUID) -> list[WorkflowQueueItem]:
         return list(
             self.session.scalars(
@@ -385,6 +616,31 @@ class SchedulerService:
             if all(key in complete_keys for key in item.dependency_keys):
                 runnable.append(item)
         return runnable
+
+    def _require_queue_item(self, queue_item_id: uuid.UUID) -> WorkflowQueueItem:
+        item = self.session.get(WorkflowQueueItem, queue_item_id)
+        if item is None:
+            raise ValueError("Unknown queue item.")
+        return item
+
+    def _refresh_run_status(self, run: WorkflowRun | None) -> None:
+        if run is None:
+            return
+        items = self._queue_items_for_run(run.id)
+        if not items:
+            return
+        statuses = {item.status for item in items}
+        if statuses <= {"completed"}:
+            run.status = "completed"
+            run.completed_at = datetime.now(UTC)
+        elif "failed" in statuses:
+            run.status = "failed"
+        elif "running" in statuses:
+            run.status = "running"
+        elif statuses & {"blocked", "approval_required"}:
+            run.status = "blocked"
+        else:
+            run.status = "queued"
 
     def _active_lock_keys(self) -> set[tuple[str, str]]:
         now = datetime.now(UTC)

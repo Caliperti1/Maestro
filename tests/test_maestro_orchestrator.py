@@ -1261,10 +1261,17 @@ def test_maestro_api_persists_active_session_history(
         "maestro",
     ]
     assert active_conversation["messages"][0]["content"] == "Prepare a Praxis partner call workflow."
+    assert active_conversation["active_plan"]["parent_task_id"] == response.json()["plan"]["parent_task_id"]
 
     sessions = client.get("/maestro/sessions")
     assert sessions.status_code == 200
     assert sessions.json()["sessions"][0]["id"] == conversation["id"]
+
+    restored = client.get(f"/maestro/sessions/{conversation['id']}")
+    assert restored.status_code == 200
+    restored_conversation = restored.json()["conversation"]
+    assert restored_conversation["active_plan"]["status"] == "proposed"
+    assert restored_conversation["active_plan"]["summary"] == response.json()["plan"]["summary"]
 
 
 def test_maestro_api_respond_refines_active_plan(

@@ -140,7 +140,12 @@ class MaestroOrchestratorService:
         self.runtime = runtime or PromptAggregationService(session)
         self.planner_llm_client = planner_llm_client
 
-    def create_plan(self, user_input: str) -> MaestroPlan:
+    def create_plan(
+        self,
+        user_input: str,
+        *,
+        conversation_id: uuid.UUID | None = None,
+    ) -> MaestroPlan:
         cleaned_input = user_input.strip()
         if not cleaned_input:
             raise MaestroOrchestratorError("Maestro input cannot be blank.")
@@ -166,6 +171,7 @@ class MaestroOrchestratorService:
         summary = decomposition.plan_summary or self._plan_summary(cleaned_input, intents, subtasks)
         plan_id = str(uuid.uuid4())
         parent_task = Task(
+            conversation_id=conversation_id,
             status="proposed",
             priority="high" if any(subtask.priority == "high" for subtask in subtasks) else "normal",
             source_type="maestro_chat",
@@ -223,8 +229,12 @@ class MaestroOrchestratorService:
         if not cleaned_refinement:
             raise MaestroOrchestratorError("Maestro refinement cannot be blank.")
         previous_plan = self.get_plan(plan_id)
+        previous_task = self.session.get(Task, uuid.UUID(previous_plan.parent_task_id))
         refined_input = self._refined_plan_input(previous_plan, cleaned_refinement)
-        plan = self.create_plan(refined_input)
+        plan = self.create_plan(
+            refined_input,
+            conversation_id=previous_task.conversation_id if previous_task else None,
+        )
         task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
         if task is not None:
             task.input_payload = {
