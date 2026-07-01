@@ -582,7 +582,7 @@ class MaestroOrchestratorService:
         run = self.run_plan(
             parent_task.id,
             execute_llm=execute_llm,
-            auto_tool_loop=auto_tool_loop,
+            auto_tool_loop=False,
             max_tool_iterations=max_tool_iterations,
             resume=True,
             approved_tool_results_by_child_task={
@@ -681,10 +681,38 @@ class MaestroOrchestratorService:
         lowered = user_input.lower()
         domain_key = self._domain_for_input(lowered, registry_snapshot)
         work_items: list[PlannerWorkItem] = []
-        if any(token in lowered for token in ("plan", "prepare", "coordinate", "workflow")):
+        planning_only = any(
+            token in lowered
+            for token in ("plan only", "minimal plan", "no code changes", "do not make code")
+        )
+        if not planning_only and any(
+            token in lowered
+            for token in ("implement", "code", "coding", "fix", "action issue", "work issue")
+        ):
             work_items.append(
                 PlannerWorkItem(
                     id="wi_1",
+                    type="workflow_task",
+                    title="Execute scoped Maestro coding work",
+                    description=user_input,
+                    domain_key="maestro-development",
+                    priority="high",
+                    required_capabilities=["software implementation", "repository editing", "test execution"],
+                    required_tools=["codex.task.run"],
+                    dependencies=[],
+                    needs_agent=True,
+                    needs_user_input=False,
+                    blocks_execution=False,
+                    can_log_directly=False,
+                    suggested_agent_keys=["maestro-coding-agent"],
+                    expected_output="Codex task result with changed files, validation run, and follow-up risks.",
+                    rationale="The request asks Maestro to execute coding work.",
+                )
+            )
+        if any(token in lowered for token in ("plan", "prepare", "coordinate", "workflow")):
+            work_items.append(
+                PlannerWorkItem(
+                    id=f"wi_{len(work_items) + 1}",
                     type="workflow_task",
                     title="Coordinate requested workflow",
                     description=user_input,
@@ -1068,16 +1096,24 @@ class MaestroOrchestratorService:
                 key for key in item.suggested_agent_keys if key in active_agent_keys
             ]
             if valid_suggested_keys:
-                if agent.key in valid_suggested_keys:
+                if agent.key == valid_suggested_keys[0]:
                     assigned.append(item)
                 continue
             score = self._agent_work_item_score(item, agent)
-            candidates = [
-                self._agent_work_item_score(item, candidate)
-                for candidate in specs
-                if item.domain_key is None or candidate.domain_key == item.domain_key
-            ]
-            top_score = max(candidates) if candidates else score
+            candidates = sorted(
+                [
+                    (self._agent_work_item_score(item, candidate), candidate.key)
+                    for candidate in specs
+                    if item.domain_key is None or candidate.domain_key == item.domain_key
+                ],
+                key=lambda pair: (-pair[0], pair[1]),
+            )
+            best_score, best_agent_key = candidates[0] if candidates else (score, agent.key)
+            if item.required_tools:
+                if score > 0 and agent.key == best_agent_key and best_score >= 2.0:
+                    assigned.append(item)
+                continue
+            top_score = best_score
             if score > 0 and score >= max(2.0, top_score * 0.5) and (
                 top_score <= 3.5 or score > 3.0
             ):
@@ -1660,6 +1696,9 @@ class MaestroOrchestratorService:
             "max_attempts": 2,
             "resource_locks": [],
             "recurring_scheduler": "planned",
+            "active_stage_index": None,
+            "active_queue_item_id": None,
+            "current_step": "Not started.",
             "queue_items": queue_items or [],
         }
 
@@ -1721,16 +1760,19 @@ class MaestroOrchestratorService:
         }
         if scheduler_status is not None:
             scheduler["status"] = scheduler_status
+        scheduler.update(self._current_scheduler_step(queue_items))
         payload["scheduler"] = scheduler
         task.input_payload = payload
 
     def _set_scheduler_status(self, task: Task, status: str) -> None:
         payload = dict(task.input_payload or {})
+        existing_scheduler = dict(payload.get("scheduler", {}))
         scheduler = {
             **self._scheduler_payload(),
-            **dict(payload.get("scheduler", {})),
+            **existing_scheduler,
             "status": status,
         }
+        scheduler.update(self._current_scheduler_step(existing_scheduler.get("queue_items", [])))
         payload["scheduler"] = scheduler
         task.input_payload = payload
 
@@ -1772,9 +1814,35 @@ class MaestroOrchestratorService:
                 }
             queue_items.append(item)
         scheduler["queue_items"] = queue_items
+        scheduler.update(self._current_scheduler_step(queue_items))
         payload["scheduler"] = scheduler
         task.input_payload = payload
         self.session.commit()
+
+    def _current_scheduler_step(self, queue_items: list[dict[str, Any]]) -> dict[str, Any]:
+        priority_statuses = ("running", "retrying", "ready", "blocked", "pending", "failed")
+        for status in priority_statuses:
+            item = next((item for item in queue_items if item.get("status") == status), None)
+            if item:
+                agent_name = item.get("agent_name") or item.get("agent_key") or "agent"
+                if status == "blocked":
+                    current_step = f"Waiting on {agent_name}: {item.get('error_message') or 'blocked'}"
+                elif status == "pending":
+                    current_step = f"Queued: {agent_name}"
+                elif status == "failed":
+                    current_step = f"Failed: {agent_name}"
+                else:
+                    current_step = f"{status.title()}: {agent_name}"
+                return {
+                    "active_stage_index": item.get("stage_index"),
+                    "active_queue_item_id": item.get("id"),
+                    "current_step": current_step,
+                }
+        return {
+            "active_stage_index": None,
+            "active_queue_item_id": None,
+            "current_step": "Workflow complete.",
+        }
 
     def _refined_plan_input(self, previous_plan: MaestroPlan, refinement: str) -> str:
         work_item_lines = [
@@ -1984,9 +2052,44 @@ class MaestroOrchestratorService:
                         "status": call.get("status"),
                         "error_message": call.get("error_message"),
                         "details": details,
+                        "output_payload": self._tool_activity_output_payload(
+                            str(tool_name),
+                            output_payload,
+                        ),
                     }
                 )
         return activity
+
+    def _tool_activity_output_payload(
+        self,
+        tool_name: str,
+        output_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if tool_name == "codex.task.run":
+            return {
+                key: output_payload.get(key)
+                for key in (
+                    "branch_workflow",
+                    "branch",
+                    "base_branch",
+                    "commit_sha",
+                    "changed_files",
+                    "diff_summary",
+                    "final_message",
+                    "pr",
+                    "pr_url",
+                    "pr_number",
+                    "review_status",
+                )
+                if key in output_payload
+            }
+        if tool_name.startswith("github.pr."):
+            return {
+                key: output_payload.get(key)
+                for key in ("pr", "pr_url", "pr_number", "diff", "checks", "summary")
+                if key in output_payload
+            }
+        return {}
 
     def _tool_activity_details(self, tool_name: str, output_payload: dict[str, Any]) -> str:
         if tool_name == "llm.tool_planner":
@@ -2018,7 +2121,10 @@ class MaestroOrchestratorService:
                 return f"Read diff ({len(diff)} chars)."
         if tool_name == "github.pr.checks":
             checks = output_payload.get("checks")
+            check_status = output_payload.get("check_status")
             if isinstance(checks, list):
+                if check_status:
+                    return f"Read {len(checks)} check(s): {check_status}."
                 return f"Read {len(checks)} check(s)."
             conclusion = output_payload.get("conclusion") or output_payload.get("state")
             if conclusion:
@@ -2035,12 +2141,20 @@ class MaestroOrchestratorService:
                 if number and title:
                     return f"Read issue #{number}: {title}."
         if tool_name == "github.issue.create":
-            url = output_payload.get("url")
-            skipped_labels = output_payload.get("skipped_labels")
+            preview = output_payload.get("approval_preview")
+            if isinstance(preview, dict):
+                summary = str(preview.get("summary") or "").strip()
+                if summary:
+                    return summary.replace("\n", " ")
+            url = output_payload.get("issue_url") or output_payload.get("url")
+            skipped_labels = output_payload.get("labels_skipped") or output_payload.get(
+                "skipped_labels"
+            )
             if url:
                 details = f"Created issue: {url}."
                 if isinstance(skipped_labels, list) and skipped_labels:
-                    details += f" Skipped missing label(s): {', '.join(str(label) for label in skipped_labels)}."
+                    skipped = ", ".join(str(label) for label in skipped_labels)
+                    details += f" Skipped missing label(s): {skipped}."
                 return details
         if output_payload.get("approval_required"):
             reason = output_payload.get("reason")
@@ -2067,6 +2181,21 @@ class MaestroOrchestratorService:
             files = output_payload.get("files")
             if isinstance(files, list):
                 return f"Found {len(files)} matching file(s)."
+        if tool_name == "codex.task.run":
+            changed_files = output_payload.get("changed_files")
+            session_id = output_payload.get("session_id")
+            pr_url = output_payload.get("pr_url")
+            final_message = str(output_payload.get("final_message") or "").strip()
+            details = "Ran a local Codex coding task"
+            if isinstance(changed_files, list):
+                details += f" with {len(changed_files)} changed file(s)"
+            if pr_url:
+                details += f" and opened PR {pr_url}"
+            if session_id:
+                details += f" in session {session_id}"
+            if final_message:
+                details += f": {final_message[:180]}"
+            return details + "."
         return ""
 
     def _chat_summary(

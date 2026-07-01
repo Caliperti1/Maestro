@@ -41,6 +41,13 @@ Rules:
 - Set can_log_directly true for items that should be captured/routed without agent execution.
 - Use required_capabilities to describe what expertise is needed before matching an agent.
 - Use required_tools only for tool classes that are clearly needed.
+- For requests to implement, code, fix, action a GitHub issue, or change Maestro code, create a
+  maestro-development work item that requires `codex.task.run` when a coding agent with that tool
+  exists in the roster. Use GitHub read tools as dependencies/context tools when the request names
+  a specific issue or PR.
+- If Chris explicitly asks for a plan only, read-only inspection only, or says not to make code
+  changes yet, do not require `codex.task.run`; use GitHub read tools and planning capabilities
+  instead.
 - Use dependencies to reference other work item IDs that must complete first.
 - Set blocks_execution true for RFIs or missing inputs that should pause the workflow until you
   answer. Set it false when useful work can proceed while waiting.

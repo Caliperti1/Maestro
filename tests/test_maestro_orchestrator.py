@@ -3,6 +3,7 @@ import json
 import uuid
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.runtime import PromptAggregationService
@@ -267,6 +268,76 @@ class FakeMaestroIssueCreatePlannerLLMClient:
                     "suggested_agent_keys": ["maestro-introspection-agent"],
                     "expected_output": "Created GitHub issue URL and summary.",
                     "rationale": "Maestro Development owns issue creation.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakeMaestroCodingPlannerLLMClient:
+    provider = "test"
+    model = "test-maestro-coding-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Action a Maestro issue with coding-agent support.",
+            "direct_response": None,
+            "planner_notes": "Fake coding planner response.",
+            "work_items": [
+                {
+                    "id": "wi_issue_50",
+                    "type": "workflow_task",
+                    "title": "Action Maestro issue #50",
+                    "description": "Use Codex to action Maestro issue #50 after reviewing the issue.",
+                    "domain_key": "maestro-development",
+                    "priority": "high",
+                    "required_capabilities": ["software implementation", "issue triage"],
+                    "required_tools": ["github.issue.get", "codex.task.run"],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Codex task result and implementation summary.",
+                    "rationale": "Coding issue action should be owned by the coding agent.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakePlanningOnlyIssuePlannerLLMClient:
+    provider = "test"
+    model = "test-planning-only-issue-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Plan issue #50 without code changes.",
+            "direct_response": None,
+            "planner_notes": "Fake planning-only response.",
+            "work_items": [
+                {
+                    "id": "wi_issue_50_plan",
+                    "type": "workflow_task",
+                    "title": "Prepare issue #50 action plan",
+                    "description": "Review issue #50 and produce a minimal plan only. Do not make code changes.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["issue triage", "implementation planning"],
+                    "required_tools": ["github.issue.get"],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Minimal plan only with no code changes.",
+                    "rationale": "Planning-only work should use read tools, not Codex execution.",
                 }
             ],
         }
@@ -681,6 +752,50 @@ def test_orchestrator_decomposes_with_llm_before_agent_matching(session: Session
     assert "Jane Smith is the partner lead" not in subtask.objective
 
 
+def test_orchestrator_assigns_each_work_item_to_one_best_agent(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro Chief Engineer",
+        name="Maestro Chief Engineer",
+        role_summary="Manages the Maestro backlog and delegates coding work.",
+        tool_permissions={
+            "github.issue.get": {"permission": "read"},
+            "codex.task.run": {"permission": "use"},
+        },
+    )
+
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeMaestroCodingPlannerLLMClient(),
+    ).create_plan("Action Maestro issue #50.")
+
+    assert len(plan.subtasks) == 1
+    assert plan.subtasks[0].agent_key == "maestro-coding-agent"
+    assert plan.subtasks[0].work_item_ids == ["wi_issue_50"]
+
+
+def test_planning_only_issue_work_does_not_require_codex(session: Session) -> None:
+    AgentRegistryService(session).create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro Chief Engineer",
+        name="Maestro Chief Engineer",
+        role_summary="Manages Maestro backlog issue triage and implementation planning without execution.",
+        tool_permissions={
+            "github.issue.get": {"permission": "read"},
+            "github.file.search": {"permission": "read"},
+        },
+    )
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakePlanningOnlyIssuePlannerLLMClient(),
+    ).create_plan("Action Maestro issue #50 with a minimal plan only; do not make code changes yet.")
+
+    assert plan.work_items[0].required_tools == ["github.issue.get"]
+    assert len(plan.subtasks) == 1
+    assert plan.subtasks[0].agent_key == "maestro-chief-engineer"
+
+
 def test_orchestrator_prevents_broad_assignment_and_self_dependencies(session: Session) -> None:
     registry = AgentRegistryService(session)
     registry.create_agent_spec(
@@ -814,6 +929,7 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     child_tasks = session.query(Task).filter(Task.parent_task_id == parent_task_id).all()
     assert len(child_tasks) == len(run.child_runs)
     assert all(task.source_type == "maestro_orchestrator" for task in child_tasks)
+    assert all((task.input_payload or {}).get("prompt_context") for task in child_tasks)
     artifacts = session.query(Artifact).all()
     assert len(artifacts) == 1
     assert artifacts[0].metadata_["canonical_workflow_artifact"] is True
@@ -851,6 +967,11 @@ def test_orchestrator_passes_dependency_outputs_to_later_agent(session: Session,
     assert "Dependency context" not in recording_client.inputs[0]
     assert "Upstream output for wi_praxis" in recording_client.inputs[1]
     assert "Praxis upstream output for the partner call." in recording_client.inputs[1]
+    child_tasks = session.scalars(
+        select(Task).where(Task.parent_task_id == uuid.UUID(plan.parent_task_id)).order_by(Task.created_at)
+    ).all()
+    assert "Dependency context" not in child_tasks[0].input_payload["prompt_context"]["user_context"]
+    assert "Upstream output for wi_praxis" in child_tasks[1].input_payload["prompt_context"]["user_context"]
     parent = session.get(Task, uuid.UUID(plan.parent_task_id))
     assert parent is not None
     assert parent.output_payload["execution_stages"] == [
@@ -966,7 +1087,7 @@ def test_orchestrator_resumes_workflow_after_tool_approval(
     assert resumed_run is not None
     assert resumed_run.status == "completed"
     assert "I created the GitHub issue after your approval." in resumed_run.chat_summary
-    assert llm_client.structured_calls == 2
+    assert llm_client.structured_calls == 1
     parent = session.get(Task, uuid.UUID(plan.parent_task_id))
     assert parent is not None
     assert parent.input_payload["scheduler"]["queue_items"][0]["status"] == "completed"

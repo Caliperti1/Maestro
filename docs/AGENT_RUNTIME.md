@@ -268,6 +268,116 @@ For real domain-specific accounts, prefer an environment-token reference:
 }
 ```
 
+Issue creation can inherit repo/domain label preferences from the same GitHub connection config.
+These keys avoid hard-coded labels in tool code:
+
+```json
+{
+  "repo": "Caliperti1/Maestro",
+  "preferred_issue_labels": ["enhancement"],
+  "required_issue_labels": ["triage"],
+  "issue_labels": {
+    "preferred": ["backend"],
+    "required": ["approved"]
+  }
+}
+```
+
+Preferred labels are best effort: the adapter checks repository labels at approval-time execution,
+applies labels that exist, and reports missing optional labels in `labels_skipped`. Required labels
+block issue creation if they are configured but missing from the repository. Approval-required write
+proposals include `approval_preview` and `preview_summary` so the UI/report layer can show a
+human-readable target repo, title, body preview, labels to apply, labels that may be skipped,
+labels proposed for creation, and uncertainty before Chris approves. This slice does not create
+repository labels during issue creation; missing optional labels are skipped and reported, while
+missing configured required labels block the write.
+
+GitHub adapter outputs expose stable top-level fields for downstream reports where applicable:
+`repo`, `owner`, `repo_name`, `name`, `issue_number`, `issue_url`, `html_url`, `state`,
+`status`, `pr_number`, `pr_url`, `check_status`, `check_counts`, `failed_checks`,
+`pending_checks`, `labels_applied`, `labels_skipped`, `write_status`, and approval metadata when
+the result came from an approval-gated write. Consumers should prefer `repo_name` when they need
+the repository name specifically, because file/check payloads may use `name` for the file or check
+name.
+
+Follow-up contract for template-driven issue creation:
+
+- Tool key: `github.issue.create_from_template`.
+- Inputs: `repo` (optional when supplied by the GitHub connection), `template_path` or
+  `template_name`, `title`, `fields` as a JSON object keyed by template field id, optional
+  `labels`, `assignees`, and `milestone`.
+- Behavior: read the repository issue template, validate required template fields, render a
+  Markdown body, merge configured preferred/required labels with payload labels, and reuse the same
+  approval preview plus result schema as `github.issue.create`.
+- Result fields: all `github.issue.create` stable fields plus `template_path`, `template_name`,
+  `template_fields`, and `template_fields_missing`.
+- Approval: always approval-required; preview must show the rendered title, template identifier,
+  required field validation, body preview, labels to apply, labels that may be skipped, and the fact
+  that repository labels are not created implicitly.
+
+MVP Codex tools:
+
+- `codex.task.run`: runs a local Codex CLI task in an authorized target directory and returns the
+  Codex session id, final message, changed files, event counts, sandbox, branch metadata, commit
+  metadata, diff summary, and PR review metadata.
+
+`codex.task.run` uses the local Codex CLI and therefore can reuse the machine's existing Codex
+authentication instead of requiring Maestro to call the OpenAI API directly. By default the tool
+runs as a branch/PR workflow:
+
+1. Validate the target path is inside an allowed root.
+2. Require a clean working tree unless `allow_dirty` is explicitly set.
+3. Check out the configured base branch.
+4. Create an isolated feature branch.
+5. Run `codex exec --json` on that branch.
+6. Commit changes if files changed.
+7. Push the branch and open a PR.
+8. Return the local checkout to the original branch.
+
+This branch/PR workflow can run without a separate approval gate because the coding agent is acting
+like a human SWE working inside a feature branch. The review boundary is the PR. Merge to main,
+deployment, and hot reload remain approval-gated actions.
+
+Configure a domain-level `codex` connection in the Tools tab:
+
+```json
+{
+  "codex_bin": "codex",
+  "default_cwd": "/Users/christopheraliperti/Maestro",
+  "allowed_roots": ["/Users/christopheraliperti/Maestro"],
+  "base_branch": "main",
+  "branch_prefix": "maestro/codex",
+  "branch_workflow": true,
+  "create_pr": true,
+  "push_branch": true
+}
+```
+
+Typical agent-planned payload:
+
+```json
+{
+  "target_path": "/Users/christopheraliperti/Maestro",
+  "sandbox": "workspace-write",
+  "prompt": "Implement GitHub issue #50. Keep the change scoped and run the relevant tests.",
+  "issue_number": 50,
+  "task_title": "Harden GitHub tool suite",
+  "timeout_seconds": 1200
+}
+```
+
+Useful result fields:
+
+- `branch`, `base_branch`, `commit_sha`
+- `changed_files`, `diff_summary`
+- `pr`, `pr_url`, `pr_number`
+- `review_status`
+- `final_message`
+
+The seeded `maestro-coding-agent` is the default Maestro Development agent intended to use this
+tool. Existing hand-created Maestro Development agents need `codex.task.run` added to their tool
+permissions before they can request it.
+
 Store this once as the domain connection for the provider key `github`. Every `github.*` tool in
 that domain inherits the shared GitHub connection unless a more specific per-tool connection exists.
 The adapter reads the configured environment variable and passes it to `gh` as `GH_TOKEN` for only
@@ -275,10 +385,9 @@ that tool process. This avoids storing tokens in the database and avoids mutatin
 active `gh` account. `.env` is ignored by Git and is the right local place for these token variables
 until a hardened credential store exists.
 
-GitHub write tools are available as separate explicit tool keys. The current runtime can execute
-them when explicitly requested; the next agent-execution layer should add an LLM planning loop,
-approval gates for high-impact writes, retry handling, and user-visible proposed tool calls before
-autonomous write execution.
+GitHub write tools are available as separate explicit tool keys. Agent-planned write tools are
+stored as approval-required tool calls with preview metadata, then executed only after Chris
+approves them.
 
 ### Interaction Artifact Packager
 

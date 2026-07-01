@@ -755,6 +755,13 @@ class PromptAggregationService:
                 "stage_interaction": stage_interaction,
                 "auto_tool_loop": auto_tool_loop,
                 "max_tool_iterations": max_tool_iterations,
+                "prompt_context": {
+                    "task_instruction": request.task_instruction,
+                    "user_context": request.user_context,
+                    "assembled_prompt_chars": len(package.assembled_prompt),
+                    "memory_included_count": package.memory_context.included_count,
+                    "semantic_status": package.memory_context.semantic_status,
+                },
                 "requested_tools": [
                     {
                         "tool_key": tool_request.tool_key,
@@ -1212,7 +1219,10 @@ class PromptAggregationService:
                     f"Iteration: {iteration}\n"
                     "Choose zero or more allowed tools that are necessary before producing the "
                     "final report. Prefer the smallest useful read-only tool set. If the task can "
-                    "be answered with existing context, return no tool calls."
+                    "be answered with existing context, return no tool calls. If prior tool "
+                    "results already include a completed approved write/action tool, do not "
+                    "request follow-on write/action tools in this same turn; produce the final "
+                    "report and let Maestro propose additional external actions separately."
                 ),
                 "## Allowed Tool Manifest\n" + json.dumps(allowed_tools, indent=2),
                 "## Prior Tool Results\n" + json.dumps(prior_results, indent=2),
@@ -1503,6 +1513,14 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": False,
         "reason": "Updates external GitHub issue metadata and requires Chris approval.",
     },
+    "codex.task.run": {
+        "level": "branch_sandbox_code_execution",
+        "auto_executable": True,
+        "reason": (
+            "Runs a local Codex coding task on an isolated feature branch and opens a PR. "
+            "Merge/deploy still require Chris approval."
+        ),
+    },
 }
 
 _AUTO_TOOL_SAFE_TOOL_KEYS = {
@@ -1512,9 +1530,11 @@ _AUTO_TOOL_SAFE_TOOL_KEYS = {
 _TOOL_PLANNER_INSTRUCTIONS = (
     "You are an execution planner for a Maestro domain agent. Return only JSON matching the "
     "schema. Choose only tools from the allowed manifest. Prefer read-only tools and the smallest "
-    "number of calls needed. Read-only tools marked safe can run automatically. Write/action "
-    "tools must only be requested when explicitly needed; they will be proposed for Chris approval "
-    "instead of executed automatically. Return tool payloads as JSON strings in "
+    "number of calls needed. Read-only tools marked safe can run automatically. `codex.task.run` "
+    "can run automatically because it works on an isolated feature branch and returns a PR for "
+    "Chris review; do not ask for approval before requesting it. Other write/action tools must "
+    "only be requested when explicitly needed; they will be proposed for Chris approval instead "
+    "of executed automatically. Return tool payloads as JSON strings in "
     "`payload_json`. Do not include repo placeholders such as repo:CURRENT or "
     "repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies the repo. "
     "For a request like 'check out the latest PR', use GitHub PR search/list tools first, then "
@@ -1607,7 +1627,11 @@ _TOOL_DESCRIPTIONS = {
     },
     "github.issue.create": {
         "name": "GitHub Issue Create",
-        "description": "Create a GitHub issue in the authorized repository.",
+        "description": (
+            "Create a GitHub issue in the authorized repository after approval. Configured "
+            "preferred labels are applied when present, missing optional labels are skipped, "
+            "and configured required labels block creation if absent."
+        ),
     },
     "github.issue.comment": {
         "name": "GitHub Issue Comment",
@@ -1631,7 +1655,18 @@ _TOOL_DESCRIPTIONS = {
     },
     "github.pr.checks": {
         "name": "GitHub PR Checks",
-        "description": "Read CI/check status for a pull request.",
+        "description": "Read CI/check status for a pull request with normalized status fields.",
+    },
+    "codex": {
+        "name": "Codex",
+        "description": "Shared local Codex CLI configuration inherited by Codex tools.",
+    },
+    "codex.task.run": {
+        "name": "Codex Task Run",
+        "description": (
+            "Run a local Codex coding task on an isolated feature branch, then return "
+            "session output, changed files, final summary, and PR review metadata."
+        ),
     },
 }
 
@@ -1639,12 +1674,16 @@ _TOOL_DESCRIPTIONS = {
 def _provider_connection_key(tool_key: str) -> str:
     if tool_key.startswith("github."):
         return "github"
+    if tool_key.startswith("codex."):
+        return "codex"
     return tool_key
 
 
 def _inherited_connection_tool_keys(tool_key: str) -> list[str]:
     if tool_key == "github":
         return [key for key in _TOOL_DESCRIPTIONS if key.startswith("github.")]
+    if tool_key == "codex":
+        return [key for key in _TOOL_DESCRIPTIONS if key.startswith("codex.")]
     return []
 
 _SEED_AGENTS = [
@@ -1767,6 +1806,55 @@ _SEED_AGENTS = [
             "github.pr.checks": {
                 "permission": "read",
                 "description": "Read Maestro GitHub pull request check status.",
+            },
+            "codex.task.run": {
+                "permission": "use",
+                "description": "Run approved local Codex coding tasks for Maestro development work.",
+            },
+        },
+    },
+    {
+        "domain_key": "maestro-development",
+        "key": "maestro-coding-agent",
+        "name": "Maestro Coding Agent",
+        "agent_type": "domain_agent",
+        "role_summary": (
+            "Executes scoped Maestro coding tasks through the local Codex tool and reports "
+            "implementation results back to Maestro."
+        ),
+        "role_prompt": (
+            "You are the Maestro Coding Agent. Work only inside the Maestro Development domain. "
+            "Use the local Codex task tool for implementation work after Chris approves the tool "
+            "call. Keep coding tasks scoped, preserve unrelated work, run the requested validation "
+            "when practical, and return a concise report with changed files, tests, and follow-up "
+            "risks."
+        ),
+        "memory_profile": "agent_prompt",
+        "model_profile": "default",
+        "tool_permissions": {
+            "memory.context_bundle": {
+                "permission": "read",
+                "description": "Retrieve Maestro-development memory bundles.",
+            },
+            "artifact.stage_interaction": {
+                "permission": "write",
+                "description": "Stage coding task outputs for curation.",
+            },
+            "llm.gateway": {
+                "permission": "use",
+                "description": "Use Maestro's shared LLM gateway.",
+            },
+            "github.issue.get": {
+                "permission": "read",
+                "description": "Read Maestro GitHub issue details before implementation.",
+            },
+            "github.file.get": {
+                "permission": "read",
+                "description": "Read repository files when preparing implementation context.",
+            },
+            "codex.task.run": {
+                "permission": "use",
+                "description": "Run approved local Codex coding tasks in authorized workspaces.",
             },
         },
     },

@@ -345,7 +345,12 @@ type MaestroPlan = {
   is_chat_only: boolean;
   selected_agents: Array<Record<string, unknown>>;
   approval_required: boolean;
-  scheduler: Record<string, unknown> & { queue_items?: MaestroQueueItem[] };
+  scheduler: Record<string, unknown> & {
+    queue_items?: MaestroQueueItem[];
+    current_step?: string;
+    active_queue_item_id?: string | null;
+    active_stage_index?: number | null;
+  };
   created_at: string;
   direct_response: string | null;
   planner_notes: string | null;
@@ -371,6 +376,7 @@ type MaestroRun = {
     status: string;
     error_message: string | null;
     details: string;
+    output_payload?: Record<string, unknown>;
   }>;
   child_runs: Array<{
     run_id: string;
@@ -748,6 +754,34 @@ export function App() {
     [maestroRun],
   );
 
+  const codexReviewPayload = (activity: MaestroRun["tool_activity"][number]) => {
+    const payload = activity.output_payload ?? {};
+    const pr = payload.pr && typeof payload.pr === "object" ? (payload.pr as Record<string, unknown>) : {};
+    const prUrl = String(payload.pr_url ?? pr.pr_url ?? pr.url ?? "");
+    const prNumber = payload.pr_number ?? pr.pr_number ?? pr.number;
+    const prTitle = String(pr.title ?? "");
+    const prBody = String(pr.body ?? "");
+    const branch = String(payload.branch ?? "");
+    const baseBranch = String(payload.base_branch ?? "");
+    const diffSummary = String(payload.diff_summary ?? "");
+    const finalMessage = String(payload.final_message ?? "");
+    const changedFiles = Array.isArray(payload.changed_files)
+      ? payload.changed_files.map((item) => String(item))
+      : [];
+    return {
+      prUrl,
+      prNumber,
+      prTitle,
+      prBody,
+      branch,
+      baseBranch,
+      diffSummary,
+      finalMessage,
+      changedFiles,
+      hasReview: Boolean(prUrl || changedFiles.length > 0 || diffSummary || prBody),
+    };
+  };
+
   const isApprovalMessage = (message: string) => {
     const normalized = message.trim().toLowerCase();
     return ["approved", "approve", "yes approved", "yes, approved", "go ahead", "run it"].includes(
@@ -779,8 +813,48 @@ export function App() {
     });
   };
 
+  const markToolApprovalRunning = (toolCallId: string) => {
+    let approvalAgentKey: string | null = null;
+    setMaestroRun((run) => {
+      if (!run) return run;
+      return {
+        ...run,
+        tool_activity: run.tool_activity.map((activity) => {
+          if (activity.tool_call_id !== toolCallId) return activity;
+          approvalAgentKey = activity.agent_key;
+          return {
+            ...activity,
+            status: "running",
+            details: "Approved; running the tool now.",
+            error_message: null,
+          };
+        }),
+      };
+    });
+    setMaestroPlan((plan) => {
+      if (!plan || !approvalAgentKey) return plan;
+      const queueItems = (plan.scheduler.queue_items ?? []).map((item) =>
+        item.agent_key === approvalAgentKey && item.status === "blocked"
+          ? { ...item, status: "running", error_message: null }
+          : item,
+      );
+      return {
+        ...plan,
+        scheduler: {
+          ...plan.scheduler,
+          status: "running",
+          current_step: `Running approved tool for ${approvalAgentKey}.`,
+          queue_items: queueItems,
+        },
+      };
+    });
+  };
+
   const approveToolCall = async (toolCallId: string) => {
     setBusyToolCallId(toolCallId);
+    setMaestroBusy(true);
+    markToolApprovalRunning(toolCallId);
+    setMaestroStatus("Running approved tool. This can take a few minutes for Codex tasks.");
     try {
       const response = await apiJson<MaestroToolCallResponse>(
         `/maestro/tool-calls/${toolCallId}/approve`,
@@ -819,6 +893,7 @@ export function App() {
       setMaestroStatus(message);
     } finally {
       setBusyToolCallId(null);
+      setMaestroBusy(false);
     }
   };
 
@@ -1164,8 +1239,8 @@ export function App() {
                 {maestroBusy && (
                   <div className="message maestro-message working-message" aria-live="polite">
                     <span>Maestro</span>
-                    <p>
-                      Conducting
+                  <p>
+                      {busyToolCallId ? "Running approved tool" : "Conducting"}
                       <span className="working-dots" aria-hidden="true">
                         <span />
                         <span />
@@ -1250,7 +1325,11 @@ export function App() {
                   Let agents plan safe tools
                 </label>
                 <span>
-                  {maestroBusy ? "Conducting" : maestroStatus}
+                  {maestroBusy
+                    ? busyToolCallId
+                      ? "Running approved tool. Long Codex tasks may take a few minutes."
+                      : "Conducting"
+                    : maestroPlan?.scheduler.current_step || maestroStatus}
                 </span>
               </div>
 
@@ -1285,6 +1364,9 @@ export function App() {
                     <span>{maestroPlanStages.length} stages</span>
                     <span>{maestroPlan.workflow_graph.edges?.length ?? 0} edges</span>
                     <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
+                    {maestroPlan.scheduler.current_step && (
+                      <span>{maestroPlan.scheduler.current_step}</span>
+                    )}
                   </div>
                   {queueStages.length > 0 && (
                     <div className="workflow-map" aria-label="Workflow dependency map">
@@ -1454,6 +1536,8 @@ export function App() {
                           <p>
                             {activity.status === "complete"
                               ? "Completed"
+                              : activity.status === "running"
+                                ? "Running"
                               : activity.status === "approval_required"
                                 ? "Needs approval"
                               : activity.status === "failed"
@@ -1482,6 +1566,54 @@ export function App() {
                               </button>
                             </div>
                           )}
+                          {activity.tool_name === "codex.task.run" &&
+                            (() => {
+                              const review = codexReviewPayload(activity);
+                              if (!review.hasReview) return null;
+                              return (
+                                <div className="tool-review-panel">
+                                  <div className="preview-meta">
+                                    {review.prNumber ? <span>PR #{String(review.prNumber)}</span> : null}
+                                    {review.branch ? <span>{review.branch}</span> : null}
+                                    {review.baseBranch ? <span>base {review.baseBranch}</span> : null}
+                                  </div>
+                                  {review.prTitle && <strong>{review.prTitle}</strong>}
+                                  {review.prUrl && (
+                                    <a href={review.prUrl} target="_blank" rel="noreferrer">
+                                      Open PR
+                                    </a>
+                                  )}
+                                  {review.prBody && (
+                                    <details>
+                                      <summary>PR body</summary>
+                                      <pre>{review.prBody}</pre>
+                                    </details>
+                                  )}
+                                  {review.changedFiles.length > 0 && (
+                                    <details>
+                                      <summary>{review.changedFiles.length} changed files</summary>
+                                      <ul>
+                                        {review.changedFiles.map((file) => (
+                                          <li key={file}>{file}</li>
+                                        ))}
+                                      </ul>
+                                    </details>
+                                  )}
+                                  {review.diffSummary && (
+                                    <details>
+                                      <summary>Diff summary</summary>
+                                      <pre>{review.diffSummary}</pre>
+                                    </details>
+                                  )}
+                                  {review.finalMessage && (
+                                    <details>
+                                      <summary>Codex report</summary>
+                                      <pre>{review.finalMessage}</pre>
+                                    </details>
+                                  )}
+                                </div>
+                              );
+                            })()}
                         </article>
                       ))}
                     </div>

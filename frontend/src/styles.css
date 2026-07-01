@@ -1433,6 +1433,45 @@ h4 {
   min-height: 34px;
 }
 
+.tool-review-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d9e2dd;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.tool-review-panel > a {
+  width: fit-content;
+  color: #245b43;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.tool-review-panel details {
+  border-top: 1px solid #edf1ed;
+  padding-top: 8px;
+}
+
+.tool-review-panel summary {
+  cursor: pointer;
+  color: #2d4638;
+  font-weight: 700;
+}
+
+.tool-review-panel pre {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.tool-review-panel ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
 .activity-dot {
   width: 10px;
   height: 10px;
