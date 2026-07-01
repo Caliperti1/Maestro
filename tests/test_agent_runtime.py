@@ -741,9 +741,9 @@ def test_codex_adapter_runs_local_codex_exec_json(
             connection=connection,
         ),
         {
-            "prompt": "Implement issue #50.",
-            "sandbox": "workspace-write",
-            "target_path": str(tmp_path),
+            "task": "Implement issue #50.",
+            "sandbox_mode": "workspace-write",
+            "target_directory": ".",
         },
     )
 
@@ -753,7 +753,7 @@ def test_codex_adapter_runs_local_codex_exec_json(
     assert output["returncode"] == 0
     assert captured["cwd"] == str(tmp_path)
     assert captured["args"][:6] == [
-        "codex",
+        "/usr/bin/codex",
         "exec",
         "--json",
         "--cd",

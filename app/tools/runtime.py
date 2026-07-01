@@ -800,11 +800,11 @@ class CodexCliToolAdapter:
         if context.dry_run:
             return {"dry_run": True, "tool": self.key, "payload": payload}
         codex_bin = self._codex_bin(context.connection)
-        if shutil.which(codex_bin) is None and not Path(codex_bin).exists():
+        if codex_bin is None:
             raise ToolExecutionError("Codex CLI is not installed or not on PATH.")
         target_path = self._target_path(context.connection, payload)
-        prompt = _required_text(payload, "prompt")
-        sandbox = str(payload.get("sandbox") or "workspace-write").strip()
+        prompt = _required_any_text(payload, ("prompt", "task", "instructions"))
+        sandbox = str(payload.get("sandbox") or payload.get("sandbox_mode") or "workspace-write").strip()
         if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
             raise ToolExecutionError("Codex sandbox must be read-only, workspace-write, or danger-full-access.")
         timeout_seconds = _bounded_int(
@@ -883,11 +883,26 @@ class CodexCliToolAdapter:
             except FileNotFoundError:
                 pass
 
-    def _codex_bin(self, connection: ToolConnection | None) -> str:
+    def _codex_bin(self, connection: ToolConnection | None) -> str | None:
         configured = ""
         if connection is not None:
             configured = str((connection.config or {}).get("codex_bin") or "").strip()
-        return configured or "codex"
+        candidates = [configured] if configured else []
+        candidates.extend(
+            [
+                "codex",
+                "/Applications/Codex.app/Contents/Resources/codex",
+            ]
+        )
+        for candidate in candidates:
+            if not candidate:
+                continue
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+            if Path(candidate).expanduser().exists():
+                return str(Path(candidate).expanduser())
+        return None
 
     def _target_path(self, connection: ToolConnection | None, payload: dict[str, Any]) -> Path:
         configured_default = ""
@@ -896,8 +911,17 @@ class CodexCliToolAdapter:
             config = connection.config or {}
             configured_default = str(config.get("default_cwd") or "").strip()
             allowed_roots = _string_list(config.get("allowed_roots"))
-        raw_target = str(payload.get("target_path") or configured_default or os.getcwd()).strip()
-        target = Path(raw_target).expanduser().resolve()
+        raw_target = str(
+            payload.get("target_path")
+            or payload.get("target_directory")
+            or payload.get("cwd")
+            or configured_default
+            or os.getcwd()
+        ).strip()
+        raw_path = Path(raw_target).expanduser()
+        if not raw_path.is_absolute() and configured_default:
+            raw_path = Path(configured_default).expanduser() / raw_path
+        target = raw_path.resolve()
         if not target.exists() or not target.is_dir():
             raise ToolExecutionError(f"Codex target path is not a directory: {target}")
         roots = [Path(root).expanduser().resolve() for root in allowed_roots] if allowed_roots else [target]
@@ -1163,6 +1187,15 @@ def _required_text(payload: dict[str, Any], key: str) -> str:
     if not value:
         raise ToolExecutionError(f"GitHub tool requires `{key}`.")
     return value
+
+
+def _required_any_text(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    choices = "`, `".join(keys)
+    raise ToolExecutionError(f"Tool payload requires one of `{choices}`.")
 
 
 def _string_list(value: Any) -> list[str]:
