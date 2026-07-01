@@ -1080,6 +1080,11 @@ class PromptAggregationService:
                     schema=_TOOL_PLAN_SCHEMA,
                 )
                 requested = _normalize_tool_plan(plan)
+                requested = _hydrate_pr_tool_payloads(
+                    requested,
+                    prior_results,
+                    context_text=package.assembled_prompt,
+                )
                 planner_call.status = "complete"
                 planner_call.output_payload = {
                     "plan_summary": plan.get("plan_summary"),
@@ -1385,6 +1390,80 @@ def _normalize_tool_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return normalized[:5]
 
 
+def _hydrate_pr_tool_payloads(
+    requested_tools: list[dict[str, Any]],
+    prior_results: list[dict[str, Any]],
+    *,
+    context_text: str = "",
+) -> list[dict[str, Any]]:
+    pr_number = _latest_pr_number_from_tool_results(prior_results)
+    if pr_number is None:
+        pr_number = _latest_pr_number_from_text(context_text)
+    if pr_number is None:
+        return requested_tools
+    hydrated: list[dict[str, Any]] = []
+    for requested in requested_tools:
+        payload = requested.get("payload") if isinstance(requested.get("payload"), dict) else {}
+        if (
+            str(requested.get("tool_key") or "").startswith("github.pr.")
+            and str(requested.get("tool_key") or "") != "github.pr.search"
+            and "pr_number" not in payload
+            and "number" not in payload
+        ):
+            payload = {**payload, "pr_number": pr_number}
+            requested = {**requested, "payload": payload}
+        hydrated.append(requested)
+    return hydrated
+
+
+def _latest_pr_number_from_tool_results(prior_results: list[dict[str, Any]]) -> int | None:
+    for result in reversed(prior_results):
+        if not isinstance(result, dict):
+            continue
+        output = result.get("output_payload")
+        if not isinstance(output, dict):
+            output = result.get("output")
+        if not isinstance(output, dict):
+            continue
+        number = output.get("pr_number") or output.get("number")
+        if number is not None:
+            try:
+                return int(number)
+            except (TypeError, ValueError):
+                pass
+        pr = output.get("pr")
+        if isinstance(pr, dict):
+            nested_number = pr.get("number") or pr.get("pr_number")
+            if nested_number is not None:
+                try:
+                    return int(nested_number)
+                except (TypeError, ValueError):
+                    pass
+        prs = output.get("prs")
+        if isinstance(prs, list) and prs:
+            latest = prs[0]
+            if isinstance(latest, dict):
+                latest_number = latest.get("number") or latest.get("pr_number")
+                if latest_number is not None:
+                    try:
+                        return int(latest_number)
+                    except (TypeError, ValueError):
+                        pass
+    return None
+
+
+def _latest_pr_number_from_text(text: str) -> int | None:
+    matches = re.findall(r"\bPR(?:\s+number|[#\s])\s*:?\s*#?(\d+)\b", text, flags=re.IGNORECASE)
+    if not matches:
+        matches = re.findall(r"/pull/(\d+)\b", text)
+    if not matches:
+        return None
+    try:
+        return int(matches[-1])
+    except (TypeError, ValueError):
+        return None
+
+
 _GLOBAL_CONTEXT_SETTING_KEY = "global_maestro_context"
 
 
@@ -1548,7 +1627,8 @@ _TOOL_PLANNER_INSTRUCTIONS = (
     "`payload_json`. Do not include repo placeholders such as repo:CURRENT or "
     "repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies the repo. "
     "For a request like 'check out the latest PR', use GitHub PR search/list tools first, then "
-    "details/checks/diff if useful."
+    "details/checks/diff if useful. If prior tool results include a PR number and the current "
+    "request refers to 'the PR', 'that PR', or 'it', pass that number as `pr_number`."
 )
 
 _TOOL_PLAN_SCHEMA = {

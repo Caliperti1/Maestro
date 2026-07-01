@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import uuid
 from subprocess import CompletedProcess
 
 from sqlalchemy.orm import Session
@@ -12,7 +13,7 @@ from app.agents.runtime import (
     PromptPackageRequest,
 )
 from app.core.config import get_settings
-from app.db.models import Artifact, MemoryItem, Task, ToolConnection
+from app.db.models import Artifact, MemoryItem, Task, ToolCall, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
 from app.tools.runtime import (
@@ -155,6 +156,30 @@ class FakeAutoWriteToolLoopLLMClient:
         assert "approval_required" in input_text
         assert "github.issue.create" in input_text
         return "## Summary\nI proposed a GitHub issue creation for approval."
+
+
+class FakeAutoMergeMissingPrNumberLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        assert "pass that number as `pr_number`" in instructions
+        assert "pr_number" in input_text or "PR number" in input_text
+        return {
+            "plan_summary": "Merge the PR Chris approved.",
+            "requires_final_answer": True,
+            "tool_calls": [
+                {
+                    "tool_key": "github.pr.merge",
+                    "payload_json": '{"method":"squash","delete_branch":true}',
+                    "rationale": "Chris asked to merge the PR from the active session.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "github.pr.merge" in input_text
+        return "## Summary\nI proposed merging the active PR."
 
 
 class FailingAgentLLMClient:
@@ -1961,6 +1986,92 @@ def test_run_agent_once_blocks_auto_planned_write_tools_for_approval(
 
     assert approved.status == "complete"
     assert approved.output["url"] == "https://github.com/Caliperti1/Maestro/issues/123"
+
+
+def test_run_agent_once_hydrates_pr_number_for_followup_pr_tools(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeAutoMergeMissingPrNumberLLMClient(),
+        tool_adapters={},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Cool, merge the PR.",
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+        initial_tool_results=[
+            {
+                "tool_name": "codex.task.run",
+                "status": "complete",
+                "output_payload": {
+                    "pr_number": 77,
+                    "pr_url": "https://github.com/Caliperti1/Maestro/pull/77",
+                },
+            }
+        ],
+    )
+
+    assert result.status == "blocked"
+    blocked = [
+        call for call in result.tool_calls if call["tool_name"] == "github.pr.merge"
+    ][0]
+    assert blocked["status"] == "approval_required"
+    tool_call = session.get(ToolCall, uuid.UUID(blocked["id"]))
+    assert tool_call is not None
+    assert tool_call.input_payload["payload"]["pr_number"] == 77
+    assert result.tool_loop["iterations"][0]["blocked"][0]["payload"]["pr_number"] == 77
+
+
+def test_run_agent_once_hydrates_pr_number_from_prompt_context(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeAutoMergeMissingPrNumberLLMClient(),
+        tool_adapters={},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction=(
+                "Previous run context: Tool codex.task.run finished with status complete; "
+                "PR number: 88; PR URL: https://github.com/Caliperti1/Maestro/pull/88. "
+                "Chris said: Cool, merge the PR."
+            ),
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "blocked"
+    blocked = [
+        call for call in result.tool_calls if call["tool_name"] == "github.pr.merge"
+    ][0]
+    tool_call = session.get(ToolCall, uuid.UUID(blocked["id"]))
+    assert tool_call is not None
+    assert tool_call.input_payload["payload"]["pr_number"] == 88
 
 
 def test_run_agent_once_records_failed_llm_call(session: Session) -> None:
