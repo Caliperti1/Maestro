@@ -112,3 +112,88 @@ def test_scheduler_api_tick_claims_due_recurring_work(
     assert len(payload["enqueued"]) == 1
     assert len(payload["claimed"]) == 1
     assert payload["claimed"][0]["lease_owner"] == "api-test"
+
+
+def test_scheduler_api_exposes_run_detail_and_archives_noise(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+    client.post(
+        "/scheduler/definitions",
+        json={
+            "key": "daily-introspection",
+            "name": "Daily Introspection",
+            "domain_key": "maestro-development",
+            "trigger_type": "recurring",
+            "trigger_config": {
+                "next_run_at": "2020-01-01T07:55:00+00:00",
+                "interval_minutes": 1440,
+            },
+            "workflow_spec": {
+                "queue_items": [
+                    {
+                        "id": "introspect",
+                        "objective": "Analyze yesterday's Maestro logs.",
+                        "domain_key": "maestro-development",
+                    }
+                ]
+            },
+        },
+    )
+    tick = client.post("/scheduler/tick", json={"owner": "api-test", "claim_limit": 1})
+    run_id = tick.json()["enqueued"][0]["id"]
+
+    detail = client.get(f"/scheduler/runs/{run_id}")
+    assert detail.status_code == 200
+    assert detail.json()["run"]["events"][0]["event_type"] in {
+        "queue_item_claimed",
+        "locks_acquired",
+        "workflow_enqueued",
+    }
+
+    archived = client.patch(f"/scheduler/runs/{run_id}", json={"status": "archived"})
+    assert archived.status_code == 200
+    assert archived.json()["run"]["status"] == "archived"
+
+    dashboard = client.get("/scheduler/dashboard")
+    assert all(run["id"] != run_id for run in dashboard.json()["runs"])
+
+
+def test_scheduler_api_updates_definition_schedule(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+    created = client.post(
+        "/scheduler/definitions",
+        json={
+            "key": "agent-daily-brief",
+            "name": "Agent Daily Brief",
+            "domain_key": "personal",
+            "trigger_type": "recurring",
+            "trigger_config": {"time_of_day": "08:00", "interval_minutes": 1440},
+            "workflow_spec": {"queue_items": [{"id": "brief", "objective": "Brief Chris."}]},
+        },
+    )
+    definition_id = created.json()["definition"]["id"]
+
+    updated = client.patch(
+        f"/scheduler/definitions/{definition_id}",
+        json={
+            "key": "ignored-on-patch",
+            "name": "Agent Daily Brief",
+            "domain_key": "personal",
+            "trigger_type": "recurring",
+            "trigger_config": {"time_of_day": "07:30", "interval_minutes": 1440},
+            "workflow_spec": {"queue_items": [{"id": "brief", "objective": "Brief Chris early."}]},
+        },
+    )
+
+    assert updated.status_code == 200
+    definition = updated.json()["definition"]
+    assert definition["key"] == "agent-daily-brief"
+    assert definition["trigger_config"]["time_of_day"] == "07:30"
+    assert definition["workflow_spec"]["queue_items"][0]["objective"] == "Brief Chris early."

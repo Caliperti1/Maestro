@@ -680,6 +680,43 @@ h4 {
   gap: 8px;
 }
 
+.compact-actions {
+  margin-top: 2px;
+}
+
+.scheduler-action-row button {
+  min-height: 30px;
+  padding: 6px 9px;
+  color: #304139;
+  background: #ffffff;
+  border: 1px solid #cfd8d0;
+  border-radius: 8px;
+}
+
+.card-reset {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+
+.card-reset > span {
+  color: #68736d;
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.scheduler-detail-panel,
+.scheduler-event-list,
+.embedded-scheduler {
+  margin-top: 12px;
+}
+
 .scheduler-run-list {
   margin-top: 12px;
   padding-top: 12px;

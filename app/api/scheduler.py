@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.db.models import WorkflowQueueItem
+from app.db.models import WorkflowDefinition, WorkflowQueueItem, WorkflowRun
 from app.db.repositories import DomainRepository
 from app.db.session import get_db
 from app.maestro.scheduler import SchedulerService
@@ -31,6 +31,10 @@ class SchedulerQueueItemUpdateBody(BaseModel):
     status: str | None = None
     priority: str | None = None
     fairness_group: str | None = None
+
+
+class SchedulerRunUpdateBody(BaseModel):
+    status: str | None = None
 
 
 class SchedulerDefinitionBody(BaseModel):
@@ -92,9 +96,77 @@ def upsert_workflow_definition(
     return {"definition": service.workflow_definition_payload(definition)}
 
 
+@router.get("/definitions/{definition_id}")
+def get_workflow_definition(
+    definition_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    definition = db.get(WorkflowDefinition, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow definition.")
+    service = SchedulerService(db)
+    runs = service.runs_for_definition(definition.id, limit=20)
+    return {
+        "definition": service.workflow_definition_payload(definition),
+        "runs": [service.workflow_run_payload(run, include_events=True) for run in runs],
+    }
+
+
+@router.patch("/definitions/{definition_id}")
+def update_workflow_definition(
+    definition_id: uuid.UUID,
+    body: SchedulerDefinitionBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    existing = db.get(WorkflowDefinition, definition_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow definition.")
+    domain = DomainRepository(db).get_by_key(body.domain_key) if body.domain_key else None
+    if body.domain_key and domain is None:
+        raise HTTPException(status_code=400, detail=f"Unknown domain: {body.domain_key}")
+    service = SchedulerService(db)
+    definition = service.upsert_definition(
+        key=existing.key,
+        name=body.name,
+        domain_id=domain.id if domain else None,
+        description=body.description,
+        trigger_type=body.trigger_type,
+        trigger_config=body.trigger_config,
+        workflow_spec=body.workflow_spec,
+        priority=body.priority,
+        fairness_group=body.fairness_group or body.domain_key,
+        is_active=body.is_active,
+    )
+    return {"definition": service.workflow_definition_payload(definition)}
+
+
 @router.get("/dashboard")
 def get_scheduler_dashboard(db: Session = Depends(get_db)) -> dict[str, Any]:
     return SchedulerService(db).dashboard()
+
+
+@router.get("/runs/{run_id}")
+def get_workflow_run(run_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    run = db.get(WorkflowRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow run.")
+    return {"run": SchedulerService(db).workflow_run_payload(run, include_events=True)}
+
+
+@router.patch("/runs/{run_id}")
+def update_workflow_run(
+    run_id: uuid.UUID,
+    body: SchedulerRunUpdateBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(WorkflowRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow run.")
+    if body.status:
+        run.status = body.status
+    db.commit()
+    db.refresh(run)
+    return {"run": SchedulerService(db).workflow_run_payload(run, include_events=True)}
 
 
 @router.get("/runnable")

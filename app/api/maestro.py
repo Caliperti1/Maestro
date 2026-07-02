@@ -465,9 +465,10 @@ def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> Maestr
     if task is None:
         return None
     try:
-        return MaestroOrchestratorService(db).get_plan(task.id)
+        plan = MaestroOrchestratorService(db).get_plan(task.id)
     except MaestroOrchestratorError:
         return None
+    return None if plan.is_chat_only else plan
 
 
 def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:

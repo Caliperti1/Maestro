@@ -62,6 +62,7 @@ type SchedulerQueueItem = {
 
 type SchedulerRun = {
   id: string;
+  workflow_definition_id: string | null;
   parent_task_id: string | null;
   conversation_id: string | null;
   source_type: string;
@@ -70,7 +71,20 @@ type SchedulerRun = {
   fairness_group: string | null;
   summary: string | null;
   created_at: string | null;
+  input_payload?: Record<string, unknown>;
+  output_payload?: Record<string, unknown>;
+  error_message?: string | null;
+  events?: SchedulerEvent[];
   queue_items: SchedulerQueueItem[];
+};
+
+type SchedulerEvent = {
+  id: string;
+  event_type: string;
+  message: string;
+  queue_item_id: string | null;
+  payload: Record<string, unknown>;
+  created_at: string | null;
 };
 
 type SchedulerDefinition = {
@@ -81,6 +95,7 @@ type SchedulerDefinition = {
   description: string | null;
   trigger_type: string;
   trigger_config: Record<string, unknown>;
+  workflow_spec?: Record<string, unknown>;
   priority: string;
   fairness_group: string | null;
   is_active: boolean;
@@ -727,6 +742,9 @@ export function App() {
   const [schedulerDefinitionEvent, setSchedulerDefinitionEvent] = useState("gmail.message.received");
   const [schedulerEventId, setSchedulerEventId] = useState("manual-test-event");
   const [schedulerStatusMessage, setSchedulerStatusMessage] = useState("");
+  const [selectedSchedulerRun, setSelectedSchedulerRun] = useState<SchedulerRun | null>(null);
+  const [selectedSchedulerDefinition, setSelectedSchedulerDefinition] =
+    useState<SchedulerDefinition | null>(null);
 
   const maestroPlanStages = useMemo(() => {
     if (!maestroPlan) return [];
@@ -930,8 +948,12 @@ export function App() {
             time_of_day: schedulerDefinitionTime,
             interval_minutes: 1440,
           };
-    await apiJson<{ definition: SchedulerDefinition }>("/scheduler/definitions", {
-      method: "POST",
+    const path = selectedSchedulerDefinition
+      ? `/scheduler/definitions/${selectedSchedulerDefinition.id}`
+      : "/scheduler/definitions";
+    const method = selectedSchedulerDefinition ? "PATCH" : "POST";
+    const response = await apiJson<{ definition: SchedulerDefinition }>(path, {
+      method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         key,
@@ -950,8 +972,56 @@ export function App() {
         },
       }),
     });
+    setSelectedSchedulerDefinition(response.definition);
     setSchedulerStatusMessage("Workflow definition saved.");
     await loadSchedulerDashboard();
+  };
+
+  const selectSchedulerDefinition = (definition: SchedulerDefinition) => {
+    setSelectedSchedulerDefinition(definition);
+    setSchedulerDefinitionMode(definition.trigger_type === "event" ? "event" : "recurring");
+    setSchedulerDefinitionName(definition.name);
+    setSchedulerDefinitionDomain(definition.domain_key ?? "personal");
+    const queueItems = Array.isArray(definition.workflow_spec?.queue_items)
+      ? (definition.workflow_spec?.queue_items as Array<Record<string, unknown>>)
+      : [];
+    setSchedulerDefinitionObjective(String(queueItems[0]?.objective ?? definition.description ?? ""));
+    if (typeof definition.trigger_config.event_type === "string") {
+      setSchedulerDefinitionEvent(definition.trigger_config.event_type);
+    }
+    if (typeof definition.trigger_config.time_of_day === "string") {
+      setSchedulerDefinitionTime(definition.trigger_config.time_of_day);
+    }
+    setSchedulerStatusMessage(`Editing ${definition.name}.`);
+  };
+
+  const selectSchedulerRun = async (runId: string) => {
+    const response = await apiJson<{ run: SchedulerRun }>(`/scheduler/runs/${runId}`);
+    setSelectedSchedulerRun(response.run);
+    setSchedulerStatusMessage("Workflow run loaded.");
+  };
+
+  const archiveSchedulerRun = async (runId: string) => {
+    await apiJson<{ run: SchedulerRun }>(`/scheduler/runs/${runId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "archived" }),
+    });
+    if (selectedSchedulerRun?.id === runId) setSelectedSchedulerRun(null);
+    setSchedulerStatusMessage("Workflow archived from queue.");
+    await loadSchedulerDashboard();
+  };
+
+  const reenterSchedulerRunSession = async (run: SchedulerRun) => {
+    if (!run.conversation_id) {
+      setSchedulerStatusMessage("This workflow is not tied to a Maestro chat session.");
+      return;
+    }
+    const response = await apiJson<{ conversation: MaestroSessionSummary }>(
+      `/maestro/sessions/${run.conversation_id}`,
+    );
+    applyConversation(response.conversation);
+    setSchedulerStatusMessage("Re-entered the workflow's Maestro session.");
   };
 
   const runSchedulerTick = async () => {
@@ -1901,6 +1971,17 @@ export function App() {
                   <button type="button" onClick={runSchedulerTick}>
                     Run tick
                   </button>
+                  {selectedSchedulerDefinition && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedSchedulerDefinition(null);
+                        setSchedulerStatusMessage("Creating a new workflow trigger.");
+                      }}
+                    >
+                      New trigger
+                    </button>
+                  )}
                 </div>
                 <div className="scheduler-form-grid">
                   <label>
@@ -1962,7 +2043,7 @@ export function App() {
                 </label>
                 <div className="scheduler-action-row">
                   <button type="button" onClick={createSchedulerDefinition}>
-                    Save trigger
+                    {selectedSchedulerDefinition ? "Update trigger" : "Save trigger"}
                   </button>
                   {schedulerDefinitionMode === "event" && (
                     <>
@@ -2112,8 +2193,14 @@ export function App() {
                     );
                     return (
                       <article className="workflow-summary-card compact-run-card" key={run.id}>
-                        <span>{run.status}</span>
-                        <h4>{run.summary || "Maestro workflow"}</h4>
+                        <button
+                          type="button"
+                          className="card-reset"
+                          onClick={() => selectSchedulerRun(run.id)}
+                        >
+                          <span>{run.status}</span>
+                          <h4>{run.summary || "Maestro workflow"}</h4>
+                        </button>
                         <div className="preview-meta">
                           <span>{run.priority}</span>
                           <span>{run.fairness_group || "global"} fairness</span>
@@ -2124,9 +2211,74 @@ export function App() {
                             <span>{runnableBatch.parallel_ready.length} parallel-ready</span>
                           )}
                         </div>
+                        <div className="scheduler-action-row compact-actions">
+                          <button type="button" onClick={() => selectSchedulerRun(run.id)}>
+                            Inspect
+                          </button>
+                          {run.conversation_id && (
+                            <button type="button" onClick={() => reenterSchedulerRunSession(run)}>
+                              Re-enter session
+                            </button>
+                          )}
+                          <button type="button" onClick={() => archiveSchedulerRun(run.id)}>
+                            Archive
+                          </button>
+                        </div>
                       </article>
                     );
                   })}
+                </div>
+              )}
+              {selectedSchedulerRun && (
+                <div className="workflow-detail-panel scheduler-detail-panel">
+                  <div className="workflow-detail-heading">
+                    <div>
+                      <span>{selectedSchedulerRun.status}</span>
+                      <h4>{selectedSchedulerRun.summary || "Workflow run"}</h4>
+                    </div>
+                    <button type="button" onClick={() => setSelectedSchedulerRun(null)}>
+                      Close
+                    </button>
+                  </div>
+                  <div className="preview-meta">
+                    <span>{selectedSchedulerRun.source_type}</span>
+                    <span>{selectedSchedulerRun.priority}</span>
+                    <span>{selectedSchedulerRun.fairness_group || "global"} fairness</span>
+                    <span>{selectedSchedulerRun.queue_items.length} queue items</span>
+                    {selectedSchedulerRun.workflow_definition_id && <span>Recurring run</span>}
+                  </div>
+                  {selectedSchedulerRun.error_message && (
+                    <p className="evaluation-note">{selectedSchedulerRun.error_message}</p>
+                  )}
+                  <div className="workflow-detail-grid">
+                    {selectedSchedulerRun.queue_items.map((item) => (
+                      <article className="mini-row" key={item.id}>
+                        <span>
+                          Stage {item.stage_index} / {item.status} /{" "}
+                          {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
+                        </span>
+                        <p>{item.objective}</p>
+                        <div className="preview-meta">
+                          <span>{item.agent_name ?? item.agent_key ?? "Unassigned"}</span>
+                          <span>{item.priority}</span>
+                          {item.dependency_keys.length > 0 && (
+                            <span>Waits for {item.dependency_keys.join(", ")}</span>
+                          )}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                  {(selectedSchedulerRun.events ?? []).length > 0 && (
+                    <div className="scheduler-event-list">
+                      <h4>Run history</h4>
+                      {selectedSchedulerRun.events?.map((event) => (
+                        <article className="mini-row" key={event.id}>
+                          <span>{event.event_type}</span>
+                          <p>{event.message}</p>
+                        </article>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
               {schedulerDashboard && schedulerDashboard.definitions.length > 0 && (
@@ -2140,8 +2292,14 @@ export function App() {
                   </div>
                   {schedulerDashboard.definitions.slice(0, 5).map((definition) => (
                     <article className="workflow-summary-card compact-run-card" key={definition.id}>
-                      <span>{definition.trigger_type}</span>
-                      <h4>{definition.name}</h4>
+                      <button
+                        type="button"
+                        className="card-reset"
+                        onClick={() => selectSchedulerDefinition(definition)}
+                      >
+                        <span>{definition.trigger_type}</span>
+                        <h4>{definition.name}</h4>
+                      </button>
                       <div className="preview-meta">
                         <span>{definition.is_active ? "active" : "paused"}</span>
                         <span>{definition.priority}</span>
@@ -2152,6 +2310,11 @@ export function App() {
                         {typeof definition.trigger_config.event_type === "string" && (
                           <span>{definition.trigger_config.event_type}</span>
                         )}
+                      </div>
+                      <div className="scheduler-action-row compact-actions">
+                        <button type="button" onClick={() => selectSchedulerDefinition(definition)}>
+                          Edit schedule
+                        </button>
                       </div>
                     </article>
                   ))}
@@ -2192,6 +2355,11 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
   const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
   const [stageRunArtifact, setStageRunArtifact] = useState(false);
   const [autoToolLoop, setAutoToolLoop] = useState(false);
+  const [agentScheduleName, setAgentScheduleName] = useState("Daily agent check-in");
+  const [agentScheduleTime, setAgentScheduleTime] = useState("08:00");
+  const [agentScheduleObjective, setAgentScheduleObjective] = useState(
+    "Review relevant context and produce a short status report.",
+  );
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [busy, setBusy] = useState(false);
 
@@ -2423,6 +2591,52 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     }
   };
 
+  const scheduleSelectedAgent = async () => {
+    if (!selectedAgent) return;
+    setBusy(true);
+    try {
+      const keyBase = `${selectedAgent.key}-${agentScheduleName}`
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
+      await apiJson<{ definition: SchedulerDefinition }>("/scheduler/definitions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: keyBase || `${selectedAgent.key}-scheduled-work`,
+          name: agentScheduleName,
+          domain_key: domainKey,
+          description: `Recurring task for ${selectedAgent.name}.`,
+          trigger_type: "recurring",
+          trigger_config: {
+            time_of_day: agentScheduleTime,
+            interval_minutes: 1440,
+            source: "agent_detail",
+          },
+          workflow_spec: {
+            queue_items: [
+              {
+                id: `${selectedAgent.key}-scheduled-work`,
+                objective: agentScheduleObjective,
+                domain_key: domainKey,
+                agent_key: selectedAgent.key,
+                required_tools: selectedAgent.allowed_tools.map((tool) => tool.key),
+              },
+            ],
+          },
+          fairness_group: domainKey,
+          priority: "normal",
+          is_active: true,
+        }),
+      });
+      setStatusMessage("Recurring agent task scheduled.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Agent schedule save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleTool = (toolKey: string, checked: boolean) => {
     setToolPermissions((current) => {
       const next = { ...current };
@@ -2614,6 +2828,48 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
             <p className="empty-state">No queued or recent tasks for this agent.</p>
           )}
         </div>
+      </section>
+
+      <section className="memory-panel admin-panel wide-panel" aria-labelledby="agent-schedule-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Recurring work</p>
+            <h3 id="agent-schedule-heading">{selectedAgent?.name ?? "No agent selected"}</h3>
+          </div>
+          <CalendarDays size={18} />
+        </div>
+        {selectedAgent ? (
+          <div className="scheduler-control-panel embedded-scheduler">
+            <div className="scheduler-form-grid">
+              <label>
+                <span>Name</span>
+                <input
+                  value={agentScheduleName}
+                  onChange={(event) => setAgentScheduleName(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Time</span>
+                <input
+                  value={agentScheduleTime}
+                  onChange={(event) => setAgentScheduleTime(event.target.value)}
+                />
+              </label>
+            </div>
+            <label className="scheduler-wide-field">
+              <span>Objective</span>
+              <input
+                value={agentScheduleObjective}
+                onChange={(event) => setAgentScheduleObjective(event.target.value)}
+              />
+            </label>
+            <button className="planner-action" onClick={scheduleSelectedAgent} disabled={busy}>
+              Schedule recurring task
+            </button>
+          </div>
+        ) : (
+          <p className="empty-state">Select an agent to schedule recurring work.</p>
+        )}
       </section>
 
       <section

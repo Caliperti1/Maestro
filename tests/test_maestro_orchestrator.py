@@ -10,7 +10,7 @@ from app.agents.runtime import PromptAggregationService
 from app.agents.runtime import AgentRegistryService
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import Artifact, Report, Task
+from app.db.models import Artifact, Report, Task, WorkflowRun
 from app.db.session import get_db
 from app.llm.client import LLMClientError
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
@@ -875,6 +875,8 @@ def test_orchestrator_direct_chat_has_no_executable_plan(session: Session) -> No
     assert plan.direct_response == "Maestro can answer that directly without delegating work."
     assert plan.subtasks == []
     assert plan.execution_stages == []
+    assert plan.scheduler["queue_items"] == []
+    assert session.query(WorkflowRun).count() == 0
 
     try:
         service.run_plan(plan.parent_task_id, execute_llm=False)
@@ -1577,6 +1579,10 @@ def test_maestro_api_respond_returns_chat_only_without_plan(
     assert payload["plan"] is None
     assert payload["chat_plan"]["is_chat_only"] is True
     assert payload["message"]
+
+    active = client.get("/maestro/sessions/active")
+    assert active.status_code == 200
+    assert active.json()["conversation"]["active_plan"] is None
 
 
 def test_maestro_api_close_session_stages_transcript_artifact(

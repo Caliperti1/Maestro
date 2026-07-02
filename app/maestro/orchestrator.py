@@ -167,12 +167,13 @@ class MaestroOrchestratorService:
         subtasks = self._build_subtasks(cleaned_input, selected_agents, intents, work_items)
         execution_stages = self._execution_stage_keys(subtasks)
         workflow_graph = self._workflow_graph(work_items, subtasks)
-        queue_items = self._queue_items(subtasks)
+        queue_items = [] if is_chat_only else self._queue_items(subtasks)
+        schedule_candidate = self._schedule_candidate_from_input(cleaned_input, work_items, subtasks)
         summary = decomposition.plan_summary or self._plan_summary(cleaned_input, intents, subtasks)
         plan_id = str(uuid.uuid4())
         parent_task = Task(
             conversation_id=conversation_id,
-            status="proposed",
+            status="completed" if is_chat_only else "proposed",
             priority="high" if any(subtask.priority == "high" for subtask in subtasks) else "normal",
             source_type="maestro_chat",
             workflow_key="maestro.generic",
@@ -193,16 +194,22 @@ class MaestroOrchestratorService:
                     for agent in selected_agents
                 ],
                 "registry_snapshot": registry_snapshot,
-                "approval_required": True,
-                "scheduler": self._scheduler_payload(queue_items=queue_items),
+                "approval_required": not is_chat_only,
+                "scheduler": self._scheduler_payload(
+                    queue_items=queue_items,
+                    status="direct_chat" if is_chat_only else "queue_foundation",
+                    schedule_candidate=schedule_candidate,
+                ),
                 "direct_response": decomposition.direct_response,
                 "planner_notes": decomposition.planner_notes,
             },
+            completed_at=datetime.now(UTC) if is_chat_only else None,
         )
         self.session.add(parent_task)
         self.session.commit()
         self.session.refresh(parent_task)
-        SchedulerService(self.session).enqueue_maestro_plan(parent_task)
+        if not is_chat_only:
+            SchedulerService(self.session).enqueue_maestro_plan(parent_task)
         return self._plan_from_task(parent_task)
 
     def get_plan(self, plan_id: uuid.UUID | str) -> MaestroPlan:
@@ -320,6 +327,8 @@ class MaestroOrchestratorService:
         parent_task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
         if parent_task is None:
             raise MaestroOrchestratorError(f"Plan parent task was not found: {plan.parent_task_id}")
+        if plan.is_chat_only:
+            raise MaestroOrchestratorError("Direct chat responses do not have an executable plan.")
         runnable_parent_statuses = {"proposed", "queued", "failed"}
         if resume:
             runnable_parent_statuses.add("blocked")
@@ -327,8 +336,7 @@ class MaestroOrchestratorService:
             raise MaestroOrchestratorError(
                 f"Plan cannot be run from status {parent_task.status}."
             )
-        if plan.is_chat_only:
-            raise MaestroOrchestratorError("Direct chat responses do not have an executable plan.")
+        self._upsert_schedule_definition_if_requested(parent_task, plan)
         blocking_dependency_ids = self._blocked_work_item_ids(plan.work_items)
         has_attached_blocking_dependency = any(
             set(item.dependencies) & {
@@ -1699,6 +1707,7 @@ class MaestroOrchestratorService:
         *,
         queue_items: list[dict[str, Any]] | None = None,
         status: str = "queue_foundation",
+        schedule_candidate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "status": status,
@@ -1714,7 +1723,97 @@ class MaestroOrchestratorService:
             "active_queue_item_id": None,
             "current_step": "Not started.",
             "queue_items": queue_items or [],
+            "schedule_candidate": schedule_candidate,
+            "scheduled_definition_id": None,
         }
+
+    def _schedule_candidate_from_input(
+        self,
+        user_input: str,
+        work_items: list[MaestroWorkItem],
+        subtasks: list[MaestroSubtask],
+    ) -> dict[str, Any] | None:
+        lowered = user_input.lower()
+        schedule_tokens = (
+            "every morning",
+            "every day",
+            "daily",
+            "recurring",
+            "schedule",
+            "scheduled",
+            "each morning",
+            "each day",
+        )
+        if not any(token in lowered for token in schedule_tokens):
+            return None
+        if not subtasks:
+            return None
+        time_of_day = "07:55" if "before 8" in lowered or "before 8am" in lowered else "08:00"
+        primary_domain = subtasks[0].domain_key if subtasks else (work_items[0].domain_key if work_items else None)
+        name_seed = next((item.title for item in work_items if item.needs_agent), "Scheduled Maestro workflow")
+        key_seed = self._slug(f"{primary_domain or 'maestro'}-{name_seed}")
+        return {
+            "key": key_seed,
+            "name": name_seed,
+            "description": user_input[:500],
+            "domain_key": primary_domain,
+            "trigger_type": "recurring",
+            "trigger_config": {
+                "time_of_day": time_of_day,
+                "interval_minutes": 1440,
+                "source": "maestro_plan",
+            },
+            "priority": "high" if any(item.priority == "high" for item in work_items) else "normal",
+            "fairness_group": primary_domain or "maestro",
+        }
+
+    def _upsert_schedule_definition_if_requested(self, task: Task, plan: MaestroPlan) -> None:
+        scheduler = dict((task.input_payload or {}).get("scheduler", {}))
+        candidate = scheduler.get("schedule_candidate")
+        if not isinstance(candidate, dict):
+            return
+        queue_items = scheduler.get("queue_items") if isinstance(scheduler.get("queue_items"), list) else []
+        if not queue_items:
+            return
+        domain_id = None
+        domain_key = candidate.get("domain_key")
+        if domain_key:
+            from app.db.repositories import DomainRepository
+
+            domain = DomainRepository(self.session).get_by_key(str(domain_key))
+            domain_id = domain.id if domain else None
+        definition = SchedulerService(self.session).upsert_definition(
+            key=str(candidate.get("key") or self._slug(plan.summary)),
+            name=str(candidate.get("name") or plan.summary[:120]),
+            domain_id=domain_id,
+            description=str(candidate.get("description") or plan.user_input[:500]),
+            trigger_type=str(candidate.get("trigger_type") or "recurring"),
+            trigger_config=dict(candidate.get("trigger_config") or {}),
+            workflow_spec={
+                "source_plan_id": plan.plan_id,
+                "source_parent_task_id": plan.parent_task_id,
+                "queue_items": queue_items,
+            },
+            priority=str(candidate.get("priority") or plan.status or "normal"),
+            fairness_group=str(candidate.get("fairness_group") or domain_key or "maestro"),
+            is_active=True,
+        )
+        payload = dict(task.input_payload or {})
+        scheduler = {
+            **self._scheduler_payload(),
+            **dict(payload.get("scheduler", {})),
+            "scheduled_definition_id": str(definition.id),
+            "status": "scheduled_definition_saved",
+        }
+        payload["scheduler"] = scheduler
+        task.input_payload = payload
+        self.session.commit()
+
+    def _slug(self, value: str) -> str:
+        cleaned = "".join(character.lower() if character.isalnum() else "-" for character in value)
+        while "--" in cleaned:
+            cleaned = cleaned.replace("--", "-")
+        return cleaned.strip("-")[:120] or "scheduled-maestro-workflow"
 
     def _queue_items(self, subtasks: list[MaestroSubtask]) -> list[dict[str, Any]]:
         queue_items: list[dict[str, Any]] = []
