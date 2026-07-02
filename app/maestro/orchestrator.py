@@ -14,8 +14,9 @@ from app.agents.runtime import (
     PromptAggregationService,
     PromptPackageRequest,
 )
-from app.db.models import Artifact, Report, Task, ToolCall
 from app.core.config import get_settings
+from app.core.time import home_isoformat
+from app.db.models import Artifact, Report, Task, ToolCall
 from app.llm.client import LLMClient, LLMClientError, OpenAILLMClient
 from app.maestro.planner import (
     LLMMaestroPlanner,
@@ -1966,7 +1967,7 @@ class MaestroOrchestratorService:
             registry_snapshot=dict(payload.get("registry_snapshot", {})),
             approval_required=bool(payload.get("approval_required", True)),
             scheduler=dict(payload.get("scheduler", self._scheduler_payload())),
-            created_at=task.created_at.isoformat() if task.created_at else "",
+            created_at=home_isoformat(task.created_at) or "",
             parent_task_id=str(task.id),
             direct_response=payload.get("direct_response"),
             planner_notes=payload.get("planner_notes"),

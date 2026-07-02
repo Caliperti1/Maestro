@@ -320,6 +320,48 @@ def test_scheduler_enqueues_due_recurring_definitions_once(session: Session) -> 
     assert definition.trigger_config["next_run_at"] != (now - timedelta(minutes=1)).isoformat()
 
 
+def test_scheduler_daily_time_of_day_uses_home_timezone(session: Session) -> None:
+    now = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
+    definition = SchedulerService(session).upsert_definition(
+        key="daily-brief",
+        name="Daily Brief",
+        trigger_type="recurring",
+        trigger_config={"time_of_day": "08:00"},
+        workflow_spec={
+            "queue_items": [
+                {"id": "brief", "objective": "Prepare the daily brief.", "domain_key": "personal"}
+            ]
+        },
+    )
+
+    SchedulerService(session).enqueue_due_workflows(now=now)
+
+    session.refresh(definition)
+    assert definition.trigger_config["next_run_at"] == "2026-01-15T13:00:00+00:00"
+
+
+def test_scheduler_payload_renders_timestamps_in_home_timezone(session: Session) -> None:
+    scheduled_for = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    definition = SchedulerService(session).upsert_definition(
+        key="summer-brief",
+        name="Summer Brief",
+        trigger_type="manual",
+        workflow_spec={
+            "queue_items": [
+                {"id": "brief", "objective": "Prepare the summer brief.", "domain_key": "personal"}
+            ]
+        },
+    )
+    run = SchedulerService(session).enqueue_definition_run(
+        definition,
+        scheduled_for=scheduled_for,
+    )
+
+    payload = SchedulerService(session).workflow_run_payload(run)
+
+    assert payload["scheduled_for"] == "2026-07-01T08:00:00-04:00"
+
+
 def test_scheduler_enqueues_event_triggered_workflows_with_filters(session: Session) -> None:
     SchedulerService(session).upsert_definition(
         key="praxis-email-triage",
