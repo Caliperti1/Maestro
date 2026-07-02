@@ -197,3 +197,95 @@ def test_scheduler_api_updates_definition_schedule(
     assert definition["key"] == "agent-daily-brief"
     assert definition["trigger_config"]["time_of_day"] == "07:30"
     assert definition["workflow_spec"]["queue_items"][0]["objective"] == "Brief Chris early."
+
+
+def test_scheduler_worker_run_executes_assigned_agent_item(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+    created = client.post(
+        "/scheduler/definitions",
+        json={
+            "key": "praxis-agent-worker-test",
+            "name": "Praxis Agent Worker Test",
+            "domain_key": "praxis",
+            "trigger_type": "recurring",
+            "trigger_config": {
+                "next_run_at": "2020-01-01T07:55:00+00:00",
+                "interval_minutes": 1440,
+            },
+            "workflow_spec": {
+                "queue_items": [
+                    {
+                        "id": "brief",
+                        "objective": "Prepare a brief scheduler worker report.",
+                        "domain_key": "praxis",
+                        "agent_key": "praxis-planning-agent",
+                    }
+                ]
+            },
+        },
+    )
+    assert created.status_code == 200
+
+    worker = client.post(
+        "/scheduler/worker/run",
+        json={
+            "owner": "api-worker-test",
+            "claim_limit": 2,
+            "execute_llm": False,
+            "auto_tool_loop": False,
+        },
+    )
+
+    assert worker.status_code == 200
+    payload = worker.json()
+    assert len(payload["enqueued"]) == 1
+    assert len(payload["claimed"]) == 1
+    assert len(payload["executed"]) == 1
+    assert payload["executed"][0]["status"] == "completed"
+    assert payload["executed"][0]["queue_item"]["status"] == "completed"
+    assert payload["executed"][0]["agent_run"]["status"] == "prepared"
+
+
+def test_scheduler_worker_blocks_unassigned_item(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+    client.post(
+        "/scheduler/definitions",
+        json={
+            "key": "unassigned-worker-test",
+            "name": "Unassigned Worker Test",
+            "domain_key": "praxis",
+            "trigger_type": "recurring",
+            "trigger_config": {
+                "next_run_at": "2020-01-01T07:55:00+00:00",
+                "interval_minutes": 1440,
+            },
+            "workflow_spec": {
+                "queue_items": [
+                    {
+                        "id": "triage",
+                        "objective": "Triage without an agent.",
+                        "domain_key": "praxis",
+                    }
+                ]
+            },
+        },
+    )
+
+    worker = client.post(
+        "/scheduler/worker/run",
+        json={"owner": "api-worker-test", "claim_limit": 2, "execute_llm": False},
+    )
+
+    assert worker.status_code == 200
+    executed = worker.json()["executed"][0]
+    assert executed["status"] == "blocked"
+    assert executed["queue_item"]["status"] == "blocked"
+    assert "No agent" in executed["queue_item"]["error_message"]

@@ -390,6 +390,32 @@ class SchedulerService:
         self.session.refresh(item)
         return item
 
+    def block_queue_item(
+        self,
+        queue_item_id: uuid.UUID,
+        *,
+        error_message: str,
+        output_payload: dict[str, Any] | None = None,
+    ) -> WorkflowQueueItem:
+        item = self._require_queue_item(queue_item_id)
+        item.status = "blocked"
+        item.error_message = error_message
+        item.output_payload = {**(item.output_payload or {}), **(output_payload or {})}
+        self.release_locks(item, commit=False)
+        run = self.session.get(WorkflowRun, item.workflow_run_id)
+        self._refresh_run_status(run)
+        self.record_event(
+            run,
+            queue_item=item,
+            event_type="queue_item_blocked",
+            message=f"Queue item `{item.external_key}` blocked: {error_message}",
+            payload={"error_message": error_message},
+            commit=False,
+        )
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
     def update_queue_item(
         self,
         queue_item_id: uuid.UUID,
@@ -653,6 +679,7 @@ class SchedulerService:
         *,
         commit: bool = True,
     ) -> None:
+        self._ensure_agents_available()
         existing = {
             item.external_key: item
             for item in self.session.scalars(
@@ -704,6 +731,7 @@ class SchedulerService:
         *,
         commit: bool = True,
     ) -> None:
+        self._ensure_agents_available()
         existing = {
             item.external_key: item
             for item in self.session.scalars(
@@ -874,6 +902,11 @@ class SchedulerService:
         if agent_key:
             locks.append({"resource_key": f"agent:{agent_key}", "lock_scope": "exclusive"})
         return locks
+
+    def _ensure_agents_available(self) -> None:
+        from app.agents.runtime import AgentRegistryService
+
+        AgentRegistryService(self.session).ensure_seed_agents()
 
     def _fairness_group(self, task: Task) -> str:
         if task.domain_id:

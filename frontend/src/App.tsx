@@ -113,6 +113,21 @@ type SchedulerDashboard = {
   active_locks: Array<Record<string, unknown>>;
 };
 
+type SchedulerWorkerAgentRun = {
+  run_id: string;
+  status: string;
+  agent_key: string;
+  agent_name: string;
+  task_id: string | null;
+  report_id: string | null;
+  execution_note: string;
+  output_preview: string;
+  tool_calls: AgentRun["tool_calls"];
+  staged_artifact_path: string | null;
+  artifact_id: string | null;
+  error_message: string | null;
+};
+
 type DropboxDomain = {
   key: string;
   inbox: number;
@@ -1036,6 +1051,37 @@ export function App() {
     });
     setSchedulerStatusMessage(
       `Tick enqueued ${response.enqueued.length} run(s) and claimed ${response.claimed.length} item(s).`,
+    );
+    await loadSchedulerDashboard();
+  };
+
+  const runSchedulerWorker = async () => {
+    const response = await apiJson<{
+      enqueued: SchedulerRun[];
+      claimed: SchedulerQueueItem[];
+      executed: Array<{
+        status: string;
+        queue_item: SchedulerQueueItem;
+        agent_run: SchedulerWorkerAgentRun | null;
+      }>;
+      runnable_batches: SchedulerDashboard["runnable_batches"];
+    }>("/scheduler/worker/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        owner: "maestro-ui-worker",
+        claim_limit: 4,
+        lease_seconds: 300,
+        execute_llm: executeMaestroLLM,
+        auto_tool_loop: autoMaestroToolLoop,
+        max_tool_iterations: 2,
+      }),
+    });
+    const completed = response.executed.filter((item) => item.status === "completed").length;
+    const blocked = response.executed.filter((item) => item.status === "blocked").length;
+    const failed = response.executed.filter((item) => item.status === "failed").length;
+    setSchedulerStatusMessage(
+      `Worker enqueued ${response.enqueued.length}, claimed ${response.claimed.length}, completed ${completed}, blocked ${blocked}, failed ${failed}.`,
     );
     await loadSchedulerDashboard();
   };
@@ -1970,6 +2016,9 @@ export function App() {
                   </div>
                   <button type="button" onClick={runSchedulerTick}>
                     Run tick
+                  </button>
+                  <button type="button" onClick={runSchedulerWorker}>
+                    Run worker
                   </button>
                   {selectedSchedulerDefinition && (
                     <button

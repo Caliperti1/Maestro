@@ -9,6 +9,7 @@ from app.db.models import WorkflowDefinition, WorkflowQueueItem, WorkflowRun
 from app.db.repositories import DomainRepository
 from app.db.session import get_db
 from app.maestro.scheduler import SchedulerService
+from app.maestro.scheduler_worker import SchedulerWorkerService
 
 router = APIRouter(prefix="/scheduler", tags=["scheduler"])
 
@@ -60,6 +61,15 @@ class SchedulerTickBody(BaseModel):
     owner: str = "maestro-worker"
     claim_limit: int = Field(default=4, ge=1, le=20)
     lease_seconds: int = Field(default=900, ge=30, le=86400)
+
+
+class SchedulerWorkerRunBody(BaseModel):
+    owner: str = "maestro-worker"
+    claim_limit: int = Field(default=4, ge=1, le=20)
+    lease_seconds: int = Field(default=900, ge=30, le=86400)
+    execute_llm: bool = True
+    auto_tool_loop: bool = True
+    max_tool_iterations: int = Field(default=2, ge=1, le=4)
 
 
 @router.get("/definitions")
@@ -205,6 +215,22 @@ def run_scheduler_tick(
         owner=options.owner,
         claim_limit=options.claim_limit,
         lease_seconds=options.lease_seconds,
+    )
+
+
+@router.post("/worker/run")
+def run_scheduler_worker_once(
+    body: SchedulerWorkerRunBody | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    options = body or SchedulerWorkerRunBody()
+    return SchedulerWorkerService(db).run_once(
+        owner=options.owner,
+        claim_limit=options.claim_limit,
+        lease_seconds=options.lease_seconds,
+        execute_llm=options.execute_llm,
+        auto_tool_loop=options.auto_tool_loop,
+        max_tool_iterations=options.max_tool_iterations,
     )
 
 
