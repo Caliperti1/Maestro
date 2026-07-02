@@ -1467,6 +1467,74 @@ def test_maestro_api_respond_refines_active_plan(
     assert payload["plan"]["plan_id"] != first_plan["plan_id"]
 
 
+def test_maestro_api_respond_treats_standalone_followup_as_new_workflow(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Prepare an Ophi research workflow.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "planned"
+    assert payload["plan"]["parent_task_id"] != first_plan["parent_task_id"]
+    task = session.get(Task, uuid.UUID(payload["plan"]["parent_task_id"]))
+    assert task is not None
+    assert "refined_from_plan_id" not in task.input_payload
+
+
+def test_maestro_api_respond_answers_scheduled_workflow_status_without_queuing(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    created = client.post(
+        "/scheduler/definitions",
+        json={
+            "key": "maestro-backlog-plan",
+            "name": "Daily Maestro Backlog Plan",
+            "trigger_type": "recurring",
+            "trigger_config": {"time_of_day": "09:00", "interval_minutes": 1440},
+            "workflow_spec": {
+                "queue_items": [
+                    {
+                        "id": "plan-day",
+                        "objective": "Review the Maestro backlog and propose a daily work plan.",
+                        "domain_key": "maestro-development",
+                    }
+                ]
+            },
+        },
+    )
+    assert created.status_code == 200
+    task_count = len(session.scalars(select(Task)).all())
+
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Tell me all of the actively scheduled workflows."},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["classification"] == "system_status"
+    assert payload["plan"] is None
+    assert "Daily Maestro Backlog Plan" in payload["message"]
+    assert len(session.scalars(select(Task)).all()) == task_count
+
+
 def test_maestro_api_respond_classifies_specific_plan_guidance_as_refinement(
     session: Session,
     tmp_path: Path,

@@ -449,7 +449,7 @@ class SchedulerService:
     def dashboard(self) -> dict[str, Any]:
         runs = self.session.scalars(
             select(WorkflowRun)
-            .where(WorkflowRun.status != "archived")
+            .where(WorkflowRun.status.in_(["queued", "ready", "running", "blocked", "failed"]))
             .order_by(WorkflowRun.created_at.desc())
             .limit(20)
         ).all()

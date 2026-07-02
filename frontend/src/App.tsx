@@ -647,6 +647,49 @@ function triggerSummary(triggerType: string, triggerConfig: Record<string, unkno
   return triggerType;
 }
 
+function messageReferencesActivePlan(message: string) {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return [
+    "this plan",
+    "that plan",
+    "the plan",
+    "current plan",
+    "active plan",
+    "this workflow",
+    "that workflow",
+    "the workflow",
+    "current workflow",
+    "active workflow",
+    "merge the pr",
+    "merge pr",
+    "merge it",
+    "merge that",
+    "hot reload",
+    "reload the app",
+    "make it live",
+    "ship it",
+    "approved",
+    "approve",
+    "reject",
+    "run it",
+    "save it",
+    "save schedule",
+    "change the plan",
+    "update the plan",
+    "refine",
+    "instead",
+    "also include",
+    "remove ",
+    "drop ",
+    "only ",
+    "belongs in",
+    "move this",
+    "do this first",
+    "do that first",
+  ].some((token) => normalized.includes(token));
+}
+
 function RoutedItemsBoard({
   domainKey,
   title,
@@ -907,6 +950,22 @@ export function App() {
       ? (candidate as Record<string, unknown>)
       : null;
   }, [maestroPlan]);
+
+  const scheduledWorkflowDefinitions = useMemo(
+    () =>
+      (schedulerDashboard?.definitions ?? []).filter((definition) =>
+        ["scheduled", "recurring"].includes(definition.trigger_type),
+      ),
+    [schedulerDashboard],
+  );
+
+  const triggerWorkflowDefinitions = useMemo(
+    () =>
+      (schedulerDashboard?.definitions ?? []).filter(
+        (definition) => definition.trigger_type === "event",
+      ),
+    [schedulerDashboard],
+  );
 
   const pendingToolApprovals = useMemo(
     () =>
@@ -1392,7 +1451,10 @@ export function App() {
       sender: "user",
       content: draftMessage.trim(),
     };
-    const activePlanId = maestroPlan ? maestroPlan.parent_task_id : null;
+    const activePlanId =
+      maestroPlan && messageReferencesActivePlan(outgoingMessage.content)
+        ? maestroPlan.parent_task_id
+        : null;
     setMaestroBusy(true);
     setChatMessages((messages) => [...messages, outgoingMessage]);
     setDraftMessage("");
@@ -2390,8 +2452,8 @@ export function App() {
                 </div>
               ) : (
                 <p className="empty-state">
-                  No scheduled or running workflows yet. Maestro workflows will appear here after
-                  they are proposed, queued, or executed.
+                  No active workflow selected. Proposed, queued, or running workflows can be
+                  inspected here when they need attention.
                 </p>
               )}
               {schedulerDashboard && schedulerDashboard.runs.length > 0 && (
@@ -2399,7 +2461,7 @@ export function App() {
                   <div className="workflow-detail-heading">
                     <div>
                       <span>Durable queue</span>
-                      <h4>Scheduled and recent workflows</h4>
+                      <h4>Active workflow queue</h4>
                     </div>
                     <span>{schedulerDashboard.runnable_batches.length} runnable batch(es)</span>
                   </div>
@@ -2448,6 +2510,12 @@ export function App() {
                     );
                   })}
                 </div>
+              )}
+              {schedulerDashboard && schedulerDashboard.runs.length === 0 && (
+                <p className="empty-state">
+                  No active queued work. Completed runs are kept as history instead of staying in
+                  the queue.
+                </p>
               )}
               {selectedSchedulerRun && (
                 <div className="workflow-detail-panel scheduler-detail-panel">
@@ -2502,16 +2570,16 @@ export function App() {
                   )}
                 </div>
               )}
-              {schedulerDashboard && schedulerDashboard.definitions.length > 0 && (
+              {scheduledWorkflowDefinitions.length > 0 && (
                 <div className="scheduler-run-list" aria-label="Scheduled workflow definitions">
                   <div className="workflow-detail-heading">
                     <div>
-                      <span>Triggers</span>
-                      <h4>Recurring and event workflows</h4>
+                      <span>Schedules</span>
+                      <h4>Scheduled workflows</h4>
                     </div>
-                    <span>{schedulerDashboard.definitions.length} configured</span>
+                    <span>{scheduledWorkflowDefinitions.length} configured</span>
                   </div>
-                  {schedulerDashboard.definitions.slice(0, 5).map((definition) => {
+                  {scheduledWorkflowDefinitions.slice(0, 5).map((definition) => {
                     const unassigned = unassignedDefinitionItemCount(definition);
                     return (
                       <article className="workflow-summary-card compact-run-card" key={definition.id}>
@@ -2539,6 +2607,47 @@ export function App() {
                         <div className="scheduler-action-row compact-actions">
                           <button type="button" onClick={() => selectSchedulerDefinition(definition)}>
                             Edit schedule
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+              {triggerWorkflowDefinitions.length > 0 && (
+                <div className="scheduler-run-list" aria-label="Trigger workflow definitions">
+                  <div className="workflow-detail-heading">
+                    <div>
+                      <span>Triggers</span>
+                      <h4>Trigger workflows</h4>
+                    </div>
+                    <span>{triggerWorkflowDefinitions.length} configured</span>
+                  </div>
+                  {triggerWorkflowDefinitions.slice(0, 5).map((definition) => {
+                    const unassigned = unassignedDefinitionItemCount(definition);
+                    return (
+                      <article className="workflow-summary-card compact-run-card" key={definition.id}>
+                        <button
+                          type="button"
+                          className="card-reset"
+                          onClick={() => selectSchedulerDefinition(definition)}
+                        >
+                          <span>{definition.trigger_type}</span>
+                          <h4>{definition.name}</h4>
+                        </button>
+                        <div className="preview-meta">
+                          <span>{definition.is_active ? "active" : "paused"}</span>
+                          <span>{triggerSummary(definition.trigger_type, definition.trigger_config)}</span>
+                          <span>{definition.priority}</span>
+                          <span>{definition.fairness_group || definition.domain_key || "global"} fairness</span>
+                          {unassigned > 0 && <span className="warning-pill">{unassigned} need agent</span>}
+                          {typeof definition.trigger_config.event_type === "string" && (
+                            <span>{definition.trigger_config.event_type}</span>
+                          )}
+                        </div>
+                        <div className="scheduler-action-row compact-actions">
+                          <button type="button" onClick={() => selectSchedulerDefinition(definition)}>
+                            Edit trigger
                           </button>
                         </div>
                       </article>
