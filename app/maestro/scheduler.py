@@ -268,6 +268,36 @@ class SchedulerService:
         self.session.refresh(run)
         return run
 
+    def archive_run_for_parent_task(
+        self,
+        parent_task_id: uuid.UUID,
+        *,
+        reason: str = "Workflow was archived.",
+        commit: bool = True,
+    ) -> WorkflowRun | None:
+        run = self.session.scalar(select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task_id))
+        if run is None:
+            return None
+        run.status = "archived"
+        run.error_message = reason
+        run.completed_at = run.completed_at or datetime.now(UTC)
+        for item in self._queue_items_for_run(run.id):
+            if item.status not in {"completed", "failed", "archived"}:
+                item.status = "archived"
+                item.error_message = reason
+                item.completed_at = item.completed_at or datetime.now(UTC)
+            self.release_locks(item, commit=False)
+        self.record_event(
+            run,
+            event_type="workflow_archived",
+            message=reason,
+            commit=False,
+        )
+        if commit:
+            self.session.commit()
+            self.session.refresh(run)
+        return run
+
     def runnable_batches(self, *, limit: int = 25) -> list[dict[str, Any]]:
         runs = self.session.scalars(
             select(WorkflowRun)

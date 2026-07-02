@@ -110,6 +110,22 @@ def respond_to_maestro(
             if classification == "new_workflow":
                 plan = service.create_plan(body.message, conversation_id=conversation.id)
                 kind = "chat_only" if plan.is_chat_only else "planned"
+            elif classification == "delete_workflow":
+                archived_plan = service.archive_plan(
+                    active_plan_id,
+                    reason=f"Workflow archived from Maestro chat. Request: {body.message}",
+                )
+                response_message = "Done. I archived that workflow and removed it from the active queue."
+                _record_session_message(db, conversation, "maestro", response_message)
+                return {
+                    "kind": "chat_only",
+                    "classification": classification,
+                    "message": response_message,
+                    "plan": None,
+                    "chat_plan": None,
+                    "active_plan": _plan_payload(archived_plan),
+                    "conversation": _conversation_payload(db, conversation),
+                }
             elif classification == "side_chat":
                 response_message = _side_chat_response(body.message, active_plan)
                 _record_session_message(db, conversation, "maestro", response_message)
@@ -500,6 +516,7 @@ def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> Maestr
         .where(
             Task.conversation_id == conversation_id,
             Task.workflow_key == "maestro.generic",
+            Task.status != "archived",
         )
         .order_by(Task.created_at.desc(), Task.id.desc())
         .limit(1)
@@ -606,6 +623,8 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
     )
     if not _should_use_plan_context(message, active_plan):
         return "new_workflow"
+    if _is_workflow_delete_message(lowered):
+        return "delete_workflow"
     if any(token in lowered for token in ("new workflow", "new plan", "separate workflow", "start over")):
         return "new_workflow"
     if any(
@@ -769,6 +788,8 @@ def _should_use_plan_context(message: str, active_plan: MaestroPlan) -> bool:
     )
     if any(token in lowered for token in contextual_tokens):
         return True
+    if _is_workflow_delete_message(lowered):
+        return True
     if any(token in lowered for token in ("remember", "log ", "capture ", "add task", "contact:", "event:")):
         return True
     if lowered.endswith("?") or any(
@@ -777,6 +798,34 @@ def _should_use_plan_context(message: str, active_plan: MaestroPlan) -> bool:
     ):
         return False
     return False
+
+
+def _is_workflow_delete_message(lowered_message: str) -> bool:
+    if (
+        "remove" in lowered_message
+        and any(token in lowered_message for token in (" task", "work item", "subtask"))
+        and "workflow" not in lowered_message
+    ):
+        return False
+    destructive = any(
+        token in lowered_message
+        for token in ("delete", "remove", "cancel", "archive", "discard", "clear out")
+    )
+    target = any(
+        token in lowered_message
+        for token in (
+            "workflow",
+            "plan",
+            "queue item",
+            "queued work",
+            "current work",
+            "under development",
+            "this",
+            "that",
+            "it",
+        )
+    )
+    return destructive and target
 
 
 def _classified_refinement_message(message: str, classification: str, active_plan: MaestroPlan) -> str:

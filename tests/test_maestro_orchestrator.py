@@ -1495,6 +1495,82 @@ def test_maestro_api_respond_treats_standalone_followup_as_new_workflow(
     assert "refined_from_plan_id" not in task.input_payload
 
 
+def test_maestro_api_respond_deletes_active_workflow_instead_of_refining(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Please delete the workflow currently under development.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["classification"] == "delete_workflow"
+    assert payload["plan"] is None
+    task = session.get(Task, uuid.UUID(first_plan["parent_task_id"]))
+    assert task is not None
+    assert task.status == "archived"
+    run = session.scalar(
+        select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(first_plan["parent_task_id"]))
+    )
+    assert run is not None
+    assert run.status == "archived"
+    active = client.get("/maestro/sessions/active")
+    assert active.json()["conversation"]["active_plan"] is None
+
+
+def test_maestro_api_refinement_supersedes_previous_queued_workflow(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    refine_response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Also include GroundTruth demo technical readiness.",
+        },
+    )
+
+    assert refine_response.status_code == 200
+    payload = refine_response.json()
+    assert payload["kind"] == "refined"
+    old_task = session.get(Task, uuid.UUID(first_plan["parent_task_id"]))
+    new_task = session.get(Task, uuid.UUID(payload["plan"]["parent_task_id"]))
+    assert old_task is not None
+    assert new_task is not None
+    assert old_task.status == "archived"
+    assert new_task.status == "proposed"
+    old_run = session.scalar(
+        select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(first_plan["parent_task_id"]))
+    )
+    new_run = session.scalar(
+        select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(payload["plan"]["parent_task_id"]))
+    )
+    assert old_run is not None
+    assert old_run.status == "archived"
+    assert new_run is not None
+    assert new_run.status in {"queued", "proposed"}
+
+
 def test_maestro_api_respond_answers_scheduled_workflow_status_without_queuing(
     session: Session,
     tmp_path: Path,

@@ -244,6 +244,18 @@ class MaestroOrchestratorService:
             refined_input,
             conversation_id=previous_task.conversation_id if previous_task else None,
         )
+        if previous_task is not None and previous_task.status in {
+            "proposed",
+            "queued",
+            "ready",
+            "blocked",
+            "failed",
+        }:
+            self._archive_parent_task(
+                previous_task,
+                reason=f"Workflow superseded by refined plan {plan.plan_id}.",
+                commit=False,
+            )
         task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
         if task is not None:
             task.input_payload = {
@@ -255,6 +267,54 @@ class MaestroOrchestratorService:
             self.session.refresh(task)
             return self._plan_from_task(task)
         return plan
+
+    def archive_plan(
+        self,
+        plan_id: uuid.UUID | str,
+        *,
+        reason: str = "Workflow archived at Chris's request.",
+    ) -> MaestroPlan:
+        plan = self.get_plan(plan_id)
+        task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
+        if task is None:
+            raise MaestroOrchestratorError(f"Plan parent task was not found: {plan.parent_task_id}")
+        self._archive_parent_task(task, reason=reason, commit=True)
+        return self._plan_from_task(task)
+
+    def _archive_parent_task(self, task: Task, *, reason: str, commit: bool) -> None:
+        raw_scheduler = task.input_payload.get("scheduler") if isinstance(task.input_payload, dict) else {}
+        scheduler = raw_scheduler if isinstance(raw_scheduler, dict) else {}
+        queue_items = scheduler.get("queue_items") if isinstance(scheduler.get("queue_items"), list) else []
+        archived_queue_items = [
+            {
+                **item,
+                "status": "archived",
+                "error_message": item.get("error_message") or reason,
+            }
+            for item in queue_items
+            if isinstance(item, dict)
+        ]
+        if isinstance(task.input_payload, dict):
+            task.input_payload = {
+                **task.input_payload,
+                "scheduler": {
+                    **scheduler,
+                    "status": "archived",
+                    "current_step": "Workflow archived.",
+                    "queue_items": archived_queue_items,
+                },
+            }
+        task.status = "archived"
+        task.error_message = reason
+        task.completed_at = task.completed_at or datetime.now(UTC)
+        SchedulerService(self.session).archive_run_for_parent_task(
+            task.id,
+            reason=reason,
+            commit=False,
+        )
+        if commit:
+            self.session.commit()
+            self.session.refresh(task)
 
     def close_session(
         self,
