@@ -13,8 +13,11 @@ class Settings(BaseSettings):
     app_name: str = "Maestro"
     app_host: str = "0.0.0.0"
     app_port: Annotated[int, Field(ge=1, le=65535)] = 8000
-    frontend_origin: str = "http://localhost:5173"
-    cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    frontend_origin: str = "http://localhost:5174"
+    cors_allow_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "http://localhost:5174,http://127.0.0.1:5174,http://0.0.0.0:5174"
+    )
     database_url: str = "postgresql+psycopg://maestro:maestro@localhost:55432/maestro"
     llm_provider: str = "openrouter"
     openai_api_key: str | None = None
