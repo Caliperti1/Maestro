@@ -10,7 +10,7 @@ from app.agents.runtime import PromptAggregationService
 from app.agents.runtime import AgentRegistryService
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import Artifact, Report, Task, WorkflowRun
+from app.db.models import Artifact, Report, Task, WorkflowDefinition, WorkflowRun
 from app.db.session import get_db
 from app.llm.client import LLMClientError
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
@@ -633,6 +633,45 @@ class FakeDirectChatPlannerLLMClient:
         raise AssertionError("Planner should use structured_response.")
 
 
+class FakeScheduledPlannerLLMClient:
+    provider = "test"
+    model = "test-scheduled-planner"
+
+    def __init__(self, *, title: str = "Review Maestro backlog", domain_key: str = "maestro-development"):
+        self.title = title
+        self.domain_key = domain_key
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": self.title,
+            "direct_response": None,
+            "planner_notes": "Fake scheduled workflow planner response.",
+            "work_items": [
+                {
+                    "id": "wi_scheduled_work",
+                    "type": "workflow_task",
+                    "title": self.title,
+                    "description": self.title,
+                    "domain_key": self.domain_key,
+                    "priority": "normal",
+                    "required_capabilities": ["planning", "synthesis"],
+                    "required_tools": ["github.issue.search"],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-introspection-agent"],
+                    "expected_output": "Scheduled workflow output.",
+                    "rationale": "Chris asked Maestro to schedule recurring or triggered work.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
 class FailingPlannerLLMClient:
     provider = "test"
     model = "test-failing-planner"
@@ -884,6 +923,62 @@ def test_orchestrator_direct_chat_has_no_executable_plan(session: Session) -> No
         assert "Direct chat responses" in str(exc)
     else:
         raise AssertionError("Direct chat plans should not be executable.")
+
+
+def test_orchestrator_saves_recurring_workflow_without_immediate_execution(
+    session: Session,
+) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeScheduledPlannerLLMClient(),
+    )
+
+    plan = service.create_plan(
+        "Each morning at 9am please review the Maestro backlog and propose a work plan for the day"
+    )
+
+    assert plan.scheduler["schedule_candidate"]["trigger_type"] == "recurring"
+    assert plan.scheduler["schedule_candidate"]["trigger_config"]["time_of_day"] == "09:00"
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=False)
+
+    assert run.status == "scheduled"
+    assert run.child_runs == []
+    definition = session.query(WorkflowDefinition).one()
+    assert definition.trigger_type == "recurring"
+    assert definition.trigger_config["time_of_day"] == "09:00"
+    assert definition.workflow_spec["queue_items"][0]["status"] == "pending"
+    workflow_run = session.query(WorkflowRun).one()
+    assert workflow_run.status == "scheduled"
+
+
+def test_orchestrator_saves_email_event_triggered_workflow(
+    session: Session,
+) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeScheduledPlannerLLMClient(
+            title="Triage new email",
+            domain_key="praxis",
+        ),
+    )
+
+    plan = service.create_plan(
+        "Each time a new email arrives identify if it is worth notifying me about, "
+        "extract relevant contact info, events, or to dos and route them appropriately"
+    )
+
+    candidate = plan.scheduler["schedule_candidate"]
+    assert candidate["trigger_type"] == "event"
+    assert candidate["trigger_config"]["event_type"] == "gmail.message.received"
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=False)
+
+    assert run.status == "scheduled"
+    definition = session.query(WorkflowDefinition).one()
+    assert definition.trigger_type == "event"
+    assert definition.trigger_config["event_type"] == "gmail.message.received"
+    assert definition.workflow_spec["queue_items"][0]["domain_key"] == "praxis"
 
 
 def test_orchestrator_run_dispatches_children_and_stages_one_artifact(

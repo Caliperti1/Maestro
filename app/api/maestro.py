@@ -173,7 +173,7 @@ def run_maestro_plan(
         conversation,
         "maestro",
         run.chat_summary
-        if run.status == "completed"
+        if run.status in {"completed", "scheduled"}
         else f"The workflow finished with status {run.status}.\n\n{run.chat_summary}",
     )
     return {"run": _run_payload(run)}
@@ -499,6 +499,14 @@ def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
 def _maestro_response_text(plan: MaestroPlan, *, refined: bool) -> str:
     if plan.is_chat_only:
         return plan.direct_response or plan.summary or "I can handle that directly here."
+    schedule_candidate = plan.scheduler.get("schedule_candidate")
+    if isinstance(schedule_candidate, dict):
+        trigger_type = schedule_candidate.get("trigger_type", "scheduled")
+        return (
+            f"I drafted a {trigger_type} workflow with {len(plan.work_items)} work items and "
+            f"{len(plan.subtasks)} subtasks. Review it here; when you run the plan I will save "
+            "the schedule in Queue instead of executing it immediately."
+        )
     blocking_items = [
         item for item in plan.work_items if item.needs_user_input and item.blocks_execution
     ]

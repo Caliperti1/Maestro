@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -336,6 +337,8 @@ class MaestroOrchestratorService:
             raise MaestroOrchestratorError(
                 f"Plan cannot be run from status {parent_task.status}."
             )
+        if self._is_schedule_definition_request(plan):
+            return self._save_scheduled_workflow(parent_task, plan)
         self._upsert_schedule_definition_if_requested(parent_task, plan)
         blocking_dependency_ids = self._blocked_work_item_ids(plan.work_items)
         has_attached_blocking_dependency = any(
@@ -750,6 +753,31 @@ class MaestroOrchestratorService:
                     suggested_agent_keys=[],
                     expected_output="Role-scoped workflow contribution and recommended next steps.",
                     rationale="The request asks Maestro to prepare or coordinate work.",
+                )
+            )
+        if (
+            not work_items
+            and self._schedule_trigger_type(lowered) is not None
+            and any(token in lowered for token in ("review", "identify", "extract", "route", "notify", "propose"))
+        ):
+            work_items.append(
+                PlannerWorkItem(
+                    id="wi_1",
+                    type="workflow_task",
+                    title="Configure scheduled Maestro workflow",
+                    description=user_input,
+                    domain_key=domain_key,
+                    priority="normal",
+                    required_capabilities=self._capabilities_from_text(lowered),
+                    required_tools=self._tools_from_scheduled_text(lowered),
+                    dependencies=[],
+                    needs_agent=True,
+                    needs_user_input=False,
+                    blocks_execution=False,
+                    can_log_directly=False,
+                    suggested_agent_keys=[],
+                    expected_output="Recurring or event-triggered workflow ready for Maestro scheduling.",
+                    rationale="The request asks Maestro to create work that should run on a trigger.",
                 )
             )
         if any(token in lowered for token in ("task", "todo", "due", "follow up", "follow-up")):
@@ -1734,7 +1762,50 @@ class MaestroOrchestratorService:
         subtasks: list[MaestroSubtask],
     ) -> dict[str, Any] | None:
         lowered = user_input.lower()
-        schedule_tokens = (
+        trigger_type = self._schedule_trigger_type(lowered)
+        if trigger_type is None:
+            return None
+        if not subtasks and not work_items:
+            return None
+        primary_domain = subtasks[0].domain_key if subtasks else (work_items[0].domain_key if work_items else None)
+        name_seed = next((item.title for item in work_items if item.needs_agent), "Scheduled Maestro workflow")
+        key_seed = self._slug(f"{primary_domain or 'maestro'}-{name_seed}")
+        if trigger_type == "event":
+            trigger_config = {
+                "event_type": self._event_type_from_text(lowered),
+                "filters": self._event_filters_from_text(lowered, primary_domain),
+                "source": "maestro_plan",
+            }
+        else:
+            trigger_config = {
+                "time_of_day": self._time_of_day_from_text(lowered),
+                "interval_minutes": 1440,
+                "source": "maestro_plan",
+            }
+        return {
+            "key": key_seed,
+            "name": name_seed,
+            "description": user_input[:500],
+            "domain_key": primary_domain,
+            "trigger_type": trigger_type,
+            "trigger_config": trigger_config,
+            "priority": "high" if any(item.priority == "high" for item in work_items) else "normal",
+            "fairness_group": primary_domain or "maestro",
+        }
+
+    def _schedule_trigger_type(self, lowered_input: str) -> str | None:
+        event_tokens = (
+            "each time",
+            "every time",
+            "whenever",
+            "when a new",
+            "when new",
+            "new email arrives",
+            "email arrives",
+        )
+        if any(token in lowered_input for token in event_tokens):
+            return "event"
+        recurring_tokens = (
             "every morning",
             "every day",
             "daily",
@@ -1744,37 +1815,82 @@ class MaestroOrchestratorService:
             "each morning",
             "each day",
         )
-        if not any(token in lowered for token in schedule_tokens):
-            return None
-        if not subtasks:
-            return None
-        time_of_day = "07:55" if "before 8" in lowered or "before 8am" in lowered else "08:00"
-        primary_domain = subtasks[0].domain_key if subtasks else (work_items[0].domain_key if work_items else None)
-        name_seed = next((item.title for item in work_items if item.needs_agent), "Scheduled Maestro workflow")
-        key_seed = self._slug(f"{primary_domain or 'maestro'}-{name_seed}")
-        return {
-            "key": key_seed,
-            "name": name_seed,
-            "description": user_input[:500],
-            "domain_key": primary_domain,
-            "trigger_type": "recurring",
-            "trigger_config": {
-                "time_of_day": time_of_day,
-                "interval_minutes": 1440,
-                "source": "maestro_plan",
-            },
-            "priority": "high" if any(item.priority == "high" for item in work_items) else "normal",
-            "fairness_group": primary_domain or "maestro",
-        }
+        if any(token in lowered_input for token in recurring_tokens):
+            return "recurring"
+        return None
 
-    def _upsert_schedule_definition_if_requested(self, task: Task, plan: MaestroPlan) -> None:
+    def _time_of_day_from_text(self, lowered_input: str) -> str:
+        before_match = re.search(r"before\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", lowered_input)
+        if before_match:
+            hour = self._hour_24(before_match.group(1), before_match.group(3))
+            minute = int(before_match.group(2) or "0")
+            if minute == 0:
+                hour = max(0, hour - 1)
+                minute = 55
+            return f"{hour:02d}:{minute:02d}"
+        at_match = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", lowered_input)
+        if at_match:
+            hour = self._hour_24(at_match.group(1), at_match.group(3))
+            minute = int(at_match.group(2) or "0")
+            return f"{hour:02d}:{minute:02d}"
+        return "08:00"
+
+    def _hour_24(self, hour_text: str, suffix: str | None) -> int:
+        hour = int(hour_text)
+        if suffix == "pm" and hour < 12:
+            hour += 12
+        if suffix == "am" and hour == 12:
+            hour = 0
+        return hour
+
+    def _event_type_from_text(self, lowered_input: str) -> str:
+        if "email" in lowered_input or "gmail" in lowered_input:
+            return "gmail.message.received"
+        return "maestro.event.received"
+
+    def _event_filters_from_text(
+        self,
+        lowered_input: str,
+        primary_domain: str | None,
+    ) -> dict[str, Any]:
+        filters: dict[str, Any] = {}
+        if primary_domain:
+            filters["domain_key"] = primary_domain
+        if "gmail" in lowered_input:
+            filters["provider"] = "gmail"
+        return filters
+
+    def _tools_from_scheduled_text(self, lowered_input: str) -> list[str]:
+        tools: list[str] = []
+        if "email" in lowered_input or "gmail" in lowered_input:
+            tools.extend(["gmail.message.search", "gmail.message.get"])
+        if "backlog" in lowered_input or "github" in lowered_input:
+            tools.extend(["github.issue.search", "github.issue.get"])
+        return tools
+
+    def _is_schedule_definition_request(self, plan: MaestroPlan) -> bool:
+        candidate = plan.scheduler.get("schedule_candidate")
+        if not isinstance(candidate, dict):
+            return False
+        lowered = plan.user_input.lower()
+        immediate_tokens = ("run now", "also run now", "execute now", "start now", "do it now")
+        return not any(token in lowered for token in immediate_tokens)
+
+    def _upsert_schedule_definition_if_requested(self, task: Task, plan: MaestroPlan):
         scheduler = dict((task.input_payload or {}).get("scheduler", {}))
         candidate = scheduler.get("schedule_candidate")
         if not isinstance(candidate, dict):
-            return
+            return None
         queue_items = scheduler.get("queue_items") if isinstance(scheduler.get("queue_items"), list) else []
         if not queue_items:
-            return
+            payload_items = [
+                MaestroWorkItem(**item)
+                for item in (task.input_payload or {}).get("work_items", [])
+                if isinstance(item, dict)
+            ]
+            queue_items = self._definition_queue_items_from_work_items(payload_items)
+        if not queue_items:
+            return None
         domain_id = None
         domain_key = candidate.get("domain_key")
         if domain_key:
@@ -1808,12 +1924,84 @@ class MaestroOrchestratorService:
         payload["scheduler"] = scheduler
         task.input_payload = payload
         self.session.commit()
+        return definition
+
+    def _save_scheduled_workflow(self, task: Task, plan: MaestroPlan) -> MaestroRun:
+        definition = self._upsert_schedule_definition_if_requested(task, plan)
+        if definition is None:
+            raise MaestroOrchestratorError("Scheduled workflow could not be saved.")
+        task.status = "scheduled"
+        task.completed_at = datetime.now(UTC)
+        payload = dict(task.input_payload or {})
+        scheduler = {
+            **self._scheduler_payload(),
+            **dict(payload.get("scheduler", {})),
+            "scheduled_definition_id": str(definition.id),
+            "status": "scheduled",
+            "current_step": "Scheduled workflow saved.",
+        }
+        scheduler["queue_items"] = [
+            {**item, "status": "scheduled"} for item in scheduler.get("queue_items", [])
+        ]
+        payload["scheduler"] = scheduler
+        task.input_payload = payload
+        summary = (
+            f"I scheduled `{definition.name}` as a {definition.trigger_type} workflow. "
+            "You can inspect or edit it from Queue."
+        )
+        task.output_payload = {
+            "plan_id": plan.plan_id,
+            "status": "scheduled",
+            "chat_summary": summary,
+            "scheduled_definition_id": str(definition.id),
+            "scheduler": scheduler,
+        }
+        self.session.commit()
+        SchedulerService(self.session).sync_run_status_from_task(task)
+        self.session.refresh(task)
+        return MaestroRun(
+            plan=self._plan_from_task(task),
+            status="scheduled",
+            parent_task_id=str(task.id),
+            child_runs=[],
+            synthesis_report_id=None,
+            synthesis=summary,
+            chat_summary=summary,
+            staged_artifact_path=None,
+            artifact_id=None,
+            scheduler=scheduler,
+            execution_stages=plan.execution_stages,
+            tool_activity=[],
+            error_message=None,
+        )
 
     def _slug(self, value: str) -> str:
         cleaned = "".join(character.lower() if character.isalnum() else "-" for character in value)
         while "--" in cleaned:
             cleaned = cleaned.replace("--", "-")
         return cleaned.strip("-")[:120] or "scheduled-maestro-workflow"
+
+    def _definition_queue_items_from_work_items(
+        self,
+        work_items: list[MaestroWorkItem],
+    ) -> list[dict[str, Any]]:
+        queue_items: list[dict[str, Any]] = []
+        for position, item in enumerate([item for item in work_items if item.needs_agent], start=1):
+            queue_items.append(
+                {
+                    "id": item.id,
+                    "stage_index": 1,
+                    "position": position,
+                    "status": "pending",
+                    "domain_key": item.domain_key,
+                    "objective": item.description or item.title,
+                    "priority": item.priority,
+                    "work_item_ids": [item.id],
+                    "depends_on_work_item_ids": item.dependencies,
+                    "required_tools": item.required_tools,
+                }
+            )
+        return queue_items
 
     def _queue_items(self, subtasks: list[MaestroSubtask]) -> list[dict[str, Any]]:
         queue_items: list[dict[str, Any]] = []
