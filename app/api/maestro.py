@@ -11,6 +11,7 @@ from app.db.models import Conversation, Message, RuntimeSetting, Task
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
+from app.maestro.channel import MAESTRO_CHANNEL_KEY, get_or_create_maestro_channel
 from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
@@ -259,17 +260,15 @@ def close_maestro_session(
 
 @router.post("/sessions/start")
 def start_maestro_session(db: Session = Depends(get_db)) -> dict[str, Any]:
-    conversation = _create_maestro_conversation(db)
+    conversation = get_or_create_maestro_channel(db)
     _set_active_maestro_conversation(db, conversation.id)
     return {"conversation": _conversation_payload(db, conversation)}
 
 
 @router.get("/sessions/active")
 def get_active_maestro_session(db: Session = Depends(get_db)) -> dict[str, Any]:
-    conversation = _active_maestro_conversation(db)
-    if conversation is None:
-        conversation = _create_maestro_conversation(db)
-        _set_active_maestro_conversation(db, conversation.id)
+    conversation = get_or_create_maestro_channel(db)
+    _set_active_maestro_conversation(db, conversation.id)
     return {"conversation": _conversation_payload(db, conversation)}
 
 
@@ -297,7 +296,6 @@ def get_maestro_session(conversation_id: uuid.UUID, db: Session = Depends(get_db
     conversation = db.get(Conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Unknown Maestro session.")
-    _set_active_maestro_conversation(db, conversation.id)
     return {"conversation": _conversation_payload(db, conversation)}
 
 
@@ -332,13 +330,10 @@ def _get_or_create_maestro_conversation(
 ) -> Conversation:
     if conversation_id is not None:
         conversation = db.get(Conversation, conversation_id)
-        if conversation is not None:
+        if conversation is not None and (conversation.metadata_ or {}).get("channel") == "primary":
             _set_active_maestro_conversation(db, conversation.id)
             return conversation
-    conversation = _active_maestro_conversation(db)
-    if conversation is not None:
-        return conversation
-    conversation = _create_maestro_conversation(db)
+    conversation = get_or_create_maestro_channel(db)
     _set_active_maestro_conversation(db, conversation.id)
     return conversation
 
@@ -358,7 +353,10 @@ def _create_maestro_conversation(db: Session) -> Conversation:
 
 
 def _active_maestro_conversation(db: Session) -> Conversation | None:
-    setting = db.get(RuntimeSetting, _ACTIVE_MAESTRO_SESSION_KEY)
+    setting = db.get(RuntimeSetting, MAESTRO_CHANNEL_KEY) or db.get(
+        RuntimeSetting,
+        _ACTIVE_MAESTRO_SESSION_KEY,
+    )
     value = setting.value if setting is not None else {}
     conversation_id = value.get("conversation_id") if isinstance(value, dict) else None
     if not conversation_id:

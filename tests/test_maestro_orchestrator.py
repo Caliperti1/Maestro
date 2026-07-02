@@ -1397,6 +1397,31 @@ def test_maestro_api_archives_sessions_from_history(
     assert archived_sessions.json()["sessions"][0]["id"] == conversation["id"]
 
 
+def test_maestro_historical_session_restore_does_not_replace_primary_channel(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    channel_id = first.json()["conversation"]["id"]
+    historical = client.post("/maestro/sessions/start")
+    historical_id = historical.json()["conversation"]["id"]
+    assert historical_id == channel_id
+
+    restored = client.get(f"/maestro/sessions/{channel_id}")
+    assert restored.status_code == 200
+
+    second = client.post(
+        "/maestro/respond",
+        json={"message": "What is the current channel model?"},
+    )
+    assert second.status_code == 200
+    assert second.json()["conversation"]["id"] == channel_id
+
+
 def test_maestro_api_respond_refines_active_plan(
     session: Session,
     tmp_path: Path,

@@ -1035,8 +1035,8 @@ export function App() {
     const response = await apiJson<{ conversation: MaestroSessionSummary }>(
       `/maestro/sessions/${run.conversation_id}`,
     );
-    applyConversation(response.conversation);
-    setSchedulerStatusMessage("Re-entered the workflow's Maestro session.");
+    setMaestroPlan(response.conversation.active_plan ?? maestroPlan);
+    setSchedulerStatusMessage("Referenced this workflow in the main Maestro channel.");
   };
 
   const runSchedulerTick = async () => {
@@ -1402,19 +1402,17 @@ export function App() {
         );
         stagedArtifactPath = response.staged_artifact_path;
       }
-      const started = await apiJson<{ conversation: MaestroSessionSummary }>("/maestro/sessions/start", {
-        method: "POST",
-      });
-      setActiveConversationId(started.conversation.id);
-      setChatMessages([]);
+      const active = await apiJson<{ conversation: MaestroSessionSummary }>("/maestro/sessions/active");
+      setActiveConversationId(active.conversation.id);
+      setChatMessages(active.conversation.messages ?? chatMessages);
       setDraftMessage("");
       setMaestroPlan(null);
       setMaestroRun(null);
       loadSessionHistory().catch(() => undefined);
       setMaestroStatus(
         stagedArtifactPath
-          ? "Previous session staged for memory curation."
-          : "New Maestro session ready.",
+          ? "Channel checkpoint staged for memory curation."
+          : "Maestro channel ready.",
       );
     } catch (error) {
       setMaestroStatus(error instanceof Error ? error.message : "Could not close session.");
@@ -1555,7 +1553,7 @@ export function App() {
                   <button
                     className="icon-button"
                     aria-label="New session"
-                    title="New session"
+                    title="Checkpoint channel"
                     onClick={startNewMaestroSession}
                     disabled={maestroBusy || (chatMessages.length === 0 && !maestroPlan && !maestroRun)}
                   >
@@ -1612,8 +1610,8 @@ export function App() {
                           setShowSessionHistory(false);
                           setMaestroStatus(
                             response.conversation.active_plan
-                              ? "Viewing previous session with its workflow restored."
-                              : "Viewing previous session.",
+                              ? "Viewing historical segment with its workflow restored."
+                              : "Viewing historical segment.",
                           );
                         }}
                       >

@@ -11,6 +11,7 @@ from app.agents.runtime import (
     PromptPackageRequest,
 )
 from app.db.models import Agent, Report, WorkflowQueueItem, WorkflowRun
+from app.maestro.channel import record_channel_message
 from app.maestro.scheduler import SchedulerService
 
 
@@ -78,6 +79,15 @@ class SchedulerWorkerService:
                 item.id,
                 error_message="No agent is assigned to this scheduled queue item.",
             )
+            self._post_channel_update(
+                run,
+                item,
+                status="blocked",
+                message=(
+                    f"Scheduled workflow `{self._run_title(run)}` is blocked because "
+                    f"`{item.external_key}` has no assigned agent."
+                ),
+            )
             return {
                 "queue_item": self.scheduler.queue_item_payload(blocked),
                 "agent_run": None,
@@ -123,6 +133,15 @@ class SchedulerWorkerService:
                 message=f"Scheduled worker completed `{item.external_key}` through {agent.name}.",
                 payload=self._agent_run_payload(agent_run),
             )
+            self._post_channel_update(
+                run,
+                completed,
+                status="completed",
+                message=(
+                    f"Scheduled workflow `{self._run_title(run)}` completed `{item.external_key}` "
+                    f"through {agent.name}."
+                ),
+            )
             return {
                 "queue_item": self.scheduler.queue_item_payload(completed),
                 "agent_run": self._agent_run_payload(agent_run),
@@ -134,6 +153,15 @@ class SchedulerWorkerService:
                 error_message=agent_run.error_message or "Agent run is blocked.",
                 output_payload=self._agent_run_payload(agent_run),
             )
+            self._post_channel_update(
+                run,
+                blocked,
+                status="blocked",
+                message=(
+                    f"Scheduled workflow `{self._run_title(run)}` is waiting on `{item.external_key}`: "
+                    f"{blocked.error_message}"
+                ),
+            )
             return {
                 "queue_item": self.scheduler.queue_item_payload(blocked),
                 "agent_run": self._agent_run_payload(agent_run),
@@ -142,6 +170,15 @@ class SchedulerWorkerService:
         failed = self.scheduler.fail_queue_item(
             item.id,
             error_message=agent_run.error_message or f"Agent run finished with status {agent_run.status}.",
+        )
+        self._post_channel_update(
+            run,
+            failed,
+            status="failed",
+            message=(
+                f"Scheduled workflow `{self._run_title(run)}` failed `{item.external_key}`: "
+                f"{failed.error_message}"
+            ),
         )
         return {
             "queue_item": self.scheduler.queue_item_payload(failed),
@@ -216,3 +253,28 @@ class SchedulerWorkerService:
             "error_message": agent_run.error_message,
             "completed_at": datetime.now(UTC).isoformat(),
         }
+
+    def _post_channel_update(
+        self,
+        run: WorkflowRun,
+        item: WorkflowQueueItem,
+        *,
+        status: str,
+        message: str,
+    ) -> None:
+        record_channel_message(
+            self.session,
+            sender="maestro",
+            content=message,
+            metadata={
+                "source": "scheduler_worker",
+                "status": status,
+                "workflow_run_id": str(run.id),
+                "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
+                "queue_item_id": str(item.id),
+                "queue_item_key": item.external_key,
+            },
+        )
+
+    def _run_title(self, run: WorkflowRun) -> str:
+        return str((run.input_payload or {}).get("summary") or run.id)

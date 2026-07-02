@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.api.main import create_app
 from app.core.config import get_settings
+from app.db.models import Message
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 
@@ -248,6 +249,11 @@ def test_scheduler_worker_run_executes_assigned_agent_item(
     assert payload["executed"][0]["status"] == "completed"
     assert payload["executed"][0]["queue_item"]["status"] == "completed"
     assert payload["executed"][0]["agent_run"]["status"] == "prepared"
+    message = session.query(Message).order_by(Message.created_at.desc()).first()
+    assert message is not None
+    assert message.sender_type == "maestro"
+    assert "Scheduled workflow" in message.content
+    assert message.metadata_["source"] == "scheduler_worker"
 
 
 def test_scheduler_worker_blocks_unassigned_item(
