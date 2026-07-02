@@ -10,7 +10,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
-from urllib.parse import quote
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -1178,6 +1180,253 @@ class GitHubCliToolAdapter:
         }
 
 
+class GmailApiToolAdapter:
+    def __init__(self, key: str):
+        self.key = key
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if context.dry_run:
+            return {"dry_run": True, "tool": self.key, "payload": payload}
+        token = _gmail_access_token(context.connection)
+        user_id = _gmail_user_id(context.connection, payload)
+        if self.key == "gmail.message.search":
+            return self._message_search(context.connection, payload, token=token, user_id=user_id)
+        if self.key == "gmail.message.list_recent":
+            return self._message_list_recent(context.connection, payload, token=token, user_id=user_id)
+        if self.key == "gmail.message.get":
+            return self._message_get(payload, token=token, user_id=user_id)
+        if self.key == "gmail.thread.get":
+            return self._thread_get(payload, token=token, user_id=user_id)
+        if self.key == "gmail.draft.create":
+            return self._draft_create(context.connection, payload, token=token, user_id=user_id)
+        if self.key == "gmail.message.modify":
+            return self._message_modify(payload, token=token, user_id=user_id)
+        raise ToolExecutionError(f"Unsupported Gmail tool: {self.key}")
+
+    def _message_search(
+        self,
+        connection: ToolConnection | None,
+        payload: dict[str, Any],
+        *,
+        token: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        query = str(payload.get("query") or payload.get("q") or "").strip()
+        default_query = str(_connection_config(connection).get("default_query") or "").strip()
+        if not query:
+            query = default_query
+        limit = _bounded_int(payload.get("limit") or payload.get("max_results"), default=10, minimum=1, maximum=50)
+        params: dict[str, Any] = {"maxResults": limit}
+        if query:
+            params["q"] = query
+        label_ids = _string_list(payload.get("label_ids") or payload.get("labels"))
+        if label_ids:
+            params["labelIds"] = label_ids
+        include_spam_trash = _as_bool(payload.get("include_spam_trash"), default=False)
+        if include_spam_trash:
+            params["includeSpamTrash"] = "true"
+        response = _gmail_api_json(
+            "GET",
+            f"/gmail/v1/users/{quote(user_id, safe='')}/messages",
+            token=token,
+            params=params,
+        )
+        messages = response.get("messages", []) if isinstance(response, dict) else []
+        hydrated = [
+            self._message_metadata(str(message.get("id")), token=token, user_id=user_id)
+            for message in messages
+            if isinstance(message, dict) and message.get("id")
+        ]
+        return {
+            "query": query,
+            "limit": limit,
+            "messages": hydrated,
+            "result_size_estimate": response.get("resultSizeEstimate") if isinstance(response, dict) else None,
+            "summary": {
+                "type": "gmail_message_list",
+                "query": query,
+                "count": len(hydrated),
+                "user_id": user_id,
+            },
+        }
+
+    def _message_list_recent(
+        self,
+        connection: ToolConnection | None,
+        payload: dict[str, Any],
+        *,
+        token: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        limit = _bounded_int(payload.get("limit") or payload.get("max_results"), default=10, minimum=1, maximum=50)
+        unread_only = _as_bool(payload.get("unread_only"), default=False)
+        newer_than_days = _bounded_int(payload.get("newer_than_days"), default=14, minimum=1, maximum=365)
+        query_parts = [f"newer_than:{newer_than_days}d"]
+        if unread_only:
+            query_parts.append("is:unread")
+        configured_query = str(_connection_config(connection).get("default_query") or "").strip()
+        if configured_query:
+            query_parts.append(configured_query)
+        return self._message_search(
+            connection,
+            {**payload, "query": " ".join(query_parts), "limit": limit},
+            token=token,
+            user_id=user_id,
+        )
+
+    def _message_get(self, payload: dict[str, Any], *, token: str, user_id: str) -> dict[str, Any]:
+        message_id = _required_any_text(payload, ("message_id", "id"))
+        max_body_chars = _bounded_int(payload.get("max_body_chars"), default=12000, minimum=500, maximum=50000)
+        message = _gmail_api_json(
+            "GET",
+            f"/gmail/v1/users/{quote(user_id, safe='')}/messages/{quote(message_id, safe='')}",
+            token=token,
+            params={"format": "full"},
+        )
+        parsed = _gmail_message_payload(message, max_body_chars=max_body_chars)
+        return {
+            **parsed,
+            "message": message,
+            "summary": {
+                "type": "gmail_message",
+                "message_id": parsed["message_id"],
+                "thread_id": parsed.get("thread_id"),
+                "subject": parsed.get("subject"),
+                "from": parsed.get("from"),
+                "date": parsed.get("date"),
+                "body_truncated": parsed.get("body_truncated"),
+            },
+        }
+
+    def _thread_get(self, payload: dict[str, Any], *, token: str, user_id: str) -> dict[str, Any]:
+        thread_id = _required_any_text(payload, ("thread_id", "id"))
+        max_body_chars = _bounded_int(payload.get("max_body_chars"), default=8000, minimum=500, maximum=30000)
+        thread = _gmail_api_json(
+            "GET",
+            f"/gmail/v1/users/{quote(user_id, safe='')}/threads/{quote(thread_id, safe='')}",
+            token=token,
+            params={"format": "full"},
+        )
+        raw_messages = thread.get("messages", []) if isinstance(thread, dict) else []
+        messages = [
+            _gmail_message_payload(message, max_body_chars=max_body_chars)
+            for message in raw_messages
+            if isinstance(message, dict)
+        ]
+        return {
+            "thread_id": thread_id,
+            "messages": messages,
+            "message_count": len(messages),
+            "thread": thread,
+            "summary": {
+                "type": "gmail_thread",
+                "thread_id": thread_id,
+                "message_count": len(messages),
+                "subjects": _dedupe_strings([message.get("subject") for message in messages]),
+            },
+        }
+
+    def _draft_create(
+        self,
+        connection: ToolConnection | None,
+        payload: dict[str, Any],
+        *,
+        token: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        to = _string_list(payload.get("to") or payload.get("recipients"))
+        if not to:
+            raise ToolExecutionError("Gmail draft creation requires at least one recipient.")
+        subject = _required_text(payload, "subject")
+        body = _required_any_text(payload, ("body", "body_text", "content"))
+        cc = _string_list(payload.get("cc"))
+        bcc = _string_list(payload.get("bcc"))
+        reply_to_message_id = str(payload.get("reply_to_message_id") or "").strip()
+        thread_id = str(payload.get("thread_id") or "").strip()
+        from_address = str(payload.get("from") or _connection_config(connection).get("send_as") or "").strip()
+        raw = _gmail_rfc822_message(
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            bcc=bcc,
+            from_address=from_address,
+            reply_to_message_id=reply_to_message_id,
+        )
+        request_body: dict[str, Any] = {"message": {"raw": _base64url(raw.encode("utf-8"))}}
+        if thread_id:
+            request_body["message"]["threadId"] = thread_id
+        response = _gmail_api_json(
+            "POST",
+            f"/gmail/v1/users/{quote(user_id, safe='')}/drafts",
+            token=token,
+            body=request_body,
+        )
+        draft_id = response.get("id") if isinstance(response, dict) else None
+        message = response.get("message") if isinstance(response, dict) else {}
+        return {
+            "draft_id": draft_id,
+            "message_id": message.get("id") if isinstance(message, dict) else None,
+            "thread_id": message.get("threadId") if isinstance(message, dict) else thread_id or None,
+            "to": to,
+            "cc": cc,
+            "bcc": bcc,
+            "subject": subject,
+            "body_preview": _preview_text(body, max_chars=700),
+            "write_status": "draft_created",
+            "summary": {
+                "type": "gmail_draft",
+                "draft_id": draft_id,
+                "message_id": message.get("id") if isinstance(message, dict) else None,
+                "thread_id": message.get("threadId") if isinstance(message, dict) else thread_id or None,
+                "to": to,
+                "subject": subject,
+                "write_status": "draft_created",
+            },
+        }
+
+    def _message_modify(self, payload: dict[str, Any], *, token: str, user_id: str) -> dict[str, Any]:
+        message_id = _required_any_text(payload, ("message_id", "id"))
+        add_labels = _string_list(payload.get("add_label_ids") or payload.get("add_labels"))
+        remove_labels = _string_list(payload.get("remove_label_ids") or payload.get("remove_labels"))
+        if not add_labels and not remove_labels:
+            raise ToolExecutionError("Gmail message modify requires labels to add or remove.")
+        response = _gmail_api_json(
+            "POST",
+            f"/gmail/v1/users/{quote(user_id, safe='')}/messages/{quote(message_id, safe='')}/modify",
+            token=token,
+            body={"addLabelIds": add_labels, "removeLabelIds": remove_labels},
+        )
+        return {
+            "message_id": message_id,
+            "thread_id": response.get("threadId") if isinstance(response, dict) else None,
+            "label_ids": response.get("labelIds") if isinstance(response, dict) else [],
+            "add_label_ids": add_labels,
+            "remove_label_ids": remove_labels,
+            "write_status": "modified",
+            "summary": {
+                "type": "gmail_message_modify",
+                "message_id": message_id,
+                "add_label_ids": add_labels,
+                "remove_label_ids": remove_labels,
+                "write_status": "modified",
+            },
+        }
+
+    def _message_metadata(self, message_id: str, *, token: str, user_id: str) -> dict[str, Any]:
+        message = _gmail_api_json(
+            "GET",
+            f"/gmail/v1/users/{quote(user_id, safe='')}/messages/{quote(message_id, safe='')}",
+            token=token,
+            params={"format": "metadata", "metadataHeaders": ["Subject", "From", "To", "Date"]},
+        )
+        return _gmail_message_payload(message, max_body_chars=0)
+
+
 class CodexCliToolAdapter:
     def __init__(self, key: str):
         self.key = key
@@ -1610,6 +1859,19 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
             "github.pr.merge",
         )
     }
+    adapters.update(
+        {
+            key: GmailApiToolAdapter(key)
+            for key in (
+                "gmail.message.search",
+                "gmail.message.list_recent",
+                "gmail.message.get",
+                "gmail.thread.get",
+                "gmail.draft.create",
+                "gmail.message.modify",
+            )
+        }
+    )
     adapters["codex.task.run"] = CodexCliToolAdapter("codex.task.run")
     adapters["local.app.reload"] = LocalAppReloadAdapter("local.app.reload")
     return adapters
@@ -2079,6 +2341,8 @@ def _clean_github_search_query(query: str, *, kind: str) -> str:
 def _provider_key(tool_key: str) -> str:
     if tool_key.startswith("github."):
         return "github"
+    if tool_key.startswith("gmail."):
+        return "gmail"
     if tool_key.startswith("codex."):
         return "codex"
     return tool_key
@@ -2099,6 +2363,288 @@ def _github_env(connection: ToolConnection | None) -> dict[str, str]:
     if token:
         env["GH_TOKEN"] = token
     return env
+
+
+def _gmail_access_token(connection: ToolConnection | None) -> str:
+    config = _connection_config(connection)
+    refresh_token = _secret_config_value(
+        config,
+        "refresh_token",
+        env_keys=("refresh_token_env", "env_refresh_token_name"),
+    )
+    if refresh_token:
+        client_id = _secret_config_value(
+            config,
+            "client_id",
+            env_keys=("client_id_env", "env_client_id_name"),
+        )
+        client_secret = _secret_config_value(
+            config,
+            "client_secret",
+            env_keys=("client_secret_env", "env_client_secret_name"),
+        )
+        if not client_id:
+            raise ToolExecutionError("Gmail refresh-token OAuth requires client_id or client_id_env.")
+        if not client_secret:
+            raise ToolExecutionError("Gmail refresh-token OAuth requires client_secret or client_secret_env.")
+        token_payload = _google_oauth_refresh_access_token(
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+        )
+        access_token = str(token_payload.get("access_token") or "").strip()
+        if not access_token:
+            raise ToolExecutionError("Google OAuth token refresh did not return an access token.")
+        return access_token
+
+    env_names = [
+        str(config.get("access_token_env") or "").strip(),
+        str(config.get("env_token_name") or "").strip(),
+        str(config.get("token_env_name") or "").strip(),
+    ]
+    for env_name in env_names:
+        if not env_name:
+            continue
+        token = os.environ.get(env_name) or _dotenv_value(env_name)
+        if token:
+            return token
+        raise ToolExecutionError(f"Gmail access token env var is not set: {env_name}")
+    token = str(config.get("access_token") or config.get("token") or "").strip()
+    if token:
+        return token
+    raise ToolExecutionError(
+        "Gmail tools require refresh-token OAuth credentials. Configure client_id_env, "
+        "client_secret_env, and refresh_token_env on the domain Gmail connection."
+    )
+
+
+def _secret_config_value(
+    config: dict[str, Any],
+    key: str,
+    *,
+    env_keys: tuple[str, ...],
+) -> str | None:
+    for env_key in env_keys:
+        env_name = str(config.get(env_key) or "").strip()
+        if not env_name:
+            continue
+        value = os.environ.get(env_name) or _dotenv_value(env_name)
+        if value:
+            return value
+        raise ToolExecutionError(f"Gmail OAuth env var is not set: {env_name}")
+    value = str(config.get(key) or "").strip()
+    return value or None
+
+
+def _google_oauth_refresh_access_token(
+    *,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+) -> dict[str, Any]:
+    data = urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+    ).encode("utf-8")
+    request = Request(
+        "https://oauth2.googleapis.com/token",
+        data=data,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise ToolExecutionError(f"Google OAuth refresh failed: {exc.code} {detail}") from exc
+    except URLError as exc:
+        raise ToolExecutionError(f"Google OAuth refresh failed: {exc.reason}") from exc
+    parsed = json.loads(raw or "{}")
+    if not isinstance(parsed, dict):
+        raise ToolExecutionError("Google OAuth refresh returned an unexpected response.")
+    return parsed
+
+
+def _gmail_user_id(connection: ToolConnection | None, payload: dict[str, Any]) -> str:
+    user_id = str(payload.get("user_id") or "").strip()
+    if not user_id:
+        user_id = str(_connection_config(connection).get("user_id") or "me").strip()
+    return user_id or "me"
+
+
+def _gmail_api_json(
+    method: str,
+    path: str,
+    *,
+    token: str,
+    params: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+    timeout: int = 60,
+) -> dict[str, Any]:
+    query = ""
+    if params:
+        query_items: list[tuple[str, str]] = []
+        for key, value in params.items():
+            if value is None:
+                continue
+            if isinstance(value, list):
+                query_items.extend((key, str(item)) for item in value)
+            else:
+                query_items.append((key, str(value)))
+        query = f"?{urlencode(query_items)}" if query_items else ""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = Request(
+        f"https://gmail.googleapis.com{path}{query}",
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise ToolExecutionError(f"Gmail API {method} {path} failed: {exc.code} {detail}") from exc
+    except URLError as exc:
+        raise ToolExecutionError(f"Gmail API {method} {path} failed: {exc.reason}") from exc
+    if not raw:
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ToolExecutionError("Gmail API returned an unexpected response.")
+    return parsed
+
+
+def _gmail_message_payload(message: dict[str, Any], *, max_body_chars: int) -> dict[str, Any]:
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+    headers = _gmail_headers(payload)
+    body = _gmail_body_text(payload) if max_body_chars > 0 else ""
+    return {
+        "message_id": message.get("id"),
+        "id": message.get("id"),
+        "thread_id": message.get("threadId"),
+        "label_ids": message.get("labelIds") or [],
+        "snippet": message.get("snippet"),
+        "history_id": message.get("historyId"),
+        "internal_date": message.get("internalDate"),
+        "subject": headers.get("subject"),
+        "from": headers.get("from"),
+        "to": headers.get("to"),
+        "cc": headers.get("cc"),
+        "date": headers.get("date"),
+        "body_text": body[:max_body_chars] if max_body_chars > 0 else "",
+        "body_truncated": len(body) > max_body_chars if max_body_chars > 0 else False,
+        "headers": headers,
+    }
+
+
+def _gmail_headers(payload: dict[str, Any]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for header in payload.get("headers") or []:
+        if not isinstance(header, dict):
+            continue
+        name = str(header.get("name") or "").strip().lower()
+        value = str(header.get("value") or "").strip()
+        if name:
+            headers[name] = value
+    return headers
+
+
+def _gmail_body_text(payload: dict[str, Any]) -> str:
+    mime_type = str(payload.get("mimeType") or "")
+    body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    data = str(body.get("data") or "")
+    if data and mime_type in {"text/plain", "text/html", ""}:
+        decoded = _base64url_decode(data)
+        if mime_type == "text/html":
+            return _strip_html(decoded)
+        return decoded
+    parts = payload.get("parts") if isinstance(payload.get("parts"), list) else []
+    plain_parts: list[str] = []
+    html_parts: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        part_type = str(part.get("mimeType") or "")
+        text = _gmail_body_text(part)
+        if not text:
+            continue
+        if part_type == "text/html":
+            html_parts.append(text)
+        else:
+            plain_parts.append(text)
+    if plain_parts:
+        return "\n\n".join(plain_parts)
+    return "\n\n".join(html_parts)
+
+
+def _base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _base64url_decode(value: str) -> str:
+    padded = value + "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8", errors="replace")
+
+
+def _strip_html(value: str) -> str:
+    text = value.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    output = []
+    in_tag = False
+    for char in text:
+        if char == "<":
+            in_tag = True
+            continue
+        if char == ">":
+            in_tag = False
+            continue
+        if not in_tag:
+            output.append(char)
+    return " ".join("".join(output).split())
+
+
+def _gmail_rfc822_message(
+    *,
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: list[str],
+    bcc: list[str],
+    from_address: str,
+    reply_to_message_id: str,
+) -> str:
+    headers = []
+    if from_address:
+        headers.append(("From", from_address))
+    headers.extend(
+        [
+            ("To", ", ".join(to)),
+            ("Subject", subject),
+            ("Content-Type", 'text/plain; charset="UTF-8"'),
+            ("MIME-Version", "1.0"),
+        ]
+    )
+    if cc:
+        headers.append(("Cc", ", ".join(cc)))
+    if bcc:
+        headers.append(("Bcc", ", ".join(bcc)))
+    if reply_to_message_id:
+        headers.append(("In-Reply-To", reply_to_message_id))
+        headers.append(("References", reply_to_message_id))
+    header_text = "\r\n".join(f"{key}: {value}" for key, value in headers)
+    return f"{header_text}\r\n\r\n{body}"
 
 
 def _dotenv_value(key: str) -> str | None:

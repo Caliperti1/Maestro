@@ -898,7 +898,17 @@ class SchedulerService:
         locks = []
         for tool_key in raw.get("required_tools") or []:
             tool_key = str(tool_key)
-            scope = "shared" if any(token in tool_key for token in (".get", ".search", ".diff", ".checks", "memory.context")) else "exclusive"
+            scope = "shared" if any(
+                token in tool_key
+                for token in (
+                    ".get",
+                    ".search",
+                    ".diff",
+                    ".checks",
+                    ".list_recent",
+                    "memory.context",
+                )
+            ) else "exclusive"
             locks.append({"resource_key": f"tool:{tool_key}", "lock_scope": scope})
         agent_key = raw.get("agent_key")
         if agent_key:

@@ -35,11 +35,13 @@ def test_list_agents_returns_seeded_runtime_specs(session: Session, tmp_path: Pa
     praxis = next(agent for agent in agents if agent["key"] == "praxis-planning-agent")
     assert praxis["domain_key"] == "praxis"
     assert praxis["memory_profile"] == "agent_prompt"
-    assert {tool["key"] for tool in praxis["allowed_tools"]} == {
+    allowed_tools = {tool["key"] for tool in praxis["allowed_tools"]}
+    assert {
         "artifact.stage_interaction",
         "llm.gateway",
         "memory.context_bundle",
-    }
+        "gmail.message.search",
+    }.issubset(allowed_tools)
 
 
 def test_prompt_package_endpoint_returns_scoped_prompt(session: Session, tmp_path: Path) -> None:

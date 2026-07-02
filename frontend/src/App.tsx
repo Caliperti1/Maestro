@@ -3202,6 +3202,7 @@ function ToolsWorkspace() {
   const [selectedToolKey, setSelectedToolKey] = useState("github");
   const [expandedToolFamilies, setExpandedToolFamilies] = useState<Record<string, boolean>>({
     github: true,
+    gmail: true,
   });
   const [connectionDomain, setConnectionDomain] = useState("praxis");
   const [connectionName, setConnectionName] = useState("Praxis memory retrieval");
@@ -3210,9 +3211,14 @@ function ToolsWorkspace() {
   const [statusMessage, setStatusMessage] = useState("Ready");
 
   const selectedTool = tools.find((tool) => tool.key === selectedToolKey) ?? tools[0] ?? null;
-  const selectedConnectionToolKey = selectedTool?.key.startsWith("github.")
-    ? "github"
-    : selectedTool?.key;
+  const providerToolKeys = useMemo(
+    () => new Set(tools.filter((tool) => !tool.key.includes(".")).map((tool) => tool.key)),
+    [tools],
+  );
+  const selectedConnectionToolKey =
+    selectedTool?.key.includes(".") && providerToolKeys.has(selectedTool.key.split(".")[0])
+      ? selectedTool.key.split(".")[0]
+      : (selectedTool?.key ?? "memory.context_bundle");
   const toolFamilies = useMemo(() => {
     const providerKeys = new Set(
       tools.filter((tool) => !tool.key.includes(".")).map((tool) => tool.key),
@@ -3237,12 +3243,12 @@ function ToolsWorkspace() {
   );
   const selectedToolAgents = useMemo(() => {
     if (!selectedTool) return [];
-    if (selectedTool.key === "github") {
-      const githubAgents = tools
-        .filter((tool) => tool.key.startsWith("github."))
+    if (providerToolKeys.has(selectedTool.key)) {
+      const familyAgents = tools
+        .filter((tool) => tool.key.startsWith(`${selectedTool.key}.`))
         .flatMap((tool) => tool.authorized_agents);
       const unique = new Map<string, ToolRegistryItem["authorized_agents"][number]>();
-      githubAgents.forEach((agent) => {
+      familyAgents.forEach((agent) => {
         unique.set(`${agent.domain_key}-${agent.agent_key}`, agent);
       });
       return Array.from(unique.values()).sort((a, b) =>
@@ -3250,7 +3256,7 @@ function ToolsWorkspace() {
       );
     }
     return selectedTool.authorized_agents;
-  }, [selectedTool, tools]);
+  }, [providerToolKeys, selectedTool, tools]);
   const selectedConnection = selectedToolConnections.find(
     (connection) => connection.domain_key === connectionDomain,
   );
@@ -3285,10 +3291,13 @@ function ToolsWorkspace() {
       return;
     }
     const isGitHub = selectedConnectionToolKey === "github";
+    const isGmail = selectedConnectionToolKey === "gmail";
     setConnectionName(
-      `${domainLabels[connectionDomain] ?? connectionDomain} ${isGitHub ? "GitHub" : selectedTool.name}`,
+      `${domainLabels[connectionDomain] ?? connectionDomain} ${
+        isGitHub ? "GitHub" : isGmail ? "Gmail" : selectedTool.name
+      }`,
     );
-    setConnectionAuthType(isGitHub ? "gh_cli" : "service");
+    setConnectionAuthType(isGitHub ? "gh_cli" : isGmail ? "oauth" : "service");
     setConnectionConfig(
       isGitHub
         ? JSON.stringify(
@@ -3299,6 +3308,18 @@ function ToolsWorkspace() {
             null,
             2,
           )
+        : isGmail
+          ? JSON.stringify(
+              {
+                user_id: "me",
+                client_id_env: "",
+                client_secret_env: "",
+                refresh_token_env: "",
+                default_query: "",
+              },
+              null,
+              2,
+            )
         : "{}",
     );
   }, [connectionDomain, connections, selectedConnectionToolKey, selectedTool?.key]);
@@ -3470,6 +3491,19 @@ function ToolsWorkspace() {
                 and token env config once here, then every GitHub tool can inherit it.
               </p>
             )}
+            {selectedTool.key === "gmail" && (
+              <p className="memory-status">
+                Edit the shared Gmail OAuth config here. Every Gmail child tool in this domain
+                inherits it unless a more specific override is added later. Use refresh-token
+                OAuth env vars for durable scheduled workflows.
+              </p>
+            )}
+            {selectedTool.key.startsWith("gmail.") && (
+              <p className="memory-status">
+                Gmail tools share one domain connection named <strong>Gmail</strong>. Save user id
+                plus refresh-token OAuth env config once here, then every Gmail tool can inherit it.
+              </p>
+            )}
             <div className="connection-list">
               {Object.entries(domainLabels)
                 .filter(([key]) => key !== "global")
@@ -3551,7 +3585,7 @@ function ToolsWorkspace() {
                 <textarea
                   value={connectionConfig}
                   onChange={(event) => setConnectionConfig(event.target.value)}
-                  placeholder='{"username":"praxis@example.com","password":"..."}'
+                  placeholder='{"user_id":"me","client_id_env":"GOOGLE_CLIENT_ID","client_secret_env":"GOOGLE_CLIENT_SECRET","refresh_token_env":"PRAXIS_GMAIL_REFRESH_TOKEN"}'
                 />
               </label>
               {selectedConnection && (
