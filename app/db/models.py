@@ -75,6 +75,7 @@ class Conversation(TimestampMixin, Base):
         Uuid, ForeignKey("agents.id", ondelete="SET NULL"), index=True
     )
     title: Mapped[str | None] = mapped_column(String(240))
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
 class Message(Base):

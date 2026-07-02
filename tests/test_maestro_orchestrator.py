@@ -1274,6 +1274,32 @@ def test_maestro_api_persists_active_session_history(
     assert restored_conversation["active_plan"]["summary"] == response.json()["plan"]["summary"]
 
 
+def test_maestro_api_archives_sessions_from_history(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    conversation = response.json()["conversation"]
+
+    archived = client.patch(
+        f"/maestro/sessions/{conversation['id']}/archive",
+        json={"archived": True},
+    )
+
+    assert archived.status_code == 200
+    assert archived.json()["conversation"]["archived"] is True
+    sessions = client.get("/maestro/sessions")
+    assert sessions.status_code == 200
+    assert sessions.json()["sessions"] == []
+    archived_sessions = client.get("/maestro/sessions?include_archived=true")
+    assert archived_sessions.status_code == 200
+    assert archived_sessions.json()["sessions"][0]["id"] == conversation["id"]
+
+
 def test_maestro_api_respond_refines_active_plan(
     session: Session,
     tmp_path: Path,

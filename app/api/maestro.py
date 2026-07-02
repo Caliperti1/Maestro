@@ -50,6 +50,10 @@ class MaestroSessionCloseBody(BaseModel):
     conversation_id: uuid.UUID | None = None
 
 
+class MaestroSessionArchiveBody(BaseModel):
+    archived: bool = True
+
+
 class MaestroToolRejectBody(BaseModel):
     reason: str | None = None
     conversation_id: uuid.UUID | None = None
@@ -270,12 +274,21 @@ def get_active_maestro_session(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 
 @router.get("/sessions")
-def list_maestro_sessions(db: Session = Depends(get_db)) -> dict[str, Any]:
+def list_maestro_sessions(
+    include_archived: bool = False,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     maestro_domain = DomainRepository(db).get_by_key("maestro-development")
     query = select(Conversation).order_by(Conversation.updated_at.desc()).limit(25)
     if maestro_domain is not None:
         query = query.where(Conversation.domain_id == maestro_domain.id)
     conversations = db.scalars(query).all()
+    if not include_archived:
+        conversations = [
+            conversation
+            for conversation in conversations
+            if not bool((conversation.metadata_ or {}).get("archived"))
+        ]
     return {"sessions": [_conversation_payload(db, conversation, include_messages=False) for conversation in conversations]}
 
 
@@ -285,6 +298,28 @@ def get_maestro_session(conversation_id: uuid.UUID, db: Session = Depends(get_db
     if conversation is None:
         raise HTTPException(status_code=404, detail="Unknown Maestro session.")
     _set_active_maestro_conversation(db, conversation.id)
+    return {"conversation": _conversation_payload(db, conversation)}
+
+
+@router.patch("/sessions/{conversation_id}/archive")
+def archive_maestro_session(
+    conversation_id: uuid.UUID,
+    body: MaestroSessionArchiveBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Unknown Maestro session.")
+    metadata = dict(conversation.metadata_ or {})
+    metadata["archived"] = body.archived
+    metadata["archived_at"] = datetime.now(UTC).isoformat() if body.archived else None
+    conversation.metadata_ = metadata
+    conversation.updated_at = datetime.now(UTC)
+    active = _active_maestro_conversation(db)
+    if active is not None and active.id == conversation.id and body.archived:
+        _clear_active_maestro_conversation(db, conversation.id)
+    db.commit()
+    db.refresh(conversation)
     return {"conversation": _conversation_payload(db, conversation)}
 
 
@@ -314,6 +349,7 @@ def _create_maestro_conversation(db: Session) -> Conversation:
     conversation = Conversation(
         domain_id=maestro_domain.id if maestro_domain else None,
         title="Maestro session",
+        metadata_={"archived": False},
     )
     db.add(conversation)
     db.commit()
@@ -400,6 +436,8 @@ def _conversation_payload(
         "title": conversation.title or "Maestro session",
         "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
         "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
+        "archived": bool((conversation.metadata_ or {}).get("archived")),
+        "archived_at": (conversation.metadata_ or {}).get("archived_at"),
         "message_count": message_count,
         "messages": [
             {

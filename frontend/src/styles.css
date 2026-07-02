@@ -348,6 +348,17 @@ h4 {
   border-radius: 8px;
 }
 
+.session-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.session-history .session-archive-button {
+  color: #8f2d2d;
+  font-size: 0.76rem;
+}
+
 .composer {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -620,9 +631,53 @@ h4 {
 
 .empty-planner-state,
 .scheduler-visualizer,
-.scheduler-run-list {
+.scheduler-run-list,
+.scheduler-control-panel {
   display: grid;
   gap: 10px;
+}
+
+.scheduler-control-panel {
+  padding: 10px;
+  background: #f6f9f6;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
+.scheduler-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.scheduler-form-grid label,
+.scheduler-wide-field {
+  display: grid;
+  gap: 4px;
+}
+
+.scheduler-form-grid span,
+.scheduler-wide-field span {
+  color: #68736d;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.scheduler-control-panel input,
+.scheduler-control-panel select {
+  min-width: 0;
+  padding: 8px;
+  color: #26352f;
+  background: #ffffff;
+  border: 1px solid #cfd8d0;
+  border-radius: 8px;
+}
+
+.scheduler-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .scheduler-run-list {

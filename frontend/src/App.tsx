@@ -37,6 +37,8 @@ type MaestroSessionSummary = {
   updated_at?: string | null;
   stagedArtifactPath: string | null;
   active_plan?: MaestroPlan | null;
+  archived?: boolean;
+  archived_at?: string | null;
 };
 
 type SchedulerQueueItem = {
@@ -713,6 +715,18 @@ export function App() {
   const [maestroBusy, setMaestroBusy] = useState(false);
   const [busyToolCallId, setBusyToolCallId] = useState<string | null>(null);
   const [expandedWorkflowNodeId, setExpandedWorkflowNodeId] = useState<string | null>(null);
+  const [schedulerDefinitionMode, setSchedulerDefinitionMode] = useState<"recurring" | "event">(
+    "recurring",
+  );
+  const [schedulerDefinitionName, setSchedulerDefinitionName] = useState("Daily Before 8");
+  const [schedulerDefinitionDomain, setSchedulerDefinitionDomain] = useState("personal");
+  const [schedulerDefinitionObjective, setSchedulerDefinitionObjective] = useState(
+    "Prepare the daily brief.",
+  );
+  const [schedulerDefinitionTime, setSchedulerDefinitionTime] = useState("07:55");
+  const [schedulerDefinitionEvent, setSchedulerDefinitionEvent] = useState("gmail.message.received");
+  const [schedulerEventId, setSchedulerEventId] = useState("manual-test-event");
+  const [schedulerStatusMessage, setSchedulerStatusMessage] = useState("");
 
   const maestroPlanStages = useMemo(() => {
     if (!maestroPlan) return [];
@@ -877,6 +891,102 @@ export function App() {
     const response = await apiJson<SchedulerDashboard>("/scheduler/dashboard");
     setSchedulerDashboard(response);
   }, []);
+
+  const archiveSession = async (sessionId: string) => {
+    await apiJson<{ conversation: MaestroSessionSummary }>(
+      `/maestro/sessions/${sessionId}/archive`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archived: true }),
+      },
+    );
+    if (activeConversationId === sessionId) {
+      const started = await apiJson<{ conversation: MaestroSessionSummary }>("/maestro/sessions/start", {
+        method: "POST",
+      });
+      applyConversation(started.conversation);
+      setMaestroPlan(null);
+      setMaestroRun(null);
+    }
+    await loadSessionHistory();
+    setMaestroStatus("Session archived.");
+  };
+
+  const createSchedulerDefinition = async () => {
+    const keyBase = schedulerDefinitionName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    const key = `${schedulerDefinitionDomain}-${keyBase || schedulerDefinitionMode}`;
+    const queueItemId = schedulerDefinitionMode === "event" ? "event-work" : "scheduled-work";
+    const triggerConfig =
+      schedulerDefinitionMode === "event"
+        ? {
+            event_type: schedulerDefinitionEvent,
+            filters: { domain_key: schedulerDefinitionDomain },
+          }
+        : {
+            time_of_day: schedulerDefinitionTime,
+            interval_minutes: 1440,
+          };
+    await apiJson<{ definition: SchedulerDefinition }>("/scheduler/definitions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key,
+        name: schedulerDefinitionName,
+        domain_key: schedulerDefinitionDomain,
+        trigger_type: schedulerDefinitionMode,
+        trigger_config: triggerConfig,
+        workflow_spec: {
+          queue_items: [
+            {
+              id: queueItemId,
+              objective: schedulerDefinitionObjective,
+              domain_key: schedulerDefinitionDomain,
+            },
+          ],
+        },
+      }),
+    });
+    setSchedulerStatusMessage("Workflow definition saved.");
+    await loadSchedulerDashboard();
+  };
+
+  const runSchedulerTick = async () => {
+    const response = await apiJson<{
+      enqueued: SchedulerRun[];
+      claimed: SchedulerQueueItem[];
+      runnable_batches: SchedulerDashboard["runnable_batches"];
+    }>("/scheduler/tick", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ owner: "maestro-ui", claim_limit: 4, lease_seconds: 300 }),
+    });
+    setSchedulerStatusMessage(
+      `Tick enqueued ${response.enqueued.length} run(s) and claimed ${response.claimed.length} item(s).`,
+    );
+    await loadSchedulerDashboard();
+  };
+
+  const triggerSchedulerEvent = async () => {
+    const response = await apiJson<{ runs: SchedulerRun[] }>("/scheduler/triggers/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        event_type: schedulerDefinitionEvent,
+        event_id: schedulerEventId || crypto.randomUUID(),
+        event_payload: {
+          id: schedulerEventId || crypto.randomUUID(),
+          domain_key: schedulerDefinitionDomain,
+          source: "maestro-ui",
+        },
+      }),
+    });
+    setSchedulerStatusMessage(`Event trigger enqueued ${response.runs.length} run(s).`);
+    await loadSchedulerDashboard();
+  };
 
   useEffect(() => {
     loadActiveSession().catch(() => {
@@ -1375,24 +1485,32 @@ export function App() {
                 <div className="session-history" aria-label="Previous Maestro sessions">
                   <span>Previous sessions</span>
                   {sessionHistory.slice(0, 8).map((session) => (
-                    <button
-                      type="button"
-                      key={session.id}
-                      onClick={async () => {
-                        const response = await apiJson<{ conversation: MaestroSessionSummary }>(
-                          `/maestro/sessions/${session.id}`,
-                        );
-                        applyConversation(response.conversation);
-                        setShowSessionHistory(false);
-                        setMaestroStatus(
-                          response.conversation.active_plan
-                            ? "Viewing previous session with its workflow restored."
-                            : "Viewing previous session.",
-                        );
-                      }}
-                    >
-                      {session.title}
-                    </button>
+                    <div className="session-history-row" key={session.id}>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const response = await apiJson<{ conversation: MaestroSessionSummary }>(
+                            `/maestro/sessions/${session.id}`,
+                          );
+                          applyConversation(response.conversation);
+                          setShowSessionHistory(false);
+                          setMaestroStatus(
+                            response.conversation.active_plan
+                              ? "Viewing previous session with its workflow restored."
+                              : "Viewing previous session.",
+                          );
+                        }}
+                      >
+                        {session.title}
+                      </button>
+                      <button
+                        type="button"
+                        className="session-archive-button"
+                        onClick={() => archiveSession(session.id)}
+                      >
+                        Archive
+                      </button>
+                    </div>
                   ))}
                 </div>
               )}
@@ -1773,6 +1891,95 @@ export function App() {
                   <h3 id="reports-heading">Queue</h3>
                 </div>
                 <Clock3 size={18} />
+              </div>
+              <div className="scheduler-control-panel">
+                <div className="workflow-detail-heading">
+                  <div>
+                    <span>Control</span>
+                    <h4>Workflow triggers</h4>
+                  </div>
+                  <button type="button" onClick={runSchedulerTick}>
+                    Run tick
+                  </button>
+                </div>
+                <div className="scheduler-form-grid">
+                  <label>
+                    <span>Mode</span>
+                    <select
+                      value={schedulerDefinitionMode}
+                      onChange={(event) =>
+                        setSchedulerDefinitionMode(event.target.value as "recurring" | "event")
+                      }
+                    >
+                      <option value="recurring">Recurring</option>
+                      <option value="event">Event</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Name</span>
+                    <input
+                      value={schedulerDefinitionName}
+                      onChange={(event) => setSchedulerDefinitionName(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Domain</span>
+                    <select
+                      value={schedulerDefinitionDomain}
+                      onChange={(event) => setSchedulerDefinitionDomain(event.target.value)}
+                    >
+                      {Object.entries(domainLabels)
+                        .filter(([key]) => key !== "global")
+                        .map(([key, label]) => (
+                          <option key={key} value={key}>
+                            {label}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>{schedulerDefinitionMode === "event" ? "Event" : "Time"}</span>
+                    <input
+                      value={
+                        schedulerDefinitionMode === "event"
+                          ? schedulerDefinitionEvent
+                          : schedulerDefinitionTime
+                      }
+                      onChange={(event) =>
+                        schedulerDefinitionMode === "event"
+                          ? setSchedulerDefinitionEvent(event.target.value)
+                          : setSchedulerDefinitionTime(event.target.value)
+                      }
+                    />
+                  </label>
+                </div>
+                <label className="scheduler-wide-field">
+                  <span>Objective</span>
+                  <input
+                    value={schedulerDefinitionObjective}
+                    onChange={(event) => setSchedulerDefinitionObjective(event.target.value)}
+                  />
+                </label>
+                <div className="scheduler-action-row">
+                  <button type="button" onClick={createSchedulerDefinition}>
+                    Save trigger
+                  </button>
+                  {schedulerDefinitionMode === "event" && (
+                    <>
+                      <input
+                        value={schedulerEventId}
+                        onChange={(event) => setSchedulerEventId(event.target.value)}
+                        aria-label="Event id"
+                      />
+                      <button type="button" onClick={triggerSchedulerEvent}>
+                        Trigger event
+                      </button>
+                    </>
+                  )}
+                </div>
+                {schedulerStatusMessage && (
+                  <p className="evaluation-note">{schedulerStatusMessage}</p>
+                )}
               </div>
               {activeWorkflowSummary ? (
                 <div className="scheduler-visualizer">
