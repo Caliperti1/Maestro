@@ -1,8 +1,9 @@
 from typing import Any
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from app.db.models import Conversation, Message, RuntimeSetting, Task
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
+from app.maestro.channel import MAESTRO_CHANNEL_KEY, get_or_create_maestro_channel
 from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
@@ -50,6 +52,10 @@ class MaestroSessionCloseBody(BaseModel):
     conversation_id: uuid.UUID | None = None
 
 
+class MaestroSessionArchiveBody(BaseModel):
+    archived: bool = True
+
+
 class MaestroToolRejectBody(BaseModel):
     reason: str | None = None
     conversation_id: uuid.UUID | None = None
@@ -80,8 +86,12 @@ def respond_to_maestro(
     _record_session_message(db, conversation, "user", body.message)
     try:
         service = MaestroOrchestratorService(db)
-        if body.active_plan_id is not None:
-            active_plan = service.get_plan(body.active_plan_id)
+        active_plan_id = body.active_plan_id
+        if active_plan_id is None:
+            channel_context = _resolve_channel_context(db, conversation)
+            active_plan_id = channel_context.parent_task_id if channel_context else None
+        if active_plan_id is not None:
+            active_plan = service.get_plan(active_plan_id)
             classification = _classify_active_session_message(body.message, active_plan)
             if classification == "side_chat":
                 response_message = _side_chat_response(body.message, active_plan)
@@ -100,7 +110,7 @@ def respond_to_maestro(
                 kind = "chat_only" if plan.is_chat_only else "planned"
             else:
                 plan = service.refine_plan(
-                    body.active_plan_id,
+                    active_plan_id,
                     _classified_refinement_message(body.message, classification, active_plan),
                 )
                 kind = "chat_only" if plan.is_chat_only else classification
@@ -124,6 +134,31 @@ def respond_to_maestro(
         "active_plan": None,
         "conversation": _conversation_payload(db, conversation),
     }
+
+
+@router.websocket("/channel/ws")
+async def maestro_channel_ws(
+    websocket: WebSocket,
+    db: Session = Depends(get_db),
+) -> None:
+    await websocket.accept()
+    last_signature: tuple[str, str | None, int] | None = None
+    try:
+        while True:
+            db.expire_all()
+            conversation = get_or_create_maestro_channel(db)
+            payload = _conversation_payload(db, conversation)
+            signature = (
+                payload["id"],
+                payload["updated_at"],
+                int(payload["message_count"]),
+            )
+            if signature != last_signature:
+                await websocket.send_json({"type": "conversation", "conversation": payload})
+                last_signature = signature
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        return
 
 
 @router.post("/plans/{plan_id}/refine")
@@ -169,7 +204,7 @@ def run_maestro_plan(
         conversation,
         "maestro",
         run.chat_summary
-        if run.status == "completed"
+        if run.status in {"completed", "scheduled"}
         else f"The workflow finished with status {run.status}.\n\n{run.chat_summary}",
     )
     return {"run": _run_payload(run)}
@@ -255,27 +290,34 @@ def close_maestro_session(
 
 @router.post("/sessions/start")
 def start_maestro_session(db: Session = Depends(get_db)) -> dict[str, Any]:
-    conversation = _create_maestro_conversation(db)
+    conversation = get_or_create_maestro_channel(db)
     _set_active_maestro_conversation(db, conversation.id)
     return {"conversation": _conversation_payload(db, conversation)}
 
 
 @router.get("/sessions/active")
 def get_active_maestro_session(db: Session = Depends(get_db)) -> dict[str, Any]:
-    conversation = _active_maestro_conversation(db)
-    if conversation is None:
-        conversation = _create_maestro_conversation(db)
-        _set_active_maestro_conversation(db, conversation.id)
+    conversation = get_or_create_maestro_channel(db)
+    _set_active_maestro_conversation(db, conversation.id)
     return {"conversation": _conversation_payload(db, conversation)}
 
 
 @router.get("/sessions")
-def list_maestro_sessions(db: Session = Depends(get_db)) -> dict[str, Any]:
+def list_maestro_sessions(
+    include_archived: bool = False,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     maestro_domain = DomainRepository(db).get_by_key("maestro-development")
     query = select(Conversation).order_by(Conversation.updated_at.desc()).limit(25)
     if maestro_domain is not None:
         query = query.where(Conversation.domain_id == maestro_domain.id)
     conversations = db.scalars(query).all()
+    if not include_archived:
+        conversations = [
+            conversation
+            for conversation in conversations
+            if not bool((conversation.metadata_ or {}).get("archived"))
+        ]
     return {"sessions": [_conversation_payload(db, conversation, include_messages=False) for conversation in conversations]}
 
 
@@ -284,7 +326,28 @@ def get_maestro_session(conversation_id: uuid.UUID, db: Session = Depends(get_db
     conversation = db.get(Conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Unknown Maestro session.")
-    _set_active_maestro_conversation(db, conversation.id)
+    return {"conversation": _conversation_payload(db, conversation)}
+
+
+@router.patch("/sessions/{conversation_id}/archive")
+def archive_maestro_session(
+    conversation_id: uuid.UUID,
+    body: MaestroSessionArchiveBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Unknown Maestro session.")
+    metadata = dict(conversation.metadata_ or {})
+    metadata["archived"] = body.archived
+    metadata["archived_at"] = datetime.now(UTC).isoformat() if body.archived else None
+    conversation.metadata_ = metadata
+    conversation.updated_at = datetime.now(UTC)
+    active = _active_maestro_conversation(db)
+    if active is not None and active.id == conversation.id and body.archived:
+        _clear_active_maestro_conversation(db, conversation.id)
+    db.commit()
+    db.refresh(conversation)
     return {"conversation": _conversation_payload(db, conversation)}
 
 
@@ -297,13 +360,10 @@ def _get_or_create_maestro_conversation(
 ) -> Conversation:
     if conversation_id is not None:
         conversation = db.get(Conversation, conversation_id)
-        if conversation is not None:
+        if conversation is not None and (conversation.metadata_ or {}).get("channel") == "primary":
             _set_active_maestro_conversation(db, conversation.id)
             return conversation
-    conversation = _active_maestro_conversation(db)
-    if conversation is not None:
-        return conversation
-    conversation = _create_maestro_conversation(db)
+    conversation = get_or_create_maestro_channel(db)
     _set_active_maestro_conversation(db, conversation.id)
     return conversation
 
@@ -314,6 +374,7 @@ def _create_maestro_conversation(db: Session) -> Conversation:
     conversation = Conversation(
         domain_id=maestro_domain.id if maestro_domain else None,
         title="Maestro session",
+        metadata_={"archived": False},
     )
     db.add(conversation)
     db.commit()
@@ -322,7 +383,10 @@ def _create_maestro_conversation(db: Session) -> Conversation:
 
 
 def _active_maestro_conversation(db: Session) -> Conversation | None:
-    setting = db.get(RuntimeSetting, _ACTIVE_MAESTRO_SESSION_KEY)
+    setting = db.get(RuntimeSetting, MAESTRO_CHANNEL_KEY) or db.get(
+        RuntimeSetting,
+        _ACTIVE_MAESTRO_SESSION_KEY,
+    )
     value = setting.value if setting is not None else {}
     conversation_id = value.get("conversation_id") if isinstance(value, dict) else None
     if not conversation_id:
@@ -400,6 +464,8 @@ def _conversation_payload(
         "title": conversation.title or "Maestro session",
         "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
         "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
+        "archived": bool((conversation.metadata_ or {}).get("archived")),
+        "archived_at": (conversation.metadata_ or {}).get("archived_at"),
         "message_count": message_count,
         "messages": [
             {
@@ -427,9 +493,20 @@ def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> Maestr
     if task is None:
         return None
     try:
-        return MaestroOrchestratorService(db).get_plan(task.id)
+        plan = MaestroOrchestratorService(db).get_plan(task.id)
     except MaestroOrchestratorError:
         return None
+    return None if plan.is_chat_only else plan
+
+
+def _resolve_channel_context(db: Session, conversation: Conversation) -> MaestroPlan | None:
+    plan = _latest_conversation_plan(db, conversation.id)
+    if plan is not None:
+        return plan
+    active = _active_maestro_conversation(db)
+    if active is not None and active.id != conversation.id:
+        return _latest_conversation_plan(db, active.id)
+    return None
 
 
 def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
@@ -460,6 +537,14 @@ def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
 def _maestro_response_text(plan: MaestroPlan, *, refined: bool) -> str:
     if plan.is_chat_only:
         return plan.direct_response or plan.summary or "I can handle that directly here."
+    schedule_candidate = plan.scheduler.get("schedule_candidate")
+    if isinstance(schedule_candidate, dict):
+        trigger_type = schedule_candidate.get("trigger_type", "scheduled")
+        return (
+            f"I drafted a {trigger_type} workflow with {len(plan.work_items)} work items and "
+            f"{len(plan.subtasks)} subtasks. Review it here; when you run the plan I will save "
+            "the schedule in Queue instead of executing it immediately."
+        )
     blocking_items = [
         item for item in plan.work_items if item.needs_user_input and item.blocks_execution
     ]

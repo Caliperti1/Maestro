@@ -391,6 +391,32 @@ class SchedulerService:
         self.session.refresh(item)
         return item
 
+    def block_queue_item(
+        self,
+        queue_item_id: uuid.UUID,
+        *,
+        error_message: str,
+        output_payload: dict[str, Any] | None = None,
+    ) -> WorkflowQueueItem:
+        item = self._require_queue_item(queue_item_id)
+        item.status = "blocked"
+        item.error_message = error_message
+        item.output_payload = {**(item.output_payload or {}), **(output_payload or {})}
+        self.release_locks(item, commit=False)
+        run = self.session.get(WorkflowRun, item.workflow_run_id)
+        self._refresh_run_status(run)
+        self.record_event(
+            run,
+            queue_item=item,
+            event_type="queue_item_blocked",
+            message=f"Queue item `{item.external_key}` blocked: {error_message}",
+            payload={"error_message": error_message},
+            commit=False,
+        )
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
     def update_queue_item(
         self,
         queue_item_id: uuid.UUID,
@@ -422,7 +448,10 @@ class SchedulerService:
 
     def dashboard(self) -> dict[str, Any]:
         runs = self.session.scalars(
-            select(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(20)
+            select(WorkflowRun)
+            .where(WorkflowRun.status != "archived")
+            .order_by(WorkflowRun.created_at.desc())
+            .limit(20)
         ).all()
         return {
             "definitions": [
@@ -440,6 +469,24 @@ class SchedulerService:
                 ).all()
             ],
         }
+
+    def runs_for_definition(
+        self,
+        definition_id: uuid.UUID,
+        *,
+        limit: int = 20,
+    ) -> list[WorkflowRun]:
+        return list(
+            self.session.scalars(
+                select(WorkflowRun)
+                .where(
+                    WorkflowRun.workflow_definition_id == definition_id,
+                    WorkflowRun.status != "archived",
+                )
+                .order_by(WorkflowRun.created_at.desc())
+                .limit(limit)
+            ).all()
+        )
 
     def acquire_locks(
         self,
@@ -501,9 +548,10 @@ class SchedulerService:
         if commit:
             self.session.commit()
 
-    def workflow_run_payload(self, run: WorkflowRun) -> dict[str, Any]:
-        return {
+    def workflow_run_payload(self, run: WorkflowRun, *, include_events: bool = False) -> dict[str, Any]:
+        payload = {
             "id": str(run.id),
+            "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
             "parent_task_id": str(run.parent_task_id) if run.parent_task_id else None,
             "conversation_id": str(run.conversation_id) if run.conversation_id else None,
             "source_type": run.source_type,
@@ -515,10 +563,23 @@ class SchedulerService:
             "completed_at": home_isoformat(run.completed_at),
             "created_at": home_isoformat(run.created_at),
             "summary": (run.input_payload or {}).get("summary"),
+            "input_payload": run.input_payload or {},
+            "output_payload": run.output_payload or {},
+            "error_message": run.error_message,
             "queue_items": [
                 self.queue_item_payload(item) for item in self._queue_items_for_run(run.id)
             ],
         }
+        if include_events:
+            payload["events"] = [
+                self.scheduler_event_payload(event)
+                for event in self.session.scalars(
+                    select(SchedulerEvent)
+                    .where(SchedulerEvent.workflow_run_id == run.id)
+                    .order_by(SchedulerEvent.created_at.desc())
+                ).all()
+            ]
+        return payload
 
     def workflow_definition_payload(self, definition: WorkflowDefinition) -> dict[str, Any]:
         domain = self.session.get(Domain, definition.domain_id) if definition.domain_id else None
@@ -577,6 +638,17 @@ class SchedulerService:
             "lease_expires_at": home_isoformat(lock.lease_expires_at),
         }
 
+    def scheduler_event_payload(self, event: SchedulerEvent) -> dict[str, Any]:
+        return {
+            "id": str(event.id),
+            "workflow_run_id": str(event.workflow_run_id) if event.workflow_run_id else None,
+            "queue_item_id": str(event.queue_item_id) if event.queue_item_id else None,
+            "event_type": event.event_type,
+            "message": event.message,
+            "payload": event.payload,
+            "created_at": event.created_at.isoformat() if event.created_at else None,
+        }
+
     def record_event(
         self,
         run: WorkflowRun | None,
@@ -608,6 +680,7 @@ class SchedulerService:
         *,
         commit: bool = True,
     ) -> None:
+        self._ensure_agents_available()
         existing = {
             item.external_key: item
             for item in self.session.scalars(
@@ -659,6 +732,7 @@ class SchedulerService:
         *,
         commit: bool = True,
     ) -> None:
+        self._ensure_agents_available()
         existing = {
             item.external_key: item
             for item in self.session.scalars(
@@ -830,6 +904,11 @@ class SchedulerService:
         if agent_key:
             locks.append({"resource_key": f"agent:{agent_key}", "lock_scope": "exclusive"})
         return locks
+
+    def _ensure_agents_available(self) -> None:
+        from app.agents.runtime import AgentRegistryService
+
+        AgentRegistryService(self.session).ensure_seed_agents()
 
     def _fairness_group(self, task: Task) -> str:
         if task.domain_id:

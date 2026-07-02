@@ -10,7 +10,7 @@ from app.agents.runtime import PromptAggregationService
 from app.agents.runtime import AgentRegistryService
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import Artifact, Report, Task
+from app.db.models import Artifact, Report, Task, WorkflowDefinition, WorkflowRun
 from app.db.session import get_db
 from app.llm.client import LLMClientError
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
@@ -633,6 +633,45 @@ class FakeDirectChatPlannerLLMClient:
         raise AssertionError("Planner should use structured_response.")
 
 
+class FakeScheduledPlannerLLMClient:
+    provider = "test"
+    model = "test-scheduled-planner"
+
+    def __init__(self, *, title: str = "Review Maestro backlog", domain_key: str = "maestro-development"):
+        self.title = title
+        self.domain_key = domain_key
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": self.title,
+            "direct_response": None,
+            "planner_notes": "Fake scheduled workflow planner response.",
+            "work_items": [
+                {
+                    "id": "wi_scheduled_work",
+                    "type": "workflow_task",
+                    "title": self.title,
+                    "description": self.title,
+                    "domain_key": self.domain_key,
+                    "priority": "normal",
+                    "required_capabilities": ["planning", "synthesis"],
+                    "required_tools": ["github.issue.search"],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-introspection-agent"],
+                    "expected_output": "Scheduled workflow output.",
+                    "rationale": "Chris asked Maestro to schedule recurring or triggered work.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
 class FailingPlannerLLMClient:
     provider = "test"
     model = "test-failing-planner"
@@ -875,6 +914,8 @@ def test_orchestrator_direct_chat_has_no_executable_plan(session: Session) -> No
     assert plan.direct_response == "Maestro can answer that directly without delegating work."
     assert plan.subtasks == []
     assert plan.execution_stages == []
+    assert plan.scheduler["queue_items"] == []
+    assert session.query(WorkflowRun).count() == 0
 
     try:
         service.run_plan(plan.parent_task_id, execute_llm=False)
@@ -882,6 +923,62 @@ def test_orchestrator_direct_chat_has_no_executable_plan(session: Session) -> No
         assert "Direct chat responses" in str(exc)
     else:
         raise AssertionError("Direct chat plans should not be executable.")
+
+
+def test_orchestrator_saves_recurring_workflow_without_immediate_execution(
+    session: Session,
+) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeScheduledPlannerLLMClient(),
+    )
+
+    plan = service.create_plan(
+        "Each morning at 9am please review the Maestro backlog and propose a work plan for the day"
+    )
+
+    assert plan.scheduler["schedule_candidate"]["trigger_type"] == "recurring"
+    assert plan.scheduler["schedule_candidate"]["trigger_config"]["time_of_day"] == "09:00"
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=False)
+
+    assert run.status == "scheduled"
+    assert run.child_runs == []
+    definition = session.query(WorkflowDefinition).one()
+    assert definition.trigger_type == "recurring"
+    assert definition.trigger_config["time_of_day"] == "09:00"
+    assert definition.workflow_spec["queue_items"][0]["status"] == "pending"
+    workflow_run = session.query(WorkflowRun).one()
+    assert workflow_run.status == "scheduled"
+
+
+def test_orchestrator_saves_email_event_triggered_workflow(
+    session: Session,
+) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeScheduledPlannerLLMClient(
+            title="Triage new email",
+            domain_key="praxis",
+        ),
+    )
+
+    plan = service.create_plan(
+        "Each time a new email arrives identify if it is worth notifying me about, "
+        "extract relevant contact info, events, or to dos and route them appropriately"
+    )
+
+    candidate = plan.scheduler["schedule_candidate"]
+    assert candidate["trigger_type"] == "event"
+    assert candidate["trigger_config"]["event_type"] == "gmail.message.received"
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=False)
+
+    assert run.status == "scheduled"
+    definition = session.query(WorkflowDefinition).one()
+    assert definition.trigger_type == "event"
+    assert definition.trigger_config["event_type"] == "gmail.message.received"
+    assert definition.workflow_spec["queue_items"][0]["domain_key"] == "praxis"
 
 
 def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
@@ -1274,6 +1371,76 @@ def test_maestro_api_persists_active_session_history(
     assert restored_conversation["active_plan"]["summary"] == response.json()["plan"]["summary"]
 
 
+def test_maestro_api_archives_sessions_from_history(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    conversation = response.json()["conversation"]
+
+    archived = client.patch(
+        f"/maestro/sessions/{conversation['id']}/archive",
+        json={"archived": True},
+    )
+
+    assert archived.status_code == 200
+    assert archived.json()["conversation"]["archived"] is True
+    sessions = client.get("/maestro/sessions")
+    assert sessions.status_code == 200
+    assert sessions.json()["sessions"] == []
+    archived_sessions = client.get("/maestro/sessions?include_archived=true")
+    assert archived_sessions.status_code == 200
+    assert archived_sessions.json()["sessions"][0]["id"] == conversation["id"]
+
+
+def test_maestro_historical_session_restore_does_not_replace_primary_channel(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    channel_id = first.json()["conversation"]["id"]
+    historical = client.post("/maestro/sessions/start")
+    historical_id = historical.json()["conversation"]["id"]
+    assert historical_id == channel_id
+
+    restored = client.get(f"/maestro/sessions/{channel_id}")
+    assert restored.status_code == 200
+
+    second = client.post(
+        "/maestro/respond",
+        json={"message": "What is the current channel model?"},
+    )
+    assert second.status_code == 200
+    assert second.json()["conversation"]["id"] == channel_id
+
+
+def test_maestro_channel_websocket_sends_active_conversation(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    conversation_id = response.json()["conversation"]["id"]
+
+    with client.websocket_connect("/maestro/channel/ws") as websocket:
+        payload = websocket.receive_json()
+
+    assert payload["type"] == "conversation"
+    assert payload["conversation"]["id"] == conversation_id
+    assert payload["conversation"]["messages"][0]["content"] == "Prepare a Praxis partner call workflow."
+
+
 def test_maestro_api_respond_refines_active_plan(
     session: Session,
     tmp_path: Path,
@@ -1386,6 +1553,47 @@ def test_maestro_api_respond_uses_previous_pr_context_for_merge_followup(
     assert "PR number: 77" in refined_input
     assert "https://github.com/example/maestro/pull/77" in refined_input
     assert "maestro/issue-42" in refined_input
+
+
+def test_maestro_api_respond_resolves_channel_context_without_explicit_plan_id(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Have the Maestro coding agent implement issue 42."},
+    )
+    first_plan = first_response.json()["plan"]
+    parent = session.get(Task, uuid.UUID(first_plan["parent_task_id"]))
+    assert parent is not None
+    parent.output_payload = {
+        "chat_summary": "Created PR #77 for issue 42 and left it ready for review.",
+        "tool_activity": [
+            {
+                "tool_name": "codex.task.run",
+                "status": "complete",
+                "details": "Opened PR #77 for review.",
+                "output_payload": {
+                    "pr_number": 77,
+                    "pr_url": "https://github.com/example/maestro/pull/77",
+                },
+            }
+        ],
+    }
+    session.commit()
+
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Cool, merge the PR and reload the app."},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "refined"
+    refined_task = session.get(Task, uuid.UUID(payload["plan"]["parent_task_id"]))
+    assert refined_task is not None
+    assert "PR number: 77" in refined_task.input_payload["user_input"]
 
 
 def test_maestro_api_respond_side_chat_keeps_active_plan(
@@ -1551,6 +1759,10 @@ def test_maestro_api_respond_returns_chat_only_without_plan(
     assert payload["plan"] is None
     assert payload["chat_plan"]["is_chat_only"] is True
     assert payload["message"]
+
+    active = client.get("/maestro/sessions/active")
+    assert active.status_code == 200
+    assert active.json()["conversation"]["active_plan"] is None
 
 
 def test_maestro_api_close_session_stages_transcript_artifact(

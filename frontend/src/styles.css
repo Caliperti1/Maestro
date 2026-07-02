@@ -348,6 +348,17 @@ h4 {
   border-radius: 8px;
 }
 
+.session-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.session-history .session-archive-button {
+  color: #8f2d2d;
+  font-size: 0.76rem;
+}
+
 .composer {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -620,9 +631,128 @@ h4 {
 
 .empty-planner-state,
 .scheduler-visualizer,
-.scheduler-run-list {
+.scheduler-run-list,
+.scheduler-control-panel {
   display: grid;
   gap: 10px;
+}
+
+.scheduler-control-panel {
+  padding: 10px;
+  background: #f6f9f6;
+  border: 1px solid #dfe6df;
+  border-radius: 8px;
+}
+
+.scheduler-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.scheduler-form-grid label,
+.scheduler-wide-field {
+  display: grid;
+  gap: 4px;
+}
+
+.scheduler-form-grid span,
+.scheduler-wide-field span {
+  color: #68736d;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.scheduler-control-panel input,
+.scheduler-control-panel select,
+.scheduler-control-panel textarea {
+  min-width: 0;
+  padding: 8px;
+  color: #26352f;
+  background: #ffffff;
+  border: 1px solid #cfd8d0;
+  border-radius: 8px;
+}
+
+.scheduler-control-panel textarea {
+  resize: vertical;
+}
+
+.scheduler-help-text {
+  margin: 0;
+  color: #52615a;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.worker-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 6px 9px;
+  color: #304139;
+  background: #ffffff;
+  border: 1px solid #cfd8d0;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.worker-toggle input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.warning-pill {
+  color: #7b3b14 !important;
+  background: #fff0df !important;
+  border-color: #f1c99f !important;
+}
+
+.scheduler-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.compact-actions {
+  margin-top: 2px;
+}
+
+.scheduler-action-row button {
+  min-height: 30px;
+  padding: 6px 9px;
+  color: #304139;
+  background: #ffffff;
+  border: 1px solid #cfd8d0;
+  border-radius: 8px;
+}
+
+.card-reset {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+
+.card-reset > span {
+  color: #68736d;
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.scheduler-detail-panel,
+.scheduler-event-list,
+.embedded-scheduler {
+  margin-top: 12px;
 }
 
 .scheduler-run-list {

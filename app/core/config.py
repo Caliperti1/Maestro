@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     embedding_api_key: str | None = None
     embedding_dimensions: int | None = None
     memory_embedding_best_effort: bool = True
+    scheduler_worker_autorun: bool = False
+    scheduler_worker_interval_seconds: int = 30
+    scheduler_worker_claim_limit: int = 4
+    scheduler_worker_execute_llm: bool = True
+    scheduler_worker_auto_tool_loop: bool = True
 
     @property
     def cors_origins(self) -> list[str]:
