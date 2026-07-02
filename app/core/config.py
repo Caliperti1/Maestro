@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     openrouter_app_title: str = "Maestro"
     llm_model: str = "openai/gpt-5.5"
     memory_dropbox_root: str = "maestro_dropbox"
+    home_timezone: str = "America/New_York"
     embedding_provider: str = "ollama"
     embedding_model: str = "nomic-embed-text"
     embedding_base_url: str = "http://localhost:11434"

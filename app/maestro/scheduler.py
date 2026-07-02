@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.time import ensure_aware_utc, home_isoformat, to_home_timezone
 from app.db.models import (
     Agent,
     Domain,
@@ -509,10 +510,10 @@ class SchedulerService:
             "status": run.status,
             "priority": run.priority,
             "fairness_group": run.fairness_group,
-            "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else None,
-            "started_at": run.started_at.isoformat() if run.started_at else None,
-            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
-            "created_at": run.created_at.isoformat() if run.created_at else None,
+            "scheduled_for": home_isoformat(run.scheduled_for),
+            "started_at": home_isoformat(run.started_at),
+            "completed_at": home_isoformat(run.completed_at),
+            "created_at": home_isoformat(run.created_at),
             "summary": (run.input_payload or {}).get("summary"),
             "queue_items": [
                 self.queue_item_payload(item) for item in self._queue_items_for_run(run.id)
@@ -533,8 +534,8 @@ class SchedulerService:
             "priority": definition.priority,
             "fairness_group": definition.fairness_group,
             "is_active": definition.is_active,
-            "created_at": definition.created_at.isoformat() if definition.created_at else None,
-            "updated_at": definition.updated_at.isoformat() if definition.updated_at else None,
+            "created_at": home_isoformat(definition.created_at),
+            "updated_at": home_isoformat(definition.updated_at),
         }
 
     def queue_item_payload(self, item: WorkflowQueueItem) -> dict[str, Any]:
@@ -558,9 +559,9 @@ class SchedulerService:
             "agent_key": agent.key if agent else None,
             "agent_name": agent.name if agent else None,
             "lease_owner": item.lease_owner,
-            "lease_expires_at": item.lease_expires_at.isoformat() if item.lease_expires_at else None,
-            "started_at": item.started_at.isoformat() if item.started_at else None,
-            "completed_at": item.completed_at.isoformat() if item.completed_at else None,
+            "lease_expires_at": home_isoformat(item.lease_expires_at),
+            "started_at": home_isoformat(item.started_at),
+            "completed_at": home_isoformat(item.completed_at),
             "error_message": item.error_message,
         }
 
@@ -573,7 +574,7 @@ class SchedulerService:
             "workflow_run_id": str(lock.workflow_run_id) if lock.workflow_run_id else None,
             "queue_item_id": str(lock.queue_item_id) if lock.queue_item_id else None,
             "owner": lock.owner,
-            "lease_expires_at": lock.lease_expires_at.isoformat() if lock.lease_expires_at else None,
+            "lease_expires_at": home_isoformat(lock.lease_expires_at),
         }
 
     def record_event(
@@ -719,15 +720,16 @@ class SchedulerService:
 
     def _next_daily_time(self, now: datetime, time_of_day: str) -> datetime:
         hour_text, minute_text = (time_of_day.split(":", 1) + ["0"])[:2]
-        candidate = now.replace(
+        local_now = to_home_timezone(now)
+        candidate = local_now.replace(
             hour=int(hour_text),
             minute=int(minute_text),
             second=0,
             microsecond=0,
         )
-        if candidate <= now:
+        if candidate <= local_now:
             candidate += timedelta(days=1)
-        return candidate
+        return candidate.astimezone(UTC)
 
     def _event_matches_filters(
         self,
@@ -855,8 +857,8 @@ class SchedulerService:
         if not value:
             return None
         if isinstance(value, datetime):
-            return value
+            return ensure_aware_utc(value)
         try:
-            return datetime.fromisoformat(str(value))
+            return ensure_aware_utc(datetime.fromisoformat(str(value)))
         except ValueError:
             return None
