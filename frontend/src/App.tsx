@@ -913,6 +913,15 @@ export function App() {
     setMaestroRun(null);
   }, []);
 
+  const pollActiveChannel = useCallback(async () => {
+    const response = await apiJson<{ conversation: MaestroSessionSummary }>(
+      "/maestro/sessions/active",
+    );
+    setActiveConversationId(response.conversation.id);
+    setChatMessages(response.conversation.messages ?? []);
+    setMaestroPlan((currentPlan) => currentPlan ?? response.conversation.active_plan ?? null);
+  }, []);
+
   const loadActiveSession = useCallback(async () => {
     const response = await apiJson<{ conversation: MaestroSessionSummary }>(
       "/maestro/sessions/active",
@@ -1112,6 +1121,15 @@ export function App() {
     loadSchedulerDashboard().catch(() => undefined);
   }, [loadActiveSession, loadSchedulerDashboard, loadSessionHistory]);
 
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      if (maestroBusy) return;
+      pollActiveChannel().catch(() => undefined);
+      loadSchedulerDashboard().catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [loadSchedulerDashboard, maestroBusy, pollActiveChannel]);
+
   const applyToolCallUpdate = (toolCall: MaestroToolCallResponse["tool_call"]) => {
     setMaestroRun((run) => {
       if (!run) return run;
@@ -1197,10 +1215,12 @@ export function App() {
         setMaestroRun(response.run);
         setMaestroPlan(response.run.plan);
       }
-      setChatMessages((messages) => [
-        ...messages,
-        { id: crypto.randomUUID(), sender: "maestro", content: response.message },
-      ]);
+      await pollActiveChannel().catch(() => {
+        setChatMessages((messages) => [
+          ...messages,
+          { id: crypto.randomUUID(), sender: "maestro", content: response.message },
+        ]);
+      });
       setMaestroStatus(
         response.run
           ? `Workflow ${response.run.status}.`
@@ -1238,10 +1258,12 @@ export function App() {
         },
       );
       applyToolCallUpdate(response.tool_call);
-      setChatMessages((messages) => [
-        ...messages,
-        { id: crypto.randomUUID(), sender: "maestro", content: response.message },
-      ]);
+      await pollActiveChannel().catch(() => {
+        setChatMessages((messages) => [
+          ...messages,
+          { id: crypto.randomUUID(), sender: "maestro", content: response.message },
+        ]);
+      });
       setMaestroStatus("Tool rejected.");
       loadSessionHistory().catch(() => undefined);
       loadSchedulerDashboard().catch(() => undefined);
@@ -1299,14 +1321,18 @@ export function App() {
       setMaestroPlan(response.plan ?? response.active_plan);
       setMaestroRun(null);
       if (response.conversation) setActiveConversationId(response.conversation.id);
-      setChatMessages((messages) => [
-        ...messages,
-        {
-          id: crypto.randomUUID(),
-          sender: "maestro",
-          content: response.message,
-        },
-      ]);
+      if (response.conversation?.messages?.length) {
+        setChatMessages(response.conversation.messages);
+      } else {
+        setChatMessages((messages) => [
+          ...messages,
+          {
+            id: crypto.randomUUID(),
+            sender: "maestro",
+            content: response.message,
+          },
+        ]);
+      }
       setMaestroStatus(
         response.kind === "chat_only"
           ? "Answered directly."
@@ -1351,17 +1377,19 @@ export function App() {
       );
       setMaestroRun(response.run);
       setMaestroPlan(response.run.plan);
-      setChatMessages((messages) => [
-        ...messages,
-        {
-          id: crypto.randomUUID(),
-          sender: "maestro",
-          content:
-            response.run.status === "completed"
-              ? response.run.chat_summary
-              : `The workflow finished with status ${response.run.status}.\n\n${response.run.chat_summary}`,
-        },
-      ]);
+      await pollActiveChannel().catch(() => {
+        setChatMessages((messages) => [
+          ...messages,
+          {
+            id: crypto.randomUUID(),
+            sender: "maestro",
+            content:
+              response.run.status === "completed"
+                ? response.run.chat_summary
+                : `The workflow finished with status ${response.run.status}.\n\n${response.run.chat_summary}`,
+          },
+        ]);
+      });
       setMaestroStatus(
         response.run.status === "completed" ? "Workflow completed." : "Workflow finished.",
       );
