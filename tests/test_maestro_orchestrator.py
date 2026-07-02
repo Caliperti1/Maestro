@@ -1422,6 +1422,25 @@ def test_maestro_historical_session_restore_does_not_replace_primary_channel(
     assert second.json()["conversation"]["id"] == channel_id
 
 
+def test_maestro_channel_websocket_sends_active_conversation(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    conversation_id = response.json()["conversation"]["id"]
+
+    with client.websocket_connect("/maestro/channel/ws") as websocket:
+        payload = websocket.receive_json()
+
+    assert payload["type"] == "conversation"
+    assert payload["conversation"]["id"] == conversation_id
+    assert payload["conversation"]["messages"][0]["content"] == "Prepare a Praxis partner call workflow."
+
+
 def test_maestro_api_respond_refines_active_plan(
     session: Session,
     tmp_path: Path,
@@ -1534,6 +1553,47 @@ def test_maestro_api_respond_uses_previous_pr_context_for_merge_followup(
     assert "PR number: 77" in refined_input
     assert "https://github.com/example/maestro/pull/77" in refined_input
     assert "maestro/issue-42" in refined_input
+
+
+def test_maestro_api_respond_resolves_channel_context_without_explicit_plan_id(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Have the Maestro coding agent implement issue 42."},
+    )
+    first_plan = first_response.json()["plan"]
+    parent = session.get(Task, uuid.UUID(first_plan["parent_task_id"]))
+    assert parent is not None
+    parent.output_payload = {
+        "chat_summary": "Created PR #77 for issue 42 and left it ready for review.",
+        "tool_activity": [
+            {
+                "tool_name": "codex.task.run",
+                "status": "complete",
+                "details": "Opened PR #77 for review.",
+                "output_payload": {
+                    "pr_number": 77,
+                    "pr_url": "https://github.com/example/maestro/pull/77",
+                },
+            }
+        ],
+    }
+    session.commit()
+
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Cool, merge the PR and reload the app."},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "refined"
+    refined_task = session.get(Task, uuid.UUID(payload["plan"]["parent_task_id"]))
+    assert refined_task is not None
+    assert "PR number: 77" in refined_task.input_payload["user_input"]
 
 
 def test_maestro_api_respond_side_chat_keeps_active_plan(

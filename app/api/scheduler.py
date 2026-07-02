@@ -9,7 +9,11 @@ from app.db.models import WorkflowDefinition, WorkflowQueueItem, WorkflowRun
 from app.db.repositories import DomainRepository
 from app.db.session import get_db
 from app.maestro.scheduler import SchedulerService
-from app.maestro.scheduler_worker import SchedulerWorkerService
+from app.maestro.scheduler_worker import (
+    SchedulerWorkerService,
+    scheduler_worker_settings,
+    update_scheduler_worker_settings,
+)
 
 router = APIRouter(prefix="/scheduler", tags=["scheduler"])
 
@@ -70,6 +74,14 @@ class SchedulerWorkerRunBody(BaseModel):
     execute_llm: bool = True
     auto_tool_loop: bool = True
     max_tool_iterations: int = Field(default=2, ge=1, le=4)
+
+
+class SchedulerWorkerSettingsBody(BaseModel):
+    enabled: bool | None = None
+    interval_seconds: int | None = Field(default=None, ge=5, le=3600)
+    claim_limit: int | None = Field(default=None, ge=1, le=20)
+    execute_llm: bool | None = None
+    auto_tool_loop: bool | None = None
 
 
 @router.get("/definitions")
@@ -232,6 +244,28 @@ def run_scheduler_worker_once(
         auto_tool_loop=options.auto_tool_loop,
         max_tool_iterations=options.max_tool_iterations,
     )
+
+
+@router.get("/worker/status")
+def get_scheduler_worker_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return {"worker": scheduler_worker_settings(db)}
+
+
+@router.patch("/worker/status")
+def update_scheduler_worker_status(
+    body: SchedulerWorkerSettingsBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return {
+        "worker": update_scheduler_worker_settings(
+            db,
+            enabled=body.enabled,
+            interval_seconds=body.interval_seconds,
+            claim_limit=body.claim_limit,
+            execute_llm=body.execute_llm,
+            auto_tool_loop=body.auto_tool_loop,
+        )
+    }
 
 
 @router.post("/worker/claim")

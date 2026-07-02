@@ -295,3 +295,40 @@ def test_scheduler_worker_blocks_unassigned_item(
     assert executed["status"] == "blocked"
     assert executed["queue_item"]["status"] == "blocked"
     assert "No agent" in executed["queue_item"]["error_message"]
+
+
+def test_scheduler_worker_status_can_be_toggled_at_runtime(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+
+    status = client.get("/scheduler/worker/status")
+
+    assert status.status_code == 200
+    assert status.json()["worker"]["enabled"] is False
+    assert status.json()["worker"]["source"] == "env"
+
+    updated = client.patch(
+        "/scheduler/worker/status",
+        json={
+            "enabled": True,
+            "interval_seconds": 15,
+            "claim_limit": 3,
+            "execute_llm": False,
+            "auto_tool_loop": False,
+        },
+    )
+
+    assert updated.status_code == 200
+    worker = updated.json()["worker"]
+    assert worker["enabled"] is True
+    assert worker["interval_seconds"] == 15
+    assert worker["claim_limit"] == 3
+    assert worker["execute_llm"] is False
+    assert worker["auto_tool_loop"] is False
+    assert worker["source"] == "runtime"
+
+    reloaded = client.get("/scheduler/worker/status")
+    assert reloaded.json()["worker"]["enabled"] is True

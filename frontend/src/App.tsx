@@ -128,6 +128,15 @@ type SchedulerWorkerAgentRun = {
   error_message: string | null;
 };
 
+type SchedulerWorkerStatus = {
+  enabled: boolean;
+  interval_seconds: number;
+  claim_limit: number;
+  execute_llm: boolean;
+  auto_tool_loop: boolean;
+  source: string;
+};
+
 type DropboxDomain = {
   key: string;
   inbox: number;
@@ -606,6 +615,38 @@ async function apiJson<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function websocketUrl(path: string) {
+  const url = new URL(path, API_BASE_URL);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}
+
+function definitionQueueItems(definition: SchedulerDefinition) {
+  return Array.isArray(definition.workflow_spec?.queue_items)
+    ? (definition.workflow_spec.queue_items as Array<Record<string, unknown>>)
+    : [];
+}
+
+function unassignedDefinitionItemCount(definition: SchedulerDefinition) {
+  return definitionQueueItems(definition).filter((item) => !item.agent_key).length;
+}
+
+function triggerSummary(triggerType: string, triggerConfig: Record<string, unknown>) {
+  if (triggerType === "event") {
+    return `When ${String(triggerConfig.event_type ?? "event arrives")}`;
+  }
+  if (typeof triggerConfig.time_of_day === "string") {
+    return `Daily at ${triggerConfig.time_of_day}`;
+  }
+  if (typeof triggerConfig.next_run_at === "string") {
+    return `Next ${triggerConfig.next_run_at}`;
+  }
+  if (typeof triggerConfig.interval_minutes === "number") {
+    return `Every ${triggerConfig.interval_minutes} minutes`;
+  }
+  return triggerType;
+}
+
 function RoutedItemsBoard({
   domainKey,
   title,
@@ -760,6 +801,8 @@ export function App() {
   const [selectedSchedulerRun, setSelectedSchedulerRun] = useState<SchedulerRun | null>(null);
   const [selectedSchedulerDefinition, setSelectedSchedulerDefinition] =
     useState<SchedulerDefinition | null>(null);
+  const [schedulerWorkerStatus, setSchedulerWorkerStatus] =
+    useState<SchedulerWorkerStatus | null>(null);
 
   const maestroPlanStages = useMemo(() => {
     if (!maestroPlan) return [];
@@ -858,6 +901,13 @@ export function App() {
     };
   }, [maestroPlan, maestroRun, queueStages.length]);
 
+  const planScheduleCandidate = useMemo(() => {
+    const candidate = maestroPlan?.scheduler.schedule_candidate;
+    return candidate && typeof candidate === "object"
+      ? (candidate as Record<string, unknown>)
+      : null;
+  }, [maestroPlan]);
+
   const pendingToolApprovals = useMemo(
     () =>
       (maestroRun?.tool_activity ?? []).filter(
@@ -910,7 +960,6 @@ export function App() {
     setActiveConversationId(conversation.id);
     setChatMessages(conversation.messages ?? []);
     setMaestroPlan(conversation.active_plan ?? null);
-    setMaestroRun(null);
   }, []);
 
   const pollActiveChannel = useCallback(async () => {
@@ -933,6 +982,25 @@ export function App() {
     const response = await apiJson<SchedulerDashboard>("/scheduler/dashboard");
     setSchedulerDashboard(response);
   }, []);
+
+  const loadSchedulerWorkerStatus = useCallback(async () => {
+    const response = await apiJson<{ worker: SchedulerWorkerStatus }>("/scheduler/worker/status");
+    setSchedulerWorkerStatus(response.worker);
+  }, []);
+
+  const updateSchedulerWorkerStatus = async (updates: Partial<SchedulerWorkerStatus>) => {
+    const response = await apiJson<{ worker: SchedulerWorkerStatus }>("/scheduler/worker/status", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    setSchedulerWorkerStatus(response.worker);
+    setSchedulerStatusMessage(
+      response.worker.enabled
+        ? "Auto worker is on. Maestro will claim and run due queue items."
+        : "Auto worker is paused. Queue items wait for manual worker runs.",
+    );
+  };
 
   const archiveSession = async (sessionId: string) => {
     await apiJson<{ conversation: MaestroSessionSummary }>(
@@ -1119,16 +1187,54 @@ export function App() {
     });
     loadSessionHistory().catch(() => undefined);
     loadSchedulerDashboard().catch(() => undefined);
-  }, [loadActiveSession, loadSchedulerDashboard, loadSessionHistory]);
+    loadSchedulerWorkerStatus().catch(() => undefined);
+  }, [loadActiveSession, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadSessionHistory]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      if (maestroBusy) return;
-      pollActiveChannel().catch(() => undefined);
       loadSchedulerDashboard().catch(() => undefined);
+      loadSchedulerWorkerStatus().catch(() => undefined);
     }, 3000);
     return () => window.clearInterval(interval);
-  }, [loadSchedulerDashboard, maestroBusy, pollActiveChannel]);
+  }, [loadSchedulerDashboard, loadSchedulerWorkerStatus]);
+
+  useEffect(() => {
+    let closed = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | undefined;
+
+    const connect = () => {
+      socket = new WebSocket(websocketUrl("/maestro/channel/ws"));
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data) as {
+            type?: string;
+            conversation?: MaestroSessionSummary;
+          };
+          if (payload.type === "conversation" && payload.conversation) {
+            applyConversation(payload.conversation);
+          }
+        } catch {
+          setMaestroStatus("Could not parse Maestro channel update.");
+        }
+      };
+      socket.onclose = () => {
+        if (!closed) {
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+      socket.onerror = () => {
+        socket?.close();
+      };
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [applyConversation]);
 
   const applyToolCallUpdate = (toolCall: MaestroToolCallResponse["tool_call"]) => {
     setMaestroRun((run) => {
@@ -1360,7 +1466,9 @@ export function App() {
 
   const runMaestroPlan = async () => {
     if (!maestroPlan) return;
+    const isScheduledApproval = Boolean(planScheduleCandidate);
     setMaestroBusy(true);
+    setMaestroStatus(isScheduledApproval ? "Saving scheduled workflow..." : "Running workflow...");
     try {
       const response = await apiJson<{ run: MaestroRun }>(
         `/maestro/plans/${maestroPlan.parent_task_id}/run`,
@@ -1377,21 +1485,27 @@ export function App() {
       );
       setMaestroRun(response.run);
       setMaestroPlan(response.run.plan);
-      await pollActiveChannel().catch(() => {
-        setChatMessages((messages) => [
+      setChatMessages((messages) => {
+        const alreadyShown = messages.some((message) => message.content === response.run.chat_summary);
+        if (alreadyShown) return messages;
+        return [
           ...messages,
           {
             id: crypto.randomUUID(),
             sender: "maestro",
             content:
-              response.run.status === "completed"
+              response.run.status === "completed" || response.run.status === "scheduled"
                 ? response.run.chat_summary
                 : `The workflow finished with status ${response.run.status}.\n\n${response.run.chat_summary}`,
           },
-        ]);
+        ];
       });
       setMaestroStatus(
-        response.run.status === "completed" ? "Workflow completed." : "Workflow finished.",
+        response.run.status === "scheduled"
+          ? "Scheduled workflow saved."
+          : response.run.status === "completed"
+            ? "Workflow completed."
+            : "Workflow finished.",
       );
       loadSessionHistory().catch(() => undefined);
       loadSchedulerDashboard().catch(() => undefined);
@@ -1728,10 +1842,15 @@ export function App() {
                       disabled={maestroBusy || !["proposed", "queued", "failed"].includes(maestroPlan.status)}
                     >
                       <Sparkles size={16} />
-                      Run plan
+                      {planScheduleCandidate ? "Save schedule" : "Run plan"}
                     </button>
                   </div>
                   <p>{maestroPlan.summary}</p>
+                  {planScheduleCandidate && (
+                    <p className="evaluation-note">
+                      This will save a scheduled workflow in Queue instead of executing the agents now.
+                    </p>
+                  )}
                   {maestroPlan.planner_notes && (
                     <p className="evaluation-note">{maestroPlan.planner_notes}</p>
                   )}
@@ -1746,6 +1865,14 @@ export function App() {
                     <span>{maestroPlanStages.length} stages</span>
                     <span>{maestroPlan.workflow_graph.edges?.length ?? 0} edges</span>
                     <span>{String(maestroPlan.scheduler.status ?? "queue")}</span>
+                    {planScheduleCandidate && (
+                      <span>
+                        {triggerSummary(
+                          String(planScheduleCandidate.trigger_type ?? "recurring"),
+                          (planScheduleCandidate.trigger_config as Record<string, unknown>) ?? {},
+                        )}
+                      </span>
+                    )}
                     {maestroPlan.scheduler.current_step && (
                       <span>{maestroPlan.scheduler.current_step}</span>
                     )}
@@ -2040,6 +2167,16 @@ export function App() {
                     <span>Control</span>
                     <h4>Workflow triggers</h4>
                   </div>
+                  <label className="worker-toggle">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(schedulerWorkerStatus?.enabled)}
+                      onChange={(event) =>
+                        updateSchedulerWorkerStatus({ enabled: event.target.checked })
+                      }
+                    />
+                    <span>{schedulerWorkerStatus?.enabled ? "Auto worker on" : "Auto worker off"}</span>
+                  </label>
                   <button type="button" onClick={runSchedulerTick}>
                     Run tick
                   </button>
@@ -2058,6 +2195,11 @@ export function App() {
                     </button>
                   )}
                 </div>
+                <p className="scheduler-help-text">
+                  Auto worker claims and executes due queue items every{" "}
+                  {schedulerWorkerStatus?.interval_seconds ?? 30}s. Run tick only enqueues and
+                  claims ready items; Run worker enqueues, claims, and executes once.
+                </p>
                 <div className="scheduler-form-grid">
                   <label>
                     <span>Mode</span>
@@ -2111,9 +2253,10 @@ export function App() {
                 </div>
                 <label className="scheduler-wide-field">
                   <span>Objective</span>
-                  <input
+                  <textarea
                     value={schedulerDefinitionObjective}
                     onChange={(event) => setSchedulerDefinitionObjective(event.target.value)}
+                    rows={3}
                   />
                 </label>
                 <div className="scheduler-action-row">
@@ -2263,6 +2406,7 @@ export function App() {
                   {schedulerDashboard.runs.slice(0, 5).map((run) => {
                     const completed = run.queue_items.filter((item) => item.status === "completed").length;
                     const blocked = run.queue_items.filter((item) => item.status === "blocked").length;
+                    const unassigned = run.queue_items.filter((item) => !item.agent_key).length;
                     const runnableBatch = schedulerDashboard.runnable_batches.find(
                       (batch) => batch.workflow_run_id === run.id,
                     );
@@ -2282,6 +2426,7 @@ export function App() {
                           <span>{run.queue_items.length} queued</span>
                           <span>{completed} complete</span>
                           {blocked > 0 && <span>{blocked} blocked</span>}
+                          {unassigned > 0 && <span className="warning-pill">{unassigned} need agent</span>}
                           {runnableBatch && (
                             <span>{runnableBatch.parallel_ready.length} parallel-ready</span>
                           )}
@@ -2335,6 +2480,7 @@ export function App() {
                         <p>{item.objective}</p>
                         <div className="preview-meta">
                           <span>{item.agent_name ?? item.agent_key ?? "Unassigned"}</span>
+                          {!item.agent_key && <span className="warning-pill">Needs agent assignment</span>}
                           <span>{item.priority}</span>
                           {item.dependency_keys.length > 0 && (
                             <span>Waits for {item.dependency_keys.join(", ")}</span>
@@ -2365,34 +2511,39 @@ export function App() {
                     </div>
                     <span>{schedulerDashboard.definitions.length} configured</span>
                   </div>
-                  {schedulerDashboard.definitions.slice(0, 5).map((definition) => (
-                    <article className="workflow-summary-card compact-run-card" key={definition.id}>
-                      <button
-                        type="button"
-                        className="card-reset"
-                        onClick={() => selectSchedulerDefinition(definition)}
-                      >
-                        <span>{definition.trigger_type}</span>
-                        <h4>{definition.name}</h4>
-                      </button>
-                      <div className="preview-meta">
-                        <span>{definition.is_active ? "active" : "paused"}</span>
-                        <span>{definition.priority}</span>
-                        <span>{definition.fairness_group || definition.domain_key || "global"} fairness</span>
-                        {typeof definition.trigger_config.next_run_at === "string" && (
-                          <span>Next {definition.trigger_config.next_run_at}</span>
-                        )}
-                        {typeof definition.trigger_config.event_type === "string" && (
-                          <span>{definition.trigger_config.event_type}</span>
-                        )}
-                      </div>
-                      <div className="scheduler-action-row compact-actions">
-                        <button type="button" onClick={() => selectSchedulerDefinition(definition)}>
-                          Edit schedule
+                  {schedulerDashboard.definitions.slice(0, 5).map((definition) => {
+                    const unassigned = unassignedDefinitionItemCount(definition);
+                    return (
+                      <article className="workflow-summary-card compact-run-card" key={definition.id}>
+                        <button
+                          type="button"
+                          className="card-reset"
+                          onClick={() => selectSchedulerDefinition(definition)}
+                        >
+                          <span>{definition.trigger_type}</span>
+                          <h4>{definition.name}</h4>
                         </button>
-                      </div>
-                    </article>
-                  ))}
+                        <div className="preview-meta">
+                          <span>{definition.is_active ? "active" : "paused"}</span>
+                          <span>{triggerSummary(definition.trigger_type, definition.trigger_config)}</span>
+                          <span>{definition.priority}</span>
+                          <span>{definition.fairness_group || definition.domain_key || "global"} fairness</span>
+                          {unassigned > 0 && <span className="warning-pill">{unassigned} need agent</span>}
+                          {typeof definition.trigger_config.next_run_at === "string" && (
+                            <span>Next {definition.trigger_config.next_run_at}</span>
+                          )}
+                          {typeof definition.trigger_config.event_type === "string" && (
+                            <span>{definition.trigger_config.event_type}</span>
+                          )}
+                        </div>
+                        <div className="scheduler-action-row compact-actions">
+                          <button type="button" onClick={() => selectSchedulerDefinition(definition)}>
+                            Edit schedule
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
               )}
             </section>

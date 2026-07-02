@@ -10,9 +10,79 @@ from app.agents.runtime import (
     PromptAggregationService,
     PromptPackageRequest,
 )
-from app.db.models import Agent, Report, WorkflowQueueItem, WorkflowRun
+from app.core.config import get_settings
+from app.db.models import Agent, Report, RuntimeSetting, WorkflowQueueItem, WorkflowRun
 from app.maestro.channel import record_channel_message
 from app.maestro.scheduler import SchedulerService
+
+SCHEDULER_WORKER_SETTING_KEY = "scheduler_worker"
+
+
+def scheduler_worker_settings(session: Session) -> dict[str, Any]:
+    settings = get_settings()
+    defaults: dict[str, Any] = {
+        "enabled": settings.scheduler_worker_autorun,
+        "interval_seconds": settings.scheduler_worker_interval_seconds,
+        "claim_limit": settings.scheduler_worker_claim_limit,
+        "execute_llm": settings.scheduler_worker_execute_llm,
+        "auto_tool_loop": settings.scheduler_worker_auto_tool_loop,
+        "source": "env",
+    }
+    stored = session.get(RuntimeSetting, SCHEDULER_WORKER_SETTING_KEY)
+    if stored is None:
+        return defaults
+    payload = stored.value or {}
+    return {
+        **defaults,
+        **{
+            key: payload[key]
+            for key in (
+                "enabled",
+                "interval_seconds",
+                "claim_limit",
+                "execute_llm",
+                "auto_tool_loop",
+            )
+            if key in payload
+        },
+        "source": "runtime",
+    }
+
+
+def update_scheduler_worker_settings(
+    session: Session,
+    *,
+    enabled: bool | None = None,
+    interval_seconds: int | None = None,
+    claim_limit: int | None = None,
+    execute_llm: bool | None = None,
+    auto_tool_loop: bool | None = None,
+) -> dict[str, Any]:
+    current = scheduler_worker_settings(session)
+    updates = {
+        "enabled": enabled,
+        "interval_seconds": interval_seconds,
+        "claim_limit": claim_limit,
+        "execute_llm": execute_llm,
+        "auto_tool_loop": auto_tool_loop,
+    }
+    for key, value in updates.items():
+        if value is not None:
+            current[key] = value
+
+    stored = session.get(RuntimeSetting, SCHEDULER_WORKER_SETTING_KEY)
+    if stored is None:
+        stored = RuntimeSetting(key=SCHEDULER_WORKER_SETTING_KEY, value={})
+        session.add(stored)
+    stored.value = {
+        "enabled": bool(current["enabled"]),
+        "interval_seconds": int(current["interval_seconds"]),
+        "claim_limit": int(current["claim_limit"]),
+        "execute_llm": bool(current["execute_llm"]),
+        "auto_tool_loop": bool(current["auto_tool_loop"]),
+    }
+    session.commit()
+    return scheduler_worker_settings(session)
 
 
 class SchedulerWorkerService:

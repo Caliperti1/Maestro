@@ -1,8 +1,9 @@
 from typing import Any
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -85,8 +86,12 @@ def respond_to_maestro(
     _record_session_message(db, conversation, "user", body.message)
     try:
         service = MaestroOrchestratorService(db)
-        if body.active_plan_id is not None:
-            active_plan = service.get_plan(body.active_plan_id)
+        active_plan_id = body.active_plan_id
+        if active_plan_id is None:
+            channel_context = _resolve_channel_context(db, conversation)
+            active_plan_id = channel_context.parent_task_id if channel_context else None
+        if active_plan_id is not None:
+            active_plan = service.get_plan(active_plan_id)
             classification = _classify_active_session_message(body.message, active_plan)
             if classification == "side_chat":
                 response_message = _side_chat_response(body.message, active_plan)
@@ -105,7 +110,7 @@ def respond_to_maestro(
                 kind = "chat_only" if plan.is_chat_only else "planned"
             else:
                 plan = service.refine_plan(
-                    body.active_plan_id,
+                    active_plan_id,
                     _classified_refinement_message(body.message, classification, active_plan),
                 )
                 kind = "chat_only" if plan.is_chat_only else classification
@@ -129,6 +134,31 @@ def respond_to_maestro(
         "active_plan": None,
         "conversation": _conversation_payload(db, conversation),
     }
+
+
+@router.websocket("/channel/ws")
+async def maestro_channel_ws(
+    websocket: WebSocket,
+    db: Session = Depends(get_db),
+) -> None:
+    await websocket.accept()
+    last_signature: tuple[str, str | None, int] | None = None
+    try:
+        while True:
+            db.expire_all()
+            conversation = get_or_create_maestro_channel(db)
+            payload = _conversation_payload(db, conversation)
+            signature = (
+                payload["id"],
+                payload["updated_at"],
+                int(payload["message_count"]),
+            )
+            if signature != last_signature:
+                await websocket.send_json({"type": "conversation", "conversation": payload})
+                last_signature = signature
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        return
 
 
 @router.post("/plans/{plan_id}/refine")
@@ -467,6 +497,16 @@ def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> Maestr
     except MaestroOrchestratorError:
         return None
     return None if plan.is_chat_only else plan
+
+
+def _resolve_channel_context(db: Session, conversation: Conversation) -> MaestroPlan | None:
+    plan = _latest_conversation_plan(db, conversation.id)
+    if plan is not None:
+        return plan
+    active = _active_maestro_conversation(db)
+    if active is not None and active.id != conversation.id:
+        return _latest_conversation_plan(db, active.id)
+    return None
 
 
 def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
