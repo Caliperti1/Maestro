@@ -111,11 +111,18 @@ def respond_to_maestro(
                 plan = service.create_plan(body.message, conversation_id=conversation.id)
                 kind = "chat_only" if plan.is_chat_only else "planned"
             elif classification == "delete_workflow":
-                archived_plan = service.archive_plan(
-                    active_plan_id,
-                    reason=f"Workflow archived from Maestro chat. Request: {body.message}",
+                reason = f"Workflow archived from Maestro chat. Request: {body.message}"
+                archived_count = service.archive_open_plans_for_conversation(
+                    conversation.id,
+                    reason=reason,
                 )
-                response_message = "Done. I archived that workflow and removed it from the active queue."
+                if archived_count == 0:
+                    service.archive_plan(active_plan_id, reason=reason)
+                    archived_count = 1
+                response_message = (
+                    f"Done. I archived {archived_count} open workflow"
+                    f"{'' if archived_count == 1 else 's'} and removed them from the active queue."
+                )
                 _record_session_message(db, conversation, "maestro", response_message)
                 return {
                     "kind": "chat_only",
@@ -123,7 +130,7 @@ def respond_to_maestro(
                     "message": response_message,
                     "plan": None,
                     "chat_plan": None,
-                    "active_plan": _plan_payload(archived_plan),
+                    "active_plan": None,
                     "conversation": _conversation_payload(db, conversation),
                 }
             elif classification == "side_chat":

@@ -281,6 +281,27 @@ class MaestroOrchestratorService:
         self._archive_parent_task(task, reason=reason, commit=True)
         return self._plan_from_task(task)
 
+    def archive_open_plans_for_conversation(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        reason: str = "Open workflows archived at Chris's request.",
+    ) -> int:
+        open_statuses = {"proposed", "queued", "ready", "running", "blocked", "failed", "scheduled"}
+        tasks = self.session.scalars(
+            select(Task)
+            .where(
+                Task.conversation_id == conversation_id,
+                Task.workflow_key == "maestro.generic",
+                Task.status.in_(open_statuses),
+            )
+            .order_by(Task.created_at.desc())
+        ).all()
+        for task in tasks:
+            self._archive_parent_task(task, reason=reason, commit=False)
+        self.session.commit()
+        return len(tasks)
+
     def _archive_parent_task(self, task: Task, *, reason: str, commit: bool) -> None:
         raw_scheduler = task.input_payload.get("scheduler") if isinstance(task.input_payload, dict) else {}
         scheduler = raw_scheduler if isinstance(raw_scheduler, dict) else {}
@@ -307,7 +328,15 @@ class MaestroOrchestratorService:
         task.status = "archived"
         task.error_message = reason
         task.completed_at = task.completed_at or datetime.now(UTC)
-        SchedulerService(self.session).archive_run_for_parent_task(
+        scheduler_service = SchedulerService(self.session)
+        definition_id = self._scheduled_definition_id(task)
+        if definition_id is not None:
+            scheduler_service.archive_definition(
+                definition_id,
+                reason=reason,
+                commit=False,
+            )
+        scheduler_service.archive_run_for_parent_task(
             task.id,
             reason=reason,
             commit=False,
@@ -315,6 +344,22 @@ class MaestroOrchestratorService:
         if commit:
             self.session.commit()
             self.session.refresh(task)
+
+    def _scheduled_definition_id(self, task: Task) -> uuid.UUID | None:
+        payload = task.input_payload or {}
+        scheduler = payload.get("scheduler") if isinstance(payload.get("scheduler"), dict) else {}
+        candidates = [
+            scheduler.get("scheduled_definition_id"),
+            (task.output_payload or {}).get("scheduled_definition_id") if task.output_payload else None,
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return uuid.UUID(str(candidate))
+            except (TypeError, ValueError):
+                continue
+        return None
 
     def close_session(
         self,

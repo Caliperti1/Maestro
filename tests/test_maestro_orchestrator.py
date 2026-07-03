@@ -15,6 +15,7 @@ from app.db.session import get_db
 from app.llm.client import LLMClientError
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
 from app.maestro.planner import MaestroPlannerResponse
+from app.maestro.scheduler import SchedulerService
 
 
 class FakeOrchestratorLLMClient:
@@ -1505,11 +1506,16 @@ def test_maestro_api_respond_deletes_active_workflow_instead_of_refining(
         json={"message": "Prepare a Praxis partner call workflow."},
     )
     first_plan = first_response.json()["plan"]
+    second_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare an Ophi research workflow."},
+    )
+    second_plan = second_response.json()["plan"]
 
     response = client.post(
         "/maestro/respond",
         json={
-            "active_plan_id": first_plan["parent_task_id"],
+            "active_plan_id": second_plan["parent_task_id"],
             "message": "Please delete the workflow currently under development.",
         },
     )
@@ -1519,16 +1525,48 @@ def test_maestro_api_respond_deletes_active_workflow_instead_of_refining(
     assert payload["kind"] == "chat_only"
     assert payload["classification"] == "delete_workflow"
     assert payload["plan"] is None
-    task = session.get(Task, uuid.UUID(first_plan["parent_task_id"]))
-    assert task is not None
-    assert task.status == "archived"
-    run = session.scalar(
-        select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(first_plan["parent_task_id"]))
-    )
-    assert run is not None
-    assert run.status == "archived"
+    assert payload["active_plan"] is None
+    for plan in (first_plan, second_plan):
+        task = session.get(Task, uuid.UUID(plan["parent_task_id"]))
+        assert task is not None
+        assert task.status == "archived"
+        run = session.scalar(
+            select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(plan["parent_task_id"]))
+        )
+        assert run is not None
+        assert run.status == "archived"
     active = client.get("/maestro/sessions/active")
     assert active.json()["conversation"]["active_plan"] is None
+
+
+def test_orchestrator_archive_plan_disables_saved_schedule_definition(
+    session: Session,
+) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeScheduledPlannerLLMClient(),
+    )
+    plan = service.create_plan(
+        "Each morning at 9am please review the Maestro backlog and propose a work plan for the day"
+    )
+    service.run_plan(plan.parent_task_id, execute_llm=False)
+    definition = session.query(WorkflowDefinition).one()
+    workflow_run = session.query(WorkflowRun).one()
+    assert definition.is_active is True
+    assert workflow_run.status == "scheduled"
+
+    archived = service.archive_plan(plan.parent_task_id, reason="Test archive saved schedule.")
+
+    assert archived.status == "archived"
+    session.refresh(definition)
+    session.refresh(workflow_run)
+    task = session.get(Task, uuid.UUID(plan.parent_task_id))
+    assert task is not None
+    assert task.status == "archived"
+    assert definition.is_active is False
+    assert definition.trigger_config["archive_reason"] == "Test archive saved schedule."
+    assert workflow_run.status == "archived"
+    assert SchedulerService(session).dashboard()["definitions"] == []
 
 
 def test_maestro_api_refinement_supersedes_previous_queued_workflow(

@@ -61,6 +61,47 @@ class SchedulerService:
             query = query.where(WorkflowDefinition.is_active.is_(True))
         return list(self.session.scalars(query).all())
 
+    def archive_definition(
+        self,
+        definition_id: uuid.UUID,
+        *,
+        reason: str = "Workflow definition was archived.",
+        commit: bool = True,
+    ) -> WorkflowDefinition | None:
+        definition = self.session.get(WorkflowDefinition, definition_id)
+        if definition is None:
+            return None
+        definition.is_active = False
+        trigger_config = dict(definition.trigger_config or {})
+        trigger_config["archived_at"] = datetime.now(UTC).isoformat()
+        trigger_config["archive_reason"] = reason
+        definition.trigger_config = trigger_config
+        for run in self.session.scalars(
+            select(WorkflowRun).where(
+                WorkflowRun.workflow_definition_id == definition.id,
+                WorkflowRun.status.in_(["scheduled", "queued", "ready", "running", "blocked", "failed"]),
+            )
+        ).all():
+            run.status = "archived"
+            run.error_message = reason
+            run.completed_at = run.completed_at or datetime.now(UTC)
+            for item in self._queue_items_for_run(run.id):
+                if item.status not in {"completed", "failed", "archived"}:
+                    item.status = "archived"
+                    item.error_message = reason
+                    item.completed_at = item.completed_at or datetime.now(UTC)
+                self.release_locks(item, commit=False)
+            self.record_event(
+                run,
+                event_type="workflow_archived",
+                message=reason,
+                commit=False,
+            )
+        if commit:
+            self.session.commit()
+            self.session.refresh(definition)
+        return definition
+
     def enqueue_maestro_plan(self, parent_task: Task) -> WorkflowRun:
         existing = self.session.scalar(
             select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task.id)
@@ -486,7 +527,7 @@ class SchedulerService:
         return {
             "definitions": [
                 self.workflow_definition_payload(definition)
-                for definition in self.list_definitions(active_only=False)
+                for definition in self.list_definitions(active_only=True)
             ],
             "runs": [self.workflow_run_payload(run) for run in runs],
             "runnable_batches": self.runnable_batches(),
