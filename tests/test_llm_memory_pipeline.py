@@ -171,6 +171,7 @@ def test_dropbox_processor_writes_routed_items_separate_from_memory(
                 "priority": "high",
                 "confidence": 0.86,
                 "status": "open",
+                "structured_data": {},
             },
             {
                 "route_type": "task",
@@ -180,6 +181,7 @@ def test_dropbox_processor_writes_routed_items_separate_from_memory(
                 "priority": "normal",
                 "confidence": 0.82,
                 "status": "open",
+                "structured_data": {"due_at": "2026-07-10T17:00:00Z", "owner": "Praxis"},
             },
         ],
     }
@@ -200,6 +202,10 @@ def test_dropbox_processor_writes_routed_items_separate_from_memory(
     assert [todo.todo_type for todo in todos] == ["human_input", "task"]
     assert {todo.title for todo in todos} == {"Confirm RFI owner", "Draft follow-up"}
     assert all(todo.provenance["created_from"] == "routed_item" for todo in todos)
+    task_todo = next(todo for todo in todos if todo.todo_type == "task")
+    assert task_todo.due_at is not None
+    assert task_todo.due_at.isoformat().startswith("2026-07-10T17:00:00")
+    assert task_todo.metadata_["structured_data"]["owner"] == "Praxis"
     preview = (tmp_path / "praxis" / "previews" / "run.preview.json").read_text()
     assert "routed_items" in preview
     assert "Confirm RFI owner" in preview
