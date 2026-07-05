@@ -283,6 +283,195 @@ class RoutedItem(TimestampMixin, Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
+class CalendarEvent(TimestampMixin, Base):
+    __tablename__ = "calendar_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    summary: Mapped[str | None] = mapped_column(Text)
+    start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    location: Mapped[str | None] = mapped_column(String(320))
+    attendees: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    supporting_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="scheduled", nullable=False, index=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class Entity(TimestampMixin, Base):
+    __tablename__ = "entities"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    normalized_name: Mapped[str] = mapped_column(String(260), unique=True, nullable=False)
+    website: Mapped[str | None] = mapped_column(String(320))
+    summary: Mapped[str | None] = mapped_column(Text)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class EntityDomainNote(TimestampMixin, Base):
+    __tablename__ = "entity_domain_notes"
+    __table_args__ = (
+        UniqueConstraint("entity_id", "domain_id", name="uq_entity_domain_notes_entity_domain"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    notes: Mapped[str | None] = mapped_column(Text)
+    interaction_log: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class Contact(TimestampMixin, Base):
+    __tablename__ = "contacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    normalized_name: Mapped[str] = mapped_column(String(260), nullable=False, index=True)
+    phone: Mapped[str | None] = mapped_column(String(80))
+    email: Mapped[str | None] = mapped_column(String(320), unique=True)
+    linkedin: Mapped[str | None] = mapped_column(String(320))
+    organization_entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="SET NULL"), index=True
+    )
+    summary: Mapped[str | None] = mapped_column(Text)
+    origination: Mapped[str | None] = mapped_column(Text)
+    last_contact_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    scheduled_event_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class ContactDomainNote(TimestampMixin, Base):
+    __tablename__ = "contact_domain_notes"
+    __table_args__ = (
+        UniqueConstraint("contact_id", "domain_id", name="uq_contact_domain_notes_contact_domain"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    notes: Mapped[str | None] = mapped_column(Text)
+    interaction_log: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class ContactRelationship(TimestampMixin, Base):
+    __tablename__ = "contact_relationships"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    related_contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class Todo(TimestampMixin, Base):
+    __tablename__ = "todos"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    todo_type: Mapped[str] = mapped_column(String(80), default="task", nullable=False, index=True)
+    owner_type: Mapped[str] = mapped_column(String(80), default="user", nullable=False)
+    owner_ref: Mapped[str | None] = mapped_column(String(240))
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    priority: Mapped[str] = mapped_column(String(40), default="normal", nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="open", nullable=False, index=True)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class Idea(TimestampMixin, Base):
+    __tablename__ = "ideas"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="open", nullable=False, index=True)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class DecisionRecord(TimestampMixin, Base):
+    __tablename__ = "decision_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class RoutedObjectLink(TimestampMixin, Base):
+    __tablename__ = "routed_object_links"
+    __table_args__ = (
+        UniqueConstraint("routed_item_id", "object_type", "object_id", name="uq_routed_object_link"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    routed_item_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("routed_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    object_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    object_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+
+class RoutedObjectChangeLog(TimestampMixin, Base):
+    __tablename__ = "routed_object_change_log"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    object_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    object_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    routed_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("routed_items.id", ondelete="SET NULL"), index=True
+    )
+    action: Mapped[str] = mapped_column(String(80), nullable=False)
+    changes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
 class ToolCall(Base):
     __tablename__ = "tool_calls"
 

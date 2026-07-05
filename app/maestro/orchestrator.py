@@ -17,7 +17,8 @@ from app.agents.runtime import (
 )
 from app.core.config import get_settings
 from app.core.time import home_isoformat
-from app.db.models import Artifact, Report, Task, ToolCall
+from app.db.models import Artifact, Report, RoutedItem, Task, ToolCall
+from app.db.repositories import DomainRepository
 from app.llm.client import LLMClient, LLMClientError, OpenAILLMClient
 from app.maestro.planner import (
     LLMMaestroPlanner,
@@ -26,6 +27,7 @@ from app.maestro.planner import (
 )
 from app.maestro.scheduler import SchedulerService
 from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
+from app.memory.routed_service import RoutedMemoryService
 from app.tools.runtime import ToolExecutionResult, ToolExecutionService, tool_result_payload
 
 IntentType = Literal[
@@ -210,6 +212,7 @@ class MaestroOrchestratorService:
         self.session.add(parent_task)
         self.session.commit()
         self.session.refresh(parent_task)
+        self._route_direct_work_items(parent_task, work_items)
         if not is_chat_only:
             SchedulerService(self.session).enqueue_maestro_plan(parent_task)
         return self._plan_from_task(parent_task)
@@ -360,6 +363,61 @@ class MaestroOrchestratorService:
             except (TypeError, ValueError):
                 continue
         return None
+
+    def _route_direct_work_items(
+        self,
+        parent_task: Task,
+        work_items: list[MaestroWorkItem],
+    ) -> list[RoutedItem]:
+        routed_items: list[RoutedItem] = []
+        for item in work_items:
+            route_type = _ROUTE_TYPE_BY_WORK_ITEM.get(item.type)
+            if route_type is None:
+                continue
+            routed_items.append(
+                RoutedItem(
+                    domain_id=self._domain_id_for_key(item.domain_key) or parent_task.domain_id,
+                    task_id=parent_task.id,
+                    route_type=route_type,
+                    title=item.title,
+                    content=item.description,
+                    priority=item.priority,
+                    status="needs_input" if route_type == "human_input" else "open",
+                    source_refs=[
+                        {
+                            "type": "maestro_chat",
+                            "task_id": str(parent_task.id),
+                            "plan_id": str((parent_task.input_payload or {}).get("plan_id") or parent_task.id),
+                        }
+                    ],
+                    metadata_={
+                        "curator": "maestro_orchestrator",
+                        "work_item_id": item.id,
+                        "work_item_type": item.type,
+                        "rationale": item.rationale,
+                        "expected_output": item.expected_output,
+                        "required_capabilities": item.required_capabilities,
+                        "required_tools": item.required_tools,
+                        "dependencies": item.dependencies,
+                        "needs_agent": item.needs_agent,
+                        "needs_user_input": item.needs_user_input,
+                        "blocks_execution": item.blocks_execution,
+                        "can_log_directly": item.can_log_directly,
+                    },
+                )
+            )
+        for routed_item in routed_items:
+            self.session.add(routed_item)
+        if routed_items:
+            self.session.commit()
+            RoutedMemoryService(self.session).promote_items(routed_items)
+        return routed_items
+
+    def _domain_id_for_key(self, domain_key: str | None) -> uuid.UUID | None:
+        if not domain_key:
+            return None
+        domain = DomainRepository(self.session).get_by_key(domain_key)
+        return domain.id if domain else None
 
     def close_session(
         self,
@@ -2895,6 +2953,15 @@ _INTENT_TYPE_BY_WORK_ITEM = {
     "memory_candidate": "memory_route",
     "think_tank": "direct_chat",
     "direct_response": "direct_chat",
+}
+
+_ROUTE_TYPE_BY_WORK_ITEM = {
+    "standalone_task": "task",
+    "contact": "contact",
+    "event": "event",
+    "decision": "decision_log",
+    "rfi": "human_input",
+    "think_tank": "think_tank",
 }
 
 _ACTION_BY_WORK_ITEM_TYPE = {
