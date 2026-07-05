@@ -172,6 +172,7 @@ class LLMMemoryCurator:
         for extracted_item in extracted_items:
             if extracted_item.route_type == "ignore":
                 continue
+            structured_data = extracted_item.structured_data or {}
             items.append(
                 RoutedItem(
                     domain_id=source.domain_id,
@@ -191,7 +192,9 @@ class LLMMemoryCurator:
                         "source_title": source.title,
                         "rationale": extracted_item.rationale,
                         "llm_confidence": extracted_item.confidence,
+                        "structured_data": structured_data,
                         **source.metadata,
+                        **structured_data,
                     },
                 )
             )
