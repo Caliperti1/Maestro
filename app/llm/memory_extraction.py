@@ -11,6 +11,7 @@ ExtractedRouteType = Literal[
     "human_input",
     "event",
     "contact",
+    "entity",
     "think_tank",
     "decision_log",
     "project",
@@ -48,7 +49,8 @@ Route policy:
 - task: due-outs, action items, work requests, follow-ups, or things Maestro/agents should do.
 - human_input: RFIs, missing answers, approvals, decisions, or questions that require Chris.
 - event: meetings, scheduled blocks, reminders, deadlines, or other time-bound commitments.
-- contact: people, organizations, roles, relationship notes, and contact details.
+- contact: people, roles, relationship notes, and contact details.
+- entity: organizations, companies, units, schools, institutions, or teams.
 - think_tank: immature ideas, brainstorms, possible projects, or concepts not ready for tasks.
 - decision_log: approvals, denials, decisions, and rationale that should be audit-visible.
 - project: initiatives that group tasks, artifacts, decisions, and memory.

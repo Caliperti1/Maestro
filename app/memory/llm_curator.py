@@ -14,6 +14,7 @@ from app.memory.service import (
     MemoryService,
     MemoryWriteResult,
 )
+from app.memory.routed_service import RoutedMemoryService
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,7 @@ class LLMMemoryCurator:
             self.memory_service.session.add(item)
         if routed_items:
             self.memory_service.session.commit()
+            RoutedMemoryService(self.memory_service.session).promote_items(list(routed_items))
 
     def _ids_for_scope(
         self,

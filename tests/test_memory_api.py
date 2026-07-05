@@ -5,10 +5,11 @@ from sqlalchemy.orm import Session
 
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import MemoryItem, MemoryProposal, RoutedItem, SeedPackage
+from app.db.models import CalendarEvent, Contact, ContactDomainNote, Entity, MemoryItem, MemoryProposal, RoutedItem, SeedPackage, Todo
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
+from app.memory.routed_service import RoutedMemoryService
 
 
 def _client(session: Session, tmp_path: Path) -> TestClient:
@@ -201,6 +202,107 @@ def test_routed_items_endpoint_can_return_all_statuses(
         "needs_input",
         "scheduled",
     }
+
+
+def test_routed_objects_api_returns_canonical_stores(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    session.add_all(
+        [
+            Todo(
+                domain_id=praxis.id,
+                title="Draft partner follow-up",
+                description="Draft a partner follow-up email.",
+                todo_type="task",
+                owner_type="maestro",
+                priority="normal",
+                status="open",
+                source_refs=[],
+                provenance={"created_from": "test"},
+                metadata_={},
+            ),
+            CalendarEvent(
+                domain_id=praxis.id,
+                title="Partner sync",
+                summary="Partner sync with Example Corp.",
+                status="scheduled",
+                attendees=[],
+                supporting_refs=[],
+                source_refs=[],
+                provenance={"created_from": "test"},
+                metadata_={},
+            ),
+            Contact(
+                name="Jane Smith",
+                normalized_name="jane smith",
+                email="jane@example.com",
+                summary="Partner lead at Example Corp.",
+                scheduled_event_ids=[],
+                source_refs=[],
+                provenance={"created_from": "test"},
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+    client = _client(session, tmp_path)
+
+    bundle = client.get("/memory/routed-objects?domain_key=praxis&query_text=partner")
+    contacts = client.get("/memory/routed-objects/contacts")
+    todos = client.get("/memory/routed-objects/todos?domain_key=praxis")
+
+    assert bundle.status_code == 200
+    assert bundle.json()["events"][0]["title"] == "Partner sync"
+    assert bundle.json()["todos"][0]["title"] == "Draft partner follow-up"
+    assert contacts.json()["contacts"][0]["name"] == "Jane Smith"
+    assert todos.json()["todos"][0]["domain_key"] == "praxis"
+
+
+def test_routed_memory_service_dedupes_contacts_and_links_entities(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_items = [
+        RoutedItem(
+            domain_id=praxis.id,
+            route_type="contact",
+            title="Jane Smith",
+            content="Jane Smith is the partner lead at Example Corp. jane@example.com",
+            priority="normal",
+            status="open",
+            source_refs=[{"type": "test", "id": "one"}],
+            metadata_={},
+        ),
+        RoutedItem(
+            domain_id=praxis.id,
+            route_type="contact",
+            title="Jane Smith",
+            content="Jane Smith prefers short agendas before calls. jane@example.com",
+            priority="normal",
+            status="open",
+            source_refs=[{"type": "test", "id": "two"}],
+            metadata_={},
+        ),
+    ]
+    session.add_all(routed_items)
+    session.commit()
+
+    results = RoutedMemoryService(session).promote_items(routed_items)
+
+    assert len(results) == 2
+    assert session.query(Contact).count() == 1
+    contact = session.query(Contact).one()
+    assert contact.email == "jane@example.com"
+    assert "short agendas" in contact.summary
+    assert session.query(Entity).one().name == "Example Corp"
+    assert session.query(ContactDomainNote).one().domain_id == praxis.id
 
 
 def test_archive_memory_item_endpoint_hides_from_default_list(

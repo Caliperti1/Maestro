@@ -10,7 +10,7 @@ from app.agents.runtime import PromptAggregationService
 from app.agents.runtime import AgentRegistryService
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import Artifact, Report, Task, WorkflowDefinition, WorkflowRun
+from app.db.models import Artifact, Contact, Report, RoutedItem, Task, Todo, WorkflowDefinition, WorkflowRun
 from app.db.session import get_db
 from app.llm.client import LLMClientError
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
@@ -924,6 +924,23 @@ def test_orchestrator_direct_chat_has_no_executable_plan(session: Session) -> No
         assert "Direct chat responses" in str(exc)
     else:
         raise AssertionError("Direct chat plans should not be executable.")
+
+
+def test_orchestrator_immediately_promotes_routed_work_items(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakePlannerLLMClient(),
+    )
+
+    plan = service.create_plan("Prepare a Praxis partner call workflow.")
+
+    assert plan.status == "proposed"
+    routed = session.query(RoutedItem).order_by(RoutedItem.route_type).all()
+    assert [item.route_type for item in routed] == ["contact", "human_input"]
+    assert session.query(Contact).one().name == "Jane Smith"
+    todo = session.query(Todo).one()
+    assert todo.todo_type == "human_input"
+    assert todo.status == "needs_input"
 
 
 def test_orchestrator_saves_recurring_workflow_without_immediate_execution(
