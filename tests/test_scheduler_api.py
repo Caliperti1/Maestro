@@ -255,6 +255,10 @@ def test_scheduler_worker_run_executes_assigned_agent_item(
     assert "Scheduled workflow" in message.content
     assert message.metadata_["source"] == "scheduler_worker"
 
+    dashboard = client.get("/scheduler/dashboard")
+    assert dashboard.status_code == 200
+    assert all(run["status"] != "completed" for run in dashboard.json()["runs"])
+
 
 def test_scheduler_worker_blocks_unassigned_item(
     session: Session,

@@ -244,6 +244,18 @@ class MaestroOrchestratorService:
             refined_input,
             conversation_id=previous_task.conversation_id if previous_task else None,
         )
+        if previous_task is not None and previous_task.status in {
+            "proposed",
+            "queued",
+            "ready",
+            "blocked",
+            "failed",
+        }:
+            self._archive_parent_task(
+                previous_task,
+                reason=f"Workflow superseded by refined plan {plan.plan_id}.",
+                commit=False,
+            )
         task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
         if task is not None:
             task.input_payload = {
@@ -255,6 +267,99 @@ class MaestroOrchestratorService:
             self.session.refresh(task)
             return self._plan_from_task(task)
         return plan
+
+    def archive_plan(
+        self,
+        plan_id: uuid.UUID | str,
+        *,
+        reason: str = "Workflow archived at Chris's request.",
+    ) -> MaestroPlan:
+        plan = self.get_plan(plan_id)
+        task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
+        if task is None:
+            raise MaestroOrchestratorError(f"Plan parent task was not found: {plan.parent_task_id}")
+        self._archive_parent_task(task, reason=reason, commit=True)
+        return self._plan_from_task(task)
+
+    def archive_open_plans_for_conversation(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        reason: str = "Open workflows archived at Chris's request.",
+    ) -> int:
+        open_statuses = {"proposed", "queued", "ready", "running", "blocked", "failed", "scheduled"}
+        tasks = self.session.scalars(
+            select(Task)
+            .where(
+                Task.conversation_id == conversation_id,
+                Task.workflow_key == "maestro.generic",
+                Task.status.in_(open_statuses),
+            )
+            .order_by(Task.created_at.desc())
+        ).all()
+        for task in tasks:
+            self._archive_parent_task(task, reason=reason, commit=False)
+        self.session.commit()
+        return len(tasks)
+
+    def _archive_parent_task(self, task: Task, *, reason: str, commit: bool) -> None:
+        raw_scheduler = task.input_payload.get("scheduler") if isinstance(task.input_payload, dict) else {}
+        scheduler = raw_scheduler if isinstance(raw_scheduler, dict) else {}
+        queue_items = scheduler.get("queue_items") if isinstance(scheduler.get("queue_items"), list) else []
+        archived_queue_items = [
+            {
+                **item,
+                "status": "archived",
+                "error_message": item.get("error_message") or reason,
+            }
+            for item in queue_items
+            if isinstance(item, dict)
+        ]
+        if isinstance(task.input_payload, dict):
+            task.input_payload = {
+                **task.input_payload,
+                "scheduler": {
+                    **scheduler,
+                    "status": "archived",
+                    "current_step": "Workflow archived.",
+                    "queue_items": archived_queue_items,
+                },
+            }
+        task.status = "archived"
+        task.error_message = reason
+        task.completed_at = task.completed_at or datetime.now(UTC)
+        scheduler_service = SchedulerService(self.session)
+        definition_id = self._scheduled_definition_id(task)
+        if definition_id is not None:
+            scheduler_service.archive_definition(
+                definition_id,
+                reason=reason,
+                commit=False,
+            )
+        scheduler_service.archive_run_for_parent_task(
+            task.id,
+            reason=reason,
+            commit=False,
+        )
+        if commit:
+            self.session.commit()
+            self.session.refresh(task)
+
+    def _scheduled_definition_id(self, task: Task) -> uuid.UUID | None:
+        payload = task.input_payload or {}
+        scheduler = payload.get("scheduler") if isinstance(payload.get("scheduler"), dict) else {}
+        candidates = [
+            scheduler.get("scheduled_definition_id"),
+            (task.output_payload or {}).get("scheduled_definition_id") if task.output_payload else None,
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return uuid.UUID(str(candidate))
+            except (TypeError, ValueError):
+                continue
+        return None
 
     def close_session(
         self,

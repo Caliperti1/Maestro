@@ -1597,6 +1597,36 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": False,
         "reason": "Updates external GitHub issue metadata and requires Chris approval.",
     },
+    "gmail.message.search": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Gmail message search.",
+    },
+    "gmail.message.list_recent": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Gmail recent message listing.",
+    },
+    "gmail.message.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Gmail message inspection.",
+    },
+    "gmail.thread.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Gmail thread inspection.",
+    },
+    "gmail.draft.create": {
+        "level": "external_write",
+        "auto_executable": False,
+        "reason": "Creates an external Gmail draft and requires Chris approval.",
+    },
+    "gmail.message.modify": {
+        "level": "external_write",
+        "auto_executable": False,
+        "reason": "Modifies Gmail labels/read state and requires Chris approval.",
+    },
     "codex.task.run": {
         "level": "branch_sandbox_code_execution",
         "auto_executable": True,
@@ -1627,7 +1657,8 @@ _TOOL_PLANNER_INSTRUCTIONS = (
     "`payload_json`. Do not include repo placeholders such as repo:CURRENT or "
     "repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies the repo. "
     "For a request like 'check out the latest PR', use GitHub PR search/list tools first, then "
-    "details/checks/diff if useful. If prior tool results include a PR number and the current "
+    "details/checks/diff if useful. For email triage, use Gmail search/list tools first, then "
+    "fetch full message or thread details only when needed. If prior tool results include a PR number and the current "
     "request refers to 'the PR', 'that PR', or 'it', pass that number as `pr_number`."
 )
 
@@ -1751,6 +1782,34 @@ _TOOL_DESCRIPTIONS = {
         "name": "GitHub PR Merge",
         "description": "Merge an approved GitHub pull request after Chris approval.",
     },
+    "gmail": {
+        "name": "Gmail",
+        "description": "Shared Gmail OAuth/config inherited by Gmail tools.",
+    },
+    "gmail.message.search": {
+        "name": "Gmail Message Search",
+        "description": "Search Gmail messages with Gmail query syntax through the authorized domain account.",
+    },
+    "gmail.message.list_recent": {
+        "name": "Gmail Recent Messages",
+        "description": "List recent Gmail messages, optionally unread-only.",
+    },
+    "gmail.message.get": {
+        "name": "Gmail Message Details",
+        "description": "Read a full Gmail message, including headers and decoded text body.",
+    },
+    "gmail.thread.get": {
+        "name": "Gmail Thread Details",
+        "description": "Read all messages in a Gmail conversation thread.",
+    },
+    "gmail.draft.create": {
+        "name": "Gmail Draft Create",
+        "description": "Create a Gmail draft after Chris approval.",
+    },
+    "gmail.message.modify": {
+        "name": "Gmail Message Modify",
+        "description": "Apply or remove Gmail labels after Chris approval.",
+    },
     "codex": {
         "name": "Codex",
         "description": "Shared local Codex CLI configuration inherited by Codex tools.",
@@ -1774,6 +1833,8 @@ _TOOL_DESCRIPTIONS = {
 def _provider_connection_key(tool_key: str) -> str:
     if tool_key.startswith("github."):
         return "github"
+    if tool_key.startswith("gmail."):
+        return "gmail"
     if tool_key.startswith("codex."):
         return "codex"
     return tool_key
@@ -1782,6 +1843,8 @@ def _provider_connection_key(tool_key: str) -> str:
 def _inherited_connection_tool_keys(tool_key: str) -> list[str]:
     if tool_key == "github":
         return [key for key in _TOOL_DESCRIPTIONS if key.startswith("github.")]
+    if tool_key == "gmail":
+        return [key for key in _TOOL_DESCRIPTIONS if key.startswith("gmail.")]
     if tool_key == "codex":
         return [key for key in _TOOL_DESCRIPTIONS if key.startswith("codex.")]
     return []
@@ -1816,6 +1879,22 @@ _SEED_AGENTS = [
             "llm.gateway": {
                 "permission": "use",
                 "description": "Use Maestro's shared LLM gateway.",
+            },
+            "gmail.message.search": {
+                "permission": "read",
+                "description": "Search Praxis Gmail for partner and workflow context.",
+            },
+            "gmail.message.list_recent": {
+                "permission": "read",
+                "description": "List recent Praxis Gmail messages for triage.",
+            },
+            "gmail.message.get": {
+                "permission": "read",
+                "description": "Read selected Praxis Gmail messages.",
+            },
+            "gmail.thread.get": {
+                "permission": "read",
+                "description": "Read Praxis Gmail conversation threads.",
             },
         },
     },

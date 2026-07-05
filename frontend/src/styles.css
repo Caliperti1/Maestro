@@ -229,8 +229,14 @@ h4 {
 .thread {
   display: grid;
   gap: 10px;
-  min-height: 250px;
+  align-content: start;
+  height: 330px;
+  min-height: 330px;
   margin: 16px 0;
+  padding-right: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .message {

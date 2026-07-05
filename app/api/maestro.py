@@ -8,11 +8,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Conversation, Message, RuntimeSetting, Task
+from app.db.models import Conversation, Domain, Message, RuntimeSetting, Task
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.maestro.channel import MAESTRO_CHANNEL_KEY, get_or_create_maestro_channel
+from app.maestro.scheduler import SchedulerService
 from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
@@ -84,16 +85,55 @@ def respond_to_maestro(
 ) -> dict[str, Any]:
     conversation = _get_or_create_maestro_conversation(db, body.conversation_id)
     _record_session_message(db, conversation, "user", body.message)
+    if _is_scheduled_workflow_status_question(body.message):
+        response_message = _scheduled_workflow_status_response(db)
+        _record_session_message(db, conversation, "maestro", response_message)
+        return {
+            "kind": "chat_only",
+            "classification": "system_status",
+            "message": response_message,
+            "plan": None,
+            "chat_plan": None,
+            "active_plan": None,
+            "conversation": _conversation_payload(db, conversation),
+        }
     try:
         service = MaestroOrchestratorService(db)
         active_plan_id = body.active_plan_id
         if active_plan_id is None:
             channel_context = _resolve_channel_context(db, conversation)
-            active_plan_id = channel_context.parent_task_id if channel_context else None
+            if channel_context is not None and _should_use_plan_context(body.message, channel_context):
+                active_plan_id = channel_context.parent_task_id
         if active_plan_id is not None:
             active_plan = service.get_plan(active_plan_id)
             classification = _classify_active_session_message(body.message, active_plan)
-            if classification == "side_chat":
+            if classification == "new_workflow":
+                plan = service.create_plan(body.message, conversation_id=conversation.id)
+                kind = "chat_only" if plan.is_chat_only else "planned"
+            elif classification == "delete_workflow":
+                reason = f"Workflow archived from Maestro chat. Request: {body.message}"
+                archived_count = service.archive_open_plans_for_conversation(
+                    conversation.id,
+                    reason=reason,
+                )
+                if archived_count == 0:
+                    service.archive_plan(active_plan_id, reason=reason)
+                    archived_count = 1
+                response_message = (
+                    f"Done. I archived {archived_count} open workflow"
+                    f"{'' if archived_count == 1 else 's'} and removed them from the active queue."
+                )
+                _record_session_message(db, conversation, "maestro", response_message)
+                return {
+                    "kind": "chat_only",
+                    "classification": classification,
+                    "message": response_message,
+                    "plan": None,
+                    "chat_plan": None,
+                    "active_plan": None,
+                    "conversation": _conversation_payload(db, conversation),
+                }
+            elif classification == "side_chat":
                 response_message = _side_chat_response(body.message, active_plan)
                 _record_session_message(db, conversation, "maestro", response_message)
                 return {
@@ -105,9 +145,6 @@ def respond_to_maestro(
                     "active_plan": _plan_payload(active_plan),
                     "conversation": _conversation_payload(db, conversation),
                 }
-            if classification == "new_workflow":
-                plan = service.create_plan(body.message, conversation_id=conversation.id)
-                kind = "chat_only" if plan.is_chat_only else "planned"
             else:
                 plan = service.refine_plan(
                     active_plan_id,
@@ -486,6 +523,7 @@ def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> Maestr
         .where(
             Task.conversation_id == conversation_id,
             Task.workflow_key == "maestro.generic",
+            Task.status != "archived",
         )
         .order_by(Task.created_at.desc(), Task.id.desc())
         .limit(1)
@@ -590,6 +628,10 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
     has_blocking_rfi = any(
         item.needs_user_input and item.blocks_execution for item in active_plan.work_items
     )
+    if not _should_use_plan_context(message, active_plan):
+        return "new_workflow"
+    if _is_workflow_delete_message(lowered):
+        return "delete_workflow"
     if any(token in lowered for token in ("new workflow", "new plan", "separate workflow", "start over")):
         return "new_workflow"
     if any(
@@ -610,7 +652,6 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
             "refine",
             "instead",
             "also include",
-            "add ",
             "remove ",
             "drop ",
             "only ",
@@ -631,6 +672,167 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
     ):
         return "side_chat"
     return "refined"
+
+
+def _is_scheduled_workflow_status_question(message: str) -> bool:
+    lowered = message.lower().strip()
+    if not any(
+        token in lowered
+        for token in (
+            "scheduled workflow",
+            "scheduled workflows",
+            "actively scheduled",
+            "recurring workflow",
+            "recurring workflows",
+            "trigger workflow",
+            "trigger workflows",
+            "active queue",
+        )
+    ):
+        return False
+    return lowered.endswith("?") or any(
+        lowered.startswith(prefix)
+        for prefix in (
+            "what ",
+            "which ",
+            "tell me",
+            "show me",
+            "list ",
+            "summarize",
+            "give me",
+        )
+    )
+
+
+def _scheduled_workflow_status_response(db: Session) -> str:
+    definitions = SchedulerService(db).list_definitions(active_only=True)
+    domains = {domain.id: domain.key for domain in db.scalars(select(Domain)).all()}
+    scheduled = [
+        definition
+        for definition in definitions
+        if definition.trigger_type in {"scheduled", "recurring"}
+    ]
+    triggered = [definition for definition in definitions if definition.trigger_type == "event"]
+    if not scheduled and not triggered:
+        return "There are no active scheduled or trigger-based workflows configured."
+
+    lines = ["Here is what is actively scheduled right now:"]
+    if scheduled:
+        lines.append("Scheduled and recurring workflows:")
+        lines.extend(f"- {_definition_summary(definition, domains)}" for definition in scheduled)
+    if triggered:
+        lines.append("Trigger-based workflows:")
+        lines.extend(f"- {_definition_summary(definition, domains)}" for definition in triggered)
+    return "\n".join(lines)
+
+
+def _definition_summary(definition: Any, domains: dict[uuid.UUID, str]) -> str:
+    trigger_config = definition.trigger_config or {}
+    if definition.trigger_type == "event":
+        trigger = trigger_config.get("event_type") or "event trigger"
+    else:
+        trigger = (
+            trigger_config.get("time_of_day")
+            or trigger_config.get("next_run_at")
+            or "configured schedule"
+        )
+    domain = domains.get(definition.domain_id, "global")
+    return f"{definition.name} ({domain}, {definition.trigger_type}, {trigger})"
+
+
+def _should_use_plan_context(message: str, active_plan: MaestroPlan) -> bool:
+    lowered = message.lower().strip()
+    has_blocking_rfi = any(
+        item.needs_user_input and item.blocks_execution for item in active_plan.work_items
+    )
+    if any(token in lowered for token in ("new workflow", "new plan", "separate workflow", "start over")):
+        return False
+    if has_blocking_rfi and not lowered.endswith("?"):
+        return True
+    contextual_tokens = (
+        "this plan",
+        "that plan",
+        "the plan",
+        "current plan",
+        "active plan",
+        "previous plan",
+        "this workflow",
+        "that workflow",
+        "the workflow",
+        "current workflow",
+        "active workflow",
+        "previous workflow",
+        "the pr",
+        "this pr",
+        "that pr",
+        "merge the pr",
+        "merge pr",
+        "merge it",
+        "merge that",
+        "merge and reload",
+        "hot reload",
+        "reload the app",
+        "make it live",
+        "ship it",
+        "approve",
+        "approved",
+        "reject",
+        "run it",
+        "save it",
+        "save schedule",
+        "change the plan",
+        "update the plan",
+        "refine",
+        "instead",
+        "also include",
+        "remove ",
+        "drop ",
+        "only ",
+        "belongs in",
+        "move this",
+        "do this first",
+        "do that first",
+    )
+    if any(token in lowered for token in contextual_tokens):
+        return True
+    if _is_workflow_delete_message(lowered):
+        return True
+    if any(token in lowered for token in ("remember", "log ", "capture ", "add task", "contact:", "event:")):
+        return True
+    if lowered.endswith("?") or any(
+        lowered.startswith(prefix)
+        for prefix in ("what ", "why ", "how ", "who ", "when ", "where ", "can you explain")
+    ):
+        return False
+    return False
+
+
+def _is_workflow_delete_message(lowered_message: str) -> bool:
+    if (
+        "remove" in lowered_message
+        and any(token in lowered_message for token in (" task", "work item", "subtask"))
+        and "workflow" not in lowered_message
+    ):
+        return False
+    destructive = any(
+        token in lowered_message
+        for token in ("delete", "remove", "cancel", "archive", "discard", "clear out")
+    )
+    target = any(
+        token in lowered_message
+        for token in (
+            "workflow",
+            "plan",
+            "queue item",
+            "queued work",
+            "current work",
+            "under development",
+            "this",
+            "that",
+            "it",
+        )
+    )
+    return destructive and target
 
 
 def _classified_refinement_message(message: str, classification: str, active_plan: MaestroPlan) -> str:

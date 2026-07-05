@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import json
 import uuid
 from subprocess import CompletedProcess
@@ -18,6 +19,7 @@ from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
 from app.tools.runtime import (
     CodexCliToolAdapter,
+    GmailApiToolAdapter,
     GitHubCliToolAdapter,
     LocalAppReloadAdapter,
     ToolExecutionContext,
@@ -262,11 +264,11 @@ def test_seed_agent_registry_returns_domain_scoped_specs(session: Session) -> No
     praxis = next(spec for spec in specs if spec.key == "praxis-planning-agent")
     assert praxis.domain_key == "praxis"
     assert praxis.memory_profile == "agent_prompt"
-    assert [tool.key for tool in praxis.allowed_tools] == [
-        "artifact.stage_interaction",
-        "llm.gateway",
-        "memory.context_bundle",
-    ]
+    praxis_tools = [tool.key for tool in praxis.allowed_tools]
+    assert "artifact.stage_interaction" in praxis_tools
+    assert "llm.gateway" in praxis_tools
+    assert "memory.context_bundle" in praxis_tools
+    assert "gmail.message.search" in praxis_tools
     coding = next(spec for spec in specs if spec.key == "maestro-coding-agent")
     assert coding.domain_key == "maestro-development"
     assert "codex.task.run" in [tool.key for tool in coding.allowed_tools]
@@ -391,6 +393,31 @@ def test_tool_manifest_can_inherit_provider_level_github_connection(session: Ses
     assert "maestro-development" in registry_issue_search.connected_domains
 
 
+def test_tool_manifest_can_inherit_provider_level_gmail_connection(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="praxis",
+        tool_key="gmail",
+        display_name="Praxis Gmail",
+        auth_type="oauth",
+        config={
+            "user_id": "me",
+            "client_id_env": "GOOGLE_CLIENT_ID",
+            "client_secret_env": "GOOGLE_CLIENT_SECRET",
+            "refresh_token_env": "PRAXIS_GMAIL_REFRESH_TOKEN",
+        },
+    )
+
+    spec = registry.get_spec("praxis-planning-agent")
+    tools = registry.list_tools()
+
+    message_search = next(tool for tool in spec.allowed_tools if tool.key == "gmail.message.search")
+    assert message_search.connection_id is not None
+    assert message_search.auth_type == "oauth"
+    registry_message_search = next(tool for tool in tools if tool.key == "gmail.message.search")
+    assert "praxis" in registry_message_search.connected_domains
+
+
 def test_seed_agent_merge_adds_github_tool_permissions_to_existing_seed_agent(
     session: Session,
 ) -> None:
@@ -419,6 +446,30 @@ def test_seed_agent_merge_adds_github_tool_permissions_to_existing_seed_agent(
     assert "github.repo.create" in [tool.key for tool in refreshed.allowed_tools]
     assert "github.pr.checks" in [tool.key for tool in refreshed.allowed_tools]
     assert "codex.task.run" in [tool.key for tool in refreshed.allowed_tools]
+
+
+def test_seed_agent_merge_adds_gmail_read_permissions_to_existing_praxis_agent(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("praxis-planning-agent")
+    agent = AgentRepository(session).get_by_key("praxis-planning-agent")
+    assert agent is not None
+    agent.tool_permissions = {
+        "memory.context_bundle": {
+            "permission": "read",
+            "description": "Legacy seed permissions.",
+        }
+    }
+    session.commit()
+
+    refreshed = registry.get_spec("praxis-planning-agent")
+
+    allowed = [tool.key for tool in refreshed.allowed_tools]
+    assert "gmail.message.search" in allowed
+    assert "gmail.message.list_recent" in allowed
+    assert "gmail.message.get" in allowed
+    assert "gmail.thread.get" in allowed
 
 
 def test_codex_tool_manifest_inherits_codex_connection(session: Session, tmp_path: Path) -> None:
@@ -509,6 +560,229 @@ def test_github_adapter_uses_domain_token_env_for_write_tools(
         "Created by a test.",
     ]
     assert captured["env"]["GH_TOKEN"] == "test-token"
+
+
+def test_gmail_adapter_searches_and_decodes_message_metadata(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="praxis",
+        tool_key="gmail",
+        display_name="Praxis Gmail",
+        auth_type="oauth",
+        config={
+            "user_id": "me",
+            "client_id_env": "GOOGLE_CLIENT_ID",
+            "client_secret_env": "GOOGLE_CLIENT_SECRET",
+            "refresh_token_env": "PRAXIS_GMAIL_REFRESH_TOKEN",
+        },
+    )
+    registry.get_spec("praxis-planning-agent")
+    agent = AgentRepository(session).get_by_key("praxis-planning-agent")
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.gmail",
+        objective="Search Gmail.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="gmail").one()
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PRAXIS_GMAIL_REFRESH_TOKEN", "refresh-token")
+    calls: list[dict[str, object]] = []
+
+    def fake_refresh_token(*, client_id, client_secret, refresh_token):
+        assert client_id == "client-id"
+        assert client_secret == "client-secret"
+        assert refresh_token == "refresh-token"
+        return {"access_token": "gmail-token", "expires_in": 3600, "token_type": "Bearer"}
+
+    def fake_gmail_api(method, path, *, token, params=None, body=None, timeout=60):
+        calls.append({"method": method, "path": path, "token": token, "params": params, "body": body})
+        if path.endswith("/messages") and method == "GET":
+            return {"messages": [{"id": "msg-1", "threadId": "thread-1"}], "resultSizeEstimate": 1}
+        if path.endswith("/messages/msg-1"):
+            return {
+                "id": "msg-1",
+                "threadId": "thread-1",
+                "labelIds": ["UNREAD", "INBOX"],
+                "snippet": "Partner update",
+                "payload": {
+                    "headers": [
+                        {"name": "Subject", "value": "Partner update"},
+                        {"name": "From", "value": "Jane <jane@example.com>"},
+                        {"name": "To", "value": "Chris <chris@example.com>"},
+                        {"name": "Date", "value": "Thu, 2 Jul 2026 09:00:00 -0400"},
+                    ]
+                },
+            }
+        raise AssertionError(f"Unexpected Gmail API call: {method} {path}")
+
+    monkeypatch.setattr("app.tools.runtime._google_oauth_refresh_access_token", fake_refresh_token)
+    monkeypatch.setattr("app.tools.runtime._gmail_api_json", fake_gmail_api)
+
+    output = GmailApiToolAdapter("gmail.message.search").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"query": "from:jane newer_than:7d", "limit": 5},
+    )
+
+    assert output["summary"]["type"] == "gmail_message_list"
+    assert output["messages"][0]["message_id"] == "msg-1"
+    assert output["messages"][0]["subject"] == "Partner update"
+    assert calls[0]["token"] == "gmail-token"
+    assert calls[0]["params"]["q"] == "from:jane newer_than:7d"
+
+
+def test_gmail_adapter_gets_full_message_body(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="praxis",
+        tool_key="gmail",
+        display_name="Praxis Gmail",
+        auth_type="oauth",
+        config={"access_token": "inline-token"},
+    )
+    registry.get_spec("praxis-planning-agent")
+    agent = AgentRepository(session).get_by_key("praxis-planning-agent")
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.gmail",
+        objective="Read Gmail.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="gmail").one()
+    encoded_body = base64.urlsafe_b64encode(b"Full body text for Maestro.").decode("ascii").rstrip("=")
+
+    def fake_gmail_api(method, path, *, token, params=None, body=None, timeout=60):
+        assert token == "inline-token"
+        assert params == {"format": "full"}
+        return {
+            "id": "msg-2",
+            "threadId": "thread-2",
+            "payload": {
+                "mimeType": "text/plain",
+                "body": {"data": encoded_body},
+                "headers": [
+                    {"name": "Subject", "value": "Full update"},
+                    {"name": "From", "value": "partner@example.com"},
+                ],
+            },
+        }
+
+    monkeypatch.setattr("app.tools.runtime._gmail_api_json", fake_gmail_api)
+
+    output = GmailApiToolAdapter("gmail.message.get").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"message_id": "msg-2"},
+    )
+
+    assert output["message_id"] == "msg-2"
+    assert output["body_text"] == "Full body text for Maestro."
+    assert output["summary"]["subject"] == "Full update"
+
+
+def test_gmail_draft_create_builds_encoded_rfc822_message(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="praxis",
+        tool_key="gmail",
+        display_name="Praxis Gmail",
+        auth_type="oauth",
+        config={"access_token": "inline-token", "send_as": "praxis@example.com"},
+    )
+    registry.get_spec("praxis-planning-agent")
+    agent = AgentRepository(session).get_by_key("praxis-planning-agent")
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    agent.tool_permissions = {
+        **(agent.tool_permissions or {}),
+        "gmail.draft.create": {"permission": "use", "description": "Create drafts when approved."},
+    }
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.gmail",
+        objective="Draft Gmail.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="gmail").one()
+    captured: dict[str, object] = {}
+
+    def fake_gmail_api(method, path, *, token, params=None, body=None, timeout=60):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"id": "draft-1", "message": {"id": "msg-3", "threadId": "thread-3"}}
+
+    monkeypatch.setattr("app.tools.runtime._gmail_api_json", fake_gmail_api)
+
+    output = GmailApiToolAdapter("gmail.draft.create").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {
+            "to": ["jane@example.com"],
+            "subject": "Partner follow-up",
+            "body": "Thanks Jane. Here are next steps.",
+            "thread_id": "thread-3",
+        },
+    )
+
+    raw = captured["body"]["message"]["raw"]
+    decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8")
+    assert output["draft_id"] == "draft-1"
+    assert "From: praxis@example.com" in decoded
+    assert "To: jane@example.com" in decoded
+    assert "Subject: Partner follow-up" in decoded
+    assert "Thanks Jane. Here are next steps." in decoded
 
 
 def test_github_adapter_skips_missing_issue_labels(

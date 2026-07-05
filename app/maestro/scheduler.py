@@ -61,6 +61,47 @@ class SchedulerService:
             query = query.where(WorkflowDefinition.is_active.is_(True))
         return list(self.session.scalars(query).all())
 
+    def archive_definition(
+        self,
+        definition_id: uuid.UUID,
+        *,
+        reason: str = "Workflow definition was archived.",
+        commit: bool = True,
+    ) -> WorkflowDefinition | None:
+        definition = self.session.get(WorkflowDefinition, definition_id)
+        if definition is None:
+            return None
+        definition.is_active = False
+        trigger_config = dict(definition.trigger_config or {})
+        trigger_config["archived_at"] = datetime.now(UTC).isoformat()
+        trigger_config["archive_reason"] = reason
+        definition.trigger_config = trigger_config
+        for run in self.session.scalars(
+            select(WorkflowRun).where(
+                WorkflowRun.workflow_definition_id == definition.id,
+                WorkflowRun.status.in_(["scheduled", "queued", "ready", "running", "blocked", "failed"]),
+            )
+        ).all():
+            run.status = "archived"
+            run.error_message = reason
+            run.completed_at = run.completed_at or datetime.now(UTC)
+            for item in self._queue_items_for_run(run.id):
+                if item.status not in {"completed", "failed", "archived"}:
+                    item.status = "archived"
+                    item.error_message = reason
+                    item.completed_at = item.completed_at or datetime.now(UTC)
+                self.release_locks(item, commit=False)
+            self.record_event(
+                run,
+                event_type="workflow_archived",
+                message=reason,
+                commit=False,
+            )
+        if commit:
+            self.session.commit()
+            self.session.refresh(definition)
+        return definition
+
     def enqueue_maestro_plan(self, parent_task: Task) -> WorkflowRun:
         existing = self.session.scalar(
             select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task.id)
@@ -268,6 +309,36 @@ class SchedulerService:
         self.session.refresh(run)
         return run
 
+    def archive_run_for_parent_task(
+        self,
+        parent_task_id: uuid.UUID,
+        *,
+        reason: str = "Workflow was archived.",
+        commit: bool = True,
+    ) -> WorkflowRun | None:
+        run = self.session.scalar(select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task_id))
+        if run is None:
+            return None
+        run.status = "archived"
+        run.error_message = reason
+        run.completed_at = run.completed_at or datetime.now(UTC)
+        for item in self._queue_items_for_run(run.id):
+            if item.status not in {"completed", "failed", "archived"}:
+                item.status = "archived"
+                item.error_message = reason
+                item.completed_at = item.completed_at or datetime.now(UTC)
+            self.release_locks(item, commit=False)
+        self.record_event(
+            run,
+            event_type="workflow_archived",
+            message=reason,
+            commit=False,
+        )
+        if commit:
+            self.session.commit()
+            self.session.refresh(run)
+        return run
+
     def runnable_batches(self, *, limit: int = 25) -> list[dict[str, Any]]:
         runs = self.session.scalars(
             select(WorkflowRun)
@@ -449,14 +520,14 @@ class SchedulerService:
     def dashboard(self) -> dict[str, Any]:
         runs = self.session.scalars(
             select(WorkflowRun)
-            .where(WorkflowRun.status != "archived")
+            .where(WorkflowRun.status.in_(["queued", "ready", "running", "blocked", "failed"]))
             .order_by(WorkflowRun.created_at.desc())
             .limit(20)
         ).all()
         return {
             "definitions": [
                 self.workflow_definition_payload(definition)
-                for definition in self.list_definitions(active_only=False)
+                for definition in self.list_definitions(active_only=True)
             ],
             "runs": [self.workflow_run_payload(run) for run in runs],
             "runnable_batches": self.runnable_batches(),
@@ -898,7 +969,17 @@ class SchedulerService:
         locks = []
         for tool_key in raw.get("required_tools") or []:
             tool_key = str(tool_key)
-            scope = "shared" if any(token in tool_key for token in (".get", ".search", ".diff", ".checks", "memory.context")) else "exclusive"
+            scope = "shared" if any(
+                token in tool_key
+                for token in (
+                    ".get",
+                    ".search",
+                    ".diff",
+                    ".checks",
+                    ".list_recent",
+                    "memory.context",
+                )
+            ) else "exclusive"
             locks.append({"resource_key": f"tool:{tool_key}", "lock_scope": scope})
         agent_key = raw.get("agent_key")
         if agent_key:

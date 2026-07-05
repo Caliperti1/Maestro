@@ -647,6 +647,49 @@ function triggerSummary(triggerType: string, triggerConfig: Record<string, unkno
   return triggerType;
 }
 
+function messageReferencesActivePlan(message: string) {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return [
+    "this plan",
+    "that plan",
+    "the plan",
+    "current plan",
+    "active plan",
+    "this workflow",
+    "that workflow",
+    "the workflow",
+    "current workflow",
+    "active workflow",
+    "merge the pr",
+    "merge pr",
+    "merge it",
+    "merge that",
+    "hot reload",
+    "reload the app",
+    "make it live",
+    "ship it",
+    "approved",
+    "approve",
+    "reject",
+    "run it",
+    "save it",
+    "save schedule",
+    "change the plan",
+    "update the plan",
+    "refine",
+    "instead",
+    "also include",
+    "remove ",
+    "drop ",
+    "only ",
+    "belongs in",
+    "move this",
+    "do this first",
+    "do that first",
+  ].some((token) => normalized.includes(token));
+}
+
 function RoutedItemsBoard({
   domainKey,
   title,
@@ -907,6 +950,22 @@ export function App() {
       ? (candidate as Record<string, unknown>)
       : null;
   }, [maestroPlan]);
+
+  const scheduledWorkflowDefinitions = useMemo(
+    () =>
+      (schedulerDashboard?.definitions ?? []).filter((definition) =>
+        ["scheduled", "recurring"].includes(definition.trigger_type),
+      ),
+    [schedulerDashboard],
+  );
+
+  const triggerWorkflowDefinitions = useMemo(
+    () =>
+      (schedulerDashboard?.definitions ?? []).filter(
+        (definition) => definition.trigger_type === "event",
+      ),
+    [schedulerDashboard],
+  );
 
   const pendingToolApprovals = useMemo(
     () =>
@@ -1392,7 +1451,10 @@ export function App() {
       sender: "user",
       content: draftMessage.trim(),
     };
-    const activePlanId = maestroPlan ? maestroPlan.parent_task_id : null;
+    const activePlanId =
+      maestroPlan && messageReferencesActivePlan(outgoingMessage.content)
+        ? maestroPlan.parent_task_id
+        : null;
     setMaestroBusy(true);
     setChatMessages((messages) => [...messages, outgoingMessage]);
     setDraftMessage("");
@@ -2390,8 +2452,8 @@ export function App() {
                 </div>
               ) : (
                 <p className="empty-state">
-                  No scheduled or running workflows yet. Maestro workflows will appear here after
-                  they are proposed, queued, or executed.
+                  No active workflow selected. Proposed, queued, or running workflows can be
+                  inspected here when they need attention.
                 </p>
               )}
               {schedulerDashboard && schedulerDashboard.runs.length > 0 && (
@@ -2399,7 +2461,7 @@ export function App() {
                   <div className="workflow-detail-heading">
                     <div>
                       <span>Durable queue</span>
-                      <h4>Scheduled and recent workflows</h4>
+                      <h4>Active workflow queue</h4>
                     </div>
                     <span>{schedulerDashboard.runnable_batches.length} runnable batch(es)</span>
                   </div>
@@ -2448,6 +2510,12 @@ export function App() {
                     );
                   })}
                 </div>
+              )}
+              {schedulerDashboard && schedulerDashboard.runs.length === 0 && (
+                <p className="empty-state">
+                  No active queued work. Completed runs are kept as history instead of staying in
+                  the queue.
+                </p>
               )}
               {selectedSchedulerRun && (
                 <div className="workflow-detail-panel scheduler-detail-panel">
@@ -2502,16 +2570,16 @@ export function App() {
                   )}
                 </div>
               )}
-              {schedulerDashboard && schedulerDashboard.definitions.length > 0 && (
+              {scheduledWorkflowDefinitions.length > 0 && (
                 <div className="scheduler-run-list" aria-label="Scheduled workflow definitions">
                   <div className="workflow-detail-heading">
                     <div>
-                      <span>Triggers</span>
-                      <h4>Recurring and event workflows</h4>
+                      <span>Schedules</span>
+                      <h4>Scheduled workflows</h4>
                     </div>
-                    <span>{schedulerDashboard.definitions.length} configured</span>
+                    <span>{scheduledWorkflowDefinitions.length} configured</span>
                   </div>
-                  {schedulerDashboard.definitions.slice(0, 5).map((definition) => {
+                  {scheduledWorkflowDefinitions.slice(0, 5).map((definition) => {
                     const unassigned = unassignedDefinitionItemCount(definition);
                     return (
                       <article className="workflow-summary-card compact-run-card" key={definition.id}>
@@ -2539,6 +2607,47 @@ export function App() {
                         <div className="scheduler-action-row compact-actions">
                           <button type="button" onClick={() => selectSchedulerDefinition(definition)}>
                             Edit schedule
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+              {triggerWorkflowDefinitions.length > 0 && (
+                <div className="scheduler-run-list" aria-label="Trigger workflow definitions">
+                  <div className="workflow-detail-heading">
+                    <div>
+                      <span>Triggers</span>
+                      <h4>Trigger workflows</h4>
+                    </div>
+                    <span>{triggerWorkflowDefinitions.length} configured</span>
+                  </div>
+                  {triggerWorkflowDefinitions.slice(0, 5).map((definition) => {
+                    const unassigned = unassignedDefinitionItemCount(definition);
+                    return (
+                      <article className="workflow-summary-card compact-run-card" key={definition.id}>
+                        <button
+                          type="button"
+                          className="card-reset"
+                          onClick={() => selectSchedulerDefinition(definition)}
+                        >
+                          <span>{definition.trigger_type}</span>
+                          <h4>{definition.name}</h4>
+                        </button>
+                        <div className="preview-meta">
+                          <span>{definition.is_active ? "active" : "paused"}</span>
+                          <span>{triggerSummary(definition.trigger_type, definition.trigger_config)}</span>
+                          <span>{definition.priority}</span>
+                          <span>{definition.fairness_group || definition.domain_key || "global"} fairness</span>
+                          {unassigned > 0 && <span className="warning-pill">{unassigned} need agent</span>}
+                          {typeof definition.trigger_config.event_type === "string" && (
+                            <span>{definition.trigger_config.event_type}</span>
+                          )}
+                        </div>
+                        <div className="scheduler-action-row compact-actions">
+                          <button type="button" onClick={() => selectSchedulerDefinition(definition)}>
+                            Edit trigger
                           </button>
                         </div>
                       </article>
@@ -3202,6 +3311,7 @@ function ToolsWorkspace() {
   const [selectedToolKey, setSelectedToolKey] = useState("github");
   const [expandedToolFamilies, setExpandedToolFamilies] = useState<Record<string, boolean>>({
     github: true,
+    gmail: true,
   });
   const [connectionDomain, setConnectionDomain] = useState("praxis");
   const [connectionName, setConnectionName] = useState("Praxis memory retrieval");
@@ -3210,9 +3320,14 @@ function ToolsWorkspace() {
   const [statusMessage, setStatusMessage] = useState("Ready");
 
   const selectedTool = tools.find((tool) => tool.key === selectedToolKey) ?? tools[0] ?? null;
-  const selectedConnectionToolKey = selectedTool?.key.startsWith("github.")
-    ? "github"
-    : selectedTool?.key;
+  const providerToolKeys = useMemo(
+    () => new Set(tools.filter((tool) => !tool.key.includes(".")).map((tool) => tool.key)),
+    [tools],
+  );
+  const selectedConnectionToolKey =
+    selectedTool?.key.includes(".") && providerToolKeys.has(selectedTool.key.split(".")[0])
+      ? selectedTool.key.split(".")[0]
+      : (selectedTool?.key ?? "memory.context_bundle");
   const toolFamilies = useMemo(() => {
     const providerKeys = new Set(
       tools.filter((tool) => !tool.key.includes(".")).map((tool) => tool.key),
@@ -3237,12 +3352,12 @@ function ToolsWorkspace() {
   );
   const selectedToolAgents = useMemo(() => {
     if (!selectedTool) return [];
-    if (selectedTool.key === "github") {
-      const githubAgents = tools
-        .filter((tool) => tool.key.startsWith("github."))
+    if (providerToolKeys.has(selectedTool.key)) {
+      const familyAgents = tools
+        .filter((tool) => tool.key.startsWith(`${selectedTool.key}.`))
         .flatMap((tool) => tool.authorized_agents);
       const unique = new Map<string, ToolRegistryItem["authorized_agents"][number]>();
-      githubAgents.forEach((agent) => {
+      familyAgents.forEach((agent) => {
         unique.set(`${agent.domain_key}-${agent.agent_key}`, agent);
       });
       return Array.from(unique.values()).sort((a, b) =>
@@ -3250,7 +3365,7 @@ function ToolsWorkspace() {
       );
     }
     return selectedTool.authorized_agents;
-  }, [selectedTool, tools]);
+  }, [providerToolKeys, selectedTool, tools]);
   const selectedConnection = selectedToolConnections.find(
     (connection) => connection.domain_key === connectionDomain,
   );
@@ -3285,10 +3400,13 @@ function ToolsWorkspace() {
       return;
     }
     const isGitHub = selectedConnectionToolKey === "github";
+    const isGmail = selectedConnectionToolKey === "gmail";
     setConnectionName(
-      `${domainLabels[connectionDomain] ?? connectionDomain} ${isGitHub ? "GitHub" : selectedTool.name}`,
+      `${domainLabels[connectionDomain] ?? connectionDomain} ${
+        isGitHub ? "GitHub" : isGmail ? "Gmail" : selectedTool.name
+      }`,
     );
-    setConnectionAuthType(isGitHub ? "gh_cli" : "service");
+    setConnectionAuthType(isGitHub ? "gh_cli" : isGmail ? "oauth" : "service");
     setConnectionConfig(
       isGitHub
         ? JSON.stringify(
@@ -3299,6 +3417,18 @@ function ToolsWorkspace() {
             null,
             2,
           )
+        : isGmail
+          ? JSON.stringify(
+              {
+                user_id: "me",
+                client_id_env: "",
+                client_secret_env: "",
+                refresh_token_env: "",
+                default_query: "",
+              },
+              null,
+              2,
+            )
         : "{}",
     );
   }, [connectionDomain, connections, selectedConnectionToolKey, selectedTool?.key]);
@@ -3470,6 +3600,19 @@ function ToolsWorkspace() {
                 and token env config once here, then every GitHub tool can inherit it.
               </p>
             )}
+            {selectedTool.key === "gmail" && (
+              <p className="memory-status">
+                Edit the shared Gmail OAuth config here. Every Gmail child tool in this domain
+                inherits it unless a more specific override is added later. Use refresh-token
+                OAuth env vars for durable scheduled workflows.
+              </p>
+            )}
+            {selectedTool.key.startsWith("gmail.") && (
+              <p className="memory-status">
+                Gmail tools share one domain connection named <strong>Gmail</strong>. Save user id
+                plus refresh-token OAuth env config once here, then every Gmail tool can inherit it.
+              </p>
+            )}
             <div className="connection-list">
               {Object.entries(domainLabels)
                 .filter(([key]) => key !== "global")
@@ -3551,7 +3694,7 @@ function ToolsWorkspace() {
                 <textarea
                   value={connectionConfig}
                   onChange={(event) => setConnectionConfig(event.target.value)}
-                  placeholder='{"username":"praxis@example.com","password":"..."}'
+                  placeholder='{"user_id":"me","client_id_env":"GOOGLE_CLIENT_ID","client_secret_env":"GOOGLE_CLIENT_SECRET","refresh_token_env":"PRAXIS_GMAIL_REFRESH_TOKEN"}'
                 />
               </label>
               {selectedConnection && (
