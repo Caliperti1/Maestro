@@ -1556,6 +1556,36 @@ def test_maestro_api_respond_deletes_active_workflow_instead_of_refining(
     assert active.json()["conversation"]["active_plan"] is None
 
 
+def test_maestro_api_respond_clears_current_workflow_without_creating_new_workflow(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Clear the current workflow.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["classification"] == "delete_workflow"
+    assert payload["plan"] is None
+    task = session.get(Task, uuid.UUID(first_plan["parent_task_id"]))
+    assert task is not None
+    assert task.status == "archived"
+    assert session.query(Task).filter(Task.workflow_key == "maestro.generic").count() == 1
+
+
 def test_orchestrator_archive_plan_disables_saved_schedule_definition(
     session: Session,
 ) -> None:

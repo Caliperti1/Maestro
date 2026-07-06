@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     routed_resolver_llm_provider: str = "ollama"
     routed_resolver_llm_model: str = "llama3.1:8b"
     routed_resolver_llm_base_url: str = "http://localhost:11434"
+    maestro_intent_classifier_provider: str = "ollama"
+    maestro_intent_classifier_model: str = "llama3.1:8b"
+    maestro_intent_classifier_base_url: str = "http://localhost:11434"
+    maestro_intent_classifier_timeout_seconds: float = 0.75
     scheduler_worker_autorun: bool = False
     scheduler_worker_interval_seconds: int = 30
     scheduler_worker_claim_limit: int = 4

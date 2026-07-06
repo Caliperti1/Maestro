@@ -13,6 +13,7 @@ from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.maestro.channel import MAESTRO_CHANNEL_KEY, get_or_create_maestro_channel
+from app.maestro.intent_classifier import classify_active_message_with_local_llm
 from app.maestro.scheduler import SchedulerService
 from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
@@ -637,11 +638,11 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
     has_blocking_rfi = any(
         item.needs_user_input and item.blocks_execution for item in active_plan.work_items
     )
-    if not _should_use_plan_context(message, active_plan):
-        return "new_workflow"
     if _is_workflow_delete_message(lowered):
         return "delete_workflow"
     if any(token in lowered for token in ("new workflow", "new plan", "separate workflow", "start over")):
+        return "new_workflow"
+    if not _should_use_plan_context(message, active_plan):
         return "new_workflow"
     if any(
         token in lowered
@@ -680,6 +681,28 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
         for prefix in ("what ", "why ", "how ", "who ", "when ", "where ", "can you explain")
     ):
         return "side_chat"
+    llm_classification = classify_active_message_with_local_llm(
+        message=message,
+        active_plan={
+            "summary": active_plan.summary,
+            "status": active_plan.status,
+            "work_items": [
+                {
+                    "id": item.id,
+                    "type": item.type,
+                    "title": item.title,
+                    "description": item.description,
+                    "needs_agent": item.needs_agent,
+                    "needs_user_input": item.needs_user_input,
+                    "blocks_execution": item.blocks_execution,
+                }
+                for item in active_plan.work_items[:8]
+            ],
+        },
+        has_blocking_rfi=has_blocking_rfi,
+    )
+    if llm_classification is not None:
+        return llm_classification
     return "refined"
 
 
@@ -825,7 +848,7 @@ def _is_workflow_delete_message(lowered_message: str) -> bool:
         return False
     destructive = any(
         token in lowered_message
-        for token in ("delete", "remove", "cancel", "archive", "discard", "clear out")
+        for token in ("delete", "remove", "cancel", "archive", "discard", "clear out", "clear")
     )
     target = any(
         token in lowered_message
