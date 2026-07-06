@@ -358,6 +358,23 @@ class Contact(TimestampMixin, Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
+class ContactAlias(TimestampMixin, Base):
+    __tablename__ = "contact_aliases"
+    __table_args__ = (
+        UniqueConstraint("normalized_alias", name="uq_contact_aliases_normalized_alias"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    alias: Mapped[str] = mapped_column(String(240), nullable=False)
+    normalized_alias: Mapped[str] = mapped_column(String(260), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(80), default="system", nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
 class ContactDomainNote(TimestampMixin, Base):
     __tablename__ = "contact_domain_notes"
     __table_args__ = (

@@ -11,7 +11,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import CalendarEvent, Contact, ContactDomainNote, Todo, RoutedItem
+from app.db.models import CalendarEvent, Contact, ContactAlias, ContactDomainNote, Todo, RoutedItem
 
 
 @dataclass(frozen=True)
@@ -210,6 +210,11 @@ class RoutedObjectResolver:
 
     def _score_contact(self, item: RoutedItem, contact: Contact, normalized: str, name: str) -> tuple[float, str, str]:
         aliases = _contact_aliases(contact)
+        aliases.update(
+            self.session.scalars(
+                select(ContactAlias.normalized_alias).where(ContactAlias.contact_id == contact.id)
+            ).all()
+        )
         if normalized and normalized in aliases:
             return 0.95, "alias", "Matched stored contact alias."
         contact_name = _normalize_key(contact.name)

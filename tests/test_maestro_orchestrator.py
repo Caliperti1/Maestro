@@ -634,6 +634,41 @@ class FakeDirectChatPlannerLLMClient:
         raise AssertionError("Planner should use structured_response.")
 
 
+class FakeStandaloneContactPlannerLLMClient:
+    provider = "test"
+    model = "test-standalone-contact-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Capture Ben Daniels contact context.",
+            "direct_response": None,
+            "planner_notes": "Fake standalone contact response.",
+            "work_items": [
+                {
+                    "id": "wi_capture_ben",
+                    "type": "standalone_task",
+                    "title": "Capture Ben Daniels from XVIII Airborne Corps as Praxis engagement contact",
+                    "description": "Capture Ben Daniels from XVIII Airborne Corps as Praxis engagement contact.",
+                    "domain_key": "praxis",
+                    "priority": "normal",
+                    "required_capabilities": [],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": True,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Contact routed for CRM review.",
+                    "rationale": "This should be contact context, not a todo.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
 class FakeScheduledPlannerLLMClient:
     provider = "test"
     model = "test-scheduled-planner"
@@ -1956,6 +1991,23 @@ def test_routed_only_message_completes_without_schedule_candidate(session: Sessi
     assert plan.scheduler["schedule_candidate"] is None
     assert plan.scheduler["queue_items"] == []
     assert session.query(RoutedItem).count() >= 3
+
+
+def test_orchestrator_routes_contact_shaped_standalone_work_item_as_contact(
+    session: Session,
+) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeStandaloneContactPlannerLLMClient(),
+    )
+
+    plan = service.create_plan("Capture Ben Daniels from XVIII Airborne Corps as Praxis engagement contact.")
+
+    assert plan.is_routing_only is True
+    assert session.query(Todo).count() == 0
+    routed = session.query(RoutedItem).one()
+    assert routed.route_type == "contact"
+    assert session.query(Contact).one().name == "Ben Daniels"
 
 
 def test_maestro_api_marks_direct_chat_plan(session: Session, tmp_path: Path) -> None:

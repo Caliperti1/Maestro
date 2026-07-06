@@ -377,7 +377,7 @@ class MaestroOrchestratorService:
     ) -> list[RoutedItem]:
         routed_items: list[RoutedItem] = []
         for item in work_items:
-            route_type = _ROUTE_TYPE_BY_WORK_ITEM.get(item.type)
+            route_type = self._route_type_for_work_item(item)
             if route_type is None:
                 continue
             routed_items.append(
@@ -418,6 +418,18 @@ class MaestroOrchestratorService:
             self.session.commit()
             RoutedMemoryService(self.session).promote_items(routed_items)
         return routed_items
+
+    def _route_type_for_work_item(self, item: MaestroWorkItem) -> str | None:
+        route_type = _ROUTE_TYPE_BY_WORK_ITEM.get(item.type)
+        if item.type == "standalone_task":
+            text = f"{item.title}\n{item.description}\n{item.expected_output}".lower()
+            if any(token in text for token in ("contact", "crm", "relationship context", "partner lead")):
+                return "contact"
+            if any(token in text for token in ("event", "calendar", "meeting", "standup", "sync")):
+                return "event"
+            if any(token in text for token in ("decision:", "decision -", "decided ")):
+                return "decision_log"
+        return route_type
 
     def _domain_id_for_key(self, domain_key: str | None) -> uuid.UUID | None:
         if not domain_key:

@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     CalendarEvent,
     Contact,
+    ContactAlias,
     ContactDomainNote,
+    ContactRelationship,
     DecisionRecord,
     Entity,
     EntityDomainNote,
@@ -235,7 +237,13 @@ class RoutedMemoryService:
         if organization:
             entity = self._upsert_entity(organization, item)
             contact.organization_entity_id = entity.id
+            contact.metadata_ = {
+                **(contact.metadata_ or {}),
+                "organization": entity.name,
+            }
+        self._upsert_contact_aliases(contact, name, item)
         self._upsert_contact_domain_note(contact, item)
+        self._extract_contact_relationships(contact, item)
         return self._link(item, "contact", contact.id, action)
 
     def _attach_resolution(self, item: RoutedItem, decision) -> None:
@@ -320,6 +328,61 @@ class RoutedMemoryService:
             note.interaction_log = [*(note.interaction_log or []), entry]
             note.source_refs = _merge_source_refs(note.source_refs, item.source_refs)
             note.metadata_ = {**(note.metadata_ or {}), **self._canonical_metadata(item)}
+
+    def _upsert_contact_aliases(self, contact: Contact, name: str, item: RoutedItem) -> None:
+        aliases = set(contact_aliases_for(contact.name))
+        aliases.update(contact_aliases_for(name))
+        metadata_aliases = (contact.metadata_ or {}).get("aliases") or []
+        if isinstance(metadata_aliases, list):
+            aliases.update(str(alias) for alias in metadata_aliases if str(alias).strip())
+        for alias in sorted(aliases):
+            normalized = _normalize_key(alias)
+            existing = self.session.scalar(
+                select(ContactAlias).where(ContactAlias.normalized_alias == normalized)
+            )
+            if existing is None:
+                self.session.add(
+                    ContactAlias(
+                        contact_id=contact.id,
+                        alias=alias,
+                        normalized_alias=normalized,
+                        source="routed_promote",
+                        source_refs=item.source_refs,
+                        metadata_=self._canonical_metadata(item),
+                    )
+                )
+            elif existing.contact_id == contact.id:
+                existing.source_refs = _merge_source_refs(existing.source_refs, item.source_refs)
+                existing.metadata_ = {**(existing.metadata_ or {}), **self._canonical_metadata(item)}
+
+    def _extract_contact_relationships(self, contact: Contact, item: RoutedItem) -> None:
+        related_name, description = _relationship_from_text(contact.name, item.content)
+        if not related_name:
+            return
+        related_normalized = _normalize_key(related_name)
+        related = self.session.scalar(select(Contact).where(Contact.normalized_name == related_normalized))
+        if related is None or related.id == contact.id:
+            return
+        existing = self.session.scalar(
+            select(ContactRelationship).where(
+                ContactRelationship.contact_id == contact.id,
+                ContactRelationship.related_contact_id == related.id,
+                ContactRelationship.description == description,
+            )
+        )
+        if existing is None:
+            self.session.add(
+                ContactRelationship(
+                    contact_id=contact.id,
+                    related_contact_id=related.id,
+                    description=description,
+                    source_refs=item.source_refs,
+                    metadata_=self._canonical_metadata(item),
+                )
+            )
+        else:
+            existing.source_refs = _merge_source_refs(existing.source_refs, item.source_refs)
+            existing.metadata_ = {**(existing.metadata_ or {}), **self._canonical_metadata(item)}
 
     def _upsert_entity_domain_note(self, entity: Entity, item: RoutedItem) -> None:
         note = self.session.scalar(
@@ -554,6 +617,13 @@ def _normalize_key(value: str) -> str:
 
 def _name_from_title(title: str) -> str:
     title = title.strip()
+    capture_match = re.search(
+        r"^capture\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})(?:\s+(?:from|as|at|with)\b|$)",
+        title,
+        re.IGNORECASE,
+    )
+    if capture_match:
+        return _title_case_name(capture_match.group(1))
     for prefix in ("contact:", "new contact:", "person:"):
         if title.lower().startswith(prefix):
             return title[len(prefix):].strip() or title
@@ -561,6 +631,13 @@ def _name_from_title(title: str) -> str:
 
 
 def _name_from_content(content: str) -> str | None:
+    capture_match = re.search(
+        r"\bcapture\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})(?:\s+(?:from|as|at|with)\b|$)",
+        content,
+        re.IGNORECASE,
+    )
+    if capture_match:
+        return _title_case_name(capture_match.group(1))
     match = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s+(?:is|serves|works|prefers|leads)\b", content)
     return match.group(1).strip() if match else None
 
@@ -582,10 +659,28 @@ def _linkedin_from_text(text: str) -> str | None:
 
 def _organization_from_text(text: str) -> str | None:
     match = re.search(
-        r"(?:at|from|with|works for|partner lead at)\s+([A-Z][A-Za-z0-9&.\- ]{2,80}?)(?:\.|\s{2,}|,|;|$)",
+        r"(?:at|from|with|works for|partner lead at)\s+([A-Z][A-Za-z0-9&.\- ]{2,80}?)(?:\s+as\b|\.|\s{2,}|,|;|$)",
         text,
     )
     return match.group(1).strip(" .") if match else None
+
+
+def _relationship_from_text(contact_name: str, text: str) -> tuple[str | None, str | None]:
+    escaped = re.escape(contact_name)
+    patterns = [
+        (rf"{escaped}\s+(?:works with|collaborates with|partners with)\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){{1,3}})", "works with"),
+        (rf"{escaped}\s+(?:reports to|works for)\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){{1,3}})", "reports to"),
+        (rf"([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){{1,3}})\s+(?:works with|collaborates with|partners with)\s+{escaped}", "works with"),
+    ]
+    for pattern, relation in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1).strip(), relation
+    return None, None
+
+
+def _title_case_name(value: str) -> str:
+    return " ".join(part[:1].upper() + part[1:] for part in value.strip().split())
 
 
 def _datetime_from_metadata(metadata: dict[str, Any], key: str) -> datetime | None:

@@ -6,10 +6,24 @@ from sqlalchemy.orm import Session
 
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import CalendarEvent, Contact, ContactDomainNote, Entity, MemoryItem, MemoryProposal, RoutedItem, SeedPackage, Todo
+from app.db.models import (
+    CalendarEvent,
+    Contact,
+    ContactAlias,
+    ContactDomainNote,
+    ContactRelationship,
+    Entity,
+    MemoryItem,
+    MemoryProposal,
+    RoutedItem,
+    SeedPackage,
+    Todo,
+)
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
+from app.memory.routed_hygiene import RoutedHygieneService
+from app.memory.routed_retrieval import RoutedRetrievalService
 from app.memory.routed_service import RoutedMemoryService
 
 
@@ -341,7 +355,74 @@ def test_routed_memory_service_resolves_contact_aliases(session: Session, tmp_pa
     assert contact.name == "Chris Flournoy"
     assert "short updates" in contact.summary
     assert "chris f" in contact.metadata_["aliases"]
+    assert session.query(ContactAlias).filter_by(normalized_alias="chris f").one().contact_id == contact.id
     assert second.metadata_["resolution"]["strategy"] in {"initial_alias", "alias"}
+
+
+def test_routed_memory_service_canonicalizes_capture_contact_title(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="contact",
+        title="Capture Ben Daniels from XVIII Airborne Corps as Praxis engagement contact",
+        content="Capture Ben Daniels from XVIII Airborne Corps as Praxis engagement contact.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "capture"}],
+        metadata_={},
+    )
+    session.add(routed_item)
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([routed_item])
+
+    contact = session.query(Contact).one()
+    assert contact.name == "Ben Daniels"
+    assert "Capture Ben Daniels" in contact.summary
+    assert session.query(Entity).one().name == "XVIII Airborne Corps"
+
+
+def test_routed_memory_service_extracts_contact_relationship(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    jane = RoutedItem(
+        domain_id=praxis.id,
+        route_type="contact",
+        title="Jane Smith",
+        content="Jane Smith is a Praxis partner.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "jane"}],
+        metadata_={},
+    )
+    ben = RoutedItem(
+        domain_id=praxis.id,
+        route_type="contact",
+        title="Ben Daniels",
+        content="Ben Daniels works with Jane Smith on Praxis follow-ups.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "ben"}],
+        metadata_={},
+    )
+    session.add_all([jane, ben])
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([jane, ben])
+
+    relationship = session.query(ContactRelationship).one()
+    assert relationship.description == "works with"
+    assert relationship.contact_id == session.query(Contact).filter_by(name="Ben Daniels").one().id
+    assert relationship.related_contact_id == session.query(Contact).filter_by(name="Jane Smith").one().id
 
 
 def test_routed_memory_service_dedupes_events(session: Session, tmp_path: Path) -> None:
@@ -461,6 +542,77 @@ def test_routed_memory_service_resolves_todo_updates(
     assert "finance-plan context" in todo.description
     assert todo.due_at is not None
     assert todo.due_at.replace(tzinfo=UTC) == datetime(2026, 7, 10, 17, 0, tzinfo=UTC)
+
+
+def test_routed_retrieval_and_edit_services(session: Session, tmp_path: Path) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    contact = Contact(
+        name="Ben Daniels",
+        normalized_name="ben daniels",
+        summary="Ben Daniels supports Praxis engagement.",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    todo = Todo(
+        domain_id=praxis.id,
+        title="Draft partner follow-up",
+        description="Draft follow-up for Ben Daniels.",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([contact, todo])
+    session.commit()
+
+    client = _client(session, tmp_path)
+    context = client.get("/memory/routed-context?domain_key=praxis&query_text=Ben&max_chars=1000")
+
+    assert context.status_code == 200
+    assert "Ben Daniels" in context.json()["rendered_text"]
+
+    update = client.patch(
+        f"/memory/routed-objects/contacts/{contact.id}",
+        json={"updates": {"summary": "Updated Praxis engagement contact."}},
+    )
+
+    assert update.status_code == 200
+    assert update.json()["contact"]["summary"] == "Updated Praxis engagement contact."
+
+
+def test_routed_hygiene_backfills_aliases_and_suggests_duplicates(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    contacts = [
+        Contact(
+            name="Ben Daniels",
+            normalized_name="ben daniels",
+            email="ben@example.com",
+            summary="One",
+            source_refs=[],
+            provenance={},
+            metadata_={},
+        ),
+        Contact(
+            name="Ben Daniels",
+            normalized_name="ben daniels",
+            email="ben.alt@example.com",
+            summary="Two",
+            source_refs=[],
+            provenance={},
+            metadata_={},
+        ),
+    ]
+    session.add_all(contacts)
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+
+    assert report.aliases_backfilled >= 2
+    assert any(item["object_type"] == "contact" for item in report.suggestions)
 
 
 def test_archive_memory_item_endpoint_hides_from_default_list(

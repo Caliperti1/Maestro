@@ -40,6 +40,8 @@ from app.memory.retrieval import (
     RetrievedMemoryLink,
 )
 from app.memory.service import MemoryAccessError, MemoryService
+from app.memory.routed_hygiene import RoutedHygieneService
+from app.memory.routed_retrieval import RoutedEditService, RoutedRetrievalService
 from app.memory.routed_service import RoutedMemoryService
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -60,6 +62,10 @@ class UpdateRoutedItemRequest(BaseModel):
 
 class PromoteRoutedItemsRequest(BaseModel):
     limit: int = 100
+
+
+class UpdateRoutedObjectRequest(BaseModel):
+    updates: dict[str, Any]
 
 
 class ReclassifySourceRequest(BaseModel):
@@ -232,6 +238,38 @@ def list_routed_objects(
     )
 
 
+@router.get("/routed-context")
+def routed_context_bundle(
+    domain_key: str | None = None,
+    query_text: str | None = None,
+    limit: int = 12,
+    max_chars: int = 3000,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    bundle = RoutedRetrievalService(db).build_context_bundle(
+        domain_id=domain_id,
+        query_text=query_text,
+        limit=limit,
+        max_chars=max_chars,
+    )
+    return {
+        "query_text": bundle.query_text,
+        "domain_key": domain_key,
+        "stores": bundle.stores,
+        "rendered_text": bundle.rendered_text,
+    }
+
+
+@router.post("/routed-hygiene/run")
+def run_routed_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
+    report = RoutedHygieneService(db).run_once()
+    return {
+        "aliases_backfilled": report.aliases_backfilled,
+        "suggestions": report.suggestions,
+    }
+
+
 @router.get("/routed-objects/events")
 def list_calendar_events(
     domain_key: str | None = None,
@@ -247,6 +285,19 @@ def list_calendar_events(
         query = query.where(CalendarEvent.status == status)
     events = db.scalars(query.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(limit)).all()
     return {"events": [_calendar_event_payload(db, event) for event in events]}
+
+
+@router.patch("/routed-objects/events/{event_id}")
+def update_calendar_event(
+    event_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        event = RoutedEditService(db).update_event(event_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"event": _calendar_event_payload(db, event)}
 
 
 @router.get("/routed-objects/todos")
@@ -266,10 +317,49 @@ def list_todos(
     return {"todos": [_todo_payload(db, todo) for todo in todos]}
 
 
+@router.patch("/routed-objects/todos/{todo_id}")
+def update_todo(
+    todo_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        todo = RoutedEditService(db).update_todo(todo_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"todo": _todo_payload(db, todo)}
+
+
 @router.get("/routed-objects/contacts")
 def list_contacts(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
     contacts = db.scalars(select(Contact).order_by(Contact.updated_at.desc()).limit(limit)).all()
     return {"contacts": [_contact_payload(contact) for contact in contacts]}
+
+
+@router.patch("/routed-objects/contacts/{contact_id}")
+def update_contact(
+    contact_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        contact = RoutedEditService(db).update_contact(contact_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"contact": _contact_payload(contact)}
+
+
+@router.patch("/routed-objects/{object_type}/{object_id}/archive")
+def archive_routed_object(
+    object_type: str,
+    object_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        obj = RoutedEditService(db).archive_object(object_type, object_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "archived", "object_type": object_type, "object_id": str(obj.id)}
 
 
 @router.get("/routed-objects/entities")
