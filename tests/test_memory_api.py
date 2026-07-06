@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -305,6 +306,44 @@ def test_routed_memory_service_dedupes_contacts_and_links_entities(
     assert session.query(ContactDomainNote).one().domain_id == praxis.id
 
 
+def test_routed_memory_service_resolves_contact_aliases(session: Session, tmp_path: Path) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    first = RoutedItem(
+        domain_id=praxis.id,
+        route_type="contact",
+        title="Chris Flournoy",
+        content="Chris Flournoy is the Praxis standup contact.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "one"}],
+        metadata_={"organization": "Praxis"},
+    )
+    second = RoutedItem(
+        domain_id=praxis.id,
+        route_type="contact",
+        title="Chris F",
+        content="Chris F prefers short updates before the Praxis standup.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "two"}],
+        metadata_={"organization": "Praxis"},
+    )
+    session.add_all([first, second])
+    session.commit()
+
+    results = RoutedMemoryService(session).promote_items([first, second])
+
+    assert [result.action for result in results] == ["created", "updated"]
+    assert session.query(Contact).count() == 1
+    contact = session.query(Contact).one()
+    assert contact.name == "Chris Flournoy"
+    assert "short updates" in contact.summary
+    assert "chris f" in contact.metadata_["aliases"]
+    assert second.metadata_["resolution"]["strategy"] in {"initial_alias", "alias"}
+
+
 def test_routed_memory_service_dedupes_events(session: Session, tmp_path: Path) -> None:
     seed_default_domains(session)
     praxis = DomainRepository(session).get_by_key("praxis")
@@ -341,6 +380,87 @@ def test_routed_memory_service_dedupes_events(session: Session, tmp_path: Path) 
     event = session.query(CalendarEvent).one()
     assert len(event.source_refs) == 2
     assert [result.action for result in results] == ["created", "updated"]
+
+
+def test_routed_memory_service_resolves_events_by_time_and_title(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    start_at = "2026-07-10T16:00:00Z"
+    first = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Praxis standup",
+        content="Praxis standup with Chris Flournoy.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "one"}],
+        metadata_={"start_at": start_at},
+    )
+    second = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Praxis standup with Chris F",
+        content="Same Praxis standup now includes finance-plan discussion.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "two"}],
+        metadata_={"start_at": start_at},
+    )
+    session.add_all([first, second])
+    session.commit()
+
+    results = RoutedMemoryService(session).promote_items([first, second])
+
+    assert [result.action for result in results] == ["created", "updated"]
+    assert session.query(CalendarEvent).count() == 1
+    event = session.query(CalendarEvent).one()
+    assert "finance-plan" in event.summary
+    assert second.metadata_["resolution"]["strategy"] in {"time_title", "llm_resolver"}
+
+
+def test_routed_memory_service_resolves_todo_updates(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    first = RoutedItem(
+        domain_id=praxis.id,
+        route_type="task",
+        title="Draft partner follow-up email",
+        content="Draft the partner follow-up email.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "one"}],
+        metadata_={"due_at": "2026-07-10T17:00:00Z"},
+    )
+    second = RoutedItem(
+        domain_id=praxis.id,
+        route_type="task",
+        title="Partner follow-up email",
+        content="Update the partner follow-up email with the finance-plan context.",
+        priority="high",
+        status="open",
+        source_refs=[{"type": "test", "id": "two"}],
+        metadata_={"due_at": "2026-07-10T17:00:00Z"},
+    )
+    session.add_all([first, second])
+    session.commit()
+
+    results = RoutedMemoryService(session).promote_items([first, second])
+
+    assert [result.action for result in results] == ["created", "updated"]
+    assert session.query(Todo).count() == 1
+    todo = session.query(Todo).one()
+    assert todo.priority == "high"
+    assert "finance-plan context" in todo.description
+    assert todo.due_at is not None
+    assert todo.due_at.replace(tzinfo=UTC) == datetime(2026, 7, 10, 17, 0, tzinfo=UTC)
 
 
 def test_archive_memory_item_endpoint_hides_from_default_list(

@@ -20,6 +20,11 @@ from app.db.models import (
     RoutedObjectLink,
     Todo,
 )
+from app.memory.routed_resolver import (
+    RoutedObjectResolver,
+    contact_aliases_for,
+    resolution_metadata,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,7 @@ class RoutedMemoryService:
 
     def __init__(self, session: Session):
         self.session = session
+        self.resolver = RoutedObjectResolver(session)
 
     def process_pending(self, *, limit: int = 100) -> list[RoutedPromotionResult]:
         items = self.session.scalars(
@@ -99,27 +105,45 @@ class RoutedMemoryService:
         }
 
     def _promote_todo(self, item: RoutedItem) -> RoutedPromotionResult:
-        todo = Todo(
-            domain_id=item.domain_id,
-            title=item.title,
-            description=item.content,
-            todo_type="human_input" if item.route_type == "human_input" else item.route_type,
-            owner_type="user" if item.route_type == "human_input" else "maestro",
-            owner_ref="Chris" if item.route_type == "human_input" else None,
-            due_at=_datetime_from_metadata(item.metadata_, "due_at"),
-            priority=item.priority,
-            status="needs_input" if item.route_type == "human_input" else "open",
-            source_refs=item.source_refs,
-            provenance=self._provenance(item),
-            metadata_=self._canonical_metadata(item),
-        )
-        self.session.add(todo)
-        self.session.flush()
-        return self._link(item, "todo", todo.id, "created")
+        due_at = _datetime_from_metadata(item.metadata_, "due_at")
+        decision = self.resolver.resolve_todo(item, due_at=due_at)
+        self._attach_resolution(item, decision)
+        todo = self.session.get(Todo, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
+        action = "updated" if todo is not None else "created"
+        if todo is None:
+            todo = Todo(
+                domain_id=item.domain_id,
+                title=item.title,
+                description=item.content,
+                todo_type="human_input" if item.route_type == "human_input" else item.route_type,
+                owner_type="user" if item.route_type == "human_input" else "maestro",
+                owner_ref="Chris" if item.route_type == "human_input" else None,
+                due_at=due_at,
+                priority=item.priority,
+                status="needs_input" if item.route_type == "human_input" else "open",
+                source_refs=item.source_refs,
+                provenance=self._provenance(item),
+                metadata_=self._canonical_metadata(item),
+            )
+            self.session.add(todo)
+            self.session.flush()
+        else:
+            todo.description = _append_note(todo.description, item.content)
+            todo.source_refs = _merge_source_refs(todo.source_refs, item.source_refs)
+            todo.metadata_ = {**(todo.metadata_ or {}), **self._canonical_metadata(item)}
+            if due_at and not todo.due_at:
+                todo.due_at = due_at
+            if _priority_rank(item.priority) > _priority_rank(todo.priority):
+                todo.priority = item.priority
+        return self._link(item, "todo", todo.id, action)
 
     def _promote_event(self, item: RoutedItem) -> RoutedPromotionResult:
         start_at = _datetime_from_metadata(item.metadata_, "start_at")
-        event = self._find_matching_event(item, start_at)
+        decision = self.resolver.resolve_event(item, start_at=start_at)
+        self._attach_resolution(item, decision)
+        event = self.session.get(CalendarEvent, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
+        if event is None:
+            event = self._find_matching_event(item, start_at)
         action = "updated" if event is not None else "created"
         if event is None:
             event = CalendarEvent(
@@ -171,13 +195,9 @@ class RoutedMemoryService:
             or _name_from_title(item.title)
         )
         normalized_name = _normalize_key(name)
-        contact = self.session.scalar(
-            select(Contact).where(Contact.email == email)
-        ) if email else None
-        if contact is None:
-            contact = self.session.scalar(
-                select(Contact).where(Contact.normalized_name == normalized_name)
-            )
+        decision = self.resolver.resolve_contact(item, name=name, email=email)
+        self._attach_resolution(item, decision)
+        contact = self.session.get(Contact, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
         action = "updated" if contact is not None else "created"
         if contact is None:
             contact = Contact(
@@ -191,14 +211,24 @@ class RoutedMemoryService:
                 last_contact_at=_datetime_from_metadata(item.metadata_, "last_contact_at"),
                 source_refs=item.source_refs,
                 provenance=self._provenance(item),
-                metadata_=self._canonical_metadata(item),
+                metadata_={
+                    **self._canonical_metadata(item),
+                    "aliases": sorted(contact_aliases_for(name)),
+                },
             )
             self.session.add(contact)
             self.session.flush()
         else:
             contact.summary = _append_note(contact.summary, item.content)
             contact.source_refs = _merge_source_refs(contact.source_refs, item.source_refs)
-            contact.metadata_ = {**(contact.metadata_ or {}), **self._canonical_metadata(item)}
+            aliases = set(contact.metadata_.get("aliases") or []) if contact.metadata_ else set()
+            aliases.update(contact_aliases_for(contact.name))
+            aliases.update(contact_aliases_for(name))
+            contact.metadata_ = {
+                **(contact.metadata_ or {}),
+                **self._canonical_metadata(item),
+                "aliases": sorted(alias for alias in aliases if alias),
+            }
             if email and not contact.email:
                 contact.email = email
         organization = _organization_from_text(item.content) or _string_from_metadata(item.metadata_, "organization")
@@ -207,6 +237,12 @@ class RoutedMemoryService:
             contact.organization_entity_id = entity.id
         self._upsert_contact_domain_note(contact, item)
         return self._link(item, "contact", contact.id, action)
+
+    def _attach_resolution(self, item: RoutedItem, decision) -> None:
+        item.metadata_ = {
+            **(item.metadata_ or {}),
+            "resolution": resolution_metadata(decision),
+        }
 
     def _promote_entity(self, item: RoutedItem) -> RoutedPromotionResult:
         entity = self._upsert_entity(item.title, item)
@@ -595,3 +631,7 @@ def _merge_source_refs(existing: list[dict[str, Any]], new_refs: list[dict[str, 
         if ref not in merged:
             merged.append(ref)
     return merged
+
+
+def _priority_rank(priority: str | None) -> int:
+    return {"low": 0, "normal": 1, "high": 2, "urgent": 3}.get((priority or "normal").lower(), 1)
