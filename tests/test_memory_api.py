@@ -305,6 +305,44 @@ def test_routed_memory_service_dedupes_contacts_and_links_entities(
     assert session.query(ContactDomainNote).one().domain_id == praxis.id
 
 
+def test_routed_memory_service_dedupes_events(session: Session, tmp_path: Path) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_items = [
+        RoutedItem(
+            domain_id=praxis.id,
+            route_type="event",
+            title="Praxis daily standup",
+            content="Praxis daily standup with Chris F today at 1200.",
+            priority="normal",
+            status="open",
+            source_refs=[{"type": "test", "id": "one"}],
+            metadata_={},
+        ),
+        RoutedItem(
+            domain_id=praxis.id,
+            route_type="event",
+            title="Praxis daily standup",
+            content="Praxis daily standup with Chris F today at 1200.",
+            priority="normal",
+            status="open",
+            source_refs=[{"type": "test", "id": "two"}],
+            metadata_={},
+        ),
+    ]
+    session.add_all(routed_items)
+    session.commit()
+
+    results = RoutedMemoryService(session).promote_items(routed_items)
+
+    assert len(results) == 2
+    assert session.query(CalendarEvent).count() == 1
+    event = session.query(CalendarEvent).one()
+    assert len(event.source_refs) == 2
+    assert [result.action for result in results] == ["created", "updated"]
+
+
 def test_archive_memory_item_endpoint_hides_from_default_list(
     session: Session,
     tmp_path: Path,

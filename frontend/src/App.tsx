@@ -20,7 +20,7 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type ChatMessage = {
   id: string;
@@ -445,6 +445,7 @@ type MaestroPlan = {
     stages?: Array<Record<string, unknown>>;
   };
   is_chat_only: boolean;
+  is_routing_only: boolean;
   selected_agents: Array<Record<string, unknown>>;
   approval_required: boolean;
   scheduler: Record<string, unknown> & {
@@ -816,6 +817,7 @@ export function App() {
     "dashboard",
   );
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const [sessionHistory, setSessionHistory] = useState<MaestroSessionSummary[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [schedulerDashboard, setSchedulerDashboard] = useState<SchedulerDashboard | null>(null);
@@ -844,6 +846,12 @@ export function App() {
   const [selectedSchedulerRun, setSelectedSchedulerRun] = useState<SchedulerRun | null>(null);
   const [selectedSchedulerDefinition, setSelectedSchedulerDefinition] =
     useState<SchedulerDefinition | null>(null);
+
+  useEffect(() => {
+    const thread = chatThreadRef.current;
+    if (!thread) return;
+    thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
+  }, [chatMessages, maestroBusy]);
   const [schedulerWorkerStatus, setSchedulerWorkerStatus] =
     useState<SchedulerWorkerStatus | null>(null);
 
@@ -1766,7 +1774,7 @@ export function App() {
                 </div>
               </div>
 
-              <div className="thread">
+              <div className="thread" ref={chatThreadRef}>
                 {chatMessages.length > 0 ? (
                   chatMessages.map((message) => (
                     <div
@@ -2239,12 +2247,16 @@ export function App() {
                     />
                     <span>{schedulerWorkerStatus?.enabled ? "Auto worker on" : "Auto worker off"}</span>
                   </label>
-                  <button type="button" onClick={runSchedulerTick}>
-                    Run tick
-                  </button>
-                  <button type="button" onClick={runSchedulerWorker}>
-                    Run worker
-                  </button>
+                  {!schedulerWorkerStatus?.enabled && (
+                    <>
+                      <button type="button" onClick={runSchedulerTick}>
+                        Run tick
+                      </button>
+                      <button type="button" onClick={runSchedulerWorker}>
+                        Run worker
+                      </button>
+                    </>
+                  )}
                   {selectedSchedulerDefinition && (
                     <button
                       type="button"
@@ -2257,11 +2269,12 @@ export function App() {
                     </button>
                   )}
                 </div>
-                <p className="scheduler-help-text">
-                  Auto worker claims and executes due queue items every{" "}
-                  {schedulerWorkerStatus?.interval_seconds ?? 30}s. Run tick only enqueues and
-                  claims ready items; Run worker enqueues, claims, and executes once.
-                </p>
+                {!schedulerWorkerStatus?.enabled && (
+                  <p className="scheduler-help-text">
+                    Run tick only enqueues and claims ready items; Run worker enqueues, claims,
+                    and executes once.
+                  </p>
+                )}
                 <div className="scheduler-form-grid">
                   <label>
                     <span>Mode</span>

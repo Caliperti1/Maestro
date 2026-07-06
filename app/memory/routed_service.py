@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -118,23 +118,50 @@ class RoutedMemoryService:
         return self._link(item, "todo", todo.id, "created")
 
     def _promote_event(self, item: RoutedItem) -> RoutedPromotionResult:
-        event = CalendarEvent(
-            domain_id=item.domain_id,
-            title=item.title,
-            summary=item.content,
-            start_at=_datetime_from_metadata(item.metadata_, "start_at"),
-            end_at=_datetime_from_metadata(item.metadata_, "end_at"),
-            location=_string_from_metadata(item.metadata_, "location"),
-            attendees=_list_from_metadata(item.metadata_, "attendees"),
-            supporting_refs=item.source_refs,
-            source_refs=item.source_refs,
-            provenance=self._provenance(item),
-            status=item.status if item.status not in {"open", "needs_input"} else "scheduled",
-            metadata_=self._canonical_metadata(item),
+        start_at = _datetime_from_metadata(item.metadata_, "start_at")
+        event = self._find_matching_event(item, start_at)
+        action = "updated" if event is not None else "created"
+        if event is None:
+            event = CalendarEvent(
+                domain_id=item.domain_id,
+                title=item.title,
+                summary=item.content,
+                start_at=start_at,
+                end_at=_datetime_from_metadata(item.metadata_, "end_at"),
+                location=_string_from_metadata(item.metadata_, "location"),
+                attendees=_list_from_metadata(item.metadata_, "attendees"),
+                supporting_refs=item.source_refs,
+                source_refs=item.source_refs,
+                provenance=self._provenance(item),
+                status=item.status if item.status not in {"open", "needs_input"} else "scheduled",
+                metadata_=self._canonical_metadata(item),
+            )
+            self.session.add(event)
+            self.session.flush()
+        else:
+            event.summary = _append_note(event.summary, item.content)
+            event.source_refs = _merge_source_refs(event.source_refs, item.source_refs)
+            event.supporting_refs = _merge_source_refs(event.supporting_refs, item.source_refs)
+            event.metadata_ = {**(event.metadata_ or {}), **self._canonical_metadata(item)}
+            if start_at and not event.start_at:
+                event.start_at = start_at
+            if not event.location:
+                event.location = _string_from_metadata(item.metadata_, "location")
+            if not event.attendees:
+                event.attendees = _list_from_metadata(item.metadata_, "attendees")
+        return self._link(item, "event", event.id, action)
+
+    def _find_matching_event(self, item: RoutedItem, start_at: datetime | None) -> CalendarEvent | None:
+        statement = select(CalendarEvent).where(
+            CalendarEvent.domain_id == item.domain_id,
+            func.lower(CalendarEvent.title) == item.title.strip().lower(),
+            CalendarEvent.status != "archived",
         )
-        self.session.add(event)
-        self.session.flush()
-        return self._link(item, "event", event.id, "created")
+        if start_at is not None:
+            statement = statement.where(CalendarEvent.start_at == start_at)
+        else:
+            statement = statement.where(CalendarEvent.summary == item.content)
+        return self.session.scalar(statement.limit(1))
 
     def _promote_contact(self, item: RoutedItem) -> RoutedPromotionResult:
         email = _email_from_text(item.content) or _string_from_metadata(item.metadata_, "email")

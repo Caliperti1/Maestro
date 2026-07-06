@@ -100,6 +100,7 @@ class MaestroPlan:
     execution_stages: list[list[str]]
     workflow_graph: dict[str, Any]
     is_chat_only: bool
+    is_routing_only: bool
     selected_agents: list[dict[str, Any]]
     registry_snapshot: dict[str, Any]
     approval_required: bool
@@ -165,7 +166,8 @@ class MaestroOrchestratorService:
         work_items = self._harden_work_items(
             [self._work_item_from_planner(item) for item in decomposition.work_items]
         )
-        is_chat_only = self._is_chat_only(work_items, decomposition)
+        is_routing_only = self._is_routing_only(work_items)
+        is_chat_only = self._is_chat_only(work_items, decomposition) or is_routing_only
         selected_agents = self._select_agents_for_work_items(work_items, agents)
         intents = self._intents_from_work_items(work_items, selected_agents)
         subtasks = self._build_subtasks(cleaned_input, selected_agents, intents, work_items)
@@ -174,6 +176,9 @@ class MaestroOrchestratorService:
         queue_items = [] if is_chat_only else self._queue_items(subtasks)
         schedule_candidate = self._schedule_candidate_from_input(cleaned_input, work_items, subtasks)
         summary = decomposition.plan_summary or self._plan_summary(cleaned_input, intents, subtasks)
+        direct_response = decomposition.direct_response
+        if is_routing_only:
+            direct_response = self._routed_direct_response(work_items)
         plan_id = str(uuid.uuid4())
         parent_task = Task(
             conversation_id=conversation_id,
@@ -193,6 +198,7 @@ class MaestroOrchestratorService:
                 "execution_stages": execution_stages,
                 "workflow_graph": workflow_graph,
                 "is_chat_only": is_chat_only,
+                "is_routing_only": is_routing_only,
                 "selected_agents": [
                     self._selected_agent_payload(agent, user_input=cleaned_input)
                     for agent in selected_agents
@@ -204,7 +210,7 @@ class MaestroOrchestratorService:
                     status="direct_chat" if is_chat_only else "queue_foundation",
                     schedule_candidate=schedule_candidate,
                 ),
-                "direct_response": decomposition.direct_response,
+                "direct_response": direct_response,
                 "planner_notes": decomposition.planner_notes,
             },
             completed_at=datetime.now(UTC) if is_chat_only else None,
@@ -1629,6 +1635,29 @@ class MaestroOrchestratorService:
             for item in work_items
         )
 
+    def _is_routing_only(self, work_items: list[MaestroWorkItem]) -> bool:
+        return bool(work_items) and not any(item.needs_agent for item in work_items) and any(
+            _ROUTE_TYPE_BY_WORK_ITEM.get(item.type) is not None for item in work_items
+        )
+
+    def _routed_direct_response(self, work_items: list[MaestroWorkItem]) -> str:
+        routed = [
+            item
+            for item in work_items
+            if _ROUTE_TYPE_BY_WORK_ITEM.get(item.type) is not None
+        ]
+        if not routed:
+            return "I captured that context."
+        route_counts: dict[str, int] = {}
+        for item in routed:
+            route_type = _ROUTE_TYPE_BY_WORK_ITEM.get(item.type) or "item"
+            route_counts[route_type] = route_counts.get(route_type, 0) + 1
+        summary = ", ".join(
+            f"{count} {route_type.replace('_', ' ')}{'' if count == 1 else 's'}"
+            for route_type, count in sorted(route_counts.items())
+        )
+        return f"Captured and routed {summary}. These were written to their routed stores with provenance."
+
     def _dependency_context(
         self,
         completed_outputs_by_work_item: dict[str, str],
@@ -1929,7 +1958,7 @@ class MaestroOrchestratorService:
         trigger_type = self._schedule_trigger_type(lowered)
         if trigger_type is None:
             return None
-        if not subtasks and not work_items:
+        if not any(item.needs_agent for item in work_items):
             return None
         primary_domain = subtasks[0].domain_key if subtasks else (work_items[0].domain_key if work_items else None)
         name_seed = next((item.title for item in work_items if item.needs_agent), "Scheduled Maestro workflow")
@@ -2413,6 +2442,7 @@ class MaestroOrchestratorService:
             execution_stages=list(payload.get("execution_stages", [])),
             workflow_graph=dict(payload.get("workflow_graph", {})),
             is_chat_only=bool(payload.get("is_chat_only", False)),
+            is_routing_only=bool(payload.get("is_routing_only", False)),
             selected_agents=list(payload.get("selected_agents", [])),
             registry_snapshot=dict(payload.get("registry_snapshot", {})),
             approval_required=bool(payload.get("approval_required", True)),

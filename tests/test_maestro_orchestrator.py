@@ -1904,7 +1904,28 @@ def test_maestro_api_respond_routes_context_inside_active_session(
     payload = response.json()
     assert payload["kind"] == "routed"
     assert payload["classification"] == "routed"
-    assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+    assert payload["plan"] is None
+    assert payload["chat_plan"]["is_routing_only"] is True
+    assert payload["active_plan"]["plan_id"] == first_plan["plan_id"]
+
+
+def test_routed_only_message_completes_without_schedule_candidate(session: Session) -> None:
+    service = MaestroOrchestratorService(session)
+
+    plan = service.create_plan(
+        "Praxis note: Jane Smith is the partner lead at Example Corp. "
+        "RFI: Chris needs to confirm the follow-up owner. "
+        "Due-out: Draft a partner follow-up email. "
+        "Event: daily standup today at 1200."
+    )
+
+    assert plan.status == "completed"
+    assert plan.is_chat_only is True
+    assert plan.is_routing_only is True
+    assert plan.approval_required is False
+    assert plan.scheduler["schedule_candidate"] is None
+    assert plan.scheduler["queue_items"] == []
+    assert session.query(RoutedItem).count() >= 3
 
 
 def test_maestro_api_marks_direct_chat_plan(session: Session, tmp_path: Path) -> None:
