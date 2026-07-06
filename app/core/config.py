@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     embedding_api_key: str | None = None
     embedding_dimensions: int | None = None
     memory_embedding_best_effort: bool = True
-    routed_resolver_llm_provider: str = "disabled"
+    routed_resolver_llm_provider: str = "ollama"
     routed_resolver_llm_model: str = "llama3.1:8b"
     routed_resolver_llm_base_url: str = "http://localhost:11434"
     scheduler_worker_autorun: bool = False
