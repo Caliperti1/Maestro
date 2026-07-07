@@ -14,6 +14,7 @@ from app.memory.service import (
     MemoryService,
     MemoryWriteResult,
 )
+from app.memory.routed_service import RoutedMemoryService
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,7 @@ class LLMMemoryCurator:
         for extracted_item in extracted_items:
             if extracted_item.route_type == "ignore":
                 continue
+            structured_data = extracted_item.structured_data or {}
             items.append(
                 RoutedItem(
                     domain_id=source.domain_id,
@@ -190,7 +192,9 @@ class LLMMemoryCurator:
                         "source_title": source.title,
                         "rationale": extracted_item.rationale,
                         "llm_confidence": extracted_item.confidence,
+                        "structured_data": structured_data,
                         **source.metadata,
+                        **structured_data,
                     },
                 )
             )
@@ -201,6 +205,7 @@ class LLMMemoryCurator:
             self.memory_service.session.add(item)
         if routed_items:
             self.memory_service.session.commit()
+            RoutedMemoryService(self.memory_service.session).promote_items(list(routed_items))
 
     def _ids_for_scope(
         self,

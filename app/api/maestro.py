@@ -13,6 +13,7 @@ from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.maestro.channel import MAESTRO_CHANNEL_KEY, get_or_create_maestro_channel
+from app.maestro.intent_classifier import classify_active_message_with_local_llm
 from app.maestro.scheduler import SchedulerService
 from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
@@ -100,6 +101,7 @@ def respond_to_maestro(
     try:
         service = MaestroOrchestratorService(db)
         active_plan_id = body.active_plan_id
+        response_active_plan: MaestroPlan | None = None
         if active_plan_id is None:
             channel_context = _resolve_channel_context(db, conversation)
             if channel_context is not None and _should_use_plan_context(body.message, channel_context):
@@ -109,7 +111,7 @@ def respond_to_maestro(
             classification = _classify_active_session_message(body.message, active_plan)
             if classification == "new_workflow":
                 plan = service.create_plan(body.message, conversation_id=conversation.id)
-                kind = "chat_only" if plan.is_chat_only else "planned"
+                kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else "planned")
             elif classification == "delete_workflow":
                 reason = f"Workflow archived from Maestro chat. Request: {body.message}"
                 archived_count = service.archive_open_plans_for_conversation(
@@ -145,15 +147,22 @@ def respond_to_maestro(
                     "active_plan": _plan_payload(active_plan),
                     "conversation": _conversation_payload(db, conversation),
                 }
+            elif classification == "routed":
+                plan = service.create_plan(
+                    body.message,
+                    conversation_id=conversation.id,
+                )
+                kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else "planned")
+                response_active_plan = active_plan
             else:
                 plan = service.refine_plan(
                     active_plan_id,
                     _classified_refinement_message(body.message, classification, active_plan),
                 )
-                kind = "chat_only" if plan.is_chat_only else classification
+                kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else classification)
         else:
             plan = service.create_plan(body.message, conversation_id=conversation.id)
-            kind = "chat_only" if plan.is_chat_only else "planned"
+            kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else "planned")
             classification = kind
     except MaestroOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -168,7 +177,7 @@ def respond_to_maestro(
         "message": response_message,
         "plan": None if plan.is_chat_only else _plan_payload(plan),
         "chat_plan": _plan_payload(plan) if plan.is_chat_only else None,
-        "active_plan": None,
+        "active_plan": _plan_payload(response_active_plan) if response_active_plan is not None else None,
         "conversation": _conversation_payload(db, conversation),
     }
 
@@ -562,6 +571,7 @@ def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
         "execution_stages": plan.execution_stages,
         "workflow_graph": plan.workflow_graph,
         "is_chat_only": plan.is_chat_only,
+        "is_routing_only": plan.is_routing_only,
         "selected_agents": plan.selected_agents,
         "registry_snapshot": plan.registry_snapshot,
         "approval_required": plan.approval_required,
@@ -628,11 +638,11 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
     has_blocking_rfi = any(
         item.needs_user_input and item.blocks_execution for item in active_plan.work_items
     )
-    if not _should_use_plan_context(message, active_plan):
-        return "new_workflow"
     if _is_workflow_delete_message(lowered):
         return "delete_workflow"
     if any(token in lowered for token in ("new workflow", "new plan", "separate workflow", "start over")):
+        return "new_workflow"
+    if not _should_use_plan_context(message, active_plan):
         return "new_workflow"
     if any(
         token in lowered
@@ -671,6 +681,28 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
         for prefix in ("what ", "why ", "how ", "who ", "when ", "where ", "can you explain")
     ):
         return "side_chat"
+    llm_classification = classify_active_message_with_local_llm(
+        message=message,
+        active_plan={
+            "summary": active_plan.summary,
+            "status": active_plan.status,
+            "work_items": [
+                {
+                    "id": item.id,
+                    "type": item.type,
+                    "title": item.title,
+                    "description": item.description,
+                    "needs_agent": item.needs_agent,
+                    "needs_user_input": item.needs_user_input,
+                    "blocks_execution": item.blocks_execution,
+                }
+                for item in active_plan.work_items[:8]
+            ],
+        },
+        has_blocking_rfi=has_blocking_rfi,
+    )
+    if llm_classification is not None:
+        return llm_classification
     return "refined"
 
 
@@ -816,7 +848,7 @@ def _is_workflow_delete_message(lowered_message: str) -> bool:
         return False
     destructive = any(
         token in lowered_message
-        for token in ("delete", "remove", "cancel", "archive", "discard", "clear out")
+        for token in ("delete", "remove", "cancel", "archive", "discard", "clear out", "clear")
     )
     target = any(
         token in lowered_message

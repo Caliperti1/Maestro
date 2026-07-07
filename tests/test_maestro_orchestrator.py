@@ -10,7 +10,7 @@ from app.agents.runtime import PromptAggregationService
 from app.agents.runtime import AgentRegistryService
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import Artifact, Report, Task, WorkflowDefinition, WorkflowRun
+from app.db.models import Artifact, Contact, Report, RoutedItem, Task, Todo, WorkflowDefinition, WorkflowRun
 from app.db.session import get_db
 from app.llm.client import LLMClientError
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
@@ -634,6 +634,41 @@ class FakeDirectChatPlannerLLMClient:
         raise AssertionError("Planner should use structured_response.")
 
 
+class FakeStandaloneContactPlannerLLMClient:
+    provider = "test"
+    model = "test-standalone-contact-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Capture Ben Daniels contact context.",
+            "direct_response": None,
+            "planner_notes": "Fake standalone contact response.",
+            "work_items": [
+                {
+                    "id": "wi_capture_ben",
+                    "type": "standalone_task",
+                    "title": "Capture Ben Daniels from XVIII Airborne Corps as Praxis engagement contact",
+                    "description": "Capture Ben Daniels from XVIII Airborne Corps as Praxis engagement contact.",
+                    "domain_key": "praxis",
+                    "priority": "normal",
+                    "required_capabilities": [],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": True,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Contact routed for CRM review.",
+                    "rationale": "This should be contact context, not a todo.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
 class FakeScheduledPlannerLLMClient:
     provider = "test"
     model = "test-scheduled-planner"
@@ -924,6 +959,23 @@ def test_orchestrator_direct_chat_has_no_executable_plan(session: Session) -> No
         assert "Direct chat responses" in str(exc)
     else:
         raise AssertionError("Direct chat plans should not be executable.")
+
+
+def test_orchestrator_immediately_promotes_routed_work_items(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakePlannerLLMClient(),
+    )
+
+    plan = service.create_plan("Prepare a Praxis partner call workflow.")
+
+    assert plan.status == "proposed"
+    routed = session.query(RoutedItem).order_by(RoutedItem.route_type).all()
+    assert [item.route_type for item in routed] == ["contact", "human_input"]
+    assert session.query(Contact).one().name == "Jane Smith"
+    todo = session.query(Todo).one()
+    assert todo.todo_type == "human_input"
+    assert todo.status == "needs_input"
 
 
 def test_orchestrator_saves_recurring_workflow_without_immediate_execution(
@@ -1539,6 +1591,36 @@ def test_maestro_api_respond_deletes_active_workflow_instead_of_refining(
     assert active.json()["conversation"]["active_plan"] is None
 
 
+def test_maestro_api_respond_clears_current_workflow_without_creating_new_workflow(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    first_plan = first_response.json()["plan"]
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": first_plan["parent_task_id"],
+            "message": "Clear the current workflow.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["classification"] == "delete_workflow"
+    assert payload["plan"] is None
+    task = session.get(Task, uuid.UUID(first_plan["parent_task_id"]))
+    assert task is not None
+    assert task.status == "archived"
+    assert session.query(Task).filter(Task.workflow_key == "maestro.generic").count() == 1
+
+
 def test_orchestrator_archive_plan_disables_saved_schedule_definition(
     session: Session,
 ) -> None:
@@ -1887,7 +1969,45 @@ def test_maestro_api_respond_routes_context_inside_active_session(
     payload = response.json()
     assert payload["kind"] == "routed"
     assert payload["classification"] == "routed"
-    assert payload["plan"]["plan_id"] != first_plan["plan_id"]
+    assert payload["plan"] is None
+    assert payload["chat_plan"]["is_routing_only"] is True
+    assert payload["active_plan"]["plan_id"] == first_plan["plan_id"]
+
+
+def test_routed_only_message_completes_without_schedule_candidate(session: Session) -> None:
+    service = MaestroOrchestratorService(session)
+
+    plan = service.create_plan(
+        "Praxis note: Jane Smith is the partner lead at Example Corp. "
+        "RFI: Chris needs to confirm the follow-up owner. "
+        "Due-out: Draft a partner follow-up email. "
+        "Event: daily standup today at 1200."
+    )
+
+    assert plan.status == "completed"
+    assert plan.is_chat_only is True
+    assert plan.is_routing_only is True
+    assert plan.approval_required is False
+    assert plan.scheduler["schedule_candidate"] is None
+    assert plan.scheduler["queue_items"] == []
+    assert session.query(RoutedItem).count() >= 3
+
+
+def test_orchestrator_routes_contact_shaped_standalone_work_item_as_contact(
+    session: Session,
+) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeStandaloneContactPlannerLLMClient(),
+    )
+
+    plan = service.create_plan("Capture Ben Daniels from XVIII Airborne Corps as Praxis engagement contact.")
+
+    assert plan.is_routing_only is True
+    assert session.query(Todo).count() == 0
+    routed = session.query(RoutedItem).one()
+    assert routed.route_type == "contact"
+    assert session.query(Contact).one().name == "Ben Daniels"
 
 
 def test_maestro_api_marks_direct_chat_plan(session: Session, tmp_path: Path) -> None:

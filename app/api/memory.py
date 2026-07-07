@@ -10,7 +10,18 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import MemoryItem, MemoryProposal, RoutedItem, SeedPackage
+from app.db.models import (
+    CalendarEvent,
+    Contact,
+    DecisionRecord,
+    Entity,
+    Idea,
+    MemoryItem,
+    MemoryProposal,
+    RoutedItem,
+    SeedPackage,
+    Todo,
+)
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
@@ -29,6 +40,9 @@ from app.memory.retrieval import (
     RetrievedMemoryLink,
 )
 from app.memory.service import MemoryAccessError, MemoryService
+from app.memory.routed_hygiene import RoutedHygieneService
+from app.memory.routed_retrieval import RoutedEditService, RoutedRetrievalService
+from app.memory.routed_service import RoutedMemoryService
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
@@ -44,6 +58,14 @@ class ArchiveMemoryRequest(BaseModel):
 class UpdateRoutedItemRequest(BaseModel):
     status: str
     reason: str | None = None
+
+
+class PromoteRoutedItemsRequest(BaseModel):
+    limit: int = 100
+
+
+class UpdateRoutedObjectRequest(BaseModel):
+    updates: dict[str, Any]
 
 
 class ReclassifySourceRequest(BaseModel):
@@ -154,6 +176,26 @@ def list_routed_items(
     return {"items": [_routed_item_payload(db, item) for item in items]}
 
 
+@router.post("/routed-items/promote")
+def promote_pending_routed_items(
+    request: PromoteRoutedItemsRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    results = RoutedMemoryService(db).process_pending(limit=request.limit)
+    return {
+        "promoted": [
+            {
+                "routed_item_id": str(result.routed_item_id),
+                "route_type": result.route_type,
+                "object_type": result.object_type,
+                "object_id": str(result.object_id),
+                "action": result.action,
+            }
+            for result in results
+        ]
+    }
+
+
 @router.patch("/routed-items/{item_id}")
 def update_routed_item(
     item_id: uuid.UUID,
@@ -179,6 +221,179 @@ def update_routed_item(
     db.commit()
     db.refresh(item)
     return {"status": "updated", "item": _routed_item_payload(db, item)}
+
+
+@router.get("/routed-objects")
+def list_routed_objects(
+    domain_key: str | None = None,
+    query_text: str | None = None,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    return RoutedMemoryService(db).build_context_bundle(
+        domain_id=domain_id,
+        query_text=query_text,
+        limit=limit,
+    )
+
+
+@router.get("/routed-context")
+def routed_context_bundle(
+    domain_key: str | None = None,
+    query_text: str | None = None,
+    limit: int = 12,
+    max_chars: int = 3000,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    bundle = RoutedRetrievalService(db).build_context_bundle(
+        domain_id=domain_id,
+        query_text=query_text,
+        limit=limit,
+        max_chars=max_chars,
+    )
+    return {
+        "query_text": bundle.query_text,
+        "domain_key": domain_key,
+        "stores": bundle.stores,
+        "rendered_text": bundle.rendered_text,
+    }
+
+
+@router.post("/routed-hygiene/run")
+def run_routed_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
+    report = RoutedHygieneService(db).run_once()
+    return {
+        "aliases_backfilled": report.aliases_backfilled,
+        "suggestions": report.suggestions,
+    }
+
+
+@router.get("/routed-objects/events")
+def list_calendar_events(
+    domain_key: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    query = select(CalendarEvent)
+    if domain_id is not None:
+        query = query.where(CalendarEvent.domain_id == domain_id)
+    if status is not None:
+        query = query.where(CalendarEvent.status == status)
+    events = db.scalars(query.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(limit)).all()
+    return {"events": [_calendar_event_payload(db, event) for event in events]}
+
+
+@router.patch("/routed-objects/events/{event_id}")
+def update_calendar_event(
+    event_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        event = RoutedEditService(db).update_event(event_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"event": _calendar_event_payload(db, event)}
+
+
+@router.get("/routed-objects/todos")
+def list_todos(
+    domain_key: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    query = select(Todo)
+    if domain_id is not None:
+        query = query.where(Todo.domain_id == domain_id)
+    if status is not None:
+        query = query.where(Todo.status == status)
+    todos = db.scalars(query.order_by(Todo.due_at, Todo.created_at.desc()).limit(limit)).all()
+    return {"todos": [_todo_payload(db, todo) for todo in todos]}
+
+
+@router.patch("/routed-objects/todos/{todo_id}")
+def update_todo(
+    todo_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        todo = RoutedEditService(db).update_todo(todo_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"todo": _todo_payload(db, todo)}
+
+
+@router.get("/routed-objects/contacts")
+def list_contacts(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
+    contacts = db.scalars(select(Contact).order_by(Contact.updated_at.desc()).limit(limit)).all()
+    return {"contacts": [_contact_payload(contact) for contact in contacts]}
+
+
+@router.patch("/routed-objects/contacts/{contact_id}")
+def update_contact(
+    contact_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        contact = RoutedEditService(db).update_contact(contact_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"contact": _contact_payload(contact)}
+
+
+@router.patch("/routed-objects/{object_type}/{object_id}/archive")
+def archive_routed_object(
+    object_type: str,
+    object_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        obj = RoutedEditService(db).archive_object(object_type, object_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "archived", "object_type": object_type, "object_id": str(obj.id)}
+
+
+@router.get("/routed-objects/entities")
+def list_entities(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
+    entities = db.scalars(select(Entity).order_by(Entity.updated_at.desc()).limit(limit)).all()
+    return {"entities": [_entity_payload(entity) for entity in entities]}
+
+
+@router.get("/routed-objects/ideas")
+def list_ideas(
+    domain_key: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    query = select(Idea)
+    if domain_id is not None:
+        query = query.where(Idea.domain_id == domain_id)
+    ideas = db.scalars(query.order_by(Idea.updated_at.desc()).limit(limit)).all()
+    return {"ideas": [_idea_payload(db, idea) for idea in ideas]}
+
+
+@router.get("/routed-objects/decisions")
+def list_decisions(
+    domain_key: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    query = select(DecisionRecord)
+    if domain_id is not None:
+        query = query.where(DecisionRecord.domain_id == domain_id)
+    decisions = db.scalars(query.order_by(DecisionRecord.updated_at.desc()).limit(limit)).all()
+    return {"decisions": [_decision_payload(db, decision) for decision in decisions]}
 
 
 @router.post("/proposals/{proposal_id}/approve")
@@ -526,6 +741,107 @@ def _routed_item_payload(db: Session, item: RoutedItem) -> dict[str, Any]:
         "source_refs": item.source_refs,
         "metadata": item.metadata_,
         "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _calendar_event_payload(db: Session, event: CalendarEvent) -> dict[str, Any]:
+    return {
+        "id": str(event.id),
+        "domain_key": _domain_key_for_id(db, event.domain_id),
+        "title": event.title,
+        "summary": event.summary,
+        "start_at": event.start_at.isoformat() if event.start_at else None,
+        "end_at": event.end_at.isoformat() if event.end_at else None,
+        "location": event.location,
+        "attendees": event.attendees,
+        "supporting_refs": event.supporting_refs,
+        "source_refs": event.source_refs,
+        "provenance": event.provenance,
+        "status": event.status,
+        "metadata": event.metadata_,
+        "created_at": event.created_at.isoformat() if event.created_at else None,
+    }
+
+
+def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
+    return {
+        "id": str(todo.id),
+        "domain_key": _domain_key_for_id(db, todo.domain_id),
+        "title": todo.title,
+        "description": todo.description,
+        "todo_type": todo.todo_type,
+        "owner_type": todo.owner_type,
+        "owner_ref": todo.owner_ref,
+        "due_at": todo.due_at.isoformat() if todo.due_at else None,
+        "priority": todo.priority,
+        "status": todo.status,
+        "source_refs": todo.source_refs,
+        "provenance": todo.provenance,
+        "metadata": todo.metadata_,
+        "created_at": todo.created_at.isoformat() if todo.created_at else None,
+    }
+
+
+def _contact_payload(contact: Contact) -> dict[str, Any]:
+    return {
+        "id": str(contact.id),
+        "name": contact.name,
+        "phone": contact.phone,
+        "email": contact.email,
+        "linkedin": contact.linkedin,
+        "organization_entity_id": str(contact.organization_entity_id) if contact.organization_entity_id else None,
+        "summary": contact.summary,
+        "origination": contact.origination,
+        "last_contact_at": contact.last_contact_at.isoformat() if contact.last_contact_at else None,
+        "scheduled_event_ids": contact.scheduled_event_ids,
+        "source_refs": contact.source_refs,
+        "provenance": contact.provenance,
+        "status": contact.status,
+        "metadata": contact.metadata_,
+        "created_at": contact.created_at.isoformat() if contact.created_at else None,
+    }
+
+
+def _entity_payload(entity: Entity) -> dict[str, Any]:
+    return {
+        "id": str(entity.id),
+        "name": entity.name,
+        "website": entity.website,
+        "summary": entity.summary,
+        "source_refs": entity.source_refs,
+        "provenance": entity.provenance,
+        "status": entity.status,
+        "metadata": entity.metadata_,
+        "created_at": entity.created_at.isoformat() if entity.created_at else None,
+    }
+
+
+def _idea_payload(db: Session, idea: Idea) -> dict[str, Any]:
+    return {
+        "id": str(idea.id),
+        "domain_key": _domain_key_for_id(db, idea.domain_id),
+        "title": idea.title,
+        "content": idea.content,
+        "status": idea.status,
+        "source_refs": idea.source_refs,
+        "provenance": idea.provenance,
+        "metadata": idea.metadata_,
+        "created_at": idea.created_at.isoformat() if idea.created_at else None,
+    }
+
+
+def _decision_payload(db: Session, decision: DecisionRecord) -> dict[str, Any]:
+    return {
+        "id": str(decision.id),
+        "domain_key": _domain_key_for_id(db, decision.domain_id),
+        "title": decision.title,
+        "decision": decision.decision,
+        "rationale": decision.rationale,
+        "status": decision.status,
+        "source_refs": decision.source_refs,
+        "provenance": decision.provenance,
+        "metadata": decision.metadata_,
+        "created_at": decision.created_at.isoformat() if decision.created_at else None,
     }
 
 

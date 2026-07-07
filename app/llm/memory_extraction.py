@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -11,6 +11,7 @@ ExtractedRouteType = Literal[
     "human_input",
     "event",
     "contact",
+    "entity",
     "think_tank",
     "decision_log",
     "project",
@@ -48,7 +49,8 @@ Route policy:
 - task: due-outs, action items, work requests, follow-ups, or things Maestro/agents should do.
 - human_input: RFIs, missing answers, approvals, decisions, or questions that require Chris.
 - event: meetings, scheduled blocks, reminders, deadlines, or other time-bound commitments.
-- contact: people, organizations, roles, relationship notes, and contact details.
+- contact: people, roles, relationship notes, and contact details.
+- entity: organizations, companies, units, schools, institutions, or teams.
 - think_tank: immature ideas, brainstorms, possible projects, or concepts not ready for tasks.
 - decision_log: approvals, denials, decisions, and rationale that should be audit-visible.
 - project: initiatives that group tasks, artifacts, decisions, and memory.
@@ -56,6 +58,16 @@ Route policy:
   provenance/run history but should not be injected into memory retrieval by default.
 - integration_note: non-secret notes about tool integrations or credential routing.
 - ignore: duplicates, transient chatter, or low-value content that should not be written.
+
+Routed structured_data guidance:
+- Include structured_data whenever the source explicitly provides fields.
+- event keys may include start_at, end_at, date, time, location, attendees, and supporting_refs.
+- task and human_input keys may include due_at, owner, assignee, blocking, and related_contact.
+- contact keys may include name, email, phone, linkedin, organization, role, origination, and last_contact_at.
+- entity keys may include name, website, organization_type, and aliases.
+- decision_log keys may include decision_maker, decided_at, and supersedes.
+- Use ISO 8601 strings for dates/times when the source gives enough information.
+- Never invent structured fields that are not present or directly inferable from the source.
 
 Scope policy:
 - Use domain scope by default for files dropped into a domain folder.
@@ -136,6 +148,7 @@ class ExtractedRoutedItem(BaseModel):
     priority: ExtractedPriority
     confidence: float = Field(ge=0.0, le=1.0)
     status: str
+    structured_data: dict[str, Any]
 
 
 class ExtractedMemoryResponse(BaseModel):
