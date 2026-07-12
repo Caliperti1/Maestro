@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import CalendarEvent, Contact, ContactAlias, ContactDomainNote, Todo, RoutedItem
+from app.prompts import load_prompt
 
 
 @dataclass(frozen=True)
@@ -66,14 +67,7 @@ class OllamaRoutedResolverLLM:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You resolve whether a newly extracted Maestro routed item updates an "
-                        "existing routed object. Return JSON only with keys: action "
-                        "('update_existing', 'create_new', or 'needs_review'), object_id "
-                        "(string or null), confidence (0-1), reason (short). Prefer create_new "
-                        "when identity is ambiguous. Never merge two different people just "
-                        "because they share a first name."
-                    ),
+                    "content": load_prompt("routed_item_resolution.md"),
                 },
                 {
                     "role": "user",
@@ -128,11 +122,17 @@ class LLMResolverResponse(BaseModel):
 class RoutedObjectResolver:
     """Resolves routed item identity before canonical object writes."""
 
-    def __init__(self, session: Session, *, llm: RoutedResolverLLM | None = None):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        llm: RoutedResolverLLM | None = None,
+        enable_llm: bool = True,
+    ):
         self.session = session
         settings = get_settings()
         self.llm = llm
-        if self.llm is None and settings.routed_resolver_llm_provider == "ollama":
+        if enable_llm and self.llm is None and settings.routed_resolver_llm_provider == "ollama":
             self.llm = OllamaRoutedResolverLLM()
 
     def resolve_contact(
@@ -238,17 +238,24 @@ class RoutedObjectResolver:
     def _score_event(self, item: RoutedItem, event: CalendarEvent, start_at: datetime | None) -> tuple[float, str, str]:
         title_similarity = _token_similarity(item.title, event.title)
         content_similarity = _token_similarity(item.content, f"{event.title} {event.summary or ''}")
+        participant_similarity = _event_participant_similarity(item, event)
         if start_at and event.start_at:
             delta = abs(_aware(event.start_at) - _aware(start_at))
             if delta <= timedelta(minutes=5) and title_similarity >= 0.5:
                 return 0.94, "time_title", "Same event time and similar title."
             if delta <= timedelta(hours=2) and content_similarity >= 0.55:
                 return 0.82, "near_time_context", "Nearby event time and similar context."
+            if delta <= timedelta(hours=2) and participant_similarity >= 0.65:
+                return 0.86, "near_time_participant", "Nearby event time and matching participant."
+        if start_at and not event.start_at and participant_similarity >= 0.65:
+            return 0.88, "fills_missing_time_participant", "Follow-up supplies time for matching incomplete event."
+        if participant_similarity >= 0.8 and max(title_similarity, content_similarity) >= 0.45:
+            return 0.82, "participant_context", "Matching participant and event context."
         if title_similarity >= 0.86:
             return 0.83, "title", "Strong event title match."
         if content_similarity >= 0.72:
             return 0.76, "event_context", "Strong event context match."
-        return max(title_similarity, content_similarity), "lexical", "Lexical event overlap."
+        return max(title_similarity, content_similarity, participant_similarity * 0.7), "lexical", "Lexical event overlap."
 
     def _score_todo(self, item: RoutedItem, todo: Todo, due_at: datetime | None) -> tuple[float, str, str]:
         title_similarity = _token_similarity(item.title, todo.title)
@@ -440,6 +447,66 @@ def _initial_alias_match(candidate: str, contact_name: str) -> bool:
 def _first_name(name: str) -> str | None:
     parts = _normalize_key(name).split()
     return parts[0] if parts else None
+
+
+def _event_participant_similarity(item: RoutedItem, event: CalendarEvent) -> float:
+    item_names = _participant_names_from_item(item)
+    event_names = _participant_names_from_event(event)
+    if not item_names or not event_names:
+        return 0.0
+    best = 0.0
+    for item_name in item_names:
+        for event_name in event_names:
+            item_tokens = _tokens(item_name)
+            event_tokens = _tokens(event_name)
+            if not item_tokens or not event_tokens:
+                continue
+            if item_tokens <= event_tokens or event_tokens <= item_tokens:
+                best = max(best, 1.0)
+            elif item_tokens & event_tokens:
+                best = max(best, len(item_tokens & event_tokens) / min(len(item_tokens), len(event_tokens)))
+    return best
+
+
+def _participant_names_from_item(item: RoutedItem) -> set[str]:
+    names = _participant_names_from_attendees((item.metadata_ or {}).get("attendees"))
+    names.update(_names_after_meeting_with(item.title))
+    names.update(_names_after_meeting_with(item.content))
+    return names
+
+
+def _participant_names_from_event(event: CalendarEvent) -> set[str]:
+    names = _participant_names_from_attendees(event.attendees)
+    names.update(_names_after_meeting_with(event.title))
+    names.update(_names_after_meeting_with(event.summary or ""))
+    return names
+
+
+def _participant_names_from_attendees(attendees: Any) -> set[str]:
+    names: set[str] = set()
+    if isinstance(attendees, list):
+        for attendee in attendees:
+            if isinstance(attendee, dict):
+                value = attendee.get("name") or attendee.get("value") or attendee.get("email")
+            else:
+                value = attendee
+            if value:
+                names.add(str(value))
+    elif attendees:
+        names.add(str(attendees))
+    return {name for name in names if name.strip()}
+
+
+def _names_after_meeting_with(text: str) -> set[str]:
+    names: set[str] = set()
+    for match in re.finditer(
+        r"\b(?:meeting|call|sync)\s+with\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){0,3})",
+        text or "",
+    ):
+        candidate = re.split(r"\s+(?:about|at|on|for|was|is)\b", match.group(1).strip())[0].strip()
+        if candidate:
+            names.add(candidate)
+    return names
 
 
 def _token_similarity(left: str, right: str) -> float:

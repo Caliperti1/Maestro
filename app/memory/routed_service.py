@@ -1,12 +1,24 @@
+"""Canonical routed-object promotion service.
+
+Routed objects are operational records such as events, todos, contacts, entities, decisions, and
+think-tank ideas. They are not the same thing as durable RAG memories: they should be editable,
+queryable, and displayed in calendar/CRM/task surfaces. This service promotes raw routed
+extraction rows into those canonical stores with provenance and duplicate resolution.
+"""
+
 import re
 import uuid
+import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
+from urllib import error, request
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.models import (
     CalendarEvent,
     Contact,
@@ -27,6 +39,7 @@ from app.memory.routed_resolver import (
     contact_aliases_for,
     resolution_metadata,
 )
+from app.prompts import load_prompt
 
 
 @dataclass(frozen=True)
@@ -41,9 +54,9 @@ class RoutedPromotionResult:
 class RoutedMemoryService:
     """Promotes raw routed extraction ledger rows into canonical routed-memory stores."""
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, enable_llm_resolver: bool = True):
         self.session = session
-        self.resolver = RoutedObjectResolver(session)
+        self.resolver = RoutedObjectResolver(session, enable_llm=enable_llm_resolver)
 
     def process_pending(self, *, limit: int = 100) -> list[RoutedPromotionResult]:
         items = self.session.scalars(
@@ -72,6 +85,7 @@ class RoutedMemoryService:
         return results
 
     def promote_item(self, item: RoutedItem) -> RoutedPromotionResult | None:
+        self._enrich_item(item)
         route_type = item.route_type
         if route_type == "ignore":
             return None
@@ -88,6 +102,29 @@ class RoutedMemoryService:
         if route_type == "decision_log":
             return self._promote_decision(item)
         return self._promote_idea(item, object_type="routed_note")
+
+    def _enrich_item(self, item: RoutedItem) -> None:
+        if (item.metadata_ or {}).get("enriched_at"):
+            return
+        enrichment = _deterministic_enrichment(item)
+        if get_settings().routed_enricher_llm_provider == "ollama":
+            enrichment = {
+                **enrichment,
+                **_ollama_enrichment(item, enrichment),
+            }
+        if not enrichment:
+            item.metadata_ = {
+                **(item.metadata_ or {}),
+                "enriched_at": datetime.now(UTC).isoformat(),
+                "enrichment_source": "none",
+            }
+            return
+        item.metadata_ = {
+            **(item.metadata_ or {}),
+            **{key: value for key, value in enrichment.items() if value not in (None, "", [])},
+            "enriched_at": datetime.now(UTC).isoformat(),
+            "enrichment_source": "routed_item_enricher",
+        }
 
     def build_context_bundle(
         self,
@@ -112,6 +149,7 @@ class RoutedMemoryService:
         self._attach_resolution(item, decision)
         todo = self.session.get(Todo, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
         action = "updated" if todo is not None else "created"
+        owner_ref = get_settings().user_display_name if item.route_type == "human_input" else None
         if todo is None:
             todo = Todo(
                 domain_id=item.domain_id,
@@ -119,7 +157,7 @@ class RoutedMemoryService:
                 description=item.content,
                 todo_type="human_input" if item.route_type == "human_input" else item.route_type,
                 owner_type="user" if item.route_type == "human_input" else "maestro",
-                owner_ref="Chris" if item.route_type == "human_input" else None,
+                owner_ref=owner_ref,
                 due_at=due_at,
                 priority=item.priority,
                 status="needs_input" if item.route_type == "human_input" else "open",
@@ -141,21 +179,23 @@ class RoutedMemoryService:
 
     def _promote_event(self, item: RoutedItem) -> RoutedPromotionResult:
         start_at = _datetime_from_metadata(item.metadata_, "start_at")
+        event_title = _event_title_from_item(item)
+        attendees = self._event_attendees_from_item(item)
         decision = self.resolver.resolve_event(item, start_at=start_at)
         self._attach_resolution(item, decision)
         event = self.session.get(CalendarEvent, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
         if event is None:
-            event = self._find_matching_event(item, start_at)
+            event = self._find_matching_event(item, start_at, event_title)
         action = "updated" if event is not None else "created"
         if event is None:
             event = CalendarEvent(
                 domain_id=item.domain_id,
-                title=item.title,
-                summary=item.content,
+                title=event_title,
+                summary=_event_summary_from_item(item),
                 start_at=start_at,
                 end_at=_datetime_from_metadata(item.metadata_, "end_at"),
                 location=_string_from_metadata(item.metadata_, "location"),
-                attendees=_list_from_metadata(item.metadata_, "attendees"),
+                attendees=attendees,
                 supporting_refs=item.source_refs,
                 source_refs=item.source_refs,
                 provenance=self._provenance(item),
@@ -165,7 +205,9 @@ class RoutedMemoryService:
             self.session.add(event)
             self.session.flush()
         else:
-            event.summary = _append_note(event.summary, item.content)
+            if _is_generic_route_title(event.title) and not _is_generic_route_title(event_title):
+                event.title = event_title
+            event.summary = _append_note(event.summary, _event_summary_from_item(item))
             event.source_refs = _merge_source_refs(event.source_refs, item.source_refs)
             event.supporting_refs = _merge_source_refs(event.supporting_refs, item.source_refs)
             event.metadata_ = {**(event.metadata_ or {}), **self._canonical_metadata(item)}
@@ -173,14 +215,18 @@ class RoutedMemoryService:
                 event.start_at = start_at
             if not event.location:
                 event.location = _string_from_metadata(item.metadata_, "location")
-            if not event.attendees:
-                event.attendees = _list_from_metadata(item.metadata_, "attendees")
+            event.attendees = _merge_attendees(event.attendees, attendees)
         return self._link(item, "event", event.id, action)
 
-    def _find_matching_event(self, item: RoutedItem, start_at: datetime | None) -> CalendarEvent | None:
+    def _find_matching_event(
+        self,
+        item: RoutedItem,
+        start_at: datetime | None,
+        event_title: str,
+    ) -> CalendarEvent | None:
         statement = select(CalendarEvent).where(
             CalendarEvent.domain_id == item.domain_id,
-            func.lower(CalendarEvent.title) == item.title.strip().lower(),
+            func.lower(CalendarEvent.title) == event_title.strip().lower(),
             CalendarEvent.status != "archived",
         )
         if start_at is not None:
@@ -193,6 +239,7 @@ class RoutedMemoryService:
         email = _email_from_text(item.content) or _string_from_metadata(item.metadata_, "email")
         name = (
             _string_from_metadata(item.metadata_, "name")
+            or _string_from_metadata(item.metadata_, "contact_name")
             or _name_from_content(item.content)
             or _name_from_title(item.title)
         )
@@ -208,7 +255,7 @@ class RoutedMemoryService:
                 email=email,
                 phone=_phone_from_text(item.content) or _string_from_metadata(item.metadata_, "phone"),
                 linkedin=_linkedin_from_text(item.content) or _string_from_metadata(item.metadata_, "linkedin"),
-                summary=item.content,
+                summary=_contact_summary_from_item(item),
                 origination=_string_from_metadata(item.metadata_, "origination"),
                 last_contact_at=_datetime_from_metadata(item.metadata_, "last_contact_at"),
                 source_refs=item.source_refs,
@@ -221,7 +268,7 @@ class RoutedMemoryService:
             self.session.add(contact)
             self.session.flush()
         else:
-            contact.summary = _append_note(contact.summary, item.content)
+            contact.summary = _append_note(contact.summary, _contact_summary_from_item(item))
             contact.source_refs = _merge_source_refs(contact.source_refs, item.source_refs)
             aliases = set(contact.metadata_.get("aliases") or []) if contact.metadata_ else set()
             aliases.update(contact_aliases_for(contact.name))
@@ -253,7 +300,7 @@ class RoutedMemoryService:
         }
 
     def _promote_entity(self, item: RoutedItem) -> RoutedPromotionResult:
-        entity = self._upsert_entity(item.title, item)
+        entity = self._upsert_entity(_entity_name_from_item(item), item)
         self._upsert_entity_domain_note(entity, item)
         return self._link(item, "entity", entity.id, "upserted")
 
@@ -323,6 +370,7 @@ class RoutedMemoryService:
                 metadata_=self._canonical_metadata(item),
             )
             self.session.add(note)
+            self.session.flush()
         else:
             note.notes = _append_note(note.notes, item.content)
             note.interaction_log = [*(note.interaction_log or []), entry]
@@ -335,8 +383,14 @@ class RoutedMemoryService:
         metadata_aliases = (contact.metadata_ or {}).get("aliases") or []
         if isinstance(metadata_aliases, list):
             aliases.update(str(alias) for alias in metadata_aliases if str(alias).strip())
+        now = datetime.now(UTC)
+        seen_normalized: set[str] = set()
+        added_alias = False
         for alias in sorted(aliases):
             normalized = _normalize_key(alias)
+            if not normalized or normalized in seen_normalized:
+                continue
+            seen_normalized.add(normalized)
             existing = self.session.scalar(
                 select(ContactAlias).where(ContactAlias.normalized_alias == normalized)
             )
@@ -349,11 +403,16 @@ class RoutedMemoryService:
                         source="routed_promote",
                         source_refs=item.source_refs,
                         metadata_=self._canonical_metadata(item),
+                        created_at=now,
+                        updated_at=now,
                     )
                 )
+                added_alias = True
             elif existing.contact_id == contact.id:
                 existing.source_refs = _merge_source_refs(existing.source_refs, item.source_refs)
                 existing.metadata_ = {**(existing.metadata_ or {}), **self._canonical_metadata(item)}
+        if added_alias:
+            self.session.flush()
 
     def _extract_contact_relationships(self, contact: Contact, item: RoutedItem) -> None:
         related_name, description = _relationship_from_text(contact.name, item.content)
@@ -384,6 +443,78 @@ class RoutedMemoryService:
             existing.source_refs = _merge_source_refs(existing.source_refs, item.source_refs)
             existing.metadata_ = {**(existing.metadata_ or {}), **self._canonical_metadata(item)}
 
+    def _event_attendees_from_item(self, item: RoutedItem) -> list[dict[str, Any]]:
+        attendees = _list_from_metadata(item.metadata_ or {}, "attendees")
+        if not attendees:
+            attendees = [{"name": name} for name in _attendee_names_from_event_text(item.title, item.content)]
+        linked: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for attendee in attendees:
+            name = str(attendee.get("name") or attendee.get("value") or attendee.get("email") or "").strip()
+            if not name:
+                continue
+            contact = self._contact_for_attendee(name, item)
+            normalized = _normalize_key(contact.name)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            linked.append(
+                {
+                    **attendee,
+                    "name": contact.name,
+                    "contact_id": str(contact.id),
+                }
+            )
+        return linked
+
+    def _contact_for_attendee(self, name: str, item: RoutedItem) -> Contact:
+        normalized = _normalize_key(name)
+        contact = self.session.scalar(select(Contact).where(Contact.normalized_name == normalized))
+        if contact is None:
+            alias = self.session.scalar(select(ContactAlias).where(ContactAlias.normalized_alias == normalized))
+            if alias is not None:
+                contact = self.session.get(Contact, alias.contact_id)
+        if contact is None and " " not in normalized:
+            candidates = list(
+                self.session.scalars(
+                    select(Contact).where(
+                        Contact.status != "archived",
+                        Contact.normalized_name.ilike(f"{normalized} %"),
+                    )
+                )
+            )
+            if len(candidates) == 1:
+                contact = candidates[0]
+        if contact is None:
+            contact = Contact(
+                name=_title_case_name(name),
+                normalized_name=normalized,
+                summary=f"Created as an attendee for {item.title}.",
+                source_refs=item.source_refs,
+                provenance=self._provenance(item),
+                metadata_={
+                    **self._canonical_metadata(item),
+                    "created_from_attendee": True,
+                    "aliases": sorted(contact_aliases_for(name)),
+                },
+            )
+            self.session.add(contact)
+            self.session.flush()
+            self._upsert_contact_aliases(contact, contact.name, item)
+        else:
+            contact.source_refs = _merge_source_refs(contact.source_refs, item.source_refs)
+            aliases = set(contact.metadata_.get("aliases") or []) if contact.metadata_ else set()
+            aliases.update(contact_aliases_for(contact.name))
+            aliases.update(contact_aliases_for(name))
+            contact.metadata_ = {
+                **(contact.metadata_ or {}),
+                **self._canonical_metadata(item),
+                "aliases": sorted(alias for alias in aliases if alias),
+            }
+            self._upsert_contact_aliases(contact, name, item)
+        self._upsert_contact_domain_note(contact, item)
+        return contact
+
     def _upsert_entity_domain_note(self, entity: Entity, item: RoutedItem) -> None:
         note = self.session.scalar(
             select(EntityDomainNote).where(
@@ -402,6 +533,7 @@ class RoutedMemoryService:
                 metadata_=self._canonical_metadata(item),
             )
             self.session.add(note)
+            self.session.flush()
         else:
             note.notes = _append_note(note.notes, item.content)
             note.interaction_log = [*(note.interaction_log or []), entry]
@@ -615,15 +747,248 @@ def _normalize_key(value: str) -> str:
     return re.sub(r"\s+", " ", normalized) or "unknown"
 
 
+def _deterministic_enrichment(item: RoutedItem) -> dict[str, Any]:
+    if item.route_type == "event":
+        return _deterministic_event_enrichment(item)
+    if item.route_type == "contact":
+        name = (
+            _string_from_metadata(item.metadata_ or {}, "name")
+            or _string_from_metadata(item.metadata_ or {}, "contact_name")
+            or _name_from_content(item.content)
+            or _name_from_title(item.title)
+        )
+        return {
+            "name": name,
+            "email": _email_from_text(item.content),
+            "phone": _phone_from_text(item.content),
+            "linkedin": _linkedin_from_text(item.content),
+            "organization": _organization_from_text(item.content),
+            "summary": _contact_summary_from_item(item),
+        }
+    if item.route_type in {"task", "human_input", "project", "integration_note"}:
+        due_at = _datetime_from_text(f"{item.title}\n{item.content}")
+        return {
+            "due_at": due_at.isoformat() if due_at else None,
+            "summary": item.content,
+        }
+    if item.route_type == "entity":
+        return {
+            "entity_name": _entity_name_from_item(item),
+            "summary": item.content,
+        }
+    return {}
+
+
+def _deterministic_event_enrichment(item: RoutedItem) -> dict[str, Any]:
+    text = f"{item.title}\n{item.content}"
+    start_at = _datetime_from_metadata(item.metadata_ or {}, "start_at") or _datetime_from_text(text)
+    duration_minutes = _duration_minutes_from_text(text)
+    end_at = None
+    if start_at:
+        end_at = start_at + timedelta(minutes=duration_minutes)
+    attendees = _list_from_metadata(item.metadata_ or {}, "attendees")
+    if not attendees:
+        attendees = [{"name": name} for name in _attendee_names_from_event_text(item.title, item.content)]
+    if not attendees:
+        title = _event_title_from_text(f"{item.title}\n{item.content}") or ""
+        meeting_match = re.match(r"Meeting with (.+)", title)
+        if meeting_match:
+            attendees = [{"name": meeting_match.group(1).strip()}]
+    title = _event_title_from_item(item)
+    if _is_generic_route_title(title) and attendees:
+        names = [str(attendee.get("name") or attendee.get("value") or "").strip() for attendee in attendees]
+        names = [name for name in names if name]
+        if names:
+            title = f"Meeting with {', '.join(names[:2])}"
+    return {
+        "event_title": title,
+        "summary": _event_summary_from_item(item),
+        "start_at": start_at.isoformat() if start_at else None,
+        "end_at": end_at.isoformat() if end_at else None,
+        "duration_minutes": duration_minutes,
+        "attendees": attendees,
+        "location": _location_from_text(text),
+    }
+
+
+def _ollama_enrichment(item: RoutedItem, deterministic: dict[str, Any]) -> dict[str, Any]:
+    settings = get_settings()
+    payload = {
+        "model": settings.routed_enricher_llm_model,
+        "stream": False,
+        "format": "json",
+        "messages": [
+            {
+                "role": "system",
+                "content": load_prompt("routed_item_enrichment.md"),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "route_type": item.route_type,
+                        "title": item.title,
+                        "content": item.content,
+                        "metadata": item.metadata_ or {},
+                        "deterministic_guess": deterministic,
+                    }
+                ),
+            },
+        ],
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        f"{settings.routed_enricher_llm_base_url.rstrip('/')}/api/chat",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=settings.routed_enricher_llm_timeout_seconds) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+    except (OSError, TimeoutError, json.JSONDecodeError, error.URLError):
+        return {}
+    content = raw.get("message", {}).get("content")
+    if not isinstance(content, str):
+        return {}
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        key: value
+        for key, value in parsed.items()
+        if key
+        in {
+            "event_title",
+            "title",
+            "summary",
+            "start_at",
+            "end_at",
+            "location",
+            "attendees",
+            "name",
+            "contact_name",
+            "email",
+            "phone",
+            "linkedin",
+            "organization",
+            "entity_name",
+            "due_at",
+        }
+    }
+
+
+_GENERIC_ROUTE_TITLE_PATTERNS = (
+    "capture event",
+    "capture calendar",
+    "capture relationship",
+    "capture contact",
+    "record event",
+    "recorded event",
+    "record meeting",
+    "recorded meeting",
+    "meeting metadata",
+    "calendar context",
+    "event metadata",
+    "contact context",
+    "relationship context",
+    "crm context",
+)
+
+
+def _is_generic_route_title(value: str | None) -> bool:
+    normalized = _normalize_key(value or "")
+    return not normalized or any(pattern in normalized for pattern in _GENERIC_ROUTE_TITLE_PATTERNS)
+
+
+def _clean_routed_label(value: str) -> str:
+    text = value.strip()
+    text = re.sub(r"^(?:event|calendar|contact|person|entity|organization)\s*[:\-]\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(?:record|recorded|capture|save|add)\s+(?:the\s+)?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+(?:as|to)\s+(?:an?\s+)?(?:event|calendar entry|contact|crm contact|entity)\.?$", "", text, flags=re.IGNORECASE)
+    return text.strip(" .") or value.strip()
+
+
+def _event_title_from_item(item: RoutedItem) -> str:
+    metadata = item.metadata_ or {}
+    for key in ("event_title", "calendar_title", "name", "title"):
+        candidate = _string_from_metadata(metadata, key)
+        if candidate and not _is_generic_route_title(candidate):
+            return _clean_routed_label(candidate)
+    content_title = _event_title_from_text(item.content)
+    if content_title:
+        return content_title
+    if not _is_generic_route_title(item.title):
+        return _clean_routed_label(item.title)
+    attendees = _list_from_metadata(metadata, "attendees")
+    attendee_names = [
+        str(attendee.get("name") or attendee.get("value") or "").strip()
+        for attendee in attendees
+        if isinstance(attendee, dict)
+    ]
+    attendee_names = [name for name in attendee_names if name]
+    if attendee_names:
+        return f"Meeting with {', '.join(attendee_names[:2])}"
+    return "Untitled event"
+
+
+def _attendee_names_from_event_text(*texts: str) -> list[str]:
+    names: list[str] = []
+    for text in texts:
+        for match in re.finditer(
+            r"\b(?:meeting|call|sync|standup)\s+with\s+([A-Z][a-z]+(?:\s+[A-Z](?:[A-Za-z.'-]+)?){0,3})",
+            text or "",
+        ):
+            candidate = re.split(r"\s+(?:about|at|on|for|was|is|today|tomorrow|yesterday)\b", match.group(1).strip())[0].strip()
+            if candidate:
+                names.append(candidate)
+    return names
+
+
+def _event_title_from_text(text: str) -> str | None:
+    candidates = [
+        r"\bEvent\s*[:\-]\s*(.+?)(?:\s+is\s+scheduled\b|\s+is\s+set\b|\s+at\b|\s+on\b|\.|$)",
+        r"\bCalendar\s*[:\-]\s*(.+?)(?:\s+is\s+scheduled\b|\s+is\s+set\b|\s+at\b|\s+on\b|\.|$)",
+        r"\b(.+?)\s+is\s+scheduled\s+for\b",
+        r"\b(.+?)\s+is\s+set\s+for\b",
+        r"\b(?:meeting|call|sync)\s+with\s+(.+?)(?:\s+about\b|\s+occurred\b|\s+was\b|\s+is\s+scheduled\b|\s+is\s+set\b|\s+at\b|\s+on\b|\.|$)",
+    ]
+    for pattern in candidates:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = _clean_routed_label(match.group(1))
+        if candidate and not _is_generic_route_title(candidate):
+            if pattern.startswith(r"\b(?:meeting"):
+                return f"Meeting with {candidate}"
+            return candidate
+    return None
+
+
+def _event_summary_from_item(item: RoutedItem) -> str:
+    summary = _string_from_metadata(item.metadata_ or {}, "summary") or item.content
+    return re.sub(r"^\s*(?:Event|Calendar)\s*[:\-]\s*", "", summary.strip(), flags=re.IGNORECASE)
+
+
 def _name_from_title(title: str) -> str:
-    title = title.strip()
+    title = _clean_routed_label(title)
     capture_match = re.search(
-        r"^capture\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})(?:\s+(?:from|as|at|with)\b|$)",
+        r"^capture\s+([A-Z][a-z]+(?:\s+[A-Z](?:[A-Za-z.'-]+)?){1,3})(?:\s+(?:from|as|at|with)\b|$)",
         title,
         re.IGNORECASE,
     )
     if capture_match:
         return _title_case_name(capture_match.group(1))
+    context_match = re.search(
+        r"^([A-Z][a-z]+(?:\s+[A-Z](?:[A-Za-z.'-]+)?){1,3})(?:\s+(?:from|as|at|with)\b|$)",
+        title,
+        re.IGNORECASE,
+    )
+    if context_match:
+        return _title_case_name(context_match.group(1))
     for prefix in ("contact:", "new contact:", "person:"):
         if title.lower().startswith(prefix):
             return title[len(prefix):].strip() or title
@@ -632,14 +997,37 @@ def _name_from_title(title: str) -> str:
 
 def _name_from_content(content: str) -> str | None:
     capture_match = re.search(
-        r"\bcapture\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})(?:\s+(?:from|as|at|with)\b|$)",
+        r"\b(?:capture|record|save|add)\s+([A-Z][a-z]+(?:\s+[A-Z](?:[A-Za-z.'-]+)?){1,3})(?:\s+(?:from|as|at|with)\b|$)",
         content,
         re.IGNORECASE,
     )
     if capture_match:
         return _title_case_name(capture_match.group(1))
-    match = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s+(?:is|serves|works|prefers|leads)\b", content)
+    contact_match = re.search(
+        r"\bContact\s*[:\-]\s*([A-Z][a-z]+(?:\s+[A-Z](?:[A-Za-z.'-]+)?){1,3})(?:\s+(?:is|serves|works|prefers|leads|at|from)\b|,|\.|$)",
+        content,
+    )
+    if contact_match:
+        return _title_case_name(contact_match.group(1))
+    match = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z](?:[A-Za-z.'-]+)?){1,3})\s+(?:is|serves|works|prefers|leads)\b", content)
     return match.group(1).strip() if match else None
+
+
+def _contact_summary_from_item(item: RoutedItem) -> str:
+    summary = _string_from_metadata(item.metadata_ or {}, "summary") or item.content
+    return re.sub(r"^\s*(?:Contact|Person)\s*[:\-]\s*", "", summary.strip(), flags=re.IGNORECASE)
+
+
+def _entity_name_from_item(item: RoutedItem) -> str:
+    metadata = item.metadata_ or {}
+    for key in ("entity_name", "organization", "organization_name", "name", "title"):
+        candidate = _string_from_metadata(metadata, key)
+        if candidate and not _is_generic_route_title(candidate):
+            return _clean_routed_label(candidate)
+    organization = _organization_from_text(item.content)
+    if organization:
+        return organization
+    return _clean_routed_label(item.title)
 
 
 def _email_from_text(text: str) -> str | None:
@@ -694,6 +1082,75 @@ def _datetime_from_metadata(metadata: dict[str, Any], key: str) -> datetime | No
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _datetime_from_text(text: str) -> datetime | None:
+    lowered = text.lower()
+    settings = get_settings()
+    try:
+        zone = ZoneInfo(settings.home_timezone)
+    except Exception:
+        zone = ZoneInfo("UTC")
+    now = datetime.now(zone)
+    if "day after tomorrow" in lowered:
+        date = now.date() + timedelta(days=2)
+    elif "tomorrow" in lowered:
+        date = now.date() + timedelta(days=1)
+    elif "yesterday" in lowered:
+        date = now.date() - timedelta(days=1)
+    else:
+        date = now.date()
+    time_value = _time_from_text(text)
+    if time_value is None:
+        return None
+    return datetime.combine(date, time_value, zone).astimezone(UTC)
+
+
+def _time_from_text(text: str) -> time | None:
+    match = re.search(r"\b(?:at|@)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", text, re.IGNORECASE)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        meridiem = (match.group(3) or "").lower()
+        if meridiem == "pm" and hour < 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+        elif not meridiem and 1 <= hour <= 7:
+            hour += 12
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return time(hour=hour, minute=minute)
+    military = re.search(r"\b(?:at|@)\s*(\d{3,4})\b", text, re.IGNORECASE)
+    if military:
+        raw = military.group(1).zfill(4)
+        hour = int(raw[:2])
+        minute = int(raw[2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return time(hour=hour, minute=minute)
+    return None
+
+
+def _duration_minutes_from_text(text: str) -> int:
+    match = re.search(r"\b(?:for|duration)\s+(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b", text, re.IGNORECASE)
+    if not match:
+        return 60
+    value = int(match.group(1))
+    unit = match.group(2).lower()
+    if unit.startswith("hour") or unit.startswith("hr"):
+        return max(15, min(value * 60, 8 * 60))
+    return max(15, min(value, 8 * 60))
+
+
+def _location_from_text(text: str) -> str | None:
+    lowered = text.lower()
+    if "google meet" in lowered:
+        return "Google Meet"
+    if "zoom" in lowered:
+        return "Zoom"
+    if "teams" in lowered or "microsoft teams" in lowered:
+        return "Microsoft Teams"
+    match = re.search(r"\b(?:at|in)\s+([A-Z][A-Za-z0-9&.' -]{2,80})(?:\.|,|;|$)", text)
+    return match.group(1).strip() if match else None
+
+
 def _string_from_metadata(metadata: dict[str, Any], key: str) -> str | None:
     value = metadata.get(key)
     if value is None:
@@ -709,6 +1166,20 @@ def _list_from_metadata(metadata: dict[str, Any], key: str) -> list[dict[str, An
     if value:
         return [{"value": str(value)}]
     return []
+
+
+def _merge_attendees(existing: list[dict[str, Any]] | None, additions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for attendee in [*(existing or []), *additions]:
+        name = str(attendee.get("name") or attendee.get("value") or attendee.get("email") or "").strip()
+        contact_id = str(attendee.get("contact_id") or "").strip()
+        key = contact_id or _normalize_key(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(attendee)
+    return merged
 
 
 def _append_note(existing: str | None, addition: str) -> str:

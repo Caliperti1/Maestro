@@ -1,6 +1,8 @@
 from typing import Any
 import asyncio
+import json
 import uuid
+import re
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -8,13 +10,19 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Conversation, Domain, Message, RuntimeSetting, Task
+from app.db.models import Conversation, Domain, Message, RoutedItem, RuntimeSetting, Task, Todo
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
+from app.llm.client import LLMClientError, OpenAILLMClient
 from app.maestro.channel import MAESTRO_CHANNEL_KEY, get_or_create_maestro_channel
-from app.maestro.intent_classifier import classify_active_message_with_local_llm
+from app.maestro.intent_classifier import (
+    classify_active_message_with_local_llm,
+    resolve_topic_with_local_llm,
+    understand_message_with_local_llm,
+)
 from app.maestro.scheduler import SchedulerService
+from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
 from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
@@ -85,10 +93,27 @@ def respond_to_maestro(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     conversation = _get_or_create_maestro_conversation(db, body.conversation_id)
-    _record_session_message(db, conversation, "user", body.message)
+    normalized_message = _normalized_message_for_routing(body.message)
+    topic_context = _resolve_topic_context(
+        db,
+        conversation,
+        body.message,
+        explicit_active_plan=body.active_plan_id is not None,
+    )
+    message_metadata = {"topic_id": topic_context.get("topic_id")} if topic_context.get("topic_id") else {}
+    user_message = _record_session_message(db, conversation, "user", body.message, metadata=message_metadata)
+    planner_message = _message_with_topic_context(
+        db,
+        conversation,
+        body.message,
+        topic_context=topic_context,
+        current_message_id=user_message.id,
+    )
+    message_understanding = _understand_message_without_active_plan(body.message)
+    planner_message = _message_with_intent_context(planner_message, message_understanding)
     if _is_scheduled_workflow_status_question(body.message):
         response_message = _scheduled_workflow_status_response(db)
-        _record_session_message(db, conversation, "maestro", response_message)
+        _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
         return {
             "kind": "chat_only",
             "classification": "system_status",
@@ -96,36 +121,65 @@ def respond_to_maestro(
             "plan": None,
             "chat_plan": None,
             "active_plan": None,
+            "channel_context": topic_context,
             "conversation": _conversation_payload(db, conversation),
         }
     try:
         service = MaestroOrchestratorService(db)
-        active_plan_id = body.active_plan_id
+        active_plan_id = None if topic_context.get("scope") in {"new_topic", "global_system"} else body.active_plan_id
         response_active_plan: MaestroPlan | None = None
+        if _is_session_restart_message(normalized_message):
+            response_message = _restart_maestro_session_response(
+                db,
+                service=service,
+                conversation=conversation,
+                message=body.message,
+            )
+            restart_context = _current_topic_context(conversation)
+            restart_metadata = {"topic_id": restart_context.get("topic_id")} if restart_context.get("topic_id") else {}
+            _record_session_message(db, conversation, "maestro", response_message, metadata=restart_metadata)
+            return {
+                "kind": "chat_only",
+                "classification": "restart_session",
+                "message": response_message,
+                "plan": None,
+                "chat_plan": None,
+                "active_plan": None,
+                "channel_context": restart_context,
+                "conversation": _conversation_payload(db, conversation),
+            }
+        if active_plan_id is None and _is_pure_chat_understanding(message_understanding):
+            response_message = _direct_chat_response(db, body.message)
+            _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
+            return {
+                "kind": "chat_only",
+                "classification": "direct_chat",
+                "message": response_message,
+                "plan": None,
+                "chat_plan": None,
+                "active_plan": None,
+                "channel_context": topic_context,
+                "conversation": _conversation_payload(db, conversation),
+            }
         if active_plan_id is None:
-            channel_context = _resolve_channel_context(db, conversation)
-            if channel_context is not None and _should_use_plan_context(body.message, channel_context):
-                active_plan_id = channel_context.parent_task_id
+            active_plan_context = None if topic_context.get("scope") == "new_topic" else _resolve_channel_context(db, conversation)
+            if active_plan_context is not None and _should_use_plan_context(body.message, active_plan_context):
+                active_plan_id = active_plan_context.parent_task_id
         if active_plan_id is not None:
             active_plan = service.get_plan(active_plan_id)
             classification = _classify_active_session_message(body.message, active_plan)
             if classification == "new_workflow":
-                plan = service.create_plan(body.message, conversation_id=conversation.id)
+                plan = service.create_plan(planner_message, conversation_id=conversation.id)
                 kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else "planned")
             elif classification == "delete_workflow":
-                reason = f"Workflow archived from Maestro chat. Request: {body.message}"
-                archived_count = service.archive_open_plans_for_conversation(
-                    conversation.id,
-                    reason=reason,
+                response_message = _delete_open_workflows_response(
+                    db,
+                    service=service,
+                    conversation=conversation,
+                    message=body.message,
+                    fallback_plan_id=active_plan_id,
                 )
-                if archived_count == 0:
-                    service.archive_plan(active_plan_id, reason=reason)
-                    archived_count = 1
-                response_message = (
-                    f"Done. I archived {archived_count} open workflow"
-                    f"{'' if archived_count == 1 else 's'} and removed them from the active queue."
-                )
-                _record_session_message(db, conversation, "maestro", response_message)
+                _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
                 return {
                     "kind": "chat_only",
                     "classification": classification,
@@ -133,11 +187,12 @@ def respond_to_maestro(
                     "plan": None,
                     "chat_plan": None,
                     "active_plan": None,
+                    "channel_context": topic_context,
                     "conversation": _conversation_payload(db, conversation),
                 }
             elif classification == "side_chat":
                 response_message = _side_chat_response(body.message, active_plan)
-                _record_session_message(db, conversation, "maestro", response_message)
+                _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
                 return {
                     "kind": "chat_only",
                     "classification": classification,
@@ -145,6 +200,7 @@ def respond_to_maestro(
                     "plan": None,
                     "chat_plan": None,
                     "active_plan": _plan_payload(active_plan),
+                    "channel_context": topic_context,
                     "conversation": _conversation_payload(db, conversation),
                 }
             elif classification == "routed":
@@ -157,11 +213,30 @@ def respond_to_maestro(
             else:
                 plan = service.refine_plan(
                     active_plan_id,
-                    _classified_refinement_message(body.message, classification, active_plan),
+                    _classified_refinement_message(planner_message, classification, active_plan),
                 )
                 kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else classification)
         else:
-            plan = service.create_plan(body.message, conversation_id=conversation.id)
+            if _is_workflow_delete_message(body.message.lower().strip()):
+                response_message = _delete_open_workflows_response(
+                    db,
+                    service=service,
+                    conversation=conversation,
+                    message=body.message,
+                    fallback_plan_id=None,
+                )
+                _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
+                return {
+                    "kind": "chat_only",
+                    "classification": "delete_workflow",
+                    "message": response_message,
+                    "plan": None,
+                    "chat_plan": None,
+                    "active_plan": None,
+                    "channel_context": topic_context,
+                    "conversation": _conversation_payload(db, conversation),
+                }
+            plan = service.create_plan(planner_message, conversation_id=conversation.id)
             kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else "planned")
             classification = kind
     except MaestroOrchestratorError as exc:
@@ -169,8 +244,9 @@ def respond_to_maestro(
     response_message = _maestro_response_text(
         plan,
         refined=kind in {"refined", "rfi_answered", "routed"},
+        topic_context=topic_context,
     )
-    _record_session_message(db, conversation, "maestro", response_message)
+    _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
     return {
         "kind": kind,
         "classification": classification,
@@ -178,6 +254,7 @@ def respond_to_maestro(
         "plan": None if plan.is_chat_only else _plan_payload(plan),
         "chat_plan": _plan_payload(plan) if plan.is_chat_only else None,
         "active_plan": _plan_payload(response_active_plan) if response_active_plan is not None else None,
+        "channel_context": topic_context,
         "conversation": _conversation_payload(db, conversation),
     }
 
@@ -337,6 +414,7 @@ def close_maestro_session(
 @router.post("/sessions/start")
 def start_maestro_session(db: Session = Depends(get_db)) -> dict[str, Any]:
     conversation = get_or_create_maestro_channel(db)
+    _start_new_topic(db, conversation, title="New Maestro topic")
     _set_active_maestro_conversation(db, conversation.id)
     return {"conversation": _conversation_payload(db, conversation)}
 
@@ -465,16 +543,418 @@ def _clear_active_maestro_conversation(
         db.commit()
 
 
+def _resolve_topic_context(
+    db: Session,
+    conversation: Conversation,
+    message: str,
+    *,
+    explicit_active_plan: bool = False,
+) -> dict[str, Any]:
+    metadata = dict(conversation.metadata_ or {})
+    active_topic = metadata.get("active_topic")
+    if not isinstance(active_topic, dict):
+        active_topic = None
+    rule_scope, reason = _classify_topic_scope(message, active_topic, explicit_active_plan)
+    message_scope = rule_scope
+    recent_topics = _recent_topic_summaries(metadata)
+    llm_resolution = None
+    if rule_scope in {"needs_resolution", "fallback_active_topic", "fallback_new_topic"}:
+        llm_resolution = resolve_topic_with_local_llm(
+            message=message,
+            active_topic=_topic_summary(active_topic) if active_topic else None,
+            recent_topics=recent_topics,
+        )
+        if llm_resolution is not None:
+            message_scope = llm_resolution.scope
+            reason = llm_resolution.reason
+        else:
+            if rule_scope == "fallback_active_topic":
+                message_scope = "active_topic"
+            elif rule_scope == "fallback_new_topic":
+                message_scope = "new_topic"
+            else:
+                message_scope = "active_topic" if active_topic is not None else "new_topic"
+            reason = "Topic resolver unavailable or low confidence; used deterministic fallback."
+    if message_scope == "existing_topic":
+        selected_topic = _find_topic_by_id(
+            [topic for topic in [active_topic, *recent_topics] if isinstance(topic, dict)],
+            llm_resolution.topic_id if llm_resolution else None,
+        )
+        if selected_topic is not None:
+            active_topic = _activate_existing_topic(db, conversation, selected_topic)
+            return {
+                "scope": "existing_topic",
+                "topic_id": active_topic["id"],
+                "topic_title": active_topic.get("title"),
+                "started_new_topic": False,
+                "reason": reason,
+            }
+        message_scope = "active_topic" if active_topic is not None else "new_topic"
+        reason = "Topic resolver selected an unavailable topic; used deterministic fallback."
+    started_new_topic = message_scope == "new_topic"
+    if active_topic is None or started_new_topic:
+        title = (
+            (llm_resolution.suggested_title or "").strip()[:72]
+            if llm_resolution is not None and llm_resolution.suggested_title
+            else _topic_title(message)
+        )
+        active_topic = _start_new_topic(db, conversation, title=title)
+        return {
+            "scope": "new_topic",
+            "topic_id": active_topic["id"],
+            "topic_title": active_topic["title"],
+            "started_new_topic": True,
+            "reason": reason,
+        }
+
+    active_topic = dict(active_topic)
+    active_topic["updated_at"] = datetime.now(UTC).isoformat()
+    metadata["active_topic"] = active_topic
+    conversation.metadata_ = metadata
+    conversation.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(conversation)
+    return {
+        "scope": message_scope,
+        "topic_id": active_topic.get("id"),
+        "topic_title": active_topic.get("title"),
+        "started_new_topic": False,
+        "reason": reason,
+    }
+
+
+def _start_new_topic(db: Session, conversation: Conversation, *, title: str) -> dict[str, Any]:
+    metadata = dict(conversation.metadata_ or {})
+    previous_topic = _summarize_topic_for_storage(db, conversation, metadata.get("active_topic"))
+    if isinstance(previous_topic, dict):
+        previous_topic = {
+            **previous_topic,
+            **_stage_topic_artifact_if_needed(db, conversation, previous_topic),
+        }
+    topics = metadata.get("topics") if isinstance(metadata.get("topics"), list) else []
+    if isinstance(previous_topic, dict):
+        topics = [
+            topic
+            for topic in topics
+            if isinstance(topic, dict) and topic.get("id") != previous_topic.get("id")
+        ]
+        topics.insert(0, previous_topic)
+    active_topic = {
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "started_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    metadata["topics"] = topics[:24]
+    metadata["active_topic"] = active_topic
+    conversation.metadata_ = metadata
+    conversation.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(conversation)
+    return active_topic
+
+
+def _stage_topic_artifact_if_needed(
+    db: Session,
+    conversation: Conversation,
+    topic: dict[str, Any],
+) -> dict[str, Any]:
+    if topic.get("staged_artifact_path"):
+        return {}
+    topic_id = str(topic.get("id") or "")
+    if not topic_id:
+        return {}
+    messages = [
+        {"sender": message.sender_type, "content": message.content}
+        for message in _conversation_messages(db, conversation.id)
+        if (message.metadata_ or {}).get("topic_id") == topic_id
+    ]
+    if not messages:
+        return {}
+    staged_path = MaestroOrchestratorService(db).close_session(messages=messages)
+    return {
+        "staged_artifact_path": staged_path,
+        "staged_for_curation_at": datetime.now(UTC).isoformat(),
+    } if staged_path else {}
+
+
+def _activate_existing_topic(
+    db: Session,
+    conversation: Conversation,
+    selected_topic: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = dict(conversation.metadata_ or {})
+    current_topic = _summarize_topic_for_storage(db, conversation, metadata.get("active_topic"))
+    topics = metadata.get("topics") if isinstance(metadata.get("topics"), list) else []
+    selected_id = str(selected_topic.get("id"))
+    remaining_topics = [
+        topic
+        for topic in topics
+        if isinstance(topic, dict) and str(topic.get("id")) != selected_id
+    ]
+    if isinstance(current_topic, dict) and str(current_topic.get("id")) != selected_id:
+        remaining_topics.insert(0, current_topic)
+    active_topic = {
+        **selected_topic,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    metadata["active_topic"] = active_topic
+    metadata["topics"] = remaining_topics[:24]
+    conversation.metadata_ = metadata
+    conversation.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(conversation)
+    return active_topic
+
+
+def _recent_topic_summaries(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    topics = metadata.get("topics") if isinstance(metadata.get("topics"), list) else []
+    summaries: list[dict[str, Any]] = []
+    for topic in topics:
+        if isinstance(topic, dict) and topic.get("id"):
+            summaries.append(_topic_summary(topic))
+    return summaries[:8]
+
+
+def _topic_summary(topic: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(topic, dict):
+        return {}
+    return {
+        "id": topic.get("id"),
+        "title": topic.get("title"),
+        "summary": topic.get("summary") or topic.get("title"),
+        "keywords": topic.get("keywords") or [],
+        "updated_at": topic.get("updated_at"),
+    }
+
+
+def _find_topic_by_id(topics: list[dict[str, Any]], topic_id: str | None) -> dict[str, Any] | None:
+    if not topic_id:
+        return None
+    for topic in topics:
+        if str(topic.get("id")) == str(topic_id):
+            return topic
+    return None
+
+
+def _summarize_topic_for_storage(
+    db: Session,
+    conversation: Conversation,
+    topic: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(topic, dict) or not topic.get("id"):
+        return None
+    topic_id = str(topic["id"])
+    messages = [
+        message.content
+        for message in _conversation_messages(db, conversation.id)
+        if (message.metadata_ or {}).get("topic_id") == topic_id
+    ]
+    summary = topic.get("summary") or _compact_topic_summary(messages, str(topic.get("title") or ""))
+    return {
+        **topic,
+        "summary": summary,
+        "keywords": _topic_keywords(f"{topic.get('title', '')} {summary}"),
+    }
+
+
+def _compact_topic_summary(messages: list[str], fallback_title: str) -> str:
+    if not messages:
+        return fallback_title[:180]
+    text = " ".join(" ".join(message.split()) for message in messages[:6])
+    return text[:220]
+
+
+def _topic_keywords(text: str) -> list[str]:
+    stopwords = {
+        "about",
+        "again",
+        "and",
+        "for",
+        "from",
+        "have",
+        "maestro",
+        "that",
+        "the",
+        "this",
+        "with",
+        "would",
+    }
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", text.lower())
+    keywords: list[str] = []
+    for word in words:
+        if word in stopwords or word in keywords:
+            continue
+        keywords.append(word)
+        if len(keywords) >= 12:
+            break
+    return keywords
+
+
+def _active_topic(conversation: Conversation) -> dict[str, Any] | None:
+    active_topic = (conversation.metadata_ or {}).get("active_topic")
+    return active_topic if isinstance(active_topic, dict) else None
+
+
+def _classify_topic_scope(
+    message: str,
+    active_topic: dict[str, Any] | None,
+    explicit_active_plan: bool,
+) -> tuple[str, str]:
+    lowered = _normalized_message_for_routing(message)
+    if _is_session_restart_message(lowered):
+        return "global_system", "System-level session reset command."
+    if _is_scheduled_workflow_status_question(message) or _is_workflow_delete_message(lowered):
+        return "global_system", "System-level queue/workflow command."
+    if active_topic is None:
+        return "new_topic", "No active working topic exists."
+    followup_markers = (
+        "this new feature",
+        "this feature",
+        "that feature",
+        "the feature",
+        "this concept",
+        "that concept",
+        "the concept",
+        "this design",
+        "that design",
+        "the design",
+        "this pattern",
+        "that pattern",
+        "how will this",
+        "how would this",
+        "what's the best pattern",
+        "what is the best pattern",
+        "add it as an issue",
+        "this looks good",
+    )
+    if any(marker in lowered for marker in followup_markers):
+        return "fallback_active_topic", "Message appears to refer back to the active working topic."
+    active_modification_markers = (
+        "existing feature",
+        "current feature",
+        "active feature",
+        "this feature",
+        "that feature",
+        "the feature",
+        "existing plan",
+        "current plan",
+        "active plan",
+    )
+    new_topic_markers = (
+        "new topic",
+        "switching gears",
+        "separate thought",
+        "different topic",
+        "fresh topic",
+        "start a new conversation",
+        "brainstorm a new feature",
+        "plan a new feature",
+        "lets plan a new feature",
+        "let's plan a new feature",
+        "begin discussing a new feature",
+        "discussing a new feature",
+        "discuss a new feature",
+        "new feature",
+        "new feature for",
+        "new feature in",
+        "brainstorm a new agent",
+        "new agent design",
+        "design a new agent",
+        "plan a new agent",
+        "build a new agent",
+        "create a new agent",
+        "new agent for",
+        "new agent in",
+        "new praxis agent",
+    )
+    if any(marker in lowered for marker in new_topic_markers):
+        if any(marker in lowered for marker in active_modification_markers):
+            return "needs_resolution", "Message mentions new work but may refine the active topic."
+        if any(marker in lowered for marker in ("new feature", "new agent", "new conversation", "new topic")):
+            return "new_topic", "Message explicitly introduces a new working topic."
+        return "fallback_new_topic", "Message appears to introduce a new working topic."
+    if explicit_active_plan:
+        return "needs_resolution", "The UI supplied an active plan, but the message still needs topic resolution."
+    question_prefixes = ("what ", "why ", "how ", "who ", "when ", "where ", "can you explain")
+    if lowered.endswith("?") or lowered.startswith(question_prefixes):
+        return "needs_resolution", "Question needs topic resolver to choose active topic or global system."
+    return "needs_resolution", "Ambiguous message needs topic resolver."
+
+
+def _normalized_message_for_routing(message: str) -> str:
+    lowered = " ".join(message.lower().strip().split())
+    if lowered.startswith("iwant "):
+        lowered = "i want " + lowered[len("iwant "):]
+    if lowered.startswith("ilets "):
+        lowered = "i lets " + lowered[len("ilets "):]
+    return lowered
+
+
+def _is_session_restart_message(lowered_message: str) -> bool:
+    return any(
+        token in lowered_message
+        for token in (
+            "restart session",
+            "reset session",
+            "start fresh session",
+            "fresh session",
+            "new clean session",
+            "clean slate",
+            "clear current work",
+            "clear hung work",
+            "clear stuck work",
+            "clear all current work",
+            "reset maestro",
+        )
+    )
+
+
+def _current_topic_context(conversation: Conversation) -> dict[str, Any]:
+    active_topic = _active_topic(conversation)
+    return {
+        "scope": "active_topic" if active_topic else "new_topic",
+        "topic_id": active_topic.get("id") if active_topic else None,
+        "topic_title": active_topic.get("title") if active_topic else None,
+        "started_new_topic": False,
+        "reason": "Current Maestro channel topic.",
+    }
+
+
+def _topic_title(message: str) -> str:
+    cleaned = " ".join(message.strip().split())
+    if cleaned.lower().startswith("iwant "):
+        cleaned = "I want " + cleaned[len("Iwant "):]
+    if not cleaned:
+        return "Maestro topic"
+    prefixes = (
+        "hey maestro ",
+        "maestro ",
+        "i want to ",
+        "let's ",
+        "lets ",
+    )
+    lowered = cleaned.lower()
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            cleaned = cleaned[len(prefix) :]
+            break
+    return cleaned[:72]
+
+
 def _record_session_message(
     db: Session,
     conversation: Conversation,
     sender: str,
     content: str,
+    *,
+    metadata: dict[str, Any] | None = None,
 ) -> Message:
     message = Message(
         conversation_id=conversation.id,
         sender_type="user" if sender == "user" else "maestro",
         content=content,
+        metadata_=metadata or {},
     )
     db.add(message)
     if sender == "user" and (not conversation.title or conversation.title == "Maestro session"):
@@ -496,18 +976,83 @@ def _conversation_messages(db: Session, conversation_id: uuid.UUID) -> list[Mess
     )
 
 
+def _message_with_topic_context(
+    db: Session,
+    conversation: Conversation,
+    message: str,
+    *,
+    topic_context: dict[str, Any],
+    current_message_id: uuid.UUID,
+) -> str:
+    if topic_context.get("scope") not in {"active_topic", "existing_topic"}:
+        return message
+    topic_id = topic_context.get("topic_id")
+    if not topic_id:
+        return message
+    previous_messages = [
+        prior
+        for prior in _conversation_messages(db, conversation.id)
+        if prior.id != current_message_id and (prior.metadata_ or {}).get("topic_id") == topic_id
+    ]
+    if not previous_messages:
+        return message
+    turns = previous_messages[-8:]
+    rendered_turns = "\n".join(
+        f"{'Chris' if turn.sender_type == 'user' else 'Maestro'}: {turn.content}"
+        for turn in turns
+    )
+    return (
+        "<latest_chris_message>\n"
+        f"{message}\n"
+        "</latest_chris_message>\n\n"
+        "<maestro_hidden_context purpose=\"topic_continuity\" do_not_copy=\"true\">\n"
+        "Use this active Maestro topic context only to interpret references like this concept, "
+        "this feature, it, that, or we. Do not copy this context into user-facing responses, "
+        "work item titles, descriptions, RFIs, or routed objects.\n\n"
+        f"Active topic: {topic_context.get('topic_title') or 'Maestro topic'}\n"
+        f"Previous topic turns:\n{rendered_turns}\n"
+        "</maestro_hidden_context>"
+    )
+
+
+def _message_with_intent_context(message: str, understanding: Any | None) -> str:
+    if understanding is None:
+        return message
+    return (
+        f"{message}\n\n"
+        "<maestro_hidden_context purpose=\"message_intent\" do_not_copy=\"true\">\n"
+        "Maestro message classifier output. Use this as routing guidance only; do not expose it "
+        "to Chris verbatim and do not copy it into work item titles, descriptions, RFIs, or routed "
+        "objects. The classifier identifies message spans and high-level next steps, but the "
+        "planner still owns task decomposition, agent/tool selection, dependencies, and execution "
+        "structure.\n"
+        f"{json.dumps(understanding.model_dump(), indent=2, default=str)}\n\n"
+        "</maestro_hidden_context>"
+    )
+
+
 def _conversation_payload(
     db: Session,
     conversation: Conversation,
     *,
     include_messages: bool = True,
 ) -> dict[str, Any]:
-    messages = _conversation_messages(db, conversation.id) if include_messages else []
-    message_count = len(messages) if include_messages else len(_conversation_messages(db, conversation.id))
+    all_messages = _conversation_messages(db, conversation.id)
+    active_topic = _active_topic(conversation)
+    active_topic_id = active_topic.get("id") if isinstance(active_topic, dict) else None
+    messages = all_messages if include_messages else []
+    if include_messages and active_topic_id:
+        messages = [
+            message
+            for message in all_messages
+            if (message.metadata_ or {}).get("topic_id") == active_topic_id
+        ]
+    message_count = len(messages) if include_messages else len(all_messages)
     plan = _latest_conversation_plan(db, conversation.id)
     return {
         "id": str(conversation.id),
         "title": conversation.title or "Maestro session",
+        "active_topic": active_topic,
         "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
         "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
         "archived": bool((conversation.metadata_ or {}).get("archived")),
@@ -519,6 +1064,7 @@ def _conversation_payload(
                 "sender": "user" if message.sender_type == "user" else "maestro",
                 "content": message.content,
                 "created_at": message.created_at.isoformat() if message.created_at else None,
+                "metadata": message.metadata_ or {},
             }
             for message in messages
         ],
@@ -527,7 +1073,7 @@ def _conversation_payload(
 
 
 def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> MaestroPlan | None:
-    task = db.scalar(
+    tasks = db.scalars(
         select(Task)
         .where(
             Task.conversation_id == conversation_id,
@@ -535,15 +1081,16 @@ def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> Maestr
             Task.status != "archived",
         )
         .order_by(Task.created_at.desc(), Task.id.desc())
-        .limit(1)
-    )
-    if task is None:
-        return None
-    try:
-        plan = MaestroOrchestratorService(db).get_plan(task.id)
-    except MaestroOrchestratorError:
-        return None
-    return None if plan.is_chat_only else plan
+        .limit(20)
+    ).all()
+    for task in tasks:
+        try:
+            plan = MaestroOrchestratorService(db).get_plan(task.id)
+        except MaestroOrchestratorError:
+            continue
+        if not plan.is_chat_only:
+            return plan
+    return None
 
 
 def _resolve_channel_context(db: Session, conversation: Conversation) -> MaestroPlan | None:
@@ -554,6 +1101,178 @@ def _resolve_channel_context(db: Session, conversation: Conversation) -> Maestro
     if active is not None and active.id != conversation.id:
         return _latest_conversation_plan(db, active.id)
     return None
+
+
+def _open_plan_ids_for_cleanup(db: Session, conversation_id: uuid.UUID) -> list[str]:
+    open_statuses = {"proposed", "queued", "ready", "running", "blocked", "failed", "scheduled"}
+    return [
+        str(task.id)
+        for task in db.scalars(
+            select(Task)
+            .where(
+                Task.conversation_id == conversation_id,
+                Task.workflow_key == "maestro.generic",
+                Task.status.in_(open_statuses),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+        ).all()
+    ]
+
+
+def _delete_open_workflows_response(
+    db: Session,
+    *,
+    service: MaestroOrchestratorService,
+    conversation: Conversation,
+    message: str,
+    fallback_plan_id: str | uuid.UUID | None,
+) -> str:
+    reason = f"Workflow archived from Maestro chat. Request: {message}"
+    target_plan_ids = _open_plan_ids_for_cleanup(db, conversation.id)
+    archived_count = service.archive_open_plans_for_conversation(
+        conversation.id,
+        reason=reason,
+    )
+    if archived_count == 0 and fallback_plan_id is not None:
+        service.archive_plan(fallback_plan_id, reason=reason)
+        archived_count = 1
+        target_plan_ids.append(str(fallback_plan_id))
+    target_plan_ids = _expanded_task_ids_for_cleanup(db, target_plan_ids)
+    routed_archived_count = _archive_routed_items_for_cleanup(
+        db,
+        task_ids=target_plan_ids,
+        command_message=message,
+        reason=reason,
+    )
+    if archived_count == 0:
+        response_message = "There was no open workflow for me to archive."
+    else:
+        response_message = (
+            f"Done. I archived {archived_count} open workflow"
+            f"{'' if archived_count == 1 else 's'} and removed them from the active queue."
+        )
+    if routed_archived_count:
+        response_message += (
+            f" I also archived {routed_archived_count} routed item"
+            f"{'' if routed_archived_count == 1 else 's'} tied to that cleanup."
+        )
+    return response_message
+
+
+def _restart_maestro_session_response(
+    db: Session,
+    *,
+    service: MaestroOrchestratorService,
+    conversation: Conversation,
+    message: str,
+) -> str:
+    workflow_message = _delete_open_workflows_response(
+        db,
+        service=service,
+        conversation=conversation,
+        message=message,
+        fallback_plan_id=None,
+    )
+    active_topic = _start_new_topic(db, conversation, title="Fresh Maestro session")
+    return (
+        f"{workflow_message} I also started a fresh session topic "
+        f"(`{active_topic['title']}`), so the chat window is clean and future messages will not "
+        "inherit the previous topic or stuck workflow context."
+    )
+
+
+def _expanded_task_ids_for_cleanup(db: Session, task_ids: list[str]) -> list[str]:
+    expanded = {str(task_id) for task_id in task_ids if task_id}
+    changed = True
+    while changed:
+        changed = False
+        tasks = [
+            db.get(Task, uuid.UUID(task_id))
+            for task_id in list(expanded)
+            if _looks_like_uuid(task_id)
+        ]
+        for task in tasks:
+            if task is None or not isinstance(task.input_payload, dict):
+                continue
+            refined_from_plan_id = task.input_payload.get("refined_from_plan_id")
+            if refined_from_plan_id:
+                previous = db.scalar(
+                    select(Task).where(
+                        Task.workflow_key == "maestro.generic",
+                        Task.input_payload["plan_id"].as_string() == str(refined_from_plan_id),
+                    )
+                )
+                if previous is not None and str(previous.id) not in expanded:
+                    expanded.add(str(previous.id))
+                    changed = True
+    return list(expanded)
+
+
+def _looks_like_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _archive_routed_items_for_cleanup(
+    db: Session,
+    *,
+    task_ids: list[str],
+    command_message: str,
+    reason: str,
+) -> int:
+    task_id_set = {str(task_id) for task_id in task_ids if task_id}
+    cleanup_tokens = ("clear", "clean slate", "blocked workflow", "archive the routed")
+    routed_items = db.scalars(
+        select(RoutedItem).where(RoutedItem.status.notin_(["archived", "done"]))
+    ).all()
+    archived_count = 0
+    for item in routed_items:
+        source_task_ids = {
+            str(ref.get("task_id"))
+            for ref in (item.source_refs or [])
+            if isinstance(ref, dict) and ref.get("task_id")
+        }
+        item_text = f"{item.title} {item.content}".lower()
+        is_cleanup_residue = all(token in command_message.lower() for token in ("clear", "workflow")) and any(
+            token in item_text for token in cleanup_tokens
+        )
+        if not (source_task_ids & task_id_set or is_cleanup_residue):
+            continue
+        item.status = "archived"
+        item.metadata_ = {
+            **(item.metadata_ or {}),
+            "archived_by": "maestro_cleanup_command",
+            "archive_reason": reason,
+            "archived_at": datetime.now(UTC).isoformat(),
+        }
+        _archive_promoted_todo_for_routed_item(db, item, reason=reason)
+        archived_count += 1
+    if archived_count:
+        db.commit()
+    return archived_count
+
+
+def _archive_promoted_todo_for_routed_item(db: Session, item: RoutedItem, *, reason: str) -> None:
+    metadata = item.metadata_ or {}
+    if metadata.get("canonical_object_type") != "todo" or not metadata.get("canonical_object_id"):
+        return
+    try:
+        todo_id = uuid.UUID(str(metadata["canonical_object_id"]))
+    except (TypeError, ValueError):
+        return
+    todo = db.get(Todo, todo_id)
+    if todo is None or todo.status == "archived":
+        return
+    todo.status = "archived"
+    todo.metadata_ = {
+        **(todo.metadata_ or {}),
+        "archived_by": "maestro_cleanup_command",
+        "archive_reason": reason,
+        "archived_at": datetime.now(UTC).isoformat(),
+    }
 
 
 def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
@@ -582,29 +1301,50 @@ def _plan_payload(plan: MaestroPlan) -> dict[str, Any]:
     }
 
 
-def _maestro_response_text(plan: MaestroPlan, *, refined: bool) -> str:
+def _maestro_response_text(
+    plan: MaestroPlan,
+    *,
+    refined: bool,
+    topic_context: dict[str, Any] | None = None,
+) -> str:
+    topic_prefix = ""
+    if (
+        topic_context
+        and topic_context.get("started_new_topic")
+        and topic_context.get("reason") != "No active working topic exists."
+    ):
+        topic_prefix = "I started a fresh topic for this so we can keep the discussion clean. "
     if plan.is_chat_only:
-        return plan.direct_response or plan.summary or "I can handle that directly here."
+        response = plan.direct_response or plan.summary or "I can handle that directly here."
+        return f"{topic_prefix}{response}".strip()
     schedule_candidate = plan.scheduler.get("schedule_candidate")
     if isinstance(schedule_candidate, dict):
+        if plan.direct_response:
+            return (
+                f"{topic_prefix}{plan.direct_response}\n\n"
+                f"I also prepared a {schedule_candidate.get('trigger_type', 'scheduled')} workflow "
+                "for this. Review "
+                "it here; when you run the plan I will save the schedule in Queue instead of "
+                "executing it immediately."
+            ).strip()
         trigger_type = schedule_candidate.get("trigger_type", "scheduled")
         return (
-            f"I drafted a {trigger_type} workflow with {len(plan.work_items)} work items and "
-            f"{len(plan.subtasks)} subtasks. Review it here; when you run the plan I will save "
+            f"{topic_prefix}I prepared a {trigger_type} workflow for this. Review it here; "
+            "when you run the plan I will save "
             "the schedule in Queue instead of executing it immediately."
-        )
+        ).strip()
     blocking_items = [
         item for item in plan.work_items if item.needs_user_input and item.blocks_execution
     ]
     if blocking_items:
         question_text = _rfi_question_text(blocking_items)
         return (
+            topic_prefix +
             f"{question_text} Answer here in chat and I will use that to refine this active plan."
-        )
+        ).strip()
     non_blocking_questions = [
         item for item in plan.work_items if item.needs_user_input and not item.blocks_execution
     ]
-    stage_count = len(plan.execution_stages) or 1
     question_text = ""
     if non_blocking_questions:
         suffix = "" if len(non_blocking_questions) == 1 else "s"
@@ -612,25 +1352,80 @@ def _maestro_response_text(plan: MaestroPlan, *, refined: bool) -> str:
             f" I also found {len(non_blocking_questions)} non-blocking question{suffix} "
             "that can be answered later."
         )
+    if plan.direct_response:
+        workflow_note = _planned_work_message(plan, refined=refined, question_text=question_text)
+        return f"{topic_prefix}{plan.direct_response}\n\n{workflow_note}".strip()
     verb = "refined" if refined else "drafted"
-    return (
-        f"I {verb} a plan with {len(plan.work_items)} work items, "
-        f"{len(plan.subtasks)} subtasks, and {stage_count} "
-        f"{'stage' if stage_count == 1 else 'stages'}.{question_text} "
-        "It is ready for review."
-    )
+    if plan.summary:
+        return f"{topic_prefix}{_planned_work_message(plan, refined=refined, question_text=question_text)}".strip()
+    return f"{topic_prefix}I {verb} a plan for this. {_review_instruction(question_text)}".strip()
+
+
+def _planned_work_message(plan: MaestroPlan, *, refined: bool, question_text: str) -> str:
+    verb = "updated" if refined else "prepared"
+    focus = _planned_work_focus(plan)
+    if focus:
+        return (
+            f"I {verb} a plan to help with this. The work is focused on {focus}. "
+            f"{_review_instruction(question_text)}"
+        )
+    return f"I {verb} a plan to help with this. {_review_instruction(question_text)}"
+
+
+def _planned_work_focus(plan: MaestroPlan) -> str:
+    executable_items = [
+        item.title.strip().rstrip(".")
+        for item in plan.work_items
+        if item.type == "workflow_task" and item.title.strip()
+    ]
+    if not executable_items:
+        executable_items = [
+            item.title.strip().rstrip(".")
+            for item in plan.work_items
+            if item.title.strip()
+        ]
+    if not executable_items:
+        return ""
+    if len(executable_items) == 1:
+        return executable_items[0]
+    if len(executable_items) == 2:
+        return f"{executable_items[0]} and {executable_items[1]}"
+    shown = executable_items[:3]
+    return f"{', '.join(shown[:-1])}, and {shown[-1]}"
+
+
+def _review_instruction(question_text: str) -> str:
+    if question_text:
+        return f"Review it here when you are ready;{question_text}"
+    return "Review it here when you are ready, and I will run it after you approve."
 
 
 def _rfi_question_text(blocking_items: list[Any]) -> str:
     if len(blocking_items) == 1:
         item = blocking_items[0]
-        detail = item.description.strip() if item.description else item.title
+        detail = _strip_hidden_context(item.description.strip() if item.description else item.title)
         return f"I need one answer before this can run: {detail}"
     questions = [
-        f"{index}. {item.description.strip() if item.description else item.title}"
+        f"{index}. {_strip_hidden_context(item.description.strip() if item.description else item.title)}"
         for index, item in enumerate(blocking_items, start=1)
     ]
     return "I need these answers before this can run: " + " ".join(questions)
+
+
+def _strip_hidden_context(value: str) -> str:
+    stripped = re.sub(
+        r"<maestro_hidden_context\b[^>]*>.*?</maestro_hidden_context>",
+        "",
+        value,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    stripped = re.sub(
+        r"<latest_chris_message>\s*(.*?)\s*</latest_chris_message>",
+        r"\1",
+        stripped,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return " ".join(stripped.split())
 
 
 def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> str:
@@ -638,12 +1433,20 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
     has_blocking_rfi = any(
         item.needs_user_input and item.blocks_execution for item in active_plan.work_items
     )
+    has_any_rfi = any(item.needs_user_input for item in active_plan.work_items)
     if _is_workflow_delete_message(lowered):
         return "delete_workflow"
     if any(token in lowered for token in ("new workflow", "new plan", "separate workflow", "start over")):
         return "new_workflow"
+    understanding = _understand_active_message_with_llm(message, active_plan)
+    if understanding is not None:
+        return understanding.legacy_intent()
     if not _should_use_plan_context(message, active_plan):
         return "new_workflow"
+    if has_any_rfi:
+        llm_classification = _classify_active_message_with_llm(message, active_plan)
+        if llm_classification is not None:
+            return llm_classification
     if any(
         token in lowered
         for token in (
@@ -672,7 +1475,7 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
         )
     ):
         return "refined"
-    if has_blocking_rfi and not lowered.endswith("?"):
+    if (has_blocking_rfi or (has_any_rfi and _looks_like_rfi_answer(lowered))) and not lowered.endswith("?"):
         return "rfi_answered"
     if any(token in lowered for token in ("remember", "log ", "capture ", "add task", "contact:", "event:")):
         return "routed"
@@ -681,26 +1484,7 @@ def _classify_active_session_message(message: str, active_plan: MaestroPlan) -> 
         for prefix in ("what ", "why ", "how ", "who ", "when ", "where ", "can you explain")
     ):
         return "side_chat"
-    llm_classification = classify_active_message_with_local_llm(
-        message=message,
-        active_plan={
-            "summary": active_plan.summary,
-            "status": active_plan.status,
-            "work_items": [
-                {
-                    "id": item.id,
-                    "type": item.type,
-                    "title": item.title,
-                    "description": item.description,
-                    "needs_agent": item.needs_agent,
-                    "needs_user_input": item.needs_user_input,
-                    "blocks_execution": item.blocks_execution,
-                }
-                for item in active_plan.work_items[:8]
-            ],
-        },
-        has_blocking_rfi=has_blocking_rfi,
-    )
+    llm_classification = _classify_active_message_with_llm(message, active_plan)
     if llm_classification is not None:
         return llm_classification
     return "refined"
@@ -777,9 +1561,32 @@ def _should_use_plan_context(message: str, active_plan: MaestroPlan) -> bool:
     has_blocking_rfi = any(
         item.needs_user_input and item.blocks_execution for item in active_plan.work_items
     )
+    has_any_rfi = any(item.needs_user_input for item in active_plan.work_items)
     if any(token in lowered for token in ("new workflow", "new plan", "separate workflow", "start over")):
         return False
-    if has_blocking_rfi and not lowered.endswith("?"):
+    understanding = _understand_active_message_with_llm(message, active_plan)
+    if understanding is not None:
+        intent_types = {intent.type for intent in understanding.intents if intent.confidence >= 0.55}
+        if intent_types & {"rfi_answer", "plan_refinement", "plan_question", "system_command"}:
+            return True
+        if understanding.relationship_to_active_plan in {"answers_rfi", "refines_plan", "asks_about_plan"}:
+            return True
+        if understanding.relationship_to_active_plan == "unrelated":
+            return False
+        if "workflow_request" in intent_types:
+            return understanding.topic_scope == "active_topic"
+        if "routed_item" in intent_types:
+            return understanding.topic_scope == "active_topic"
+        if "chat_response" in intent_types:
+            return understanding.topic_scope == "active_topic" and understanding.relationship_to_active_plan != "none"
+        return understanding.topic_scope == "active_topic"
+    if has_any_rfi:
+        llm_classification = _classify_active_message_with_llm(message, active_plan)
+        if llm_classification in {"rfi_answered", "refined"}:
+            return True
+        if llm_classification in {"new_workflow", "side_chat"}:
+            return False
+    if (has_blocking_rfi or (has_any_rfi and _looks_like_rfi_answer(lowered))) and not lowered.endswith("?"):
         return True
     contextual_tokens = (
         "this plan",
@@ -839,6 +1646,164 @@ def _should_use_plan_context(message: str, active_plan: MaestroPlan) -> bool:
     return False
 
 
+def _classify_active_message_with_llm(message: str, active_plan: MaestroPlan) -> str | None:
+    understanding = _understand_active_message_with_llm(message, active_plan)
+    if understanding is not None:
+        return understanding.legacy_intent()
+    return classify_active_message_with_local_llm(
+        message=message,
+        active_plan=_active_plan_classifier_payload(active_plan),
+        has_blocking_rfi=any(
+            item.needs_user_input and item.blocks_execution for item in active_plan.work_items
+        ),
+    )
+
+
+def _understand_active_message_with_llm(message: str, active_plan: MaestroPlan) -> Any | None:
+    return understand_message_with_local_llm(
+        message=message,
+        active_plan=_active_plan_classifier_payload(active_plan),
+        has_blocking_rfi=any(
+            item.needs_user_input and item.blocks_execution for item in active_plan.work_items
+        ),
+    )
+
+
+def _understand_message_without_active_plan(message: str) -> Any | None:
+    return understand_message_with_local_llm(
+        message=message,
+        active_plan={
+            "summary": None,
+            "status": "none",
+            "open_rfis": [],
+            "work_items": [],
+        },
+        has_blocking_rfi=False,
+    )
+
+
+def _is_pure_chat_understanding(understanding: Any | None) -> bool:
+    if understanding is None or getattr(understanding, "confidence", 0.0) < 0.62:
+        return False
+    intents = [
+        intent
+        for intent in getattr(understanding, "intents", [])
+        if getattr(intent, "confidence", 0.0) >= 0.55
+    ]
+    if not intents:
+        return False
+    intent_types = {getattr(intent, "type", "") for intent in intents}
+    if intent_types != {"chat_response"}:
+        return False
+    if getattr(understanding, "recommended_next_step", None) not in {"respond", "no_action"}:
+        return False
+    if getattr(understanding, "relationship_to_active_plan", "none") not in {"none", "unrelated"}:
+        return False
+    return True
+
+
+def _direct_chat_response(db: Session, message: str) -> str:
+    settings = get_settings()
+    if settings.llm_provider == "openrouter" and not settings.openrouter_api_key:
+        return _fallback_direct_chat_response(message)
+    if settings.llm_provider == "openai" and not settings.openai_api_key:
+        return _fallback_direct_chat_response(message)
+    try:
+        bundle = MemoryRetrievalService(db).build_context_bundle(
+            MemoryContextBundleRequest(
+                profile="agent_prompt",
+                audience="maestro",
+                query_text=message,
+                use_semantic=True,
+                max_items=6,
+                max_chars=1800,
+            )
+        )
+        memory_text = bundle.rendered_text
+    except Exception:
+        memory_text = ""
+    instructions = (
+        "You are Maestro speaking directly with Chris. Answer conversationally and helpfully. "
+        "Do not create a workflow, do not claim agents are working, and do not route memory unless "
+        "Chris explicitly asked for that. If useful, mention that you can turn the conversation into "
+        "agent work later."
+    )
+    input_text = (
+        f"Chris's message:\n{message}\n\n"
+        f"Relevant Maestro memory, if any:\n{memory_text or '(none retrieved)'}"
+    )
+    try:
+        response = OpenAILLMClient().text_response(
+            instructions=instructions,
+            input_text=input_text,
+        )
+    except (LLMClientError, OSError, ValueError):
+        return _fallback_direct_chat_response(message)
+    return _strip_hidden_context(response.strip()) or _fallback_direct_chat_response(message)
+
+
+def _fallback_direct_chat_response(message: str) -> str:
+    lowered = message.lower()
+    if any(token in lowered for token in ("brainstorm", "think through", "design", "feature")):
+        return (
+            "Yes, let's think this through here first. I'll keep this as a conversation until "
+            "you ask me to turn it into agent work, a routed item, or a GitHub issue."
+        )
+    if lowered.endswith("?"):
+        return (
+            "I can answer this directly here. If we decide the answer needs codebase inspection, "
+            "web research, or another agent's help, I'll propose that as a workflow first."
+        )
+    return "I'm with you. I'll keep this in the conversation for now rather than creating a workflow."
+
+
+def _active_plan_classifier_payload(active_plan: MaestroPlan) -> dict[str, Any]:
+    return {
+        "summary": active_plan.summary,
+        "status": active_plan.status,
+        "open_rfis": [
+            {
+                "id": item.id,
+                "title": item.title,
+                "description": item.description,
+                "blocks_execution": item.blocks_execution,
+            }
+            for item in active_plan.work_items
+            if item.needs_user_input
+        ],
+        "work_items": [
+            {
+                "id": item.id,
+                "type": item.type,
+                "title": item.title,
+                "description": item.description,
+                "needs_agent": item.needs_agent,
+                "needs_user_input": item.needs_user_input,
+                "blocks_execution": item.blocks_execution,
+            }
+            for item in active_plan.work_items[:8]
+        ],
+    }
+
+
+def _looks_like_rfi_answer(lowered_message: str) -> bool:
+    answer_markers = (
+        "answer to your rfi",
+        "answering your rfi",
+        "to answer your question",
+        "for your question",
+        "currently ",
+        "right now ",
+        "we currently",
+        "we use",
+        "we bank",
+        "we were looking",
+        "the first use case",
+        "my answer",
+    )
+    return any(marker in lowered_message for marker in answer_markers)
+
+
 def _is_workflow_delete_message(lowered_message: str) -> bool:
     if (
         "remove" in lowered_message
@@ -869,14 +1834,16 @@ def _is_workflow_delete_message(lowered_message: str) -> bool:
 
 def _classified_refinement_message(message: str, classification: str, active_plan: MaestroPlan) -> str:
     if classification == "rfi_answered":
-        blocking_titles = [
+        rfi_titles = [
             item.title
             for item in active_plan.work_items
-            if item.needs_user_input and item.blocks_execution
+            if item.needs_user_input
         ]
         return (
-            "User answered blocking RFI(s): "
-            f"{'; '.join(blocking_titles)}\n\nAnswer:\n{message}"
+            "Chris answered open RFI(s) for the active plan: "
+            f"{'; '.join(rfi_titles)}\n\nAnswer:\n{message}\n\n"
+            "Use this answer to satisfy or reduce the RFI, preserve still-valid workflow work, "
+            "and respond conversationally to Chris about how the plan changed."
         )
     if classification == "routed":
         return (

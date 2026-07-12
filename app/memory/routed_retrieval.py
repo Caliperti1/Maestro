@@ -1,5 +1,7 @@
 import uuid
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -92,6 +94,9 @@ class RoutedEditService:
         for key in ("title", "summary", "location", "status"):
             if key in updates:
                 setattr(event, key, updates[key])
+        for key in ("start_at", "end_at"):
+            if key in updates:
+                setattr(event, key, _parse_optional_datetime(updates[key]))
         if "metadata" in updates and isinstance(updates["metadata"], dict):
             event.metadata_ = {**(event.metadata_ or {}), **updates["metadata"]}
         self.session.commit()
@@ -105,11 +110,42 @@ class RoutedEditService:
         for key in ("title", "description", "priority", "status", "owner_type", "owner_ref"):
             if key in updates:
                 setattr(todo, key, updates[key])
+        if "due_at" in updates:
+            todo.due_at = _parse_optional_datetime(updates["due_at"])
         if "metadata" in updates and isinstance(updates["metadata"], dict):
             todo.metadata_ = {**(todo.metadata_ or {}), **updates["metadata"]}
         self.session.commit()
         self.session.refresh(todo)
         return todo
+
+    def update_entity(self, entity_id: uuid.UUID, updates: dict[str, Any]) -> Entity:
+        entity = self.session.get(Entity, entity_id)
+        if entity is None:
+            raise ValueError("Entity not found.")
+        if "name" in updates:
+            entity.name = updates["name"]
+            entity.normalized_name = _normalize_key(str(updates["name"]))
+        for key in ("website", "summary", "status"):
+            if key in updates:
+                setattr(entity, key, updates[key])
+        if "metadata" in updates and isinstance(updates["metadata"], dict):
+            entity.metadata_ = {**(entity.metadata_ or {}), **updates["metadata"]}
+        self.session.commit()
+        self.session.refresh(entity)
+        return entity
+
+    def update_idea(self, idea_id: uuid.UUID, updates: dict[str, Any]) -> Idea:
+        idea = self.session.get(Idea, idea_id)
+        if idea is None:
+            raise ValueError("Idea not found.")
+        for key in ("title", "content", "status"):
+            if key in updates:
+                setattr(idea, key, updates[key])
+        if "metadata" in updates and isinstance(updates["metadata"], dict):
+            idea.metadata_ = {**(idea.metadata_ or {}), **updates["metadata"]}
+        self.session.commit()
+        self.session.refresh(idea)
+        return idea
 
     def archive_object(self, object_type: str, object_id: uuid.UUID):
         model = {
@@ -128,3 +164,17 @@ class RoutedEditService:
         obj.status = "archived"
         self.session.commit()
         return obj
+
+
+def _normalize_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _parse_optional_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    raise ValueError("Expected an ISO datetime string.")

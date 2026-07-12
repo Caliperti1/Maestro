@@ -15,6 +15,7 @@ def test_openrouter_client_uses_openrouter_config() -> None:
     assert client.model == "openai/gpt-5.5"
     assert client.base_url == "https://openrouter.ai/api/v1"
     assert client.default_headers["X-OpenRouter-Title"] == "Maestro"
+    assert client.max_output_tokens == 8192
 
 
 def test_openai_client_uses_direct_openai_config() -> None:

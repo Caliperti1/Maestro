@@ -1,6 +1,15 @@
+"""Shared tool execution runtime and built-in tool adapters.
+
+Agents never call external systems directly. They propose or execute tool calls through this
+service, which resolves domain credentials, enforces agent permissions, records approval state, and
+normalizes tool results for orchestration and memory artifacts. The file is still large because it
+contains several tool families; future cleanup should split adapters by provider.
+"""
+
 import base64
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -20,6 +29,15 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models import Agent, Domain, Task, ToolCall, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
+from app.llm.client import OpenAILLMClient
+from app.memory.retrieval import (
+    MemoryContextBundle,
+    MemoryContextBundleRequest,
+    MemoryContextSection,
+    MemoryContextSnippet,
+    MemoryRetrievalError,
+    MemoryRetrievalService,
+)
 
 
 class ToolExecutionError(ValueError):
@@ -341,7 +359,7 @@ class ToolExecutionService:
         if tool_call.status != "approval_required":
             raise ToolExecutionError(f"Tool call is not awaiting approval: {tool_call.status}")
         tool_call.status = "rejected"
-        tool_call.error_message = reason or "Rejected by Chris."
+        tool_call.error_message = reason or f"Rejected by {get_settings().user_display_name}."
         tool_call.output_payload = {
             **(tool_call.output_payload or {}),
             "approval_required": False,
@@ -425,6 +443,8 @@ class GitHubCliToolAdapter:
         if self.key == "github.repo.create":
             return self._repo_create(context.connection, payload, env=env)
         repo = _repo_from(context.connection, payload)
+        if self.key == "github.read":
+            return self._aggregate_read(repo, payload, env=env)
         if self.key == "github.repo.get":
             return self._repo_get(repo, env=env)
         if self.key == "github.file.get":
@@ -452,6 +472,64 @@ class GitHubCliToolAdapter:
         if self.key == "github.pr.merge":
             return self._pr_merge(repo, payload, env=env)
         raise ToolExecutionError(f"Unsupported GitHub tool: {self.key}")
+
+    def _aggregate_read(self, repo: str, payload: dict[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
+        request_text = str(
+            payload.get("request")
+            or payload.get("purpose")
+            or payload.get("query")
+            or ""
+        ).strip()
+        search_terms = _string_list(payload.get("search_terms"))
+        if not search_terms and request_text:
+            search_terms = _github_read_search_terms(request_text)
+        max_files = _bounded_int(payload.get("max_files"), default=12, minimum=1, maximum=30)
+        include_file_tree = bool(payload.get("include_file_tree", False))
+        repo_result = self._repo_get(repo, env=env)
+        file_results = []
+        remaining_files = max_files
+        for term in search_terms[:8]:
+            if remaining_files <= 0:
+                break
+            try:
+                result = self._file_search(
+                    repo,
+                    {"query": term, "limit": min(remaining_files, 8)},
+                    env=env,
+                )
+            except ToolExecutionError as exc:
+                file_results.append({"query": term, "error": str(exc), "files": []})
+                continue
+            files = result.get("files") if isinstance(result, dict) else []
+            remaining_files -= len(files or [])
+            file_results.append(
+                {
+                    "query": term,
+                    "total_count": result.get("total_count") if isinstance(result, dict) else None,
+                    "files": files,
+                }
+            )
+        tree = None
+        if include_file_tree:
+            try:
+                tree = self._file_get(repo, {"path": "", "max_chars": 1000}, env=env)
+            except ToolExecutionError as exc:
+                tree = {"error": str(exc)}
+        return {
+            "repo": repo,
+            "request": request_text,
+            "search_terms": search_terms,
+            "repo_metadata": repo_result.get("summary") or repo_result,
+            "file_searches": file_results,
+            "file_tree": tree,
+            "summary": {
+                "type": "github_read",
+                "repo": repo,
+                "search_count": len(file_results),
+                "file_count": sum(len(item.get("files") or []) for item in file_results),
+                "request": request_text[:300],
+            },
+        }
 
     def _repo_get(self, repo: str, *, env: dict[str, str]) -> dict[str, Any]:
         owner, name = _repo_parts(repo)
@@ -1838,10 +1916,190 @@ class LocalAppReloadAdapter:
         }
 
 
+class LLMGatewayToolAdapter:
+    def __init__(self, key: str = "llm.gateway"):
+        self.key = key
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        prompt = str(
+            payload.get("prompt")
+            or payload.get("input")
+            or payload.get("task")
+            or payload.get("request")
+            or payload.get("instruction")
+            or ""
+        ).strip()
+        if not prompt:
+            raise ToolExecutionError("llm.gateway requires a prompt payload.")
+        instructions = str(
+            payload.get("instructions")
+            or (
+                "You are a Maestro support model helping an authorized domain agent reason "
+                "through a delegated task. Be concise, practical, and explicit about uncertainty."
+            )
+        )
+        context_text = str(payload.get("context") or "").strip()
+        input_text = prompt if not context_text else f"{prompt}\n\nContext:\n{context_text}"
+        if context.dry_run:
+            return {
+                "dry_run": True,
+                "tool": self.key,
+                "prompt_preview": prompt[:500],
+                "context_chars": len(context_text),
+            }
+
+        model = str(payload.get("model") or _agent_model_profile(context.agent) or "").strip()
+        client = OpenAILLMClient(model=model if model and model != "default" else None)
+        output_text = client.text_response(instructions=instructions, input_text=input_text)
+        return {
+            "summary": {
+                "type": "llm_gateway_response",
+                "provider": client.provider,
+                "model": client.model,
+                "output_chars": len(output_text),
+            },
+            "output_text": output_text,
+        }
+
+
+class WebSearchToolAdapter:
+    def __init__(self, key: str = "web.search"):
+        self.key = key
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        query = str(payload.get("query") or payload.get("prompt") or "").strip()
+        if not query:
+            raise ToolExecutionError("web.search requires a query payload.")
+        instructions = str(
+            payload.get("instructions")
+            or (
+                "You are a Maestro research tool. Search the web only as needed, synthesize "
+                "current findings, cite sources from annotations, and clearly distinguish facts "
+                "from inference."
+            )
+        )
+        search_parameters = _web_search_parameters(payload)
+        model = str(payload.get("model") or _agent_model_profile(context.agent) or "").strip()
+        if context.dry_run:
+            return {
+                "dry_run": True,
+                "tool": self.key,
+                "query": query,
+                "search_parameters": search_parameters,
+            }
+        client = OpenAILLMClient(model=model if model and model != "default" else None)
+        result = client.web_search_response(
+            instructions=instructions,
+            input_text=query,
+            search_parameters=search_parameters,
+        )
+        annotations = result.get("annotations") or []
+        citations = _citations_from_annotations(annotations)
+        output_text = str(result.get("output_text") or "")
+        return {
+            "summary": {
+                "type": "web_search_response",
+                "provider": client.provider,
+                "model": client.model,
+                "citation_count": len(citations),
+                "output_chars": len(output_text),
+            },
+            "query": query,
+            "search_parameters": search_parameters,
+            "output_text": output_text,
+            "citations": citations,
+            "annotations": annotations,
+            "usage": result.get("usage"),
+        }
+
+
+class MemoryContextBundleToolAdapter:
+    key = "memory.context_bundle"
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        domain_key = str(payload.get("domain_key") or context.domain.key)
+        domain = DomainRepository(context.session).get_by_key(domain_key)
+        if domain is None:
+            raise ToolExecutionError(f"Unknown memory domain: {domain_key}")
+        query_text = str(
+            payload.get("query_text")
+            or payload.get("query")
+            or payload.get("prompt")
+            or context.task.objective
+            or ""
+        ).strip()
+        memory_types = payload.get("memory_type", payload.get("memory_types"))
+        if isinstance(memory_types, str):
+            memory_type_set = {
+                item.strip()
+                for item in memory_types.split(",")
+                if item.strip()
+            }
+        elif isinstance(memory_types, list):
+            memory_type_set = {str(item).strip() for item in memory_types if str(item).strip()}
+        else:
+            memory_type_set = None
+        capabilities = context.agent.capabilities if isinstance(context.agent.capabilities, dict) else {}
+        try:
+            bundle = MemoryRetrievalService(context.session).build_context_bundle(
+                MemoryContextBundleRequest(
+                    profile=str(payload.get("profile") or capabilities.get("memory_profile") or "agent_prompt"),  # type: ignore[arg-type]
+                    audience=str(payload.get("audience") or "agent"),  # type: ignore[arg-type]
+                    domain_id=domain.id,
+                    agent_id=context.agent.id,
+                    query_text=query_text or None,
+                    memory_types=memory_type_set,
+                    min_importance=_optional_float(payload.get("min_importance")),
+                    use_semantic=_optional_bool(payload.get("use_semantic"), default=True),
+                    max_items=_bounded_int(payload.get("max_items"), default=12, minimum=1, maximum=40),
+                    max_chars=_bounded_int(payload.get("max_chars"), default=4000, minimum=200, maximum=12000),
+                )
+            )
+        except MemoryRetrievalError as exc:
+            raise ToolExecutionError(str(exc)) from exc
+        return _memory_context_bundle_payload(bundle, domain_key=domain.key)
+
+
+class StageInteractionArtifactToolAdapter:
+    key = "artifact.stage_interaction"
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "summary": {
+                "type": "artifact_stage_deferred",
+                "domain_key": context.domain.key,
+                "task_id": str(context.task.id),
+            },
+            "write_status": "deferred_to_runtime",
+            "message": (
+                "The final agent/workflow artifact will be staged by Maestro after the agent "
+                "produces its report, so this request does not need separate approval."
+            ),
+            "requested_payload": _redact_payload(payload),
+        }
+
+
 def default_tool_adapters() -> dict[str, ToolAdapter]:
     adapters: dict[str, ToolAdapter] = {
         key: GitHubCliToolAdapter(key)
         for key in (
+            "github.read",
             "github.repo.get",
             "github.repo.list",
             "github.repo.create",
@@ -1873,6 +2131,10 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
         }
     )
     adapters["codex.task.run"] = CodexCliToolAdapter("codex.task.run")
+    adapters["llm.gateway"] = LLMGatewayToolAdapter("llm.gateway")
+    adapters["web.search"] = WebSearchToolAdapter("web.search")
+    adapters["memory.context_bundle"] = MemoryContextBundleToolAdapter()
+    adapters["artifact.stage_interaction"] = StageInteractionArtifactToolAdapter()
     adapters["local.app.reload"] = LocalAppReloadAdapter("local.app.reload")
     return adapters
 
@@ -2338,6 +2600,81 @@ def _clean_github_search_query(query: str, *, kind: str) -> str:
     return " ".join(tokens).strip()
 
 
+def _github_read_search_terms(text: str) -> list[str]:
+    lowered = text.lower()
+    phrase_terms = [
+        ("tool registry", "tool registry"),
+        ("tool manifest", "tool manifest"),
+        ("tool access", "tool access"),
+        ("agent authorization", "agent authorization"),
+        ("permission", "permission"),
+        ("credential", "credential"),
+        ("oauth", "oauth"),
+        ("gmail", "gmail"),
+        ("google", "google"),
+        ("github", "github"),
+        ("artifact", "artifact"),
+        ("provenance", "provenance"),
+        ("scheduler", "scheduler"),
+        ("queue", "scheduler queue"),
+        ("workflow", "workflow"),
+        ("memory", "memory retrieval"),
+        ("prompt", "prompt aggregation"),
+        ("frontend", "frontend"),
+        ("ui", "frontend ui"),
+        ("api", "api route"),
+        ("database", "database model"),
+        ("model", "database model"),
+        ("test", "test"),
+    ]
+    terms: list[str] = []
+    for marker, term in phrase_terms:
+        if marker in lowered and term not in terms:
+            terms.append(term)
+    if terms:
+        return terms[:8]
+
+    stopwords = {
+        "about",
+        "after",
+        "agent",
+        "agents",
+        "architecture",
+        "before",
+        "code",
+        "codebase",
+        "current",
+        "find",
+        "for",
+        "from",
+        "how",
+        "inspect",
+        "latest",
+        "maestro",
+        "need",
+        "needs",
+        "read",
+        "repo",
+        "repository",
+        "system",
+        "that",
+        "the",
+        "this",
+        "with",
+    }
+    words = [
+        word
+        for word in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{3,}", lowered)
+        if word not in stopwords
+    ]
+    for word in words:
+        if word not in terms:
+            terms.append(word)
+        if len(terms) >= 8:
+            break
+    return terms or ["README", "docs", "app", "tests"]
+
+
 def _provider_key(tool_key: str) -> str:
     if tool_key.startswith("github."):
         return "github"
@@ -2346,6 +2683,114 @@ def _provider_key(tool_key: str) -> str:
     if tool_key.startswith("codex."):
         return "codex"
     return tool_key
+
+
+def _memory_context_bundle_payload(
+    bundle: MemoryContextBundle,
+    *,
+    domain_key: str,
+) -> dict[str, Any]:
+    request = bundle.request
+    return {
+        "summary": {
+            "type": "memory_context_bundle",
+            "domain_key": domain_key,
+            "query_text": request.query_text,
+            "included_count": bundle.included_count,
+            "semantic_status": bundle.semantic_status,
+        },
+        "profile": request.profile,
+        "audience": request.audience,
+        "domain_key": domain_key,
+        "agent_id": str(request.agent_id) if request.agent_id else None,
+        "query_text": request.query_text,
+        "memory_type": sorted(request.memory_types or []),
+        "min_importance": request.min_importance,
+        "use_semantic": request.use_semantic,
+        "semantic_status": bundle.semantic_status,
+        "max_items": request.max_items,
+        "max_chars": bundle.max_chars,
+        "used_chars": bundle.used_chars,
+        "total_visible": bundle.total_visible,
+        "filtered_count": bundle.filtered_count,
+        "retrieved_count": bundle.retrieved_count,
+        "included_count": bundle.included_count,
+        "dropped_count": bundle.dropped_count,
+        "retrieval_query": {
+            "mode": bundle.retrieval_query.mode,
+            "limit": bundle.retrieval_query.limit,
+            "include_agent_memory": bundle.retrieval_query.include_agent_memory,
+            "include_session_memory": bundle.retrieval_query.include_session_memory,
+            "include_links": bundle.retrieval_query.include_links,
+        },
+        "sections": [_memory_context_section_payload(section) for section in bundle.sections],
+        "rendered_text": bundle.rendered_text,
+    }
+
+
+def _memory_context_section_payload(section: MemoryContextSection) -> dict[str, Any]:
+    return {
+        "key": section.key,
+        "label": section.label,
+        "used_chars": section.used_chars,
+        "memories": [_memory_context_snippet_payload(snippet) for snippet in section.snippets],
+    }
+
+
+def _memory_context_snippet_payload(snippet: MemoryContextSnippet) -> dict[str, Any]:
+    memory = snippet.memory
+    return {
+        "id": str(memory.id),
+        "title": memory.title,
+        "scope": memory.scope,
+        "memory_type": memory.memory_type,
+        "importance": memory.importance,
+        "excerpt": snippet.excerpt,
+        "score": snippet.score,
+        "query_relevance": snippet.query_relevance,
+        "semantic_similarity": snippet.semantic_similarity,
+        "score_reasons": snippet.score_reasons,
+        "provenance": {
+            "source_refs": snippet.provenance.source_refs,
+            "seed_package": snippet.provenance.seed_package,
+            "artifact": snippet.provenance.artifact,
+            "processed_path": snippet.provenance.processed_path,
+        },
+        "links": [
+            {
+                "relation_type": link.relation_type,
+                "direction": link.direction,
+                "memory": {
+                    "id": str(link.memory.id),
+                    "title": link.memory.title,
+                    "scope": link.memory.scope,
+                    "memory_type": link.memory.memory_type,
+                    "importance": link.memory.importance,
+                },
+                "metadata": link.metadata,
+            }
+            for link in snippet.links
+        ],
+    }
+
+
+def _optional_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _github_env(connection: ToolConnection | None) -> dict[str, str]:
@@ -2816,6 +3261,50 @@ def _redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             redacted[key] = value
     return redacted
+
+
+def _web_search_parameters(payload: dict[str, Any]) -> dict[str, Any]:
+    parameters: dict[str, Any] = {}
+    engine = str(payload.get("engine") or "").strip()
+    if engine:
+        parameters["engine"] = engine
+    for key in ("max_results", "max_total_results", "max_characters"):
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        parameters[key] = _bounded_int(value, default=5, minimum=1, maximum=100_000)
+    context_size = str(payload.get("search_context_size") or "").strip()
+    if context_size in {"low", "medium", "high"}:
+        parameters["search_context_size"] = context_size
+    allowed_domains = _string_list(payload.get("allowed_domains"))
+    excluded_domains = _string_list(payload.get("excluded_domains"))
+    if allowed_domains:
+        parameters["allowed_domains"] = allowed_domains
+    if excluded_domains:
+        parameters["excluded_domains"] = excluded_domains
+    return parameters
+
+
+def _agent_model_profile(agent: Agent) -> str | None:
+    capabilities = agent.capabilities or {}
+    model_profile = capabilities.get("model_profile") if isinstance(capabilities, dict) else None
+    return str(model_profile).strip() if model_profile else None
+
+
+def _citations_from_annotations(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    citations: list[dict[str, Any]] = []
+    for annotation in annotations:
+        citation = annotation.get("url_citation") if isinstance(annotation, dict) else None
+        if not isinstance(citation, dict):
+            continue
+        citations.append(
+            {
+                "url": citation.get("url"),
+                "title": citation.get("title"),
+                "content": citation.get("content"),
+            }
+        )
+    return citations
 
 
 def _required_text(payload: dict[str, Any], key: str) -> str:

@@ -230,6 +230,7 @@ def list_routed_objects(
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     return RoutedMemoryService(db).build_context_bundle(
         domain_id=domain_id,
@@ -246,6 +247,7 @@ def routed_context_bundle(
     max_chars: int = 3000,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     bundle = RoutedRetrievalService(db).build_context_bundle(
         domain_id=domain_id,
@@ -266,6 +268,8 @@ def run_routed_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
     report = RoutedHygieneService(db).run_once()
     return {
         "aliases_backfilled": report.aliases_backfilled,
+        "display_fields_canonicalized": report.display_fields_canonicalized,
+        "duplicates_merged": report.duplicates_merged,
         "suggestions": report.suggestions,
     }
 
@@ -277,6 +281,7 @@ def list_calendar_events(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(CalendarEvent)
     if domain_id is not None:
@@ -307,6 +312,7 @@ def list_todos(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(Todo)
     if domain_id is not None:
@@ -332,6 +338,7 @@ def update_todo(
 
 @router.get("/routed-objects/contacts")
 def list_contacts(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     contacts = db.scalars(select(Contact).order_by(Contact.updated_at.desc()).limit(limit)).all()
     return {"contacts": [_contact_payload(contact) for contact in contacts]}
 
@@ -364,8 +371,22 @@ def archive_routed_object(
 
 @router.get("/routed-objects/entities")
 def list_entities(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     entities = db.scalars(select(Entity).order_by(Entity.updated_at.desc()).limit(limit)).all()
     return {"entities": [_entity_payload(entity) for entity in entities]}
+
+
+@router.patch("/routed-objects/entities/{entity_id}")
+def update_entity(
+    entity_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        entity = RoutedEditService(db).update_entity(entity_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"entity": _entity_payload(entity)}
 
 
 @router.get("/routed-objects/ideas")
@@ -380,6 +401,19 @@ def list_ideas(
         query = query.where(Idea.domain_id == domain_id)
     ideas = db.scalars(query.order_by(Idea.updated_at.desc()).limit(limit)).all()
     return {"ideas": [_idea_payload(db, idea) for idea in ideas]}
+
+
+@router.patch("/routed-objects/ideas/{idea_id}")
+def update_idea(
+    idea_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        idea = RoutedEditService(db).update_idea(idea_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"idea": _idea_payload(db, idea)}
 
 
 @router.get("/routed-objects/decisions")
