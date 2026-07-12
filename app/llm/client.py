@@ -43,6 +43,7 @@ class OpenAILLMClient:
         settings = get_settings()
         self.provider = provider or settings.llm_provider
         self.model = model or settings.llm_model
+        self.max_output_tokens = settings.llm_max_output_tokens
         self.base_url = base_url
         self.default_headers: dict[str, str] = {}
 
@@ -93,6 +94,7 @@ class OpenAILLMClient:
             model=self.model,
             instructions=instructions,
             input=input_text,
+            max_output_tokens=self.max_output_tokens,
             text={
                 "format": {
                     "type": "json_schema",
@@ -130,6 +132,7 @@ class OpenAILLMClient:
                     {"role": "system", "content": instructions},
                     {"role": "user", "content": input_text},
                 ],
+                max_tokens=self.max_output_tokens,
             )
             content = response.choices[0].message.content
             if not content:
@@ -140,10 +143,57 @@ class OpenAILLMClient:
             model=self.model,
             instructions=instructions,
             input=input_text,
+            max_output_tokens=self.max_output_tokens,
         )
         if not response.output_text:
             raise LLMClientError("LLM returned an empty response.")
         return response.output_text
+
+    def web_search_response(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        search_parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if self.provider != "openrouter":
+            raise LLMClientError("web.search currently requires the OpenRouter LLM provider.")
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise LLMClientError("Install the `openai` package to use live LLM calls.") from exc
+
+        client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            default_headers=self.default_headers or None,
+        )
+        tool: dict[str, Any] = {"type": "openrouter:web_search"}
+        if search_parameters:
+            tool["parameters"] = search_parameters
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": input_text},
+            ],
+            max_tokens=self.max_output_tokens,
+            tools=[tool],
+        )
+        message = response.choices[0].message
+        content = message.content or ""
+        if not content:
+            raise LLMClientError("Web search returned an empty response.")
+        annotations = [
+            _annotation_to_dict(annotation)
+            for annotation in (getattr(message, "annotations", None) or [])
+        ]
+        usage = getattr(response, "usage", None)
+        return {
+            "output_text": content,
+            "annotations": annotations,
+            "usage": _usage_to_dict(usage),
+        }
 
     def _openrouter_structured_response(
         self,
@@ -160,6 +210,7 @@ class OpenAILLMClient:
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": input_text},
             ],
+            max_tokens=self.max_output_tokens,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -176,3 +227,29 @@ class OpenAILLMClient:
             return json.loads(content)
         except json.JSONDecodeError as exc:
             raise LLMClientError("LLM returned non-JSON output.") from exc
+
+
+def _annotation_to_dict(annotation: Any) -> dict[str, Any]:
+    if hasattr(annotation, "model_dump"):
+        return annotation.model_dump()
+    if isinstance(annotation, dict):
+        return annotation
+    return {
+        key: getattr(annotation, key)
+        for key in ("type", "url_citation")
+        if hasattr(annotation, key)
+    }
+
+
+def _usage_to_dict(usage: Any) -> dict[str, Any] | None:
+    if usage is None:
+        return None
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump()
+    if isinstance(usage, dict):
+        return usage
+    return {
+        key: getattr(usage, key)
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "server_tool_use")
+        if hasattr(usage, key)
+    }

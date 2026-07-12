@@ -391,7 +391,10 @@ class SchedulerService:
                 item = self.session.get(WorkflowQueueItem, uuid.UUID(item_payload["id"]))
                 if item is None or item.status not in {"queued", "pending", "ready", "retrying"}:
                     continue
-                self.acquire_locks(item, owner=owner, lease_seconds=lease_seconds, commit=False)
+                try:
+                    self.acquire_locks(item, owner=owner, lease_seconds=lease_seconds, commit=False)
+                except ValueError:
+                    continue
                 item.status = "running"
                 item.attempt_count += 1
                 item.lease_owner = owner
@@ -568,21 +571,32 @@ class SchedulerService:
         commit: bool = True,
     ) -> list[SchedulerResourceLock]:
         requested = self._lock_keys(queue_item)
-        if requested & self._active_lock_keys():
-            raise ValueError("Requested scheduler resource lock is already held.")
         expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
         locks: list[SchedulerResourceLock] = []
         for resource_key, lock_scope in requested:
-            lock = SchedulerResourceLock(
-                resource_key=resource_key,
-                lock_scope=lock_scope,
-                status="held",
-                workflow_run_id=queue_item.workflow_run_id,
-                queue_item_id=queue_item.id,
-                owner=owner,
-                lease_expires_at=expires_at,
+            lock = self.session.scalar(
+                select(SchedulerResourceLock).where(
+                    SchedulerResourceLock.resource_key == resource_key,
+                    SchedulerResourceLock.lock_scope == lock_scope,
+                )
             )
-            self.session.add(lock)
+            if lock is not None and self._is_active_lock(lock):
+                if lock.queue_item_id == queue_item.id:
+                    locks.append(lock)
+                    continue
+                raise ValueError("Requested scheduler resource lock is already held.")
+            if lock is None:
+                lock = SchedulerResourceLock(
+                    resource_key=resource_key,
+                    lock_scope=lock_scope,
+                )
+                self.session.add(lock)
+            lock.status = "held"
+            lock.workflow_run_id = queue_item.workflow_run_id
+            lock.queue_item_id = queue_item.id
+            lock.owner = owner
+            lock.lease_expires_at = expires_at
+            lock.metadata_ = {}
             locks.append(lock)
         queue_item.lease_owner = owner
         queue_item.lease_expires_at = expires_at
@@ -944,15 +958,19 @@ class SchedulerService:
             run.status = "queued"
 
     def _active_lock_keys(self) -> set[tuple[str, str]]:
-        now = datetime.now(UTC)
         locks = self.session.scalars(
             select(SchedulerResourceLock).where(SchedulerResourceLock.status == "held")
         ).all()
         return {
             (lock.resource_key, lock.lock_scope)
             for lock in locks
-            if lock.lease_expires_at is None or lock.lease_expires_at > now
+            if self._is_active_lock(lock)
         }
+
+    def _is_active_lock(self, lock: SchedulerResourceLock) -> bool:
+        if lock.status != "held":
+            return False
+        return lock.lease_expires_at is None or ensure_aware_utc(lock.lease_expires_at) > datetime.now(UTC)
 
     def _lock_keys(self, item: WorkflowQueueItem) -> set[tuple[str, str]]:
         locks: set[tuple[str, str]] = set()

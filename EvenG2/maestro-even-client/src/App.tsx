@@ -13,10 +13,9 @@ function App() {
   const [awaitingMaestro, setAwaitingMaestro] = useState(false);
   const [latestMaestroBody, setLatestMaestroBody] = useState("");
   const [motionTick, setMotionTick] = useState(0);
-  const { connected, messages, connect, disconnect, sendText, sendVoice, simulateInbound, startNewSession } =
+  const { connected, messages, connect, disconnect, sendText, sendVoice, simulateInbound } =
     useMaestroBridge(mode, backendUrl, 3000);
   const lastMaestroIdRef = useRef<string | null>(null);
-  const lastSessionStartRef = useRef(0);
 
   const connectLabel = mode === "live" ? "Connect API" : "Connect Mock";
   const actionLabel = mode === "live" ? "Poll Maestro" : "Simulate Maestro Event";
@@ -152,10 +151,6 @@ function App() {
       .onGestures({
         onDoubleTap: async () => {
           if (!connected) return;
-          const now = Date.now();
-          if (now - lastSessionStartRef.current < 900) return;
-          lastSessionStartRef.current = now;
-          await startNewSession();
           startListeningCycle();
         },
         onSingleTap: async () => {
@@ -180,7 +175,7 @@ function App() {
       .catch(() => {
         // No-op when bridge is unavailable (desktop browser outside Even runtime).
       });
-  }, [connected, mode, startNewSession, voiceState]);
+  }, [connected, mode, voiceState]);
 
   return (
     <main className="app-shell">

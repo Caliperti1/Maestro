@@ -1,3 +1,11 @@
+"""Agent registry, prompt aggregation, run-once execution, and artifact packaging.
+
+Agents are configured per domain, receive prompts through the aggregation service, and may request
+tools through the shared tool runtime. This module also packages agent interactions into artifacts
+that can enter the memory pipeline, which keeps execution traces separate from durable memory
+writes.
+"""
+
 import json
 import re
 import uuid
@@ -28,6 +36,7 @@ from app.memory.retrieval import (
     MemoryContextBundleRequest,
     MemoryRetrievalService,
 )
+from app.prompts import load_prompt
 from app.tools.runtime import (
     ToolExecutionRequest,
     ToolExecutionService,
@@ -243,7 +252,48 @@ class AgentRegistryService:
                     tool_permissions=seed["tool_permissions"],
                 )
             )
+        self._ensure_internal_default_tools()
+        self._ensure_research_agents_can_search_web()
         return created_or_existing
+
+    def _ensure_internal_default_tools(self) -> None:
+        changed = False
+        for agent in self.session.scalars(select(Agent).where(Agent.is_active.is_(True))).all():
+            permissions = _with_internal_default_tool_permissions(agent.tool_permissions or {})
+            if permissions == (agent.tool_permissions or {}):
+                continue
+            agent.tool_permissions = permissions
+            changed = True
+        if changed:
+            self.session.commit()
+
+    def _ensure_research_agents_can_search_web(self) -> None:
+        changed = False
+        for agent in self.session.scalars(select(Agent).where(Agent.is_active.is_(True))).all():
+            permissions = dict(agent.tool_permissions or {})
+            if "web.search" in permissions:
+                continue
+            capabilities = agent.capabilities or {}
+            role_text = " ".join(
+                str(value or "")
+                for value in (
+                    agent.key,
+                    agent.name,
+                    agent.description,
+                    capabilities.get("role_summary") if isinstance(capabilities, dict) else "",
+                    capabilities.get("role_prompt") if isinstance(capabilities, dict) else "",
+                )
+            ).lower()
+            if "sota" not in role_text and "research" not in role_text:
+                continue
+            permissions["web.search"] = {
+                "permission": "read",
+                "description": "Search the web for current SOTA/research context with citations.",
+            }
+            agent.tool_permissions = permissions
+            changed = True
+        if changed:
+            self.session.commit()
 
     def list_specs(self) -> list[AgentSpec]:
         self.ensure_seed_agents()
@@ -365,7 +415,7 @@ class AgentRegistryService:
             agent_type=agent_type.strip() or "domain_agent",
             description=capabilities["role_summary"],
             capabilities=capabilities,
-            tool_permissions=tool_permissions or {},
+            tool_permissions=_with_internal_default_tool_permissions(tool_permissions or {}),
         )
         return self._spec_for_agent(agent, domain=domain)
 
@@ -401,7 +451,7 @@ class AgentRegistryService:
         if scheduled_actions is not None:
             capabilities["scheduled_actions"] = scheduled_actions
         if tool_permissions is not None:
-            agent.tool_permissions = tool_permissions
+            agent.tool_permissions = _with_internal_default_tool_permissions(tool_permissions)
             capabilities["manual_tool_permissions"] = True
         if is_active is not None:
             agent.is_active = is_active
@@ -664,6 +714,7 @@ class PromptAggregationService:
         )
         global_context = self.registry.get_global_context().context
         output_contract = _DEFAULT_OUTPUT_CONTRACT
+        prompt_task_instruction = _compact_task_instruction_for_prompt(request.task_instruction)
         return PromptPackage(
             agent=spec,
             task_instruction=request.task_instruction,
@@ -679,7 +730,7 @@ class PromptAggregationService:
                 global_context=global_context,
                 domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
                 role_prompt=spec.role_prompt,
-                task_instruction=request.task_instruction,
+                task_instruction=prompt_task_instruction,
                 user_context=request.user_context,
                 memory_text=memory_context.rendered_text,
                 tools=spec.allowed_tools,
@@ -759,6 +810,10 @@ class PromptAggregationService:
                     "task_instruction": request.task_instruction,
                     "user_context": request.user_context,
                     "assembled_prompt_chars": len(package.assembled_prompt),
+                    "raw_task_instruction_chars": len(request.task_instruction),
+                    "prompt_task_instruction_chars": len(
+                        _compact_task_instruction_for_prompt(request.task_instruction)
+                    ),
                     "memory_included_count": package.memory_context.included_count,
                     "semantic_status": package.memory_context.semantic_status,
                 },
@@ -823,13 +878,14 @@ class PromptAggregationService:
                 tool_call_payloads.extend(loop_results["tool_calls"])
                 tool_loop_trace = loop_results["trace"]
             if any(call.get("status") == "approval_required" for call in tool_call_payloads):
+                user_display_name = get_settings().user_display_name
                 task.status = "blocked"
                 task.output_payload = {
                     "run_id": run_id,
                     "tool_call_count": len(tool_call_payloads),
                     "approval_required": True,
                 }
-                task.error_message = "Waiting for Chris to approve tool use."
+                task.error_message = f"Waiting for {user_display_name} to approve tool use."
                 self._set_agent_current_action(
                     package.agent.key,
                     f"Waiting for approval: {request.task_instruction[:160]}",
@@ -837,18 +893,21 @@ class PromptAggregationService:
                 )
                 self.session.commit()
                 self.session.refresh(task)
-                execution_note = "Agent run paused while waiting for Chris to approve tool use."
+                execution_note = f"Agent run paused while waiting for {user_display_name} to approve tool use."
                 status = "blocked"
             else:
                 assembled_prompt = package.assembled_prompt
                 if tool_call_payloads:
+                    compact_tool_results = _compact_tool_results_for_prompt(tool_call_payloads)
                     assembled_prompt = (
                         f"{assembled_prompt}\n\n## Tool Results\n"
-                        "The following tool calls have already been executed by Maestro. "
+                        "The following compact tool-result evidence has already been executed by Maestro. "
+                        "Full raw tool outputs remain stored in Maestro by tool_call_id; use these "
+                        "summaries as evidence and call out if a full artifact/file read is needed. "
                         "Use these results as evidence in your report. Do not emit tool-call XML, "
                         "JSON function-call requests, or instructions to call more tools; instead, "
                         "state any additional tool access needed as an open question or next step.\n\n"
-                        f"{json.dumps(tool_call_payloads, indent=2)}"
+                        f"{json.dumps(compact_tool_results, indent=2)}"
                     )
                 tool_call = ToolCall(
                     task_id=task.id,
@@ -858,6 +917,13 @@ class PromptAggregationService:
                         "provider": getattr(llm_client, "provider", "configured"),
                         "model": package.agent.model_profile,
                         "prompt_chars": len(assembled_prompt),
+                        "base_prompt_chars": len(package.assembled_prompt),
+                        "tool_result_raw_chars": len(json.dumps(tool_call_payloads, default=str)),
+                        "tool_result_prompt_chars": len(
+                            json.dumps(_compact_tool_results_for_prompt(tool_call_payloads), default=str)
+                        )
+                        if tool_call_payloads
+                        else 0,
                     },
                     status="running",
                     started_at=datetime.now(UTC),
@@ -969,7 +1035,7 @@ class PromptAggregationService:
             self.session.commit()
             self.session.refresh(task)
             execution_note = (
-                "Manual run prepared without an LLM call. The scheduler is stubbed, but prompt, "
+                "Manual run prepared without an LLM call. Prompt, "
                 "scoped memory, tool manifest, and artifact packaging are verified."
             )
 
@@ -1021,10 +1087,9 @@ class PromptAggregationService:
             agent=package.agent,
             prompt_package=package,
             scheduler={
-                "status": "stubbed",
+                "status": "manual_run",
                 "reason": (
-                    "Master scheduler/resource-conflict policy is planned "
-                    "but not implemented."
+                    "This direct run-once path bypasses the durable scheduler queue."
                 ),
             },
             execution_note=execution_note,
@@ -1069,13 +1134,24 @@ class PromptAggregationService:
             self.session.commit()
             self.session.refresh(planner_call)
             try:
+                tool_planner_input = self._render_tool_planner_input(
+                    package=package,
+                    prior_results=prior_results,
+                    iteration=index + 1,
+                )
+                planner_call.input_payload = {
+                    **planner_call.input_payload,
+                    "prompt_chars": len(tool_planner_input),
+                    "base_prompt_chars": len(package.assembled_prompt),
+                    "prior_result_raw_chars": len(json.dumps(prior_results, default=str)),
+                    "prior_result_prompt_chars": len(
+                        json.dumps(_compact_tool_results_for_prompt(prior_results), default=str)
+                    ),
+                }
+                self.session.commit()
                 plan = llm_client.structured_response(
                     instructions=_TOOL_PLANNER_INSTRUCTIONS,
-                    input_text=self._render_tool_planner_input(
-                        package=package,
-                        prior_results=prior_results,
-                        iteration=index + 1,
-                    ),
+                    input_text=tool_planner_input,
                     schema_name="agent_tool_plan",
                     schema=_TOOL_PLAN_SCHEMA,
                 )
@@ -1202,23 +1278,15 @@ class PromptAggregationService:
         allowed_tools = [
             {
                 "key": tool.key,
-                "name": tool.name,
                 "permission": tool.permission,
-                "description": tool.description,
-                "safety": _TOOL_SAFETY_POLICIES.get(
-                    tool.key,
-                    {
-                        "level": "approval_required",
-                        "auto_executable": False,
-                        "reason": "Tool is not approved for autonomous execution.",
-                    },
-                ),
+                "safety": _compact_tool_safety(tool.key),
             }
             for tool in package.tool_manifest
         ]
+        prompt_brief = _tool_planning_prompt_brief(package)
         return "\n\n".join(
             [
-                package.assembled_prompt,
+                prompt_brief,
                 "## Tool Planning Context",
                 (
                     f"Iteration: {iteration}\n"
@@ -1230,7 +1298,10 @@ class PromptAggregationService:
                     "report and let Maestro propose additional external actions separately."
                 ),
                 "## Allowed Tool Manifest\n" + json.dumps(allowed_tools, indent=2),
-                "## Prior Tool Results\n" + json.dumps(prior_results, indent=2),
+                "## Prior Tool Results\n" + json.dumps(
+                    _compact_tool_results_for_prompt(prior_results),
+                    indent=2,
+                ),
             ]
         )
 
@@ -1522,6 +1593,26 @@ _DEFAULT_OUTPUT_CONTRACT = {
 }
 
 _TOOL_SAFETY_POLICIES = {
+    "memory.context_bundle": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Internal read-only retrieval from Maestro memory for RAG context.",
+    },
+    "artifact.stage_interaction": {
+        "level": "internal_artifact_staging",
+        "auto_executable": True,
+        "reason": "Internal deferred artifact staging; Maestro stages final reports after completion.",
+    },
+    "llm.gateway": {
+        "level": "internal_reasoning",
+        "auto_executable": True,
+        "reason": "Internal LLM reasoning call for an authorized agent task.",
+    },
+    "web.search": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only web search and synthesis through the authorized LLM provider.",
+    },
     "github.repo.get": {
         "level": "safe_read",
         "auto_executable": True,
@@ -1571,6 +1662,11 @@ _TOOL_SAFETY_POLICIES = {
         "level": "safe_read",
         "auto_executable": True,
         "reason": "Read-only pull request check inspection.",
+    },
+    "github.read": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only aggregate GitHub repository inspection.",
     },
     "github.pr.merge": {
         "level": "external_write",
@@ -1646,21 +1742,7 @@ _AUTO_TOOL_SAFE_TOOL_KEYS = {
     key for key, policy in _TOOL_SAFETY_POLICIES.items() if policy["auto_executable"]
 }
 
-_TOOL_PLANNER_INSTRUCTIONS = (
-    "You are an execution planner for a Maestro domain agent. Return only JSON matching the "
-    "schema. Choose only tools from the allowed manifest. Prefer read-only tools and the smallest "
-    "number of calls needed. Read-only tools marked safe can run automatically. `codex.task.run` "
-    "can run automatically because it works on an isolated feature branch and returns a PR for "
-    "Chris review; do not ask for approval before requesting it. Other write/action tools must "
-    "only be requested when explicitly needed; they will be proposed for Chris approval instead "
-    "of executed automatically. Return tool payloads as JSON strings in "
-    "`payload_json`. Do not include repo placeholders such as repo:CURRENT or "
-    "repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies the repo. "
-    "For a request like 'check out the latest PR', use GitHub PR search/list tools first, then "
-    "details/checks/diff if useful. For email triage, use Gmail search/list tools first, then "
-    "fetch full message or thread details only when needed. If prior tool results include a PR number and the current "
-    "request refers to 'the PR', 'that PR', or 'it', pass that number as `pr_number`."
-)
+_TOOL_PLANNER_INSTRUCTIONS = load_prompt("agent_tool_planner.md")
 
 _TOOL_PLAN_SCHEMA = {
     "type": "object",
@@ -1707,6 +1789,13 @@ _TOOL_DESCRIPTIONS = {
     "llm.gateway": {
         "name": "LLM Gateway",
         "description": "Call the configured LLM provider through Maestro's shared gateway.",
+    },
+    "web.search": {
+        "name": "Web Search",
+        "description": (
+            "Use OpenRouter's server-side web search to gather current web context and cited "
+            "findings for research tasks."
+        ),
     },
     "github": {
         "name": "GitHub",
@@ -1849,6 +1938,194 @@ def _inherited_connection_tool_keys(tool_key: str) -> list[str]:
         return [key for key in _TOOL_DESCRIPTIONS if key.startswith("codex.")]
     return []
 
+
+def _with_internal_default_tool_permissions(raw_permissions: dict[str, Any]) -> dict[str, Any]:
+    permissions = dict(raw_permissions or {})
+    permissions.setdefault(
+        "memory.context_bundle",
+        {
+            "permission": "read",
+            "description": "Retrieve domain-scoped memory bundles for RAG.",
+        },
+    )
+    return permissions
+
+
+def _compact_task_instruction_for_prompt(task_instruction: str) -> str:
+    text = task_instruction.strip()
+    marker = "Assigned decomposed work items:"
+    if marker not in text:
+        return _truncate_text(text, 4000)
+    assigned = text.split(marker, 1)[1].strip()
+    preamble_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("You are "):
+            preamble_lines.append(stripped)
+        if stripped.startswith("Your specialty:"):
+            preamble_lines.append(stripped)
+        if len(preamble_lines) >= 2:
+            break
+    compact = "\n".join(
+        [
+            "Agent task brief:",
+            *preamble_lines,
+            "",
+            marker,
+            assigned,
+        ]
+    )
+    return _truncate_text(compact, 5000)
+
+
+def _tool_planning_prompt_brief(package: PromptPackage) -> str:
+    tools = ", ".join(tool.key for tool in package.tool_manifest) or "none"
+    sections = [
+        ("Agent", f"{package.agent.name} ({package.agent.key}) in {package.agent.domain_key}"),
+        ("Role", _truncate_text(package.role_prompt or package.agent.role_summary, 700)),
+        ("Task", _compact_task_instruction_for_prompt(package.task_instruction)),
+        ("Memory Summary", _truncate_text(package.memory_context.rendered_text, 1200)),
+        ("Allowed Tool Keys", _truncate_text(tools, 1200)),
+    ]
+    return "\n\n".join(f"## {title}\n{body}".strip() for title, body in sections if body)
+
+
+def _compact_tool_safety(tool_key: str) -> dict[str, Any]:
+    policy = _TOOL_SAFETY_POLICIES.get(
+        tool_key,
+        {
+            "level": "approval_required",
+            "auto_executable": False,
+            "reason": "Tool is not approved for autonomous execution.",
+        },
+    )
+    return {
+        "level": policy.get("level"),
+        "auto_executable": bool(policy.get("auto_executable")),
+    }
+
+
+def _compact_tool_results_for_prompt(
+    tool_results: list[dict[str, Any]],
+    *,
+    max_total_chars: int = 7000,
+) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    remaining = max_total_chars
+    for result in tool_results:
+        if remaining <= 0:
+            compact.append(
+                {
+                    "id": result.get("id"),
+                    "tool_name": result.get("tool_name"),
+                    "status": result.get("status"),
+                    "omitted": "Prompt evidence budget exhausted; full output remains stored by tool_call_id.",
+                }
+            )
+            continue
+        item = _compact_single_tool_result(result, max_chars=min(remaining, 2200))
+        item_chars = len(json.dumps(item, default=str))
+        if item_chars > remaining:
+            item["evidence"] = _truncate_text(str(item.get("evidence") or ""), max(120, remaining - 400))
+            item["truncated"] = True
+            item_chars = len(json.dumps(item, default=str))
+        compact.append(item)
+        remaining -= item_chars
+    return compact
+
+
+def _compact_single_tool_result(result: dict[str, Any], *, max_chars: int) -> dict[str, Any]:
+    output = result.get("output_payload")
+    compact: dict[str, Any] = {
+        "id": result.get("id"),
+        "tool_name": result.get("tool_name"),
+        "status": result.get("status"),
+    }
+    if result.get("error_message"):
+        compact["error_message"] = _truncate_text(str(result.get("error_message")), 500)
+    if result.get("connection_id"):
+        compact["connection_id"] = result.get("connection_id")
+    if output is None:
+        compact["summary"] = "No output payload."
+        return compact
+    compact["summary"] = _compact_output_summary(output)
+    evidence = _evidence_text(output)
+    if evidence:
+        compact["evidence"] = _truncate_text(evidence, max(200, max_chars - 700))
+    compact["raw_output_chars"] = len(json.dumps(output, default=str))
+    if compact["raw_output_chars"] > len(json.dumps(compact, default=str)):
+        compact["full_output"] = "stored_in_tool_call_output_payload"
+    return compact
+
+
+def _compact_output_summary(output: Any) -> Any:
+    if not isinstance(output, dict):
+        return _truncate_text(str(output), 600)
+    summary = output.get("summary")
+    if summary is not None:
+        return _truncate_nested(summary, max_text_chars=500)
+    keys = list(output.keys())
+    compact = {
+        "type": output.get("type") or output.get("object") or "tool_output",
+        "keys": keys[:12],
+    }
+    for count_key in ("included_count", "dropped_count", "total_count", "count", "issue_count", "result_count"):
+        if count_key in output:
+            compact[count_key] = output[count_key]
+    for id_key in ("url", "html_url", "number", "title", "path", "repo", "branch", "pr_number"):
+        if id_key in output:
+            compact[id_key] = _truncate_nested(output[id_key], max_text_chars=220)
+    return compact
+
+
+def _evidence_text(output: Any) -> str:
+    if not isinstance(output, dict):
+        return str(output)
+    parts: list[str] = []
+    for key in (
+        "rendered_text",
+        "output_text",
+        "body",
+        "content",
+        "text",
+        "markdown",
+        "diff",
+        "output_preview",
+    ):
+        value = output.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{key}:\n{value.strip()}")
+    for key in ("annotations", "citations", "results", "issues", "pull_requests", "files", "items"):
+        value = output.get(key)
+        if value:
+            parts.append(f"{key}:\n{json.dumps(_truncate_nested(value), default=str)}")
+    if not parts:
+        parts.append(json.dumps(_truncate_nested(output), default=str))
+    return "\n\n".join(parts)
+
+
+def _truncate_nested(value: Any, *, max_text_chars: int = 350, max_items: int = 5) -> Any:
+    if isinstance(value, str):
+        return _truncate_text(value, max_text_chars)
+    if isinstance(value, list):
+        return [_truncate_nested(item, max_text_chars=max_text_chars, max_items=max_items) for item in value[:max_items]]
+    if isinstance(value, dict):
+        return {
+            str(key): _truncate_nested(item, max_text_chars=max_text_chars, max_items=max_items)
+            for key, item in list(value.items())[:12]
+        }
+    return value
+
+
+def _truncate_text(value: str, max_chars: int) -> str:
+    normalized = " ".join(str(value or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max(0, max_chars - 3)].rstrip() + "..."
+
+
 _SEED_AGENTS = [
     {
         "domain_key": "praxis",
@@ -1859,12 +2136,7 @@ _SEED_AGENTS = [
             "Prepares Praxis planning context, partner follow-ups, and tactical innovation "
             "recommendations."
         ),
-        "role_prompt": (
-            "You are the Praxis Planning Agent. Work only inside the Praxis domain. "
-            "Use retrieved memory to ground recommendations in Praxis strategy, partner context, "
-            "training design, and transition priorities. Produce practical next steps and cite "
-            "memory or artifact references when available."
-        ),
+        "role_prompt": load_prompt("agents/praxis_planning_agent.md"),
         "memory_profile": "agent_prompt",
         "model_profile": "default",
         "tool_permissions": {
@@ -1906,11 +2178,7 @@ _SEED_AGENTS = [
         "role_summary": (
             "Reviews Maestro behavior, identifies system gaps, and proposes improvements."
         ),
-        "role_prompt": (
-            "You are the Maestro Introspection Agent. Work only inside the Maestro Development "
-            "domain. Evaluate what is working, what is brittle, and what should be improved next. "
-            "Prefer concrete implementation proposals with clear risks and validation steps."
-        ),
+        "role_prompt": load_prompt("agents/maestro_introspection_agent.md"),
         "memory_profile": "agent_prompt",
         "model_profile": "default",
         "tool_permissions": {
@@ -1925,6 +2193,10 @@ _SEED_AGENTS = [
             "llm.gateway": {
                 "permission": "use",
                 "description": "Use Maestro's shared LLM gateway.",
+            },
+            "web.search": {
+                "permission": "read",
+                "description": "Search the web for current SOTA/tooling context with citations.",
             },
             "github.read": {
                 "permission": "read",
@@ -2009,13 +2281,7 @@ _SEED_AGENTS = [
             "Executes scoped Maestro coding tasks through the local Codex tool and reports "
             "implementation results back to Maestro."
         ),
-        "role_prompt": (
-            "You are the Maestro Coding Agent. Work only inside the Maestro Development domain. "
-            "Use the local Codex task tool for implementation work after Chris approves the tool "
-            "plan. Keep coding tasks scoped, preserve unrelated work, run the requested validation "
-            "when practical, and return a concise report with changed files, tests, and follow-up "
-            "risks."
-        ),
+        "role_prompt": load_prompt("agents/maestro_coding_agent.md"),
         "memory_profile": "agent_prompt",
         "model_profile": "default",
         "tool_permissions": {

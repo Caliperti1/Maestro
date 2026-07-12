@@ -1,3 +1,10 @@
+"""FastAPI application factory and process-local background services.
+
+The backend exposes Maestro's HTTP/WebSocket API and starts a lightweight scheduler heartbeat in
+the same process. The worker reads runtime settings from the database on every loop so the UI can
+turn autonomous execution on/off without editing `.env` or restarting the app.
+"""
+
 import asyncio
 import contextlib
 import logging

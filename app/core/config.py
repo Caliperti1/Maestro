@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Maestro"
+    user_display_name: str = "Chris"
     app_host: str = "0.0.0.0"
     app_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     frontend_origin: str = "http://localhost:5174"
@@ -26,6 +27,7 @@ class Settings(BaseSettings):
     openrouter_http_referer: str = "http://localhost:5173"
     openrouter_app_title: str = "Maestro"
     llm_model: str = "openai/gpt-5.5"
+    llm_max_output_tokens: Annotated[int, Field(ge=256, le=32768)] = 8192
     memory_dropbox_root: str = "maestro_dropbox"
     home_timezone: str = "America/New_York"
     embedding_provider: str = "ollama"
@@ -37,10 +39,19 @@ class Settings(BaseSettings):
     routed_resolver_llm_provider: str = "ollama"
     routed_resolver_llm_model: str = "llama3.1:8b"
     routed_resolver_llm_base_url: str = "http://localhost:11434"
+    routed_enricher_llm_provider: str = "none"
+    routed_enricher_llm_model: str = "llama3.1:8b"
+    routed_enricher_llm_base_url: str = "http://localhost:11434"
+    routed_enricher_llm_timeout_seconds: float = 1.25
     maestro_intent_classifier_provider: str = "ollama"
-    maestro_intent_classifier_model: str = "llama3.1:8b"
+    maestro_intent_classifier_model: str = "qwen3:8b"
     maestro_intent_classifier_base_url: str = "http://localhost:11434"
-    maestro_intent_classifier_timeout_seconds: float = 0.75
+    maestro_intent_classifier_timeout_seconds: float = 2.5
+    maestro_topic_resolver_provider: str = "ollama"
+    maestro_topic_resolver_model: str = "qwen3:8b"
+    maestro_topic_resolver_base_url: str = "http://localhost:11434"
+    maestro_topic_resolver_timeout_seconds: float = 2.5
+    maestro_topic_resolver_confidence_threshold: float = 0.72
     scheduler_worker_autorun: bool = False
     scheduler_worker_interval_seconds: int = 30
     scheduler_worker_claim_limit: int = 4

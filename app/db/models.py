@@ -659,6 +659,9 @@ class WorkflowQueueItem(TimestampMixin, Base):
 
 class SchedulerResourceLock(TimestampMixin, Base):
     __tablename__ = "scheduler_resource_locks"
+    __table_args__ = (
+        UniqueConstraint("resource_key", "lock_scope", name="uq_scheduler_resource_lock_scope"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     resource_key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)

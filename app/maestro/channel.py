@@ -1,3 +1,11 @@
+"""Primary Maestro conversation channel helpers.
+
+Maestro intentionally behaves like one broad system-level chat rather than many isolated workflow
+threads. This module stores the canonical channel conversation id in runtime settings, gives the
+WebSocket broadcaster a stable conversation to watch, and lets background workers post status
+updates into the same place the user already watches.
+"""
+
 import uuid
 from datetime import UTC, datetime
 

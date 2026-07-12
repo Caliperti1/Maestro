@@ -163,16 +163,15 @@ Expected:
 - `tool_calls` includes any explicit tools requested before `llm.gateway`
 - `tool_loop` explains any agent-planned tool iterations when `auto_tool_loop` is true
 - `report_id` and `output_text` are set when execution succeeds
-- `scheduler.status` is `stubbed`
+- `scheduler.status` is `manual_run`
 - if `stage_interaction` is true, a package lands in `maestro_dropbox/<domain>/inbox`
 
 The resulting interaction artifact contains the agent output, task ID, tool call summary, generated
 report reference, run ID, and execution status. The memory curator can process that artifact just
 like a manually dropped file.
 
-The scheduler is deliberately separate. Maestro will need a master scheduler service that can
-coordinate recurring work, resource locks, exclusive tools, queue priority, and user approvals
-without individual agents fighting over the same capabilities.
+The durable scheduler is deliberately separate from this direct run-once path. Recurring or
+queued Maestro work should enter the scheduler, while manual agent tests can still bypass it.
 
 ### Agent-Planned Tool Loop
 

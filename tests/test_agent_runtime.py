@@ -12,6 +12,7 @@ from app.agents.runtime import (
     InteractionArtifactPackager,
     PromptAggregationService,
     PromptPackageRequest,
+    _compact_tool_results_for_prompt,
 )
 from app.core.config import get_settings
 from app.db.models import Artifact, MemoryItem, Task, ToolCall, ToolConnection
@@ -21,11 +22,16 @@ from app.tools.runtime import (
     CodexCliToolAdapter,
     GmailApiToolAdapter,
     GitHubCliToolAdapter,
+    LLMGatewayToolAdapter,
     LocalAppReloadAdapter,
+    MemoryContextBundleToolAdapter,
     ToolExecutionContext,
     ToolExecutionRequest,
     ToolExecutionService,
+    WebSearchToolAdapter,
     _clean_github_search_query,
+    _github_read_search_terms,
+    default_tool_adapters,
 )
 
 
@@ -136,6 +142,38 @@ class FakeAutoToolLoopLLMClient:
         return "## Summary\nLatest PR reviewed.\n\n## Findings\nPR #44 is ready for inspection."
 
 
+class FakeAutoGitHubReadToolLoopLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def __init__(self):
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Inspect the repository with the aggregate read tool.",
+                "requires_final_answer": True,
+                "tool_calls": [
+                    {
+                        "tool_key": "github.read",
+                        "payload_json": '{"request":"Inspect repository architecture only."}',
+                        "rationale": "Read-only repository inspection.",
+                    }
+                ],
+            }
+        return {
+            "plan_summary": "Enough repository context has been gathered.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "github.read" in input_text
+        return "## Summary\nRepository architecture inspected with read-only GitHub context."
+
+
 class FakeAutoWriteToolLoopLLMClient:
     provider = "test"
     model = "test-agent-model"
@@ -158,6 +196,80 @@ class FakeAutoWriteToolLoopLLMClient:
         assert "approval_required" in input_text
         assert "github.issue.create" in input_text
         return "## Summary\nI proposed a GitHub issue creation for approval."
+
+
+class FakeAutoLLMGatewayToolLoopLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def __init__(self):
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        assert "internal_reasoning" in input_text
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Use the internal gateway for a focused research synthesis.",
+                "requires_final_answer": True,
+                "tool_calls": [
+                    {
+                        "tool_key": "llm.gateway",
+                        "payload_json": (
+                            '{"prompt":"Survey CAD-to-STL agent architecture options.",'
+                            '"context":"Maestro Development brainstorm"}'
+                        ),
+                        "rationale": "The task asks for architecture synthesis.",
+                    }
+                ],
+            }
+        return {
+            "plan_summary": "Internal synthesis is available.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "llm.gateway" in input_text
+        assert "CAD toolchain synthesis" in input_text
+        return "## Summary\nCAD integration options reviewed.\n\n## Next Steps\nPick a prototype path."
+
+
+class FakeAutoMemoryContextToolLoopLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def __init__(self):
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Retrieve Maestro memory before answering.",
+                "requires_final_answer": True,
+                "tool_calls": [
+                    {
+                        "tool_key": "memory.context_bundle",
+                        "payload_json": (
+                            '{"query_text":"CAD tool STL generation architecture",'
+                            '"domain_key":"maestro-development","use_semantic":false,'
+                            '"max_items":6,"max_chars":1200}'
+                        ),
+                        "rationale": "The agent needs scoped RAG context before reporting.",
+                    }
+                ],
+            }
+        return {
+            "plan_summary": "Memory context is available.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "memory.context_bundle" in input_text
+        assert "CAD design agents should use shared CAD tool infrastructure" in input_text
+        return "## Summary\nRetrieved Maestro memory before answering.\n\n## Next Steps\nUse the shared tool pattern."
 
 
 class FakeAutoMergeMissingPrNumberLLMClient:
@@ -258,6 +370,60 @@ class FakeGitHubIssueCreateAdapter:
         }
 
 
+class FakeLLMGatewayAdapter:
+    key = "llm.gateway"
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        assert context.domain.key == "maestro-development"
+        assert payload["prompt"] == "Survey CAD-to-STL agent architecture options."
+        return {
+            "summary": {"type": "llm_gateway_response", "model": "test-agent-model"},
+            "output_text": "CAD toolchain synthesis: consider FreeCAD, build123d, and Blender.",
+        }
+
+
+class FakeWebSearchLLMClient:
+    provider = "openrouter"
+    model = "test-web-model"
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def web_search_response(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        search_parameters: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        assert "research" in instructions.lower()
+        assert input_text == "current CAD AI STL generation tools"
+        assert search_parameters == {
+            "engine": "exa",
+            "max_results": 3,
+            "allowed_domains": ["freecad.org"],
+        }
+        return {
+            "output_text": "FreeCAD and build123d are relevant options.",
+            "annotations": [
+                {
+                    "type": "url_citation",
+                    "url_citation": {
+                        "url": "https://www.freecad.org/",
+                        "title": "FreeCAD",
+                        "content": "FreeCAD is an open source parametric 3D modeler.",
+                    },
+                }
+            ],
+            "usage": {"server_tool_use": {"web_search_requests": 1}},
+        }
+
+
 def test_seed_agent_registry_returns_domain_scoped_specs(session: Session) -> None:
     specs = AgentRegistryService(session).list_specs()
 
@@ -272,6 +438,8 @@ def test_seed_agent_registry_returns_domain_scoped_specs(session: Session) -> No
     coding = next(spec for spec in specs if spec.key == "maestro-coding-agent")
     assert coding.domain_key == "maestro-development"
     assert "codex.task.run" in [tool.key for tool in coding.allowed_tools]
+    introspection = next(spec for spec in specs if spec.key == "maestro-introspection-agent")
+    assert "web.search" in [tool.key for tool in introspection.allowed_tools]
 
 
 def test_prompt_aggregation_includes_scoped_memory_and_tools(session: Session) -> None:
@@ -448,6 +616,19 @@ def test_seed_agent_merge_adds_github_tool_permissions_to_existing_seed_agent(
     assert "codex.task.run" in [tool.key for tool in refreshed.allowed_tools]
 
 
+def test_internal_memory_tool_is_added_to_custom_agents_by_default(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    custom = registry.create_agent_spec(
+        domain_key="maestro-development",
+        key="custom-maestro-agent",
+        name="Custom Maestro Agent",
+        role_summary="Tests default internal memory tools.",
+        tool_permissions={},
+    )
+
+    assert "memory.context_bundle" in [tool.key for tool in custom.allowed_tools]
+
+
 def test_seed_agent_merge_adds_gmail_read_permissions_to_existing_praxis_agent(
     session: Session,
 ) -> None:
@@ -470,6 +651,25 @@ def test_seed_agent_merge_adds_gmail_read_permissions_to_existing_praxis_agent(
     assert "gmail.message.list_recent" in allowed
     assert "gmail.message.get" in allowed
     assert "gmail.thread.get" in allowed
+
+
+def test_research_agents_are_granted_web_search_permission(session: Session) -> None:
+    seed_default_domains(session)
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert domain is not None
+    AgentRepository(session).create(
+        domain_id=domain.id,
+        key="maestro-sota-researcher",
+        name="Maestro SOTA Researcher",
+        agent_type="domain_agent",
+        description="Researches current state-of-the-art tools and implementation patterns.",
+        capabilities={"role_summary": "SOTA research agent", "memory_profile": "agent_prompt"},
+        tool_permissions={"memory.context_bundle": {"permission": "read"}},
+    )
+
+    spec = AgentRegistryService(session).get_spec("maestro-sota-researcher")
+
+    assert "web.search" in [tool.key for tool in spec.allowed_tools]
 
 
 def test_codex_tool_manifest_inherits_codex_connection(session: Session, tmp_path: Path) -> None:
@@ -560,6 +760,52 @@ def test_github_adapter_uses_domain_token_env_for_write_tools(
         "Created by a test.",
     ]
     assert captured["env"]["GH_TOKEN"] == "test-token"
+
+
+def test_web_search_adapter_uses_openrouter_server_tool_and_returns_citations(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    spec = registry.get_spec("maestro-introspection-agent")
+    agent = AgentRepository(session).get_by_key(spec.key)
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.web",
+        objective="Search for current CAD AI STL generation tools.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.OpenAILLMClient", FakeWebSearchLLMClient)
+
+    output = WebSearchToolAdapter().execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=None,
+        ),
+        {
+            "query": "current CAD AI STL generation tools",
+            "instructions": "Research current CAD AI tool options.",
+            "engine": "exa",
+            "max_results": 3,
+            "allowed_domains": ["freecad.org"],
+        },
+    )
+
+    assert output["summary"]["type"] == "web_search_response"
+    assert output["citations"][0]["url"] == "https://www.freecad.org/"
+    assert output["usage"]["server_tool_use"]["web_search_requests"] == 1
 
 
 def test_gmail_adapter_searches_and_decodes_message_metadata(
@@ -2104,7 +2350,7 @@ def test_run_agent_once_prepares_prompt_and_optional_staged_artifact(
     )
 
     assert result.status == "prepared"
-    assert result.scheduler["status"] == "stubbed"
+    assert result.scheduler["status"] == "manual_run"
     assert result.prompt_package.agent.key == "praxis-planning-agent"
     assert result.staged_artifact_path is not None
     assert Path(result.staged_artifact_path).is_file()
@@ -2217,6 +2463,201 @@ def test_run_agent_once_can_auto_plan_safe_tool_calls_before_final_report(
     assert any(call["tool_name"] == "github.pr.search" for call in result.tool_calls)
     assert result.output_text is not None
     assert "Latest PR reviewed" in result.output_text
+
+
+def test_run_agent_once_auto_executes_aggregate_github_read_without_approval(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+
+    class FakeGitHubReadAdapter:
+        key = "github.read"
+
+        def execute(self, context: ToolExecutionContext, payload: dict) -> dict:
+            assert payload["request"] == "Inspect repository architecture only."
+            return {"summary": "Read-only repository context returned."}
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeAutoGitHubReadToolLoopLLMClient(),
+        tool_adapters={"github.read": FakeGitHubReadAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Inspect the repo architecture for a planning task.",
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    github_read = next(call for call in result.tool_calls if call["tool_name"] == "github.read")
+    assert github_read["status"] == "complete"
+    assert not result.tool_loop["iterations"][0]["blocked"]
+    assert "Repository architecture inspected" in (result.output_text or "")
+
+
+def test_default_tools_include_safe_aggregate_github_read() -> None:
+    adapters = default_tool_adapters()
+
+    assert "github.read" in adapters
+    assert adapters["github.read"].key == "github.read"
+
+
+def test_github_read_search_terms_extract_architecture_hints() -> None:
+    terms = _github_read_search_terms(
+        "Inspect how Maestro's tool registry, credential handling, and workflow scheduler work."
+    )
+
+    assert "tool registry" in terms
+    assert "credential" in terms
+    assert "workflow" in terms
+    assert len(terms) <= 8
+
+
+def test_llm_gateway_accepts_task_payload_alias(session: Session) -> None:
+    AgentRegistryService(session).create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro LLM Gateway Tester",
+        name="Maestro LLM Gateway Tester",
+        role_summary="Tests internal LLM gateway payload handling.",
+        tool_permissions={"llm.gateway": {"permission": "use"}},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-llm-gateway-tester")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.llm_gateway",
+        objective="Synthesize a test plan.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+
+    output = LLMGatewayToolAdapter().execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=None,
+            dry_run=True,
+        ),
+        {"task": "Synthesize a voice input feature plan.", "context": "Use Maestro constraints."},
+    )
+
+    assert output["dry_run"] is True
+    assert output["prompt_preview"] == "Synthesize a voice input feature plan."
+    assert output["context_chars"] > 0
+
+
+def test_tool_results_are_compacted_before_prompt_reuse() -> None:
+    raw_result = {
+        "id": "tool-call-1",
+        "tool_name": "memory.context_bundle",
+        "status": "complete",
+        "output_payload": {
+            "summary": {"type": "memory_context_bundle", "included_count": 8},
+            "rendered_text": "Important memory. " * 1000,
+        },
+    }
+
+    compact = _compact_tool_results_for_prompt([raw_result], max_total_chars=1800)
+
+    assert compact[0]["id"] == "tool-call-1"
+    assert compact[0]["summary"]["included_count"] == 8
+    assert compact[0]["raw_output_chars"] > 10000
+    assert len(json.dumps(compact, default=str)) < 2200
+    assert compact[0]["full_output"] == "stored_in_tool_call_output_payload"
+
+
+def test_run_agent_once_can_auto_execute_internal_llm_gateway_tool(
+    session: Session,
+) -> None:
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeAutoLLMGatewayToolLoopLLMClient(),
+        tool_adapters={"llm.gateway": FakeLLMGatewayAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Survey CAD-to-fabrication options for Maestro.",
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    assert result.tool_loop["enabled"] is True
+    assert result.tool_loop["iterations"][0]["requested_tools"][0]["tool_key"] == "llm.gateway"
+    assert result.tool_loop["iterations"][0]["executed"][0]["status"] == "complete"
+    assert not result.tool_loop["iterations"][0]["blocked"]
+    assert any(call["tool_name"] == "llm.gateway" for call in result.tool_calls)
+    assert result.output_text is not None
+    assert "CAD integration options reviewed" in result.output_text
+
+
+def test_run_agent_once_can_auto_execute_memory_context_bundle_tool(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert domain is not None
+    session.add(
+        MemoryItem(
+            scope="domain",
+            domain_id=domain.id,
+            memory_type="decision",
+            title="Shared CAD tool infrastructure",
+            content=(
+                "CAD design agents should use shared CAD tool infrastructure instead of "
+                "owning separate CAD integrations per agent."
+            ),
+            impact_level="medium",
+            importance=0.9,
+            metadata_={},
+        )
+    )
+    session.commit()
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeAutoMemoryContextToolLoopLLMClient(),
+        tool_adapters={"memory.context_bundle": MemoryContextBundleToolAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Use memory to answer the CAD tool architecture question.",
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    assert result.tool_loop["iterations"][0]["requested_tools"][0]["tool_key"] == "memory.context_bundle"
+    assert result.tool_loop["iterations"][0]["executed"][0]["status"] == "complete"
+    assert not result.tool_loop["iterations"][0]["blocked"]
+    memory_call = next(call for call in result.tool_calls if call["tool_name"] == "memory.context_bundle")
+    assert memory_call["output_payload"]["summary"]["type"] == "memory_context_bundle"
+    assert memory_call["output_payload"]["included_count"] >= 1
+    assert result.output_text is not None
+    assert "Retrieved Maestro memory" in result.output_text
 
 
 def test_run_agent_once_blocks_auto_planned_write_tools_for_approval(

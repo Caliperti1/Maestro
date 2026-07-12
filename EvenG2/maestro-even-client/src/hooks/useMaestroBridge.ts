@@ -12,7 +12,6 @@ type BridgeLike = {
   disconnect: () => void;
   sendTextFromUser: (text: string) => void | Promise<void>;
   sendVoiceTranscript: (transcript: string) => void | Promise<void>;
-  startNewSession?: () => void | Promise<void>;
 };
 
 const systemMessage = (text: string): ChatMessage => ({
@@ -98,14 +97,6 @@ export function useMaestroBridge(mode: BridgeMode, baseUrl: string, pollInterval
         if (bridge instanceof MaestroApiBridge) {
           await bridge.pollNow();
         }
-      },
-      startNewSession: async () => {
-        const bridge = bridgeRef.current;
-        if (bridge instanceof MaestroApiBridge) {
-          await bridge.startNewSession();
-          return;
-        }
-        setMessages((prev) => [...prev, systemMessage("Mock mode: new session trigger received.")]);
       },
     }),
     [mode],

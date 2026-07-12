@@ -136,6 +136,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["queue_item_id"], ["workflow_queue_items.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["workflow_run_id"], ["workflow_runs.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("resource_key", "lock_scope", name="uq_scheduler_resource_lock_scope"),
     )
     op.create_index("ix_scheduler_resource_locks_lease_expires_at", "scheduler_resource_locks", ["lease_expires_at"])
     op.create_index("ix_scheduler_resource_locks_queue_item_id", "scheduler_resource_locks", ["queue_item_id"])

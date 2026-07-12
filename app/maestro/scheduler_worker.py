@@ -1,3 +1,11 @@
+"""Durable scheduler worker for autonomous Maestro work.
+
+The scheduler separates "work exists" from "work is executing". Definitions create workflow runs,
+runs contain queue items, and this worker claims ready items while honoring scheduler state. It is
+safe to call `run_once` from tests, API buttons, or the app heartbeat; each call performs one small
+unit of queue adjudication and agent execution.
+"""
+
 import json
 import uuid
 from datetime import UTC, datetime
@@ -7,11 +15,12 @@ from sqlalchemy.orm import Session
 
 from app.agents.runtime import (
     AgentRuntimeError,
+    InteractionArtifactPackager,
     PromptAggregationService,
     PromptPackageRequest,
 )
 from app.core.config import get_settings
-from app.db.models import Agent, Report, RuntimeSetting, WorkflowQueueItem, WorkflowRun
+from app.db.models import Agent, Artifact, Domain, Report, RuntimeSetting, WorkflowQueueItem, WorkflowRun
 from app.maestro.channel import record_channel_message
 from app.maestro.scheduler import SchedulerService
 
@@ -212,6 +221,9 @@ class SchedulerWorkerService:
                     f"through {agent.name}."
                 ),
             )
+            if run.status == "completed":
+                self._stage_completed_workflow_run(run)
+                self._post_workflow_completion_update(run)
             return {
                 "queue_item": self.scheduler.queue_item_payload(completed),
                 "agent_run": self._agent_run_payload(agent_run),
@@ -324,6 +336,114 @@ class SchedulerWorkerService:
             "completed_at": datetime.now(UTC).isoformat(),
         }
 
+    def _stage_completed_workflow_run(self, run: WorkflowRun) -> None:
+        output_payload = run.output_payload or {}
+        if output_payload.get("staged_artifact_path"):
+            return
+        domain_key = "maestro-development"
+        if run.domain_id:
+            domain = self.session.get(Domain, run.domain_id)
+            if domain is not None:
+                domain_key = domain.key
+        queue_items = self.scheduler._queue_items_for_run(run.id)
+        generated_artifacts: list[dict[str, Any]] = []
+        tool_calls: list[dict[str, Any]] = []
+        output_sections: list[str] = []
+        for item in queue_items:
+            item_output = item.output_payload or {}
+            agent_run = item_output.get("agent_run") if isinstance(item_output.get("agent_run"), dict) else item_output
+            generated_artifacts.append(
+                {
+                    "name": item.external_key,
+                    "type": "scheduled_queue_item",
+                    "queue_item_id": str(item.id),
+                    "task_id": agent_run.get("task_id"),
+                    "report_id": agent_run.get("report_id"),
+                    "staged_artifact_path": agent_run.get("staged_artifact_path"),
+                    "artifact_id": agent_run.get("artifact_id"),
+                }
+            )
+            if isinstance(agent_run.get("tool_calls"), list):
+                tool_calls.extend(agent_run["tool_calls"])
+            preview = str(
+                agent_run.get("output_preview")
+                or agent_run.get("execution_note")
+                or ""
+            ).strip()
+            if preview:
+                output_sections.append(f"## {item.external_key}\n{preview}")
+        package = InteractionArtifactPackager(self.session).build_package(
+            domain_key=domain_key,
+            agent_key=None,
+            user_input=str((run.input_payload or {}).get("summary") or self._run_title(run)),
+            maestro_tasking=str((run.input_payload or {}).get("summary") or "Scheduled Maestro workflow"),
+            agent_output="\n\n".join(output_sections) or f"Scheduled workflow {run.id} completed.",
+            tool_calls=tool_calls,
+            generated_artifacts=generated_artifacts,
+            next_steps=["Curate durable context from this scheduled workflow artifact."],
+            provenance={
+                "workflow_run_id": str(run.id),
+                "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
+                "canonical_scheduled_workflow_artifact": True,
+                "source_type": run.source_type,
+            },
+        )
+        staged = InteractionArtifactPackager(self.session).stage_package(package)
+        artifact = self.session.get(Artifact, uuid.UUID(staged.artifact_id or ""))
+        if artifact is not None:
+            artifact.metadata_ = {
+                **(artifact.metadata_ or {}),
+                "workflow_run_id": str(run.id),
+                "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
+                "canonical_scheduled_workflow_artifact": True,
+            }
+        run.output_payload = {
+            **output_payload,
+            "staged_artifact_path": staged.path,
+            "artifact_id": staged.artifact_id,
+        }
+        self.session.commit()
+
+    def _post_workflow_completion_update(self, run: WorkflowRun) -> None:
+        self.session.refresh(run)
+        output_payload = run.output_payload or {}
+        if output_payload.get("completion_channel_message_posted"):
+            return
+        queue_items = self.scheduler._queue_items_for_run(run.id)
+        summaries: list[str] = []
+        for item in queue_items[:4]:
+            item_output = item.output_payload or {}
+            agent_run = item_output.get("agent_run") if isinstance(item_output.get("agent_run"), dict) else item_output
+            preview = str(
+                agent_run.get("output_preview")
+                or agent_run.get("execution_note")
+                or f"Finished with status {agent_run.get('status') or item.status}."
+            ).strip()
+            agent_name = str(agent_run.get("agent_name") or item.external_key)
+            summaries.append(f"- {agent_name}: {self._plain_text_preview(preview, max_chars=260)}")
+        message = f"I finished scheduled workflow `{self._run_title(run)}`."
+        if summaries:
+            message += "\n\nWhat came back:\n" + "\n".join(summaries)
+        else:
+            message += " No agent report text was available, but the queue items completed."
+        record_channel_message(
+            self.session,
+            sender="maestro",
+            content=message,
+            metadata={
+                "source": "scheduler_worker",
+                "status": "completed",
+                "workflow_run_id": str(run.id),
+                "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
+                "event_type": "workflow_completed",
+            },
+        )
+        run.output_payload = {
+            **(run.output_payload or {}),
+            "completion_channel_message_posted": True,
+        }
+        self.session.commit()
+
     def _post_channel_update(
         self,
         run: WorkflowRun,
@@ -348,3 +468,9 @@ class SchedulerWorkerService:
 
     def _run_title(self, run: WorkflowRun) -> str:
         return str((run.input_payload or {}).get("summary") or run.id)
+
+    def _plain_text_preview(self, value: str, *, max_chars: int) -> str:
+        text = " ".join(value.replace("```", "").split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1].rstrip() + "…"

@@ -253,7 +253,7 @@ def test_tool_connection_endpoint_redacts_config(
     assert connections.json()["connections"][0]["display_name"] == "Praxis Gmail"
 
 
-def test_run_once_endpoint_prepares_stubbed_run(
+def test_run_once_endpoint_prepares_manual_run(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -273,7 +273,7 @@ def test_run_once_endpoint_prepares_stubbed_run(
     assert response.status_code == 200
     payload = response.json()["run"]
     assert payload["status"] == "prepared"
-    assert payload["scheduler"]["status"] == "stubbed"
+    assert payload["scheduler"]["status"] == "manual_run"
     assert payload["prompt_package"]["agent"]["key"] == "praxis-planning-agent"
     assert payload["task_id"] is not None
     assert payload["output_text"] is None

@@ -8,12 +8,26 @@ from sqlalchemy.orm import Session
 
 from app.agents.runtime import PromptAggregationService
 from app.agents.runtime import AgentRegistryService
+from app.api import maestro as maestro_api
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.db.models import Artifact, Contact, Report, RoutedItem, Task, Todo, WorkflowDefinition, WorkflowRun
+from app.db.models import (
+    Artifact,
+    Contact,
+    Conversation,
+    Idea,
+    Message,
+    Report,
+    RoutedItem,
+    Task,
+    Todo,
+    WorkflowDefinition,
+    WorkflowRun,
+)
 from app.db.session import get_db
 from app.llm.client import LLMClientError
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
+from app.maestro.intent_classifier import MaestroMessageUnderstandingResponse
 from app.maestro.planner import MaestroPlannerResponse
 from app.maestro.scheduler import SchedulerService
 
@@ -199,6 +213,166 @@ class FakeMultiDomainPlannerLLMClient:
                     "suggested_agent_keys": ["maestro-introspection-agent"],
                     "expected_output": "Maestro gap report with implementation recommendations.",
                     "rationale": "Maestro Development owns system improvement.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakeSameAgentCapacityPlannerLLMClient:
+    provider = "test"
+    model = "test-same-agent-capacity-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Plan with multiple downstream engineering tasks.",
+            "direct_response": "I prepared a dependency-aware plan.",
+            "planner_notes": "Fake planner response for agent capacity.",
+            "work_items": [
+                {
+                    "id": "wi_research",
+                    "type": "workflow_task",
+                    "title": "Research integration options",
+                    "description": "Research Google Workspace integration options.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["research"],
+                    "required_tools": ["web.search"],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-capacity-researcher"],
+                    "expected_output": "Research brief.",
+                    "rationale": "Research is needed first.",
+                },
+                {
+                    "id": "wi_product",
+                    "type": "workflow_task",
+                    "title": "Define product behavior",
+                    "description": "Define user-facing product behavior.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["product planning"],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-capacity-product"],
+                    "expected_output": "Product brief.",
+                    "rationale": "Product planning is needed first.",
+                },
+                {
+                    "id": "wi_security",
+                    "type": "workflow_task",
+                    "title": "Draft security model",
+                    "description": "Draft security and permission model.",
+                    "domain_key": "maestro-development",
+                    "priority": "high",
+                    "required_capabilities": ["security architecture"],
+                    "required_tools": [],
+                    "dependencies": ["wi_research"],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-capacity-engineer"],
+                    "expected_output": "Security model.",
+                    "rationale": "Engineering security design follows research.",
+                },
+                {
+                    "id": "wi_roadmap",
+                    "type": "workflow_task",
+                    "title": "Draft implementation roadmap",
+                    "description": "Draft implementation roadmap.",
+                    "domain_key": "maestro-development",
+                    "priority": "high",
+                    "required_capabilities": ["architecture planning"],
+                    "required_tools": [],
+                    "dependencies": ["wi_research", "wi_product"],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-capacity-engineer"],
+                    "expected_output": "Implementation roadmap.",
+                    "rationale": "Engineering roadmap follows research and product work.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakeSameAgentDependentPlannerLLMClient:
+    provider = "test"
+    model = "test-same-agent-dependent-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Plan a feature with sequential engineering work.",
+            "direct_response": "I prepared a dependency-aware engineering plan.",
+            "planner_notes": "Fake planner response for same-agent dependency handling.",
+            "work_items": [
+                {
+                    "id": "wi_1",
+                    "type": "workflow_task",
+                    "title": "Map existing upload architecture",
+                    "description": "Inspect existing frontend and backend upload handling.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["architecture", "codebase inspection"],
+                    "required_tools": ["github.read"],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-chief-engineer"],
+                    "expected_output": "Architecture findings.",
+                    "rationale": "The chief engineer should inspect the current system first.",
+                },
+                {
+                    "id": "wi_2",
+                    "type": "workflow_task",
+                    "title": "Design chat file import behavior",
+                    "description": "Design the product and API behavior for chat file import.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["architecture", "product design"],
+                    "required_tools": [],
+                    "dependencies": ["wi_1"],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-chief-engineer"],
+                    "expected_output": "Design proposal.",
+                    "rationale": "Design depends on knowing the existing upload architecture.",
+                },
+                {
+                    "id": "wi_3",
+                    "type": "workflow_task",
+                    "title": "Draft implementation plan",
+                    "description": "Draft phased implementation tasks for the feature.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": ["architecture", "implementation planning"],
+                    "required_tools": [],
+                    "dependencies": ["wi_1", "wi_2"],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-chief-engineer"],
+                    "expected_output": "Implementation plan.",
+                    "rationale": "Implementation planning depends on architecture and design.",
                 },
             ],
         }
@@ -669,6 +843,97 @@ class FakeStandaloneContactPlannerLLMClient:
         raise AssertionError("Planner should use structured_response.")
 
 
+class FakeThinkTankPlannerLLMClient:
+    provider = "test"
+    model = "test-think-tank-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Capture CAD AI tool concept.",
+            "direct_response": "That CAD-to-print concept is worth keeping in Think Tank.",
+            "planner_notes": "Fake think tank response.",
+            "work_items": [
+                {
+                    "id": "wi_cad_concept",
+                    "type": "memory_candidate",
+                    "title": "CAD AI tool feature concept",
+                    "description": (
+                        "A CAD AI tool could let mechanical design agents generate STL files "
+                        "for later slicing and OctoPrint handoff."
+                    ),
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": [],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": True,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Idea saved for later feature design.",
+                    "rationale": "This is an immature feature concept.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
+class FakeWorkflowWithDuplicateTaskPlannerLLMClient:
+    provider = "test"
+    model = "test-workflow-with-duplicate-task-planner"
+
+    def structured_response(self, **kwargs):
+        return {
+            "plan_summary": "Execute work without creating a personal reminder.",
+            "direct_response": None,
+            "planner_notes": "Fake duplicate task response.",
+            "work_items": [
+                {
+                    "id": "wi_agent_work",
+                    "type": "workflow_task",
+                    "title": "Research CAD SOTA",
+                    "description": "Have the SOTA researcher investigate current CAD AI tooling.",
+                    "domain_key": "maestro-development",
+                    "priority": "high",
+                    "required_capabilities": ["research"],
+                    "required_tools": ["web.search"],
+                    "dependencies": [],
+                    "needs_agent": True,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": False,
+                    "suggested_agent_keys": ["maestro-introspection-agent"],
+                    "expected_output": "Current-state research report.",
+                    "rationale": "This is work for an agent to execute.",
+                },
+                {
+                    "id": "wi_duplicate_todo",
+                    "type": "standalone_task",
+                    "title": "Research CAD SOTA",
+                    "description": "Have the SOTA researcher investigate current CAD AI tooling.",
+                    "domain_key": "maestro-development",
+                    "priority": "normal",
+                    "required_capabilities": [],
+                    "required_tools": [],
+                    "dependencies": [],
+                    "needs_agent": False,
+                    "needs_user_input": False,
+                    "blocks_execution": False,
+                    "can_log_directly": True,
+                    "suggested_agent_keys": [],
+                    "expected_output": "Task routed.",
+                    "rationale": "Duplicate extraction of agent work.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        raise AssertionError("Planner should use structured_response.")
+
+
 class FakeScheduledPlannerLLMClient:
     provider = "test"
     model = "test-scheduled-planner"
@@ -760,6 +1025,21 @@ def test_orchestrator_plan_is_registry_aware_and_plan_first(session: Session) ->
     assert session.query(Report).count() == 0
 
 
+def test_orchestrator_registry_snapshot_is_prompt_compact(session: Session) -> None:
+    service = MaestroOrchestratorService(session)
+    snapshot = service._registry_snapshot(
+        service.registry.list_domain_contexts(),
+        service.registry.list_specs(),
+        service.registry.list_tools(),
+    )
+
+    assert len(json.dumps(snapshot, default=str)) < 15000
+    assert "allowed_tool_keys" in snapshot["agents"][0]
+    assert "allowed_tools" not in snapshot["agents"][0]
+    assert "connected_domains" not in snapshot["tools"][0]
+    assert "authorized_agents" not in snapshot["tools"][0]
+
+
 def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None:
     registry = AgentRegistryService(session)
     registry.create_agent_spec(
@@ -792,7 +1072,8 @@ def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None
     assert "Triages Praxis email" in email_subtask.objective
     assert "only on the portion" in email_subtask.objective
     assert email_subtask.rationale is not None
-    assert "wi_1" in email_subtask.rationale
+    assert email_subtask.work_item_ids == ["wi_2"]
+    assert "wi_2" in email_subtask.rationale
 
 
 def test_orchestrator_decomposes_with_llm_before_agent_matching(session: Session) -> None:
@@ -827,6 +1108,103 @@ def test_orchestrator_decomposes_with_llm_before_agent_matching(session: Session
     assert "Jane Smith is the partner lead" not in subtask.objective
 
 
+def test_orchestrator_serializes_multiple_subtasks_for_same_agent(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro Capacity Researcher",
+        name="Maestro Capacity Researcher",
+        role_summary="Researches external integration options.",
+        tool_permissions={"web.search": {"permission": "read"}},
+    )
+    registry.create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro Capacity Product",
+        name="Maestro Capacity Product",
+        role_summary="Defines product behavior and UX.",
+    )
+    registry.create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro Capacity Engineer",
+        name="Maestro Capacity Engineer",
+        role_summary="Designs architecture, security, and implementation roadmaps.",
+    )
+
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeSameAgentCapacityPlannerLLMClient(),
+    ).create_plan("Plan Google Workspace integration.")
+
+    assert all(len(stage) == len(set(stage)) for stage in plan.execution_stages)
+    engineer_subtasks = [
+        subtask
+        for subtask in plan.subtasks
+        if subtask.agent_key == "maestro-capacity-engineer"
+    ]
+    assert len(engineer_subtasks) == 2
+    assert "wi_security" in engineer_subtasks[1].depends_on_work_item_ids
+
+
+def test_orchestrator_splits_dependent_work_for_same_agent(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro Chief Engineer",
+        name="Maestro Chief Engineer",
+        role_summary="Designs Maestro architecture, codebase integration, and implementation plans.",
+        tool_permissions={"github.read": {"permission": "read"}},
+    )
+
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeSameAgentDependentPlannerLLMClient(),
+    ).create_plan("Plan chat file import for Maestro.")
+
+    chief_subtasks = [
+        subtask
+        for subtask in plan.subtasks
+        if subtask.agent_key == "maestro-chief-engineer"
+    ]
+    assert [subtask.work_item_ids for subtask in chief_subtasks] == [["wi_1"], ["wi_2"], ["wi_3"]]
+    assert chief_subtasks[0].depends_on_work_item_ids == []
+    assert chief_subtasks[1].depends_on_work_item_ids == ["wi_1"]
+    assert chief_subtasks[2].depends_on_work_item_ids == ["wi_1", "wi_2"]
+    assert plan.execution_stages == [
+        ["maestro-chief-engineer"],
+        ["maestro-chief-engineer"],
+        ["maestro-chief-engineer"],
+    ]
+
+
+def test_orchestrator_scheduler_step_reports_actionable_states(session: Session) -> None:
+    service = MaestroOrchestratorService(session)
+
+    assert service._current_scheduler_step([])["current_step"] == "No executable agent work."
+    assert service._current_scheduler_step(
+        [{"status": "pending", "agent_name": "Chief Engineer", "stage_index": 1, "id": "q1"}]
+    )["current_step"] == "Ready to queue: Chief Engineer"
+    assert service._current_scheduler_step(
+        [{"status": "running", "agent_name": "Chief Engineer", "stage_index": 1, "id": "q1"}]
+    )["current_step"] == "Running: Chief Engineer"
+    assert service._current_scheduler_step(
+        [{"status": "approval_required", "agent_name": "Chief Engineer", "stage_index": 1, "id": "q1"}]
+    )["current_step"] == "Waiting for approval: Chief Engineer"
+    assert service._current_scheduler_step(
+        [
+            {
+                "status": "blocked",
+                "agent_name": "Chief Engineer",
+                "stage_index": 1,
+                "id": "q1",
+                "error_message": "Need Chris.",
+            }
+        ]
+    )["current_step"] == "Waiting on Chief Engineer: Need Chris."
+    assert service._current_scheduler_step(
+        [{"status": "completed", "agent_name": "Chief Engineer", "stage_index": 1, "id": "q1"}]
+    )["current_step"] == "Workflow complete."
+
+
 def test_orchestrator_assigns_each_work_item_to_one_best_agent(session: Session) -> None:
     registry = AgentRegistryService(session)
     registry.create_agent_spec(
@@ -848,6 +1226,45 @@ def test_orchestrator_assigns_each_work_item_to_one_best_agent(session: Session)
     assert len(plan.subtasks) == 1
     assert plan.subtasks[0].agent_key == "maestro-coding-agent"
     assert plan.subtasks[0].work_item_ids == ["wi_issue_50"]
+
+
+def test_orchestrator_fallback_feature_plan_is_conversational_and_role_sized(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro Chief Engineer",
+        name="Maestro Chief Engineer",
+        role_summary="Designs Maestro architecture, agent boundaries, permission models, and rollout plans.",
+        tool_permissions={"memory.context_bundle": {"permission": "read"}},
+    )
+    registry.create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro SOTA Researcher",
+        name="Maestro SOTA Researcher",
+        role_summary="Researches current tools, APIs, SDKs, and state of the art for Maestro integrations.",
+        tool_permissions={"web.search": {"permission": "read"}},
+    )
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FailingPlannerLLMClient(),
+    ).create_plan(
+        "Lets plan a new Maestro feature that will let Maestro interact with my Google Drive, "
+        "Google Docs, Sheets etc"
+    )
+
+    assert plan.planner_mode == "deterministic"
+    assert plan.direct_response is not None
+    assert "feature-design conversation" in plan.direct_response
+    assert [item.title for item in plan.work_items] == [
+        "Draft Maestro feature architecture",
+        "Research Google Workspace integration options",
+    ]
+    subtask_items = {subtask.agent_key: subtask.work_item_ids for subtask in plan.subtasks}
+    assert subtask_items["maestro-chief-engineer"] == ["wi_1"]
+    assert subtask_items["maestro-sota-researcher"] == ["wi_2"]
+    assert "maestro-coding-agent" not in subtask_items
 
 
 def test_planning_only_issue_work_does_not_require_codex(session: Session) -> None:
@@ -904,7 +1321,7 @@ def test_orchestrator_prevents_broad_assignment_and_self_dependencies(session: S
     assert assignments[("groundtruth-chief-engineer", ("wi_4",))] == set()
     assert assignments[("paxis-crm-manager", ("wi_6",))] == {"wi_1"}
     assert assignments[("praxis-planning-agent", ("wi_3",))] == set()
-    assert assignments[("praxis-planning-agent", ("wi_8",))] == {"wi_1", "wi_4", "wi_6"}
+    assert assignments[("praxis-planning-agent", ("wi_8",))] == {"wi_1", "wi_3", "wi_4", "wi_6"}
     assert all(
         not (set(subtask.work_item_ids or []) & set(subtask.depends_on_work_item_ids or []))
         for subtask in plan.subtasks
@@ -915,7 +1332,7 @@ def test_orchestrator_prevents_broad_assignment_and_self_dependencies(session: S
     synthesis_subtask = next(
         subtask for subtask in plan.subtasks if "wi_8" in (subtask.work_item_ids or [])
     )
-    assert set(synthesis_subtask.depends_on_work_item_ids or []) == {"wi_1", "wi_4", "wi_6"}
+    assert set(synthesis_subtask.depends_on_work_item_ids or []) == {"wi_1", "wi_3", "wi_4", "wi_6"}
 
     assert set(plan.workflow_graph["stages"][0]["work_item_ids"]) == {"wi_3", "wi_4"}
     assert all(
@@ -1034,6 +1451,122 @@ def test_orchestrator_saves_email_event_triggered_workflow(
     assert definition.workflow_spec["queue_items"][0]["domain_key"] == "praxis"
 
 
+def test_schedule_candidate_ignores_hidden_topic_schedule_context(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeScheduledPlannerLLMClient(
+            title="Create GitHub issue for Maestro mobile tunnel feature",
+        ),
+    )
+
+    plan = service.create_plan(
+        "<latest_chris_message>\n"
+        "Sweet now lets create a github issue for this please\n"
+        "</latest_chris_message>\n\n"
+        "<maestro_hidden_context purpose=\"topic_continuity\" do_not_copy=\"true\">\n"
+        "Previous assistant message: I scheduled a recurring workflow yesterday.\n"
+        "</maestro_hidden_context>"
+    )
+
+    assert plan.user_input == "Sweet now lets create a github issue for this please"
+    assert plan.scheduler["schedule_candidate"] is None
+
+
+def test_schedule_candidate_respects_run_now_negation(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeScheduledPlannerLLMClient(
+            title="Create GitHub issue for Maestro mobile tunnel feature",
+        ),
+    )
+
+    plan = service.create_plan(
+        "Do not schedule this; queue it for execution. This should be a run now task, not a schedule."
+    )
+
+    assert plan.scheduler["schedule_candidate"] is None
+
+
+def test_classifier_one_time_timing_suppresses_schedule_candidate(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeScheduledPlannerLLMClient(
+            title="Create GitHub issue for Maestro mobile tunnel feature",
+        ),
+    )
+    understanding = MaestroMessageUnderstandingResponse(
+        topic_scope="active_topic",
+        relationship_to_active_plan="refines_plan",
+        intents=[
+            {
+                "type": "workflow_request",
+                "span": "queue it for execution this should be a run now task not a schedule",
+                "confidence": 0.94,
+                "recommended_next_step": "plan",
+                "workflow_timing": "one_time",
+                "schedule_details": {},
+            }
+        ],
+        recommended_next_step="plan",
+        confidence=0.93,
+        reason="Chris wants one immediate execution, not a schedule.",
+    )
+    message = maestro_api._message_with_intent_context(
+        "<latest_chris_message>\n"
+        "do not schedule this, queue it for execution this should be a run now task not a schedule\n"
+        "</latest_chris_message>\n\n"
+        "<maestro_hidden_context purpose=\"topic_continuity\" do_not_copy=\"true\">\n"
+        "Prior message mentioned a scheduled workflow.\n"
+        "</maestro_hidden_context>",
+        understanding,
+    )
+
+    plan = service.create_plan(message)
+
+    assert plan.scheduler["schedule_candidate"] is None
+
+
+def test_classifier_recurring_timing_creates_schedule_candidate(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeScheduledPlannerLLMClient(
+            title="Review Maestro backlog",
+        ),
+    )
+    understanding = MaestroMessageUnderstandingResponse(
+        topic_scope="active_topic",
+        relationship_to_active_plan="none",
+        intents=[
+            {
+                "type": "workflow_request",
+                "span": "make this a daily morning run",
+                "confidence": 0.92,
+                "recommended_next_step": "plan",
+                "workflow_timing": "recurring",
+                "schedule_details": {
+                    "trigger_type": "recurring",
+                    "time_of_day": "09:00",
+                    "interval_minutes": 1440,
+                },
+            }
+        ],
+        recommended_next_step="plan",
+        confidence=0.92,
+        reason="Chris wants recurring scheduled work.",
+    )
+    message = maestro_api._message_with_intent_context(
+        "Please set that up.",
+        understanding,
+    )
+
+    plan = service.create_plan(message)
+
+    candidate = plan.scheduler["schedule_candidate"]
+    assert candidate["trigger_type"] == "recurring"
+    assert candidate["trigger_config"]["time_of_day"] == "09:00"
+    assert candidate["trigger_config"]["interval_minutes"] == 1440
+
+
 def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     session: Session,
     tmp_path: Path,
@@ -1087,6 +1620,10 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     assert parent is not None
     assert parent.status == "completed"
     assert parent.output_payload["synthesis_report_id"] == run.synthesis_report_id
+    assert "I finished the workflow" in run.chat_summary
+    assert "What came back:" in run.chat_summary
+    assert "Praxis Planning Agent" in run.chat_summary
+    assert "Agent registry and scoped memory were available" in run.chat_summary
     completed_queue = parent.input_payload["scheduler"]["queue_items"]
     assert parent.input_payload["scheduler"]["status"] == "completed"
     assert [item["status"] for item in completed_queue] == ["completed", "completed"]
@@ -1385,7 +1922,9 @@ def test_maestro_api_respond_plans_without_active_plan(
     assert response.status_code == 200
     payload = response.json()
     assert payload["kind"] == "planned"
-    assert payload["message"].startswith("I drafted a plan")
+    assert "I prepared a plan to help with this" in payload["message"]
+    assert "Coordinate requested workflow" in payload["message"]
+    assert "run it after you approve" in payload["message"]
     assert payload["plan"]["status"] == "proposed"
     assert payload["chat_plan"] is None
 
@@ -1473,6 +2012,325 @@ def test_maestro_historical_session_restore_does_not_replace_primary_channel(
     )
     assert second.status_code == 200
     assert second.json()["conversation"]["id"] == channel_id
+
+
+def test_maestro_api_new_topic_filters_visible_channel_messages(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first = client.post(
+        "/maestro/respond",
+        json={"message": "Tell me about Maestro's current channel model."},
+    )
+    assert first.status_code == 200
+    first_payload = first.json()
+    first_topic_id = first_payload["channel_context"]["topic_id"]
+    assert len(first_payload["conversation"]["messages"]) == 2
+
+    second = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Hey Maestro I want to brainstorm a new feature for Maestro Development, "
+                "integrating a CAD tool so a mechanical design agent can generate STL files."
+            )
+        },
+    )
+
+    assert second.status_code == 200
+    payload = second.json()
+    assert payload["channel_context"]["scope"] == "new_topic"
+    assert payload["channel_context"]["started_new_topic"] is True
+    assert payload["channel_context"]["topic_id"] != first_topic_id
+    assert "I started a fresh topic for this" in payload["message"]
+    assert "I can help you think this through here first" in payload["message"]
+    assert "mechanical design agent" not in payload["message"]
+    visible_messages = payload["conversation"]["messages"]
+    assert [message["sender"] for message in visible_messages] == ["user", "maestro"]
+    assert "CAD tool" in visible_messages[0]["content"]
+    assert "channel model" not in " ".join(message["content"] for message in visible_messages)
+    session_artifact = next(
+        artifact
+        for artifact in session.query(Artifact).all()
+        if (artifact.metadata_ or {}).get("canonical_session_artifact") is True
+    )
+    assert Path(session_artifact.uri).is_file()
+    assert Path(session_artifact.uri).parent == tmp_path / "maestro-development" / "inbox"
+
+
+def test_maestro_api_followup_stays_in_active_topic(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Hey Maestro I want to brainstorm a new feature for Maestro Development, "
+                "integrating a CAD tool."
+            )
+        },
+    )
+    assert first.status_code == 200
+    first_payload = first.json()
+    topic_id = first_payload["channel_context"]["topic_id"]
+
+    followup = client.post(
+        "/maestro/respond",
+        json={"message": "How will this feature interact with the existing tool registry?"},
+    )
+
+    assert followup.status_code == 200
+    payload = followup.json()
+    assert payload["channel_context"]["scope"] == "active_topic"
+    assert payload["channel_context"]["topic_id"] == topic_id
+    assert payload["channel_context"]["started_new_topic"] is False
+    assert len(payload["conversation"]["messages"]) == 4
+
+    second_followup = client.post(
+        "/maestro/respond",
+        json={"message": "This new feature should also support STEP files."},
+    )
+
+    assert second_followup.status_code == 200
+    second_payload = second_followup.json()
+    assert second_payload["channel_context"]["scope"] == "active_topic"
+    assert second_payload["channel_context"]["topic_id"] == topic_id
+    assert second_payload["channel_context"]["started_new_topic"] is False
+
+
+def test_maestro_api_plan_new_feature_starts_fresh_topic(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Lets plan a new feature for Maestro Development that integrates iMessage "
+                "notifications."
+            )
+        },
+    )
+    assert first.status_code == 200
+    first_topic_id = first.json()["channel_context"]["topic_id"]
+
+    second = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Lets plan a new feature that allows for file import directly in the chat here."
+            )
+        },
+    )
+
+    assert second.status_code == 200
+    payload = second.json()
+    assert payload["channel_context"]["scope"] == "new_topic"
+    assert payload["channel_context"]["started_new_topic"] is True
+    assert payload["channel_context"]["topic_id"] != first_topic_id
+    visible_text = " ".join(message["content"] for message in payload["conversation"]["messages"])
+    assert "file import directly in the chat" in visible_text
+    assert "iMessage" not in visible_text
+
+
+def test_maestro_api_new_agent_plan_starts_fresh_topic_despite_typo(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    cad = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "I want to brainstorm a Maestro feature where mechanical design agents "
+                "generate STL files."
+            )
+        },
+    )
+    assert cad.status_code == 200
+    cad_topic_id = cad.json()["channel_context"]["topic_id"]
+
+    praxis = client.post(
+        "/maestro/respond",
+        json={"message": "Iwant to plan a new agent for Praxis that will help generate proposals for us"},
+    )
+
+    assert praxis.status_code == 200
+    payload = praxis.json()
+    assert payload["channel_context"]["scope"] == "new_topic"
+    assert payload["channel_context"]["started_new_topic"] is True
+    assert payload["channel_context"]["topic_id"] != cad_topic_id
+    visible_text = " ".join(message["content"] for message in payload["conversation"]["messages"])
+    assert "generate proposals" in visible_text
+    assert "STL files" not in visible_text
+
+
+def test_maestro_api_new_topic_ignores_stale_active_plan_id(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    cad = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    assert cad.status_code == 200
+    stale_plan_id = cad.json()["plan"]["parent_task_id"]
+    cad_topic_id = cad.json()["channel_context"]["topic_id"]
+
+    drive = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "I want to begin discussing a new feature for Maestro to interface with "
+                "Google Drive and edit Google Docs and Sheets."
+            ),
+            "active_plan_id": stale_plan_id,
+        },
+    )
+
+    assert drive.status_code == 200
+    payload = drive.json()
+    assert payload["channel_context"]["scope"] == "new_topic"
+    assert payload["channel_context"]["topic_id"] != cad_topic_id
+    assert payload["classification"] in {"planned", "chat_only", "routed"}
+    assert "STL files" not in " ".join(message["content"] for message in payload["conversation"]["messages"])
+
+
+def test_maestro_api_restart_session_archives_work_and_starts_clean_topic(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    assert first.status_code == 200
+    assert first.json()["plan"] is not None
+
+    restarted = client.post(
+        "/maestro/respond",
+        json={"message": "Restart session and clear current work so we can start fresh."},
+    )
+
+    assert restarted.status_code == 200
+    payload = restarted.json()
+    assert payload["classification"] == "restart_session"
+    assert payload["plan"] is None
+    assert payload["active_plan"] is None
+    assert payload["channel_context"]["topic_title"] == "Fresh Maestro session"
+    assert "fresh session topic" in payload["message"]
+    assert all(task.status == "archived" for task in session.query(Task).all())
+    assert [message["sender"] for message in payload["conversation"]["messages"]] == ["maestro"]
+
+
+def test_maestro_api_topic_resolver_can_restore_existing_topic(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _client(session, tmp_path)
+    cad = client.post(
+        "/maestro/respond",
+        json={"message": "Hey Maestro I want to brainstorm a new feature for CAD fabrication."},
+    )
+    cad_topic_id = cad.json()["channel_context"]["topic_id"]
+    gmail = client.post(
+        "/maestro/respond",
+        json={"message": "Switching gears, let's discuss Gmail triage behavior."},
+    )
+    gmail_topic_id = gmail.json()["channel_context"]["topic_id"]
+    assert gmail_topic_id != cad_topic_id
+
+    class FakeTopicResolution:
+        scope = "existing_topic"
+        topic_id = cad_topic_id
+        confidence = 0.94
+        reason = "Message refers back to the CAD fabrication topic."
+        suggested_title = None
+
+    monkeypatch.setattr(
+        "app.api.maestro.resolve_topic_with_local_llm",
+        lambda **_: FakeTopicResolution(),
+    )
+
+    restored = client.post(
+        "/maestro/respond",
+        json={"message": "For the CAD idea, what file formats should we support first?"},
+    )
+
+    assert restored.status_code == 200
+    payload = restored.json()
+    assert payload["channel_context"]["scope"] == "existing_topic"
+    assert payload["channel_context"]["topic_id"] == cad_topic_id
+    visible_text = " ".join(message["content"] for message in payload["conversation"]["messages"])
+    assert "CAD fabrication" in visible_text
+    assert "file formats" in visible_text
+    assert "Gmail triage" not in visible_text
+
+
+def test_maestro_api_topic_resolver_can_choose_global_system(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _client(session, tmp_path)
+    first = client.post(
+        "/maestro/respond",
+        json={"message": "Hey Maestro I want to brainstorm a new feature for CAD fabrication."},
+    )
+    topic_id = first.json()["channel_context"]["topic_id"]
+
+    class FakeTopicResolution:
+        scope = "global_system"
+        topic_id = None
+        confidence = 0.9
+        reason = "User is asking about Maestro globally."
+        suggested_title = None
+
+    monkeypatch.setattr(
+        "app.api.maestro.resolve_topic_with_local_llm",
+        lambda **_: FakeTopicResolution(),
+    )
+
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "What tools are available across the whole system?"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["channel_context"]["scope"] == "global_system"
+    assert payload["channel_context"]["topic_id"] == topic_id
+    assert payload["channel_context"]["started_new_topic"] is False
+
+
+def test_maestro_topic_history_is_capped(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    for index in range(30):
+        response = client.post(
+            "/maestro/respond",
+            json={"message": f"Switching gears, new topic {index}: brainstorm feature {index}."},
+        )
+        assert response.status_code == 200
+
+    conversation = response.json()["conversation"]
+    stored = session.get(Conversation, uuid.UUID(conversation["id"]))
+    assert stored is not None
+    topics = (stored.metadata_ or {}).get("topics")
+    assert isinstance(topics, list)
+    assert len(topics) == 24
+    assert all("summary" in topic for topic in topics)
+    assert all(len(topic.get("keywords", [])) <= 12 for topic in topics)
 
 
 def test_maestro_channel_websocket_sends_active_conversation(
@@ -1619,6 +2477,69 @@ def test_maestro_api_respond_clears_current_workflow_without_creating_new_workfl
     assert task is not None
     assert task.status == "archived"
     assert session.query(Task).filter(Task.workflow_key == "maestro.generic").count() == 1
+
+
+def test_maestro_api_cleanup_command_archives_latest_open_workflow_and_routed_items(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Coordinate a Praxis partner prep workflow and confirm which follow-up owner "
+                "Chris wants assigned."
+            )
+        },
+    )
+    assert first_response.status_code == 200
+    first_plan = first_response.json()["plan"]
+    routed_before = session.query(RoutedItem).filter(RoutedItem.status != "archived").count()
+    assert routed_before > 0
+
+    direct_response = client.post(
+        "/maestro/respond",
+        json={"message": "Tell me about Maestro."},
+    )
+    assert direct_response.status_code == 200
+    task_count_before_cleanup = session.query(Task).count()
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Okay please clear the last workflow that is blocked and archive the routed "
+                "items that resulted from it so we can try again from scratch."
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["classification"] == "delete_workflow"
+    assert payload["plan"] is None
+    assert "routed item" in payload["message"]
+    task = session.get(Task, uuid.UUID(first_plan["parent_task_id"]))
+    assert task is not None
+    assert task.status == "archived"
+    run = session.scalar(
+        select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(first_plan["parent_task_id"]))
+    )
+    assert run is not None
+    assert run.status == "archived"
+    workflow_routed_items = [
+        item
+        for item in session.query(RoutedItem).all()
+        if any(
+            isinstance(ref, dict) and ref.get("task_id") == first_plan["parent_task_id"]
+            for ref in (item.source_refs or [])
+        )
+    ]
+    assert workflow_routed_items
+    assert all(item.status == "archived" for item in workflow_routed_items)
+    assert session.query(Task).count() == task_count_before_cleanup
 
 
 def test_orchestrator_archive_plan_disables_saved_schedule_definition(
@@ -1922,6 +2843,164 @@ def test_maestro_api_respond_applies_blocking_rfi_answer(
         assert "Answer here in chat" in payload["message"]
 
 
+def test_maestro_api_respond_uses_llm_classifier_for_open_rfi_answer(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakePlannerLLMClient(),
+    ).create_plan("Prepare a Praxis partner call workflow.")
+    assert any(
+        item.needs_user_input
+        for item in plan.work_items
+    )
+
+    classifier_calls: list[dict] = []
+
+    def fake_understanding(**kwargs):
+        classifier_calls.append(kwargs)
+        assert kwargs["active_plan"]["open_rfis"]
+        return MaestroMessageUnderstandingResponse(
+            topic_scope="active_topic",
+            relationship_to_active_plan="answers_rfi",
+            intents=[
+                {
+                    "type": "rfi_answer",
+                    "rfi_ids": ["wi_partner_owner"],
+                    "span": kwargs["message"],
+                    "confidence": 0.91,
+                    "recommended_next_step": "refine_plan",
+                }
+            ],
+            recommended_next_step="answer_and_refine_plan",
+            confidence=0.91,
+            reason="Chris provided the owner context requested by an open RFI.",
+        )
+
+    monkeypatch.setattr("app.api.maestro.understand_message_with_local_llm", fake_understanding)
+    message = (
+        "Currently the partner follow-up should stay with Chris until we decide who "
+        "owns the next outreach lane."
+    )
+
+    assert maestro_api._should_use_plan_context(message, plan) is True
+    assert maestro_api._classify_active_session_message(message, plan) == "rfi_answered"
+    assert classifier_calls
+
+
+def test_message_understanding_supports_multiple_intents_with_per_intent_next_steps() -> None:
+    understanding = MaestroMessageUnderstandingResponse.model_validate(
+        {
+            "topic_scope": "active_topic",
+            "relationship_to_active_plan": "answers_rfi",
+            "intents": [
+                {
+                    "type": "chat_response",
+                    "span": "What tasks would be useful for a CFO agent?",
+                    "confidence": 0.93,
+                    "recommended_next_step": "respond",
+                },
+                {
+                    "type": "rfi_answer",
+                    "rfi_ids": ["wi_finance_stack"],
+                    "span": "We use Google Sheets and Mercury.",
+                    "confidence": 0.88,
+                    "recommended_next_step": "refine_plan",
+                },
+                {
+                    "type": "workflow_request",
+                    "span": "Have the CFO agent research invoice automation.",
+                    "confidence": 0.84,
+                    "recommended_next_step": "plan",
+                },
+            ],
+            "recommended_next_step": "answer_and_refine_plan",
+            "confidence": 0.9,
+            "reason": "The message contains a question, an RFI answer, and a new work request.",
+        }
+    )
+
+    assert [intent.recommended_next_step for intent in understanding.intents] == [
+        "respond",
+        "refine_plan",
+        "plan",
+    ]
+    assert understanding.legacy_intent() == "rfi_answered"
+
+
+def test_maestro_intent_context_is_planner_guidance_not_user_text() -> None:
+    understanding = MaestroMessageUnderstandingResponse(
+        topic_scope="active_topic",
+        relationship_to_active_plan="none",
+        intents=[
+            {
+                "type": "chat_response",
+                "span": "What tasks would be useful for a CFO agent?",
+                "confidence": 0.93,
+                "recommended_next_step": "respond",
+            },
+            {
+                "type": "workflow_request",
+                "span": "Have the CFO agent research invoice automation.",
+                "confidence": 0.84,
+                "recommended_next_step": "plan",
+            },
+        ],
+        recommended_next_step="plan",
+        confidence=0.9,
+        reason="The message asks for an answer and executable work.",
+    )
+
+    message = maestro_api._message_with_intent_context(
+        "Latest Chris message:\nWhat tasks would be useful, and have the CFO agent research invoices.",
+        understanding,
+    )
+
+    assert "Use this as routing guidance only" in message
+    assert "<maestro_hidden_context" in message
+    assert "the planner still owns task decomposition" in message
+    assert '"type": "chat_response"' in message
+    assert '"recommended_next_step": "plan"' in message
+    assert "Latest Chris message" in message
+
+
+def test_maestro_topic_context_is_hidden_from_planner_copy_targets(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first = client.post(
+        "/maestro/respond",
+        json={"message": "I want to brainstorm a Maestro feature where mechanical agents use CAD."},
+    )
+    assert first.status_code == 200
+    conversation = session.scalar(select(Conversation).where(Conversation.title == "Maestro channel"))
+    assert conversation is not None
+    topic_context = {**first.json()["channel_context"], "scope": "active_topic"}
+    user_message = session.scalar(
+        select(Message)
+        .where(Message.conversation_id == conversation.id, Message.sender_type == "user")
+        .order_by(Message.created_at.desc())
+    )
+    assert user_message is not None
+
+    wrapped = maestro_api._message_with_topic_context(
+        session,
+        conversation,
+        "How will this interact with the tool registry?",
+        topic_context=topic_context,
+        current_message_id=user_message.id,
+    )
+
+    assert "<maestro_hidden_context" in wrapped
+    assert "</maestro_hidden_context>" in wrapped
+    assert "<latest_chris_message>" in wrapped
+    assert "Do not copy this context into user-facing responses" in wrapped
+    assert "How will this interact with the tool registry?" in wrapped
+
+
 def test_maestro_api_respond_surfaces_blocking_rfi_in_chat(
     session: Session,
     tmp_path: Path,
@@ -2010,6 +3089,40 @@ def test_orchestrator_routes_contact_shaped_standalone_work_item_as_contact(
     assert session.query(Contact).one().name == "Ben Daniels"
 
 
+def test_orchestrator_routes_feature_concepts_to_think_tank(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeThinkTankPlannerLLMClient(),
+    )
+
+    plan = service.create_plan(
+        "This new feature will be a CAD AI tool for mechanical design agents."
+    )
+
+    assert plan.is_routing_only is True
+    assert plan.is_chat_only is True
+    assert plan.approval_required is False
+    assert plan.work_items[0].type == "think_tank"
+    assert "Think Tank" in (plan.direct_response or "")
+    routed = session.query(RoutedItem).one()
+    assert routed.route_type == "think_tank"
+    idea = session.query(Idea).one()
+    assert "CAD AI tool" in idea.title
+
+
+def test_orchestrator_drops_duplicate_todo_for_agent_work(session: Session) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeWorkflowWithDuplicateTaskPlannerLLMClient(),
+    )
+
+    plan = service.create_plan("Have the SOTA researcher investigate current CAD AI tooling.")
+
+    assert plan.is_routing_only is False
+    assert [item.type for item in plan.work_items] == ["workflow_task"]
+    assert session.query(Todo).count() == 0
+
+
 def test_maestro_api_marks_direct_chat_plan(session: Session, tmp_path: Path) -> None:
     get_settings.cache_clear()
     settings = get_settings()
@@ -2065,6 +3178,52 @@ def test_maestro_api_respond_returns_chat_only_without_plan(
     active = client.get("/maestro/sessions/active")
     assert active.status_code == 200
     assert active.json()["conversation"]["active_plan"] is None
+
+
+def test_maestro_api_pure_chat_classifier_bypasses_planner(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _client(session, tmp_path)
+
+    def fake_understanding(**kwargs):
+        return MaestroMessageUnderstandingResponse(
+            topic_scope="new_topic",
+            relationship_to_active_plan="none",
+            intents=[
+                {
+                    "type": "chat_response",
+                    "span": kwargs["message"],
+                    "confidence": 0.94,
+                    "recommended_next_step": "respond",
+                    "reason": "Chris is asking to brainstorm conversationally.",
+                }
+            ],
+            recommended_next_step="respond",
+            confidence=0.94,
+            reason="This should be answered conversationally without agent work.",
+        )
+
+    monkeypatch.setattr("app.api.maestro.understand_message_with_local_llm", fake_understanding)
+    monkeypatch.setattr(
+        "app.api.maestro._direct_chat_response",
+        lambda db, message: "Absolutely. Let's brainstorm this here before tasking agents.",
+    )
+
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "What do you think about adding a Google Docs feature?"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["classification"] == "direct_chat"
+    assert payload["plan"] is None
+    assert payload["chat_plan"] is None
+    assert "brainstorm this here" in payload["message"]
+    assert session.query(Task).count() == 0
 
 
 def test_maestro_api_close_session_stages_transcript_artifact(

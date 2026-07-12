@@ -32,11 +32,11 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Create `/app/api`
 - Create `/app/core`
 - Create `/app/agents`
-- Create `/app/domains`
 - Create `/app/memory`
 - Create `/app/tools`
 - Create `/app/db`
-- Create `/app/workflows`
+- Create `/app/llm`
+- Create `/app/maestro`
 - Create `/alembic`
 - Create `/tests`
 

@@ -1,13 +1,17 @@
 import {
   Bot,
+  Building2,
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
+  CircleAlert,
   Clock3,
   Database,
   FileText,
   HardDriveUpload,
   Inbox,
+  ListTodo,
   Menu,
   MessageSquareText,
   PanelLeftClose,
@@ -18,677 +22,285 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Users,
   Wrench,
 } from "lucide-react";
+import { Calendar, dateFnsLocalizer, View, Views } from "react-big-calendar";
+import { format, getDay, parse, startOfWeek } from "date-fns";
+import { enUS } from "date-fns/locale/en-US";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { API_BASE_URL, apiJson, websocketUrl } from "./api";
+import {
+  domainKeysByLabel,
+  domainLabels,
+  domains,
+  dropboxDomainDefaults,
+  hiddenRoutedStatuses,
+  routedGroups,
+} from "./constants";
+import type {
+  ActiveSurface,
+  AgentRun,
+  AgentSpec,
+  AgentTask,
+  ChatMessage,
+  DomainContext,
+  DropboxDomain,
+  MaestroPlan,
+  MaestroRespond,
+  MaestroRun,
+  MaestroSessionSummary,
+  MaestroSubtask,
+  MaestroToolCallResponse,
+  MaestroQueueItem,
+  MemoryItem,
+  MemoryPreview,
+  MemorySource,
+  PendingProposal,
+  PromptPackage,
+  RetrievedMemory,
+  RoutedEvent,
+  RoutedItem,
+  RoutedObjectRecord,
+  RoutedObjectSurface,
+  RoutedTodo,
+  SchedulerDashboard,
+  SchedulerDefinition,
+  SchedulerQueueItem,
+  SchedulerRun,
+  SchedulerWorkerAgentRun,
+  SchedulerWorkerStatus,
+  ToolConnection,
+  ToolRegistryItem,
+} from "./types";
+import {
+  candidateResultClass,
+  candidateResultLabel,
+  definitionQueueItems,
+  formatDateOnly,
+  formatDateTime,
+  messageReferencesActivePlan,
+  previewTime,
+  routedObjectDomain,
+  routedObjectTitle,
+  safeJson,
+  triggerSummary,
+  unassignedDefinitionItemCount,
+} from "./uiHelpers";
 
-type ChatMessage = {
-  id: string;
-  sender: "user" | "maestro";
-  content: string;
-};
+const calendarLocalizer = dateFnsLocalizer({
+  format,
+  parse,
+  startOfWeek,
+  getDay,
+  locales: { "en-US": enUS },
+});
 
-type MaestroSessionSummary = {
-  id: string;
-  title: string;
-  messages: ChatMessage[];
-  message_count?: number;
-  created_at?: string | null;
-  updated_at?: string | null;
-  stagedArtifactPath: string | null;
-  active_plan?: MaestroPlan | null;
-  archived?: boolean;
-  archived_at?: string | null;
-};
+const staleWorkflowProgressLabels = new Set(["Not started.", "Not Started", "not_started"]);
 
-type SchedulerQueueItem = {
-  id: string;
-  workflow_run_id: string;
-  external_key: string;
-  status: string;
-  priority: string;
-  stage_index: number;
-  position: number;
-  objective: string;
-  dependency_keys: string[];
-  resource_locks: Array<Record<string, unknown>>;
-  fairness_group: string | null;
-  domain_key: string | null;
-  agent_key: string | null;
-  agent_name: string | null;
-  lease_owner: string | null;
-  error_message: string | null;
-};
+function queueAgentLabel(item: MaestroQueueItem) {
+  return item.agent_name || item.agent_key || item.work_item_ids.join(", ") || "agent";
+}
 
-type SchedulerRun = {
-  id: string;
-  workflow_definition_id: string | null;
-  parent_task_id: string | null;
-  conversation_id: string | null;
-  source_type: string;
-  status: string;
-  priority: string;
-  fairness_group: string | null;
-  summary: string | null;
-  created_at: string | null;
-  input_payload?: Record<string, unknown>;
-  output_payload?: Record<string, unknown>;
-  error_message?: string | null;
-  events?: SchedulerEvent[];
-  queue_items: SchedulerQueueItem[];
-};
-
-type SchedulerEvent = {
-  id: string;
-  event_type: string;
-  message: string;
-  queue_item_id: string | null;
-  payload: Record<string, unknown>;
-  created_at: string | null;
-};
-
-type SchedulerDefinition = {
-  id: string;
-  domain_key: string | null;
-  key: string;
-  name: string;
-  description: string | null;
-  trigger_type: string;
-  trigger_config: Record<string, unknown>;
-  workflow_spec?: Record<string, unknown>;
-  priority: string;
-  fairness_group: string | null;
-  is_active: boolean;
-};
-
-type SchedulerDashboard = {
-  definitions: SchedulerDefinition[];
-  runs: SchedulerRun[];
-  runnable_batches: Array<{
-    workflow_run_id: string;
-    status: string;
-    fairness_group: string | null;
-    parallel_ready: SchedulerQueueItem[];
-  }>;
-  active_locks: Array<Record<string, unknown>>;
-};
-
-type SchedulerWorkerAgentRun = {
-  run_id: string;
-  status: string;
-  agent_key: string;
-  agent_name: string;
-  task_id: string | null;
-  report_id: string | null;
-  execution_note: string;
-  output_preview: string;
-  tool_calls: AgentRun["tool_calls"];
-  staged_artifact_path: string | null;
-  artifact_id: string | null;
-  error_message: string | null;
-};
-
-type SchedulerWorkerStatus = {
-  enabled: boolean;
-  interval_seconds: number;
-  claim_limit: number;
-  execute_llm: boolean;
-  auto_tool_loop: boolean;
-  source: string;
-};
-
-type DropboxDomain = {
-  key: string;
-  inbox: number;
-  processing: number;
-  processed: number;
-  failed: number;
-  previews: number;
-};
-
-type MemoryPreview = {
-  domain_key: string;
-  filename: string;
-  source_file: string | null;
-  status: string | null;
-  is_processing: boolean;
-  generated_at: string | null;
-  candidate_count: number;
-  result_count: number;
-  written_count: number;
-  deduped_count: number;
-  pending_approval_count: number;
-  progress_count: number;
-  progress_total: number;
-  routed_count: number;
-  payload: {
-    candidates?: Array<{
-      title?: string;
-      content?: string;
-      impact_level?: string;
-      scope?: string;
-      memory_type?: string;
-    }>;
-    results?: Array<{
-      outcome?: string;
-      memory_item_id?: string | null;
-      proposal_id?: string | null;
-      proposal_status?: string | null;
-      related_memory_id?: string | null;
-      evaluation?: {
-        decision?: string;
-        confidence?: number;
-        rationale?: string | null;
-        related_memory_id?: string | null;
-      };
-    }>;
-    routed_items?: Array<{
-      route_type?: string;
-      title?: string;
-      content?: string;
-      priority?: string;
-      status?: string;
-    }>;
-  };
-};
-
-type PreviewResult = NonNullable<MemoryPreview["payload"]["results"]>[number];
-
-type PendingProposal = {
-  id: string;
-  scope: string;
-  memory_type: string;
-  title: string;
-  content: string;
-  rationale: string | null;
-  impact_level: string;
-  status: string;
-  created_at: string | null;
-};
-
-type MemoryItem = {
-  id: string;
-  scope: string;
-  memory_type: string;
-  title: string;
-  content: string;
-  impact_level: string;
-  importance: number;
-  created_at: string | null;
-};
-
-type MemorySource = {
-  id: string;
-  name: string;
-  status: string;
-  domain_key: string;
-  memory_count: number;
-  proposal_count: number;
-  processed_at: string | null;
-};
-
-type RoutedItem = {
-  id: string;
-  domain_key: string | null;
-  route_type: string;
-  title: string;
-  content: string;
-  priority: string;
-  status: string;
-  source_refs: Array<Record<string, unknown>>;
-  metadata: Record<string, unknown>;
-  created_at: string | null;
-};
-
-type RetrievedMemory = MemoryItem & {
-  domain_key: string;
-  agent_id: string | null;
-  score: number;
-  query_relevance: number;
-  semantic_similarity: number | null;
-  score_reasons: string[];
-  provenance: {
-    source_refs: Array<Record<string, unknown>>;
-    seed_package: { id: string; name: string; source_type: string; status: string } | null;
-    artifact: {
-      id: string;
-      name: string;
-      artifact_type: string;
-      uri: string;
-      mime_type: string | null;
-    } | null;
-    processed_path: string | null;
-  };
-  links: Array<{
-    relation_type: string;
-    direction: string;
-    memory: MemoryItem & { domain_key: string };
-  }>;
-};
-
-type AgentTool = {
-  key: string;
-  name: string;
-  permission: string;
-  description: string;
-  connection_id: string | null;
-  auth_type: string | null;
-};
-
-type AgentSpec = {
-  id: string;
-  key: string;
-  name: string;
-  domain_key: string;
-  agent_type: string;
-  role_summary: string;
-  role_prompt: string;
-  memory_profile: string;
-  model_profile: string;
-  allowed_tools: AgentTool[];
-  is_active: boolean;
-  current_action: string | null;
-  scheduled_actions: Array<Record<string, unknown>>;
-};
-
-type AgentTask = {
-  id: string;
-  status: string;
-  priority: string;
-  source_type: string;
-  workflow_key: string | null;
-  objective: string;
-  started_at: string | null;
-  completed_at: string | null;
-  error_message: string | null;
-};
-
-type DomainContext = {
-  id: string;
-  key: string;
-  name: string;
-  context: string;
-  is_active: boolean;
-};
-
-type ToolRegistryItem = {
-  key: string;
-  name: string;
-  description: string;
-  exclusive: boolean;
-  connected_domains: string[];
-  authorized_agents: Array<{
-    agent_key: string;
-    agent_name: string;
-    domain_key: string;
-    permission: string;
-  }>;
-};
-
-type ToolConnection = {
-  id: string;
-  domain_key: string;
-  tool_key: string;
-  display_name: string;
-  auth_type: string;
-  config: Record<string, unknown>;
-  is_active: boolean;
-};
-
-type PromptPackage = {
-  assembled_prompt: string;
-  memory_context: {
-    included_count: number;
-    semantic_status: string;
-  };
-};
-
-type AgentRun = {
-  run_id: string;
-  status: string;
-  execution_note: string;
-  output_text: string | null;
-  task_id: string | null;
-  report_id: string | null;
-  error_message: string | null;
-  tool_calls?: Array<{
-    id: string;
-    tool_name: string;
-    status: string;
-    error_message: string | null;
-    output_payload?: Record<string, unknown> | null;
-  }>;
-  scheduler?: {
-    status: string;
-    reason: string;
-  };
-  tool_loop?: Record<string, unknown>;
-  prompt_package: PromptPackage;
-  staged_artifact_path: string | null;
-};
-
-type MaestroIntent = {
-  type: string;
-  summary: string;
-  target: string;
-  domain_key: string | null;
-  priority: string;
-  action: string | null;
-};
-
-type MaestroSubtask = {
-  agent_key: string;
-  agent_name: string;
-  domain_key: string;
-  objective: string;
-  expected_output: string;
-  priority: string;
-  rationale: string | null;
-  work_item_ids: string[] | null;
-  depends_on_work_item_ids: string[] | null;
-};
-
-type MaestroWorkItem = {
-  id: string;
-  type: string;
-  title: string;
-  description: string;
-  domain_key: string | null;
-  priority: string;
-  required_capabilities: string[];
-  required_tools: string[];
-  dependencies: string[];
-  needs_agent: boolean;
-  needs_user_input: boolean;
-  blocks_execution: boolean;
-  can_log_directly: boolean;
-  suggested_agent_keys: string[];
-  expected_output: string;
-  rationale: string;
-};
-
-type MaestroQueueItem = {
-  id: string;
-  stage_index: number;
-  position: number;
-  status: string;
-  agent_key: string;
-  agent_name: string;
-  domain_key: string;
-  objective: string;
-  priority: string;
-  work_item_ids: string[];
-  depends_on_work_item_ids: string[];
-  child_task_id: string | null;
-  child_report_id: string | null;
-  retry_count?: number;
-  started_at: string | null;
-  completed_at: string | null;
-  error_message: string | null;
-};
-
-type MaestroPlan = {
-  plan_id: string;
-  parent_task_id: string;
-  status: string;
-  user_input: string;
-  summary: string;
-  execution_mode: string;
-  planner_mode: string;
-  work_items: MaestroWorkItem[];
-  intents: MaestroIntent[];
-  subtasks: MaestroSubtask[];
-  execution_stages: string[][];
-  workflow_graph: {
-    nodes?: Array<Record<string, unknown>>;
-    edges?: Array<Record<string, unknown>>;
-    stages?: Array<Record<string, unknown>>;
-  };
-  is_chat_only: boolean;
-  is_routing_only: boolean;
-  selected_agents: Array<Record<string, unknown>>;
-  approval_required: boolean;
-  scheduler: Record<string, unknown> & {
-    queue_items?: MaestroQueueItem[];
-    current_step?: string;
-    active_queue_item_id?: string | null;
-    active_stage_index?: number | null;
-  };
-  created_at: string;
-  direct_response: string | null;
-  planner_notes: string | null;
-};
-
-type MaestroRun = {
-  plan: MaestroPlan;
-  status: string;
-  parent_task_id: string;
-  synthesis_report_id: string | null;
-  synthesis: string;
-  chat_summary: string;
-  staged_artifact_path: string | null;
-  artifact_id: string | null;
-  error_message: string | null;
-  execution_stages: string[][];
-  tool_activity: Array<{
-    tool_call_id: string | null;
-    agent_key: string;
-    agent_name: string;
-    domain_key: string;
-    tool_name: string;
-    status: string;
-    error_message: string | null;
-    details: string;
-    output_payload?: Record<string, unknown>;
-  }>;
-  child_runs: Array<{
-    run_id: string;
-    status: string;
-    agent: {
-      key: string;
-      name: string;
-      domain_key: string;
-    };
-    task_id: string | null;
-    report_id: string | null;
-    execution_note: string;
-    output_text: string | null;
-    error_message: string | null;
-    tool_calls?: AgentRun["tool_calls"];
-    tool_loop?: Record<string, unknown>;
-  }>;
-};
-
-type MaestroRespond = {
-  kind: "chat_only" | "planned" | "refined" | "rfi_answered" | "routed";
-  classification: string;
-  message: string;
+function workflowProgressLabel({
+  plan,
+  run,
+  busyToolCallId,
+  maestroStatus,
+}: {
   plan: MaestroPlan | null;
-  chat_plan: MaestroPlan | null;
-  active_plan: MaestroPlan | null;
-  conversation: MaestroSessionSummary;
-};
+  run: MaestroRun | null;
+  busyToolCallId: string | null;
+  maestroStatus: string;
+}) {
+  if (busyToolCallId) return "Running approved tool";
+  const activePlan = run?.plan ?? plan;
+  const queueItems = activePlan?.scheduler.queue_items ?? [];
+  const runStatus = run?.status;
+  const planStatus = activePlan?.status;
 
-type MaestroToolCallResponse = {
-  tool_call: {
-    id: string;
-    tool_name: string;
-    status: string;
-    error_message: string | null;
-    output_payload?: Record<string, unknown> | null;
+  const itemWithStatus = (statuses: string[]) =>
+    queueItems.find((item) => statuses.includes(item.status));
+
+  const running = itemWithStatus(["running", "retrying"]);
+  if (running) {
+    return `${running.status === "retrying" ? "Retrying" : "Running"}: ${queueAgentLabel(running)}`;
+  }
+  const approval = itemWithStatus(["approval_required"]);
+  if (approval) return `Waiting for approval: ${queueAgentLabel(approval)}`;
+  const blocked = itemWithStatus(["blocked"]);
+  if (blocked) {
+    return `Waiting on ${queueAgentLabel(blocked)}${
+      blocked.error_message ? `: ${blocked.error_message}` : ""
+    }`;
+  }
+  const failed = itemWithStatus(["failed"]);
+  if (failed) return `Failed: ${queueAgentLabel(failed)}`;
+  const queued = itemWithStatus(["ready", "queued"]);
+  if (queued) return `Queued: ${queueAgentLabel(queued)}`;
+  const pending = itemWithStatus(["pending", "proposed"]);
+  if (pending) {
+    return planStatus === "running" || runStatus === "running"
+      ? `Preparing: ${queueAgentLabel(pending)}`
+      : "Proposed plan ready for review";
+  }
+  const scheduled = itemWithStatus(["scheduled"]);
+  if (scheduled) return `Scheduled: ${queueAgentLabel(scheduled)}`;
+  if (queueItems.length > 0 && queueItems.every((item) => item.status === "completed")) {
+    return "Workflow complete";
+  }
+  if (queueItems.length > 0 && queueItems.every((item) => item.status === "archived")) {
+    return "Workflow archived";
+  }
+  if (runStatus === "completed") return "Workflow complete";
+  if (runStatus === "scheduled") return "Scheduled workflow saved";
+  if (runStatus === "blocked") return "Workflow waiting on input";
+  if (runStatus === "failed") return "Workflow failed";
+  const currentStep = String(activePlan?.scheduler.current_step ?? "").trim();
+  if (currentStep && !staleWorkflowProgressLabels.has(currentStep)) return currentStep;
+  if (maestroStatus && maestroStatus !== "Idle") return maestroStatus;
+  return "Ready";
+}
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g);
+  return tokens
+    .filter((token) => token.length > 0)
+    .map((token, index) => {
+      const key = `${keyPrefix}-${index}`;
+      if (token.startsWith("`") && token.endsWith("`")) {
+        return <code key={key}>{token.slice(1, -1)}</code>;
+      }
+      if (token.startsWith("**") && token.endsWith("**")) {
+        return <strong key={key}>{token.slice(2, -2)}</strong>;
+      }
+      if (token.startsWith("*") && token.endsWith("*")) {
+        return <em key={key}>{token.slice(1, -1)}</em>;
+      }
+      const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (linkMatch) {
+        const [, label, href] = linkMatch;
+        const safeHref = /^(https?:|mailto:)/i.test(href) ? href : "";
+        if (safeHref) {
+          return (
+            <a key={key} href={safeHref} target="_blank" rel="noreferrer">
+              {label}
+            </a>
+          );
+        }
+        return <span key={key}>{label}</span>;
+      }
+      return token;
+    });
+}
+
+function MarkdownMessage({ content }: { content: string }) {
+  const lines = content.split(/\r?\n/);
+  const blocks: ReactNode[] = [];
+  let paragraph: string[] = [];
+  let listItems: string[] = [];
+  let orderedItems: string[] = [];
+  let codeLines: string[] = [];
+  let inCodeBlock = false;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const text = paragraph.join(" ");
+    blocks.push(<p key={`p-${blocks.length}`}>{renderInlineMarkdown(text, `p-${blocks.length}`)}</p>);
+    paragraph = [];
   };
-  message: string;
-  run?: MaestroRun | null;
-};
+  const flushList = () => {
+    if (listItems.length) {
+      blocks.push(
+        <ul key={`ul-${blocks.length}`}>
+          {listItems.map((item, index) => (
+            <li key={`li-${index}`}>{renderInlineMarkdown(item, `ul-${blocks.length}-${index}`)}</li>
+          ))}
+        </ul>,
+      );
+      listItems = [];
+    }
+    if (orderedItems.length) {
+      blocks.push(
+        <ol key={`ol-${blocks.length}`}>
+          {orderedItems.map((item, index) => (
+            <li key={`oli-${index}`}>{renderInlineMarkdown(item, `ol-${blocks.length}-${index}`)}</li>
+          ))}
+        </ol>,
+      );
+      orderedItems = [];
+    }
+  };
+  const flushCode = () => {
+    if (!codeLines.length) return;
+    blocks.push(
+      <pre key={`pre-${blocks.length}`}>
+        <code>{codeLines.join("\n")}</code>
+      </pre>,
+    );
+    codeLines = [];
+  };
+  const headingBlock = (level: number, text: string) => {
+    const children = renderInlineMarkdown(text, `h-${blocks.length}`);
+    if (level <= 1) return <h3 key={`h-${blocks.length}`}>{children}</h3>;
+    if (level === 2) return <h4 key={`h-${blocks.length}`}>{children}</h4>;
+    if (level === 3) return <h5 key={`h-${blocks.length}`}>{children}</h5>;
+    return <h6 key={`h-${blocks.length}`}>{children}</h6>;
+  };
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      if (inCodeBlock) {
+        flushCode();
+        inCodeBlock = false;
+      } else {
+        flushParagraph();
+        flushList();
+        inCodeBlock = true;
+      }
+      return;
+    }
+    if (inCodeBlock) {
+      codeLines.push(line);
+      return;
+    }
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      return;
+    }
+    const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(headingMatch[1].length, 4);
+      blocks.push(headingBlock(level, headingMatch[2]));
+      return;
+    }
+    const bulletMatch = trimmed.match(/^[-*]\s+(.+)$/);
+    if (bulletMatch) {
+      flushParagraph();
+      if (orderedItems.length) flushList();
+      listItems.push(bulletMatch[1]);
+      return;
+    }
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (orderedMatch) {
+      flushParagraph();
+      if (listItems.length) flushList();
+      orderedItems.push(orderedMatch[1]);
+      return;
+    }
+    paragraph.push(trimmed);
+  });
 
-const domainLabels: Record<string, string> = {
-  global: "Global",
-  personal: "Personal",
-  "maestro-development": "Maestro Development",
-  praxis: "Praxis",
-  ophi: "Ophi",
-  usma: "USMA",
-  "personal-irad-projects": "Personal IRAD",
-  l3: "L3",
-};
+  flushParagraph();
+  flushList();
+  flushCode();
 
-const dropboxDomainDefaults: DropboxDomain[] = Object.keys(domainLabels).map((key) => ({
-  key,
-  inbox: 0,
-  processing: 0,
-  processed: 0,
-  failed: 0,
-  previews: 0,
-}));
-
-const domains = [
-  "Personal",
-  "Maestro Development",
-  "Praxis",
-  "Ophi",
-  "USMA",
-  "Personal IRAD",
-  "L3",
-];
-
-const domainKeysByLabel: Record<string, string> = Object.fromEntries(
-  Object.entries(domainLabels).map(([key, label]) => [label, key]),
-);
-
-const routedGroups = [
-  { key: "human_input", label: "RFIs", empty: "No open RFIs." },
-  { key: "task", label: "Tasks", empty: "No open tasks." },
-  { key: "event", label: "Events", empty: "No extracted events." },
-  { key: "contact", label: "Contacts", empty: "No extracted contacts." },
-  { key: "decision_log", label: "Decisions", empty: "No recent decisions." },
-  { key: "think_tank", label: "Think Tank", empty: "No think tank notes." },
-];
-
-const hiddenRoutedStatuses = new Set(["done", "archived"]);
-
-function resultLabel(result?: PreviewResult) {
-  if (!result) return "Preview only";
-  if (result.memory_item_id) return "Written to memory";
-  if (result.outcome === "duplicate_skipped") return "Duplicate skipped";
-  if (result.outcome === "reinforced") return "Reinforced existing memory";
-  if (result.outcome === "rejected") return "Rejected by memory manager";
-  if (result.outcome === "pending_user_approval") return "Needs approval";
-  if (result.proposal_status) return `Proposal ${result.proposal_status}`;
-  return result.outcome ?? "Processed";
-}
-
-function resultClass(result?: PreviewResult) {
-  if (!result) return "preview-only";
-  if (result.memory_item_id) return "written";
-  if (result.outcome === "duplicate_skipped" || result.outcome === "reinforced") return "deduped";
-  if (result.outcome === "rejected") return "rejected";
-  if (result.outcome === "pending_user_approval") return "pending";
-  return "processed";
-}
-
-function candidateResultLabel(preview: MemoryPreview, index: number) {
-  const result = preview.payload.results?.[index];
-  if (result) return resultLabel(result);
-  if (preview.is_processing) return "Queued for write";
-  return "Preview only";
-}
-
-function candidateResultClass(preview: MemoryPreview, index: number) {
-  const result = preview.payload.results?.[index];
-  if (result) return resultClass(result);
-  if (preview.is_processing) return "processing";
-  return "preview-only";
-}
-
-function previewTime(preview: MemoryPreview) {
-  const time = preview.generated_at ? Date.parse(preview.generated_at) : 0;
-  return Number.isFinite(time) ? time : 0;
-}
-
-async function apiJson<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(body.detail ?? response.statusText);
-  }
-  return response.json() as Promise<T>;
-}
-
-function websocketUrl(path: string) {
-  const url = new URL(path, API_BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString();
-}
-
-function definitionQueueItems(definition: SchedulerDefinition) {
-  return Array.isArray(definition.workflow_spec?.queue_items)
-    ? (definition.workflow_spec.queue_items as Array<Record<string, unknown>>)
-    : [];
-}
-
-function unassignedDefinitionItemCount(definition: SchedulerDefinition) {
-  return definitionQueueItems(definition).filter((item) => !item.agent_key).length;
-}
-
-function triggerSummary(triggerType: string, triggerConfig: Record<string, unknown>) {
-  if (triggerType === "event") {
-    return `When ${String(triggerConfig.event_type ?? "event arrives")}`;
-  }
-  if (typeof triggerConfig.time_of_day === "string") {
-    return `Daily at ${triggerConfig.time_of_day}`;
-  }
-  if (typeof triggerConfig.next_run_at === "string") {
-    return `Next ${triggerConfig.next_run_at}`;
-  }
-  if (typeof triggerConfig.interval_minutes === "number") {
-    return `Every ${triggerConfig.interval_minutes} minutes`;
-  }
-  return triggerType;
-}
-
-function messageReferencesActivePlan(message: string) {
-  const normalized = message.trim().toLowerCase();
-  if (!normalized) return false;
-  return [
-    "this plan",
-    "that plan",
-    "the plan",
-    "current plan",
-    "active plan",
-    "this workflow",
-    "that workflow",
-    "the workflow",
-    "current workflow",
-    "active workflow",
-    "merge the pr",
-    "merge pr",
-    "merge it",
-    "merge that",
-    "hot reload",
-    "reload the app",
-    "make it live",
-    "ship it",
-    "approved",
-    "approve",
-    "reject",
-    "run it",
-    "save it",
-    "save schedule",
-    "change the plan",
-    "update the plan",
-    "refine",
-    "instead",
-    "also include",
-    "remove ",
-    "drop ",
-    "only ",
-    "belongs in",
-    "move this",
-    "do this first",
-    "do that first",
-  ].some((token) => normalized.includes(token));
+  return <div className="markdown-message">{blocks.length > 0 ? blocks : <p>{content}</p>}</div>;
 }
 
 function RoutedItemsBoard({
@@ -810,12 +422,649 @@ function RoutedItemsBoard({
   );
 }
 
+const routedSurfaceConfig: Record<
+  RoutedObjectSurface,
+  {
+    title: string;
+    eyebrow: string;
+    endpoint: string;
+    responseKey: "events" | "contacts" | "todos" | "entities" | "ideas";
+    icon: typeof CalendarDays;
+    empty: string;
+  }
+> = {
+  calendar: {
+    title: "Calendar",
+    eyebrow: "Routed events",
+    endpoint: "/memory/routed-objects/events",
+    responseKey: "events",
+    icon: CalendarDays,
+    empty: "No routed events yet.",
+  },
+  contacts: {
+    title: "Contacts",
+    eyebrow: "Routed CRM",
+    endpoint: "/memory/routed-objects/contacts",
+    responseKey: "contacts",
+    icon: Users,
+    empty: "No contacts yet.",
+  },
+  todos: {
+    title: "To Do List",
+    eyebrow: "Routed action items",
+    endpoint: "/memory/routed-objects/todos",
+    responseKey: "todos",
+    icon: ListTodo,
+    empty: "No routed to dos yet.",
+  },
+  organizations: {
+    title: "Organizations",
+    eyebrow: "Routed organizations",
+    endpoint: "/memory/routed-objects/entities",
+    responseKey: "entities",
+    icon: Building2,
+    empty: "No organizations yet.",
+  },
+  ideas: {
+    title: "Think Tank",
+    eyebrow: "Routed ideas",
+    endpoint: "/memory/routed-objects/ideas",
+    responseKey: "ideas",
+    icon: Sparkles,
+    empty: "No think tank ideas yet.",
+  },
+};
+
+function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string> {
+  if (!item) return {};
+  if ("attendees" in item) {
+    return {
+      title: item.title ?? "",
+      summary: item.summary ?? "",
+      start_at: item.start_at ?? "",
+      end_at: item.end_at ?? "",
+      location: item.location ?? "",
+      status: item.status ?? "scheduled",
+    };
+  }
+  if ("todo_type" in item) {
+    return {
+      title: item.title ?? "",
+      description: item.description ?? "",
+      due_at: item.due_at ?? "",
+      priority: item.priority ?? "normal",
+      status: item.status ?? "open",
+      owner_type: item.owner_type ?? "user",
+      owner_ref: item.owner_ref ?? "",
+    };
+  }
+  if ("email" in item) {
+    return {
+      name: item.name ?? "",
+      email: item.email ?? "",
+      phone: item.phone ?? "",
+      linkedin: item.linkedin ?? "",
+      summary: item.summary ?? "",
+      origination: item.origination ?? "",
+      status: item.status ?? "active",
+    };
+  }
+  if ("content" in item) {
+    return {
+      title: item.title ?? "",
+      content: item.content ?? "",
+      status: item.status ?? "open",
+    };
+  }
+  return {
+    name: item.name ?? "",
+    website: item.website ?? "",
+    summary: item.summary ?? "",
+    status: item.status ?? "active",
+  };
+}
+
+function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
+  const config = routedSurfaceConfig[surface];
+  const Icon = config.icon;
+  const [items, setItems] = useState<RoutedObjectRecord[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [domainFilter, setDomainFilter] = useState("all");
+  const [showArchived, setShowArchived] = useState(false);
+  const [showDone, setShowDone] = useState(false);
+  const [calendarView, setCalendarView] = useState<View>(Views.WEEK);
+  const [calendarDate, setCalendarDate] = useState(new Date());
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [statusMessage, setStatusMessage] = useState("Ready");
+  const [busy, setBusy] = useState(false);
+
+  const supportsDomainFilter = surface === "calendar" || surface === "todos" || surface === "ideas";
+  const supportsLifecycleFilters = surface === "calendar" || surface === "todos" || surface === "ideas";
+  const visibleItems = useMemo(
+    () =>
+      items.filter((item) => {
+        if (!showArchived && item.status === "archived") return false;
+        if (!showDone && item.status === "done") return false;
+        return true;
+      }),
+    [items, showArchived, showDone],
+  );
+  const selectedItem =
+    visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0] ?? null;
+  const calendarItems = useMemo(
+    () =>
+      visibleItems
+        .filter((item): item is RoutedEvent => "start_at" in item && Boolean(item.start_at))
+        .map((item) => {
+          const start = new Date(item.start_at!);
+          const end = item.end_at ? new Date(item.end_at) : new Date(start.getTime() + 60 * 60 * 1000);
+          return {
+            id: item.id,
+            title: item.title,
+            start,
+            end,
+            resource: item,
+          };
+        }),
+    [visibleItems],
+  );
+  const unscheduledCalendarItems = visibleItems.filter(
+    (item): item is RoutedEvent => "start_at" in item && !item.start_at,
+  );
+
+  const refreshItems = useCallback(async () => {
+    const params = new URLSearchParams({ limit: "100" });
+    if (supportsDomainFilter && domainFilter !== "all") {
+      params.set("domain_key", domainFilter);
+    }
+    const response = await apiJson<Record<string, RoutedObjectRecord[]>>(
+      `${config.endpoint}?${params.toString()}`,
+    );
+    const nextItems = response[config.responseKey] ?? [];
+    setItems(nextItems);
+    setSelectedId((current) =>
+      current && nextItems.some((item) => item.id === current) ? current : (nextItems[0]?.id ?? null),
+    );
+    setStatusMessage("Ready");
+  }, [config.endpoint, config.responseKey, domainFilter, supportsDomainFilter]);
+
+  useEffect(() => {
+    refreshItems().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : `Unable to load ${config.title}.`),
+    );
+  }, [refreshItems, config.title]);
+
+  useEffect(() => {
+    setDraft(routedDraftFor(selectedItem));
+  }, [selectedItem?.id]);
+
+  const updateDraft = (key: string, value: string) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  const saveSelected = async () => {
+    if (!selectedItem) return;
+    setBusy(true);
+    try {
+      await apiJson(`${config.endpoint}/${selectedItem.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          updates: Object.fromEntries(
+            Object.entries(draft).map(([key, value]) => [key, value.trim() || null]),
+          ),
+        }),
+      });
+      setStatusMessage(`${config.title} item saved.`);
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const archiveSelected = async () => {
+    if (!selectedItem) return;
+    const objectType =
+      surface === "calendar"
+        ? "event"
+        : surface === "todos"
+          ? "todo"
+          : surface === "contacts"
+            ? "contact"
+            : surface === "ideas"
+              ? "idea"
+              : "entity";
+    setBusy(true);
+    try {
+      await apiJson(`/memory/routed-objects/${objectType}/${selectedItem.id}/archive`, {
+        method: "PATCH",
+      });
+      setStatusMessage("Item archived.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Archive failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const markSelectedDone = async () => {
+    if (!selectedItem || !(surface === "calendar" || surface === "todos" || surface === "ideas")) return;
+    setBusy(true);
+    try {
+      await apiJson(`${config.endpoint}/${selectedItem.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates: { status: "done" } }),
+      });
+      setStatusMessage("Item marked done.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Done update failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="routed-object-workspace">
+      <section className="memory-panel routed-object-list-panel" aria-labelledby={`${surface}-heading`}>
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">{config.eyebrow}</p>
+            <h3 id={`${surface}-heading`}>{config.title}</h3>
+          </div>
+          <button className="icon-button" onClick={refreshItems} title={`Refresh ${config.title}`}>
+            <RefreshCw size={18} />
+          </button>
+        </div>
+
+        {supportsDomainFilter && (
+          <label className="routed-filter">
+            <span>Domain</span>
+            <select value={domainFilter} onChange={(event) => setDomainFilter(event.target.value)}>
+              <option value="all">All domains</option>
+              {Object.entries(domainLabels)
+                .filter(([key]) => key !== "global")
+                .map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+            </select>
+          </label>
+        )}
+
+        {supportsLifecycleFilters && (
+          <div className="routed-filter-row">
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(event) => setShowArchived(event.target.checked)}
+              />
+              Show archived
+            </label>
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={showDone}
+                onChange={(event) => setShowDone(event.target.checked)}
+              />
+              Show done
+            </label>
+          </div>
+        )}
+
+        {surface === "calendar" && (
+          <div className="calendar-shell">
+            <Calendar
+              localizer={calendarLocalizer}
+              events={calendarItems}
+              startAccessor="start"
+              endAccessor="end"
+              view={calendarView}
+              date={calendarDate}
+              views={[Views.MONTH, Views.WEEK, Views.DAY, Views.AGENDA]}
+              onView={(view) => setCalendarView(view)}
+              onNavigate={(date) => setCalendarDate(date)}
+              onSelectEvent={(event) => setSelectedId(event.id)}
+              eventPropGetter={(event) => ({
+                className:
+                  event.resource.status === "done"
+                    ? "calendar-event-done"
+                    : event.resource.status === "archived"
+                      ? "calendar-event-archived"
+                      : "",
+              })}
+            />
+          </div>
+        )}
+
+        {surface === "calendar" && unscheduledCalendarItems.length > 0 && (
+          <div className="unscheduled-list">
+            <span>Unscheduled</span>
+            {unscheduledCalendarItems.map((item) => (
+              <button
+                className={item.id === selectedItem?.id ? "routed-object-row active" : "routed-object-row"}
+                key={item.id}
+                onClick={() => setSelectedId(item.id)}
+                type="button"
+              >
+                <CalendarDays size={18} />
+                <span>
+                  <strong>{item.title}</strong>
+                  <small>{item.status}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="routed-object-list">
+          {visibleItems.map((item) => (
+            <button
+              className={item.id === selectedItem?.id ? "routed-object-row active" : "routed-object-row"}
+              key={item.id}
+              onClick={() => setSelectedId(item.id)}
+              type="button"
+            >
+              {item.status === "done" ? <CheckCircle2 size={18} /> : <Icon size={18} />}
+              <span>
+                <strong>{routedObjectTitle(item)}</strong>
+                <small>
+                  {surface === "calendar" && "start_at" in item
+                    ? `${formatDateOnly(item.start_at)} / ${item.status}`
+                    : surface === "todos" && "due_at" in item
+                      ? `${domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"} / ${item.status} / ${item.priority}`
+                      : item.status}
+                </small>
+              </span>
+            </button>
+          ))}
+          {visibleItems.length === 0 && <p className="empty-state">{config.empty}</p>}
+        </div>
+      </section>
+
+      <section className="memory-panel routed-object-detail-panel" aria-labelledby={`${surface}-detail`}>
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Details</p>
+            <h3 id={`${surface}-detail`}>{selectedItem ? routedObjectTitle(selectedItem) : config.title}</h3>
+          </div>
+          <Icon size={18} />
+        </div>
+
+        {selectedItem ? (
+          <div className="routed-object-detail">
+            {"attendees" in selectedItem && (
+              <>
+                <label>
+                  Title
+                  <input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} />
+                </label>
+                <label>
+                  Summary
+                  <textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} />
+                </label>
+                <div className="two-column-fields">
+                  <label>
+                    Start
+                    <input value={draft.start_at ?? ""} onChange={(event) => updateDraft("start_at", event.target.value)} />
+                  </label>
+                  <label>
+                    End
+                    <input value={draft.end_at ?? ""} onChange={(event) => updateDraft("end_at", event.target.value)} />
+                  </label>
+                </div>
+                <label>
+                  Location
+                  <input value={draft.location ?? ""} onChange={(event) => updateDraft("location", event.target.value)} />
+                </label>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+                <details>
+                  <summary>Attendees and supporting content</summary>
+                  <pre>{safeJson({ attendees: selectedItem.attendees, supporting_refs: selectedItem.supporting_refs })}</pre>
+                </details>
+              </>
+            )}
+
+            {"todo_type" in selectedItem && (
+              <>
+                <label>
+                  Title
+                  <input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} />
+                </label>
+                <label>
+                  Description
+                  <textarea value={draft.description ?? ""} onChange={(event) => updateDraft("description", event.target.value)} />
+                </label>
+                <div className="two-column-fields">
+                  <label>
+                    Due
+                    <input value={draft.due_at ?? ""} onChange={(event) => updateDraft("due_at", event.target.value)} />
+                  </label>
+                  <label>
+                    Priority
+                    <input value={draft.priority ?? ""} onChange={(event) => updateDraft("priority", event.target.value)} />
+                  </label>
+                </div>
+                <div className="two-column-fields">
+                  <label>
+                    Owner type
+                    <input value={draft.owner_type ?? ""} onChange={(event) => updateDraft("owner_type", event.target.value)} />
+                  </label>
+                  <label>
+                    Owner
+                    <input value={draft.owner_ref ?? ""} onChange={(event) => updateDraft("owner_ref", event.target.value)} />
+                  </label>
+                </div>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+              </>
+            )}
+
+            {"email" in selectedItem && (
+              <>
+                <label>
+                  Name
+                  <input value={draft.name ?? ""} onChange={(event) => updateDraft("name", event.target.value)} />
+                </label>
+                <div className="two-column-fields">
+                  <label>
+                    Email
+                    <input value={draft.email ?? ""} onChange={(event) => updateDraft("email", event.target.value)} />
+                  </label>
+                  <label>
+                    Phone
+                    <input value={draft.phone ?? ""} onChange={(event) => updateDraft("phone", event.target.value)} />
+                  </label>
+                </div>
+                <label>
+                  LinkedIn
+                  <input value={draft.linkedin ?? ""} onChange={(event) => updateDraft("linkedin", event.target.value)} />
+                </label>
+                <label>
+                  Summary
+                  <textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} />
+                </label>
+                <label>
+                  Origination
+                  <textarea value={draft.origination ?? ""} onChange={(event) => updateDraft("origination", event.target.value)} />
+                </label>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+                <div className="preview-meta">
+                  <span>{selectedItem.organization_entity_id ? `Organization ${selectedItem.organization_entity_id.slice(0, 8)}` : "No linked organization"}</span>
+                  <span>{selectedItem.scheduled_event_ids.length} scheduled contacts</span>
+                </div>
+              </>
+            )}
+
+            {"website" in selectedItem && !("email" in selectedItem) && (
+              <>
+                <label>
+                  Name
+                  <input value={draft.name ?? ""} onChange={(event) => updateDraft("name", event.target.value)} />
+                </label>
+                <label>
+                  Website
+                  <input value={draft.website ?? ""} onChange={(event) => updateDraft("website", event.target.value)} />
+                </label>
+                <label>
+                  Summary
+                  <textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} />
+                </label>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+              </>
+            )}
+
+            {"content" in selectedItem && (
+              <>
+                <label>
+                  Title
+                  <input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} />
+                </label>
+                <label>
+                  Idea
+                  <textarea value={draft.content ?? ""} onChange={(event) => updateDraft("content", event.target.value)} />
+                </label>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+              </>
+            )}
+
+            <div className="routed-detail-actions">
+              {(surface === "calendar" || surface === "todos" || surface === "ideas") && selectedItem.status !== "done" && (
+                <button className="planner-action" onClick={markSelectedDone} disabled={busy}>
+                  <CheckCircle2 size={16} />
+                  Done
+                </button>
+              )}
+              <button className="planner-action" onClick={saveSelected} disabled={busy}>
+                Save
+              </button>
+              <button className="danger-action" onClick={archiveSelected} disabled={busy}>
+                <Trash2 size={16} />
+                Archive
+              </button>
+            </div>
+
+            <div className="routed-object-meta">
+              <div className="preview-meta">
+                <span>{domainLabels[routedObjectDomain(selectedItem) ?? "global"] ?? routedObjectDomain(selectedItem) ?? "Global"}</span>
+                <span>Created {formatDateTime(selectedItem.created_at)}</span>
+                <span>{selectedItem.source_refs.length} source refs</span>
+              </div>
+              <details>
+                <summary>Provenance</summary>
+                <pre>{safeJson(selectedItem.provenance)}</pre>
+              </details>
+              <details>
+                <summary>Metadata</summary>
+                <pre>{safeJson(selectedItem.metadata)}</pre>
+              </details>
+              <details>
+                <summary>Source refs</summary>
+                <pre>{safeJson(selectedItem.source_refs)}</pre>
+              </details>
+            </div>
+            <p className="memory-status">{statusMessage}</p>
+          </div>
+        ) : (
+          <p className="empty-state">{config.empty}</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function NeedsAttentionPanel({ schedulerDashboard }: { schedulerDashboard: SchedulerDashboard | null }) {
+  const [todos, setTodos] = useState<RoutedTodo[]>([]);
+  const [statusMessage, setStatusMessage] = useState("Ready");
+
+  const refreshTodos = useCallback(async () => {
+    const response = await apiJson<{ todos: RoutedTodo[] }>(
+      "/memory/routed-objects/todos?status=needs_input&limit=20",
+    );
+    setTodos(response.todos);
+    setStatusMessage("Ready");
+  }, []);
+
+  useEffect(() => {
+    refreshTodos().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : "Unable to load attention items."),
+    );
+  }, [refreshTodos]);
+
+  const blockedRuns =
+    schedulerDashboard?.runs.filter((run) =>
+      run.status === "blocked" ||
+      run.status === "failed" ||
+      run.queue_items.some((item) => ["blocked", "approval_required", "failed"].includes(item.status)),
+    ) ?? [];
+
+  return (
+    <section className="attention-panel dashboard-wide" aria-labelledby="attention-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Action items</p>
+          <h3 id="attention-heading">Needs attention</h3>
+        </div>
+        <button className="icon-button" onClick={refreshTodos} title="Refresh attention items">
+          <RefreshCw size={18} />
+        </button>
+      </div>
+      <div className="attention-grid">
+        {blockedRuns.map((run) => (
+          <article className="attention-card" key={run.id}>
+            <CircleAlert size={18} />
+            <div>
+              <span>{run.status}</span>
+              <h4>{run.summary || "Workflow needs attention"}</h4>
+              <p>{run.error_message || "Open the Queue panel to inspect blocked or failed work."}</p>
+            </div>
+          </article>
+        ))}
+        {todos.map((todo) => (
+          <article className="attention-card" key={todo.id}>
+            <ListTodo size={18} />
+            <div>
+              <span>{domainLabels[todo.domain_key ?? "global"] ?? todo.domain_key ?? "Global"}</span>
+              <h4>{todo.title}</h4>
+              <p>{todo.description}</p>
+            </div>
+          </article>
+        ))}
+        {blockedRuns.length === 0 && todos.length === 0 && (
+          <p className="empty-state">No blocked workflows, approvals, or RFIs are waiting right now.</p>
+        )}
+      </div>
+      <p className="memory-status">{statusMessage}</p>
+    </section>
+  );
+}
+
 export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeDomain, setActiveDomain] = useState("Maestro");
-  const [activeSurface, setActiveSurface] = useState<"dashboard" | "domain" | "memory" | "tools">(
-    "dashboard",
-  );
+  const [activeSurface, setActiveSurface] = useState<ActiveSurface>("dashboard");
+  const [memoryNavOpen, setMemoryNavOpen] = useState(true);
+  const [domainsNavOpen, setDomainsNavOpen] = useState(true);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const [sessionHistory, setSessionHistory] = useState<MaestroSessionSummary[]>([]);
@@ -934,7 +1183,9 @@ export function App() {
     const blocked = queueItems.filter((item) => item.status === "blocked").length;
     const failed = queueItems.filter((item) => item.status === "failed").length;
     const running = queueItems.filter((item) =>
-      ["ready", "running", "retrying", "pending"].includes(item.status),
+      ["approval_required", "queued", "ready", "running", "retrying", "pending"].includes(
+        item.status,
+      ),
     ).length;
     return {
       id: plan.parent_task_id,
@@ -982,6 +1233,15 @@ export function App() {
       ),
     [maestroRun],
   );
+
+  const conductingMessage = useMemo(() => {
+    return workflowProgressLabel({
+      plan: maestroPlan,
+      run: maestroRun,
+      busyToolCallId,
+      maestroStatus,
+    });
+  }, [busyToolCallId, maestroPlan, maestroRun, maestroStatus]);
 
   const codexReviewPayload = (activity: MaestroRun["tool_activity"][number]) => {
     const payload = activity.output_payload ?? {};
@@ -1464,6 +1724,9 @@ export function App() {
         ? maestroPlan.parent_task_id
         : null;
     setMaestroBusy(true);
+    setMaestroRun(null);
+    if (!activePlanId) setMaestroPlan(null);
+    setMaestroStatus("Thinking through your message...");
     setChatMessages((messages) => [...messages, outgoingMessage]);
     setDraftMessage("");
     if (isApprovalMessage(outgoingMessage.content) && pendingToolApprovals.length > 0) {
@@ -1662,13 +1925,73 @@ export function App() {
             <Sparkles size={17} />
             <span>Maestro</span>
           </button>
-          <button
-            className={activeSurface === "memory" ? "domain-button active" : "domain-button"}
-            onClick={() => setActiveSurface("memory")}
-          >
-            <Database size={17} />
-            <span>Memory</span>
-          </button>
+          <div className="nav-group">
+            <button
+              className={
+                ["memory", "calendar", "contacts", "todos", "organizations", "ideas"].includes(activeSurface)
+                  ? "domain-button active"
+                  : "domain-button"
+              }
+              onClick={() => setMemoryNavOpen((open) => !open)}
+              type="button"
+            >
+              <Database size={17} />
+              <span>Memory</span>
+              {memoryNavOpen ? <ChevronDown className="nav-chevron" size={15} /> : <ChevronRight className="nav-chevron" size={15} />}
+            </button>
+            {memoryNavOpen && (
+              <div className="nav-submenu">
+                <button
+                  className={activeSurface === "memory" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("memory")}
+                  type="button"
+                >
+                  <HardDriveUpload size={16} />
+                  <span>Memory Manager</span>
+                </button>
+                <button
+                  className={activeSurface === "calendar" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("calendar")}
+                  type="button"
+                >
+                  <CalendarDays size={16} />
+                  <span>Calendar</span>
+                </button>
+                <button
+                  className={activeSurface === "contacts" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("contacts")}
+                  type="button"
+                >
+                  <Users size={16} />
+                  <span>Contacts</span>
+                </button>
+                <button
+                  className={activeSurface === "todos" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("todos")}
+                  type="button"
+                >
+                  <ListTodo size={16} />
+                  <span>To Do List</span>
+                </button>
+                <button
+                  className={activeSurface === "organizations" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("organizations")}
+                  type="button"
+                >
+                  <Building2 size={16} />
+                  <span>Organizations</span>
+                </button>
+                <button
+                  className={activeSurface === "ideas" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("ideas")}
+                  type="button"
+                >
+                  <Sparkles size={16} />
+                  <span>Think Tank</span>
+                </button>
+              </div>
+            )}
+          </div>
           <button
             className={activeSurface === "tools" ? "domain-button active" : "domain-button"}
             onClick={() => setActiveSurface("tools")}
@@ -1676,19 +1999,39 @@ export function App() {
             <Wrench size={17} />
             <span>Tools</span>
           </button>
-          {domains.map((domain) => (
+          <div className="nav-group">
             <button
-              key={domain}
-              className={activeDomain === domain ? "domain-button active" : "domain-button"}
-              onClick={() => {
-                setActiveDomain(domain);
-                setActiveSurface("domain");
-              }}
+              className={activeSurface === "domain" ? "domain-button active" : "domain-button"}
+              onClick={() => setDomainsNavOpen((open) => !open)}
+              type="button"
             >
-              <ChevronRight size={16} />
-              <span>{domain}</span>
+              <Bot size={17} />
+              <span>Domains</span>
+              {domainsNavOpen ? <ChevronDown className="nav-chevron" size={15} /> : <ChevronRight className="nav-chevron" size={15} />}
             </button>
-          ))}
+            {domainsNavOpen && (
+              <div className="nav-submenu">
+                {domains.map((domain) => (
+                  <button
+                    key={domain}
+                    className={
+                      activeSurface === "domain" && activeDomain === domain
+                        ? "domain-button active"
+                        : "domain-button"
+                    }
+                    onClick={() => {
+                      setActiveDomain(domain);
+                      setActiveSurface("domain");
+                    }}
+                    type="button"
+                  >
+                    <ChevronRight size={16} />
+                    <span>{domain}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </nav>
 
         <div className="sidebar-footer">
@@ -1705,9 +2048,11 @@ export function App() {
             <p className="eyebrow">Active surface</p>
             <h2>
               {activeSurface === "memory"
-                ? "Memory"
+                ? "Memory Manager"
                 : activeSurface === "tools"
                   ? "Tools"
+                  : activeSurface in routedSurfaceConfig
+                    ? routedSurfaceConfig[activeSurface as RoutedObjectSurface].title
                   : activeDomain}
             </h2>
           </div>
@@ -1720,6 +2065,11 @@ export function App() {
               <span>
                 <Database size={16} />
                 Memory pipeline
+              </span>
+            ) : activeSurface in routedSurfaceConfig ? (
+              <span>
+                <Database size={16} />
+                Routed store
               </span>
             ) : activeSurface === "tools" ? (
               <span>
@@ -1739,6 +2089,8 @@ export function App() {
 
         {activeSurface === "memory" ? (
           <MemoryWorkspace />
+        ) : activeSurface in routedSurfaceConfig ? (
+          <RoutedObjectsWorkspace surface={activeSurface as RoutedObjectSurface} />
         ) : activeSurface === "tools" ? (
           <ToolsWorkspace />
         ) : activeSurface === "domain" ? (
@@ -1784,7 +2136,11 @@ export function App() {
                       key={message.id}
                     >
                       <span>{message.sender === "user" ? "You" : "Maestro"}</span>
-                      <p>{message.content}</p>
+                      {message.sender === "maestro" ? (
+                        <MarkdownMessage content={message.content} />
+                      ) : (
+                        <p className="plain-message">{message.content}</p>
+                      )}
                     </div>
                   ))
                 ) : (
@@ -1796,7 +2152,7 @@ export function App() {
                   <div className="message maestro-message working-message" aria-live="polite">
                     <span>Maestro</span>
                   <p>
-                      {busyToolCallId ? "Running approved tool" : "Conducting"}
+                      {conductingMessage}
                       <span className="working-dots" aria-hidden="true">
                         <span />
                         <span />
@@ -1891,11 +2247,7 @@ export function App() {
                   Let agents plan safe tools
                 </label>
                 <span>
-                  {maestroBusy
-                    ? busyToolCallId
-                      ? "Running approved tool. Long Codex tasks may take a few minutes."
-                      : "Conducting"
-                    : maestroPlan?.scheduler.current_step || maestroStatus}
+                  {conductingMessage}
                 </span>
               </div>
 
@@ -2202,25 +2554,49 @@ export function App() {
               )}
             </section>
 
-            <section className="planner-panel" aria-labelledby="planner-heading">
+            <section className="planner-panel" aria-labelledby="review-heading">
               <div className="section-heading">
                 <div>
-                  <p className="eyebrow">Daily planner</p>
-                  <h3 id="planner-heading">Today</h3>
+                  <p className="eyebrow">Review</p>
+                  <h3 id="review-heading">Generated output</h3>
                 </div>
-                <button className="planner-action" disabled>
-                  <CalendarDays size={17} />
-                  Adjust
-                </button>
+                <FileText size={18} />
               </div>
 
-              <div className="empty-planner-state">
-                <CalendarDays size={20} />
-                <p>
-                  Daily planner is ready for the morning standup workflow. Scheduled blocks will
-                  appear here once Maestro starts producing a real daily plan.
-                </p>
-              </div>
+              {maestroRun ? (
+                <div className="artifact-review-pane">
+                  <div className="preview-meta">
+                    <span>{maestroRun.status}</span>
+                    <span>{maestroRun.child_runs.length} child runs</span>
+                    {maestroRun.synthesis_report_id && <span>report {maestroRun.synthesis_report_id.slice(0, 8)}</span>}
+                    {maestroRun.artifact_id && <span>artifact {maestroRun.artifact_id.slice(0, 8)}</span>}
+                  </div>
+                  {maestroRun.chat_summary && (
+                    <article className="artifact-review-card">
+                      <h4>Chat summary</h4>
+                      <p>{maestroRun.chat_summary}</p>
+                    </article>
+                  )}
+                  {maestroRun.staged_artifact_path && (
+                    <article className="artifact-review-card">
+                      <h4>Staged artifact</h4>
+                      <p>{maestroRun.staged_artifact_path}</p>
+                    </article>
+                  )}
+                  <details className="artifact-review-card">
+                    <summary>Workflow synthesis</summary>
+                    <pre>{maestroRun.synthesis}</pre>
+                  </details>
+                </div>
+              ) : (
+                <div className="empty-planner-state">
+                  <FileText size={20} />
+                  <p>
+                    Workflow reports, staged artifacts, PR summaries, and generated documents will
+                    appear here when Maestro has something for review.
+                  </p>
+                </div>
+              )}
             </section>
 
             <section className="reports-panel" aria-labelledby="reports-heading">
@@ -2231,6 +2607,7 @@ export function App() {
                 </div>
                 <Clock3 size={18} />
               </div>
+              {false && (
               <div className="scheduler-control-panel">
                 <div className="workflow-detail-heading">
                   <div>
@@ -2355,6 +2732,7 @@ export function App() {
                   <p className="evaluation-note">{schedulerStatusMessage}</p>
                 )}
               </div>
+              )}
               {activeWorkflowSummary ? (
                 <div className="scheduler-visualizer">
                   <article className="workflow-summary-card">
@@ -2670,11 +3048,7 @@ export function App() {
               )}
             </section>
 
-            <RoutedItemsBoard
-              title="Open routed work"
-              eyebrow="Maestro aggregate"
-              className="dashboard-wide"
-            />
+            <NeedsAttentionPanel schedulerDashboard={schedulerDashboard} />
           </div>
         )}
       </section>
@@ -3036,13 +3410,6 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
         </button>
         <p className="memory-status">{statusMessage}</p>
       </section>
-
-      <RoutedItemsBoard
-        domainKey={domainKey}
-        title={`${domainLabel} routed work`}
-        eyebrow="Domain activity"
-        className="wide-panel"
-      />
 
       <section className="memory-panel admin-panel" aria-labelledby="domain-agent-heading">
         <div className="section-heading">
