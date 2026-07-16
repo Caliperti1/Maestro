@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import UTC, datetime
+import uuid
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.main import create_app
 from app.core.config import get_settings
 from app.db.models import (
+    Artifact,
     CalendarEvent,
     Contact,
     ContactAlias,
@@ -922,6 +924,63 @@ def test_archive_memory_item_endpoint_hides_from_default_list(
     assert archive.json()["status"] == "archived"
     assert active.json()["items"] == []
     assert archived.json()["items"][0]["title"] == "Temporary API memory"
+
+
+def test_memory_artifacts_endpoint_lists_canonical_workflow_sources(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    artifact_id = uuid.uuid4()
+    artifact = Artifact(
+        id=artifact_id,
+        artifact_type="interaction_package",
+        name="Workflow run package",
+        uri=str(tmp_path / "workflow.md"),
+        mime_type="text/markdown",
+        metadata_={
+            "canonical_workflow_artifact": True,
+            "domain_key": "maestro-development",
+        },
+    )
+    ignored = Artifact(
+        artifact_type="raw_file",
+        name="Manual upload",
+        uri=str(tmp_path / "manual.md"),
+        mime_type="text/markdown",
+        metadata_={},
+    )
+    memory = MemoryItem(
+        scope="domain",
+        memory_type="summary",
+        title="Workflow artifact memory",
+        content="The workflow artifact generated durable context.",
+        impact_level="low",
+        importance=0.6,
+        metadata_={"artifact_id": str(artifact_id)},
+    )
+    proposal = MemoryProposal(
+        scope="domain",
+        memory_type="decision",
+        title="Workflow artifact proposal",
+        content="Review workflow artifact memory.",
+        impact_level="high",
+        status="proposed",
+        source_refs=[{"type": "artifact", "id": str(artifact_id)}],
+        metadata_={},
+    )
+    session.add_all([artifact, ignored, memory, proposal])
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.get("/memory/artifacts")
+
+    assert response.status_code == 200
+    artifacts = response.json()["artifacts"]
+    assert [item["name"] for item in artifacts] == ["Workflow run package"]
+    assert artifacts[0]["canonical"] is True
+    assert artifacts[0]["memory_count"] == 1
+    assert artifacts[0]["proposal_count"] == 1
 
 
 def test_memory_preview_listing_marks_in_progress_writes(

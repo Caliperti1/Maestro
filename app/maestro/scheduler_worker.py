@@ -7,10 +7,12 @@ unit of queue adjudication and agent execution.
 """
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.runtime import (
@@ -20,11 +22,61 @@ from app.agents.runtime import (
     PromptPackageRequest,
 )
 from app.core.config import get_settings
-from app.db.models import Agent, Artifact, Domain, Report, RuntimeSetting, WorkflowQueueItem, WorkflowRun
+from app.db.models import Agent, Artifact, Domain, Report, RuntimeSetting, Task, WorkflowQueueItem, WorkflowRun
 from app.maestro.channel import record_channel_message
 from app.maestro.scheduler import SchedulerService
+from app.maestro.workflow_outputs import WorkflowOutputService
+from app.tools.runtime import ToolExecutionRequest, ToolExecutionService, tool_result_payload
 
 SCHEDULER_WORKER_SETTING_KEY = "scheduler_worker"
+logger = logging.getLogger(__name__)
+
+
+def _queue_item_required_skills(item: WorkflowQueueItem) -> list[str]:
+    payload = item.input_payload or {}
+    skills = payload.get("required_skills")
+    if not isinstance(skills, list):
+        return []
+    return [str(skill).strip() for skill in skills if str(skill).strip()]
+
+
+def _coding_pr_number(tool_calls: list[dict[str, Any]]) -> int | None:
+    for call in reversed(tool_calls):
+        if call.get("tool_name") != "codex.task.run":
+            continue
+        output = call.get("output_payload")
+        if not isinstance(output, dict):
+            continue
+        number = output.get("pr_number")
+        if number is None and isinstance(output.get("pr"), dict):
+            number = output["pr"].get("number") or output["pr"].get("pr_number")
+        try:
+            return int(number)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _queue_item_model_profile(
+    run: WorkflowRun,
+    item: WorkflowQueueItem,
+    agent: Agent | None = None,
+) -> str | None:
+    item_payload = item.input_payload or {}
+    item_profile = str(item_payload.get("model_profile") or "").strip()
+    if item_profile:
+        return item_profile
+    run_payload = run.input_payload or {}
+    workflow_spec = run_payload.get("workflow_spec") if isinstance(run_payload.get("workflow_spec"), dict) else {}
+    spec_profile = str(workflow_spec.get("model_profile") or run_payload.get("model_profile") or "").strip()
+    if spec_profile:
+        return spec_profile
+    if agent is not None:
+        capabilities = agent.capabilities or {}
+        agent_profile = str(capabilities.get("model_profile") or "").strip()
+        if agent_profile and agent_profile != "default":
+            return agent_profile
+    return None
 
 
 def scheduler_worker_settings(session: Session) -> dict[str, Any]:
@@ -182,6 +234,8 @@ class SchedulerWorkerService:
                     user_context=self._worker_user_context(run, item),
                     query_text=item.objective,
                     use_semantic=True,
+                    required_skills=_queue_item_required_skills(item),
+                    model_profile=_queue_item_model_profile(run, item, agent),
                 ),
                 stage_interaction=True,
                 execute_llm=execute_llm,
@@ -201,6 +255,34 @@ class SchedulerWorkerService:
             }
 
         if agent_run.status == "completed" or agent_run.status == "prepared":
+            delivery_review = self._propose_coding_delivery_review(item, agent_run)
+            if delivery_review is not None:
+                blocked = self.scheduler.block_queue_item(
+                    item.id,
+                    error_message=delivery_review["message"],
+                    output_payload={
+                        "agent_run": self._agent_run_payload(agent_run),
+                        "delivery_review": delivery_review["tool_call"],
+                    },
+                )
+                self.scheduler.record_event(
+                    run,
+                    queue_item=blocked,
+                    event_type="coding_pr_review_required",
+                    message=delivery_review["message"],
+                    payload=delivery_review["tool_call"],
+                )
+                self._post_channel_update(
+                    run,
+                    blocked,
+                    status="blocked",
+                    message=delivery_review["message"],
+                )
+                return {
+                    "queue_item": self.scheduler.queue_item_payload(blocked),
+                    "agent_run": self._agent_run_payload(agent_run),
+                    "status": "blocked",
+                }
             completed = self.scheduler.complete_queue_item(
                 item.id,
                 output_payload=self._agent_run_payload(agent_run),
@@ -221,9 +303,9 @@ class SchedulerWorkerService:
                     f"through {agent.name}."
                 ),
             )
+            self.session.refresh(run)
             if run.status == "completed":
-                self._stage_completed_workflow_run(run)
-                self._post_workflow_completion_update(run)
+                self._finalize_completed_workflow_run(run)
             return {
                 "queue_item": self.scheduler.queue_item_payload(completed),
                 "agent_run": self._agent_run_payload(agent_run),
@@ -268,6 +350,66 @@ class SchedulerWorkerService:
             "status": "failed",
         }
 
+    def _propose_coding_delivery_review(self, item: WorkflowQueueItem, agent_run) -> dict[str, Any] | None:
+        pr_number = _coding_pr_number(agent_run.tool_calls)
+        if pr_number is None or not agent_run.task_id:
+            return None
+        try:
+            task_id = uuid.UUID(str(agent_run.task_id))
+        except (TypeError, ValueError):
+            return None
+        task = self.session.get(Task, task_id)
+        if task is None:
+            return None
+        proposed = ToolExecutionService(self.session).propose_for_task(
+            ToolExecutionRequest(
+                agent_key=agent_run.agent.key,
+                tool_key="local.app.deploy_pr",
+                payload={"pr_number": pr_number, "method": "squash", "delete_branch": True},
+            ),
+            task=task,
+            rationale=(
+                f"Codex created PR #{pr_number}. Chris must review it before Maestro merges it "
+                "and updates the dedicated runtime."
+            ),
+            safety_level="production_code_delivery",
+            reason=(
+                f"PR #{pr_number} is ready for Chris's review. Approval will merge it and pull "
+                "the result into the dedicated runtime checkout."
+            ),
+        )
+        task.status = "blocked"
+        task.error_message = f"Waiting for Chris to review PR #{pr_number} and approve delivery."
+        task.completed_at = None
+        self.session.commit()
+        return {
+            "tool_call": tool_result_payload(proposed),
+            "message": (
+                f"PR #{pr_number} is ready for review. This workflow is paused until you approve "
+                "merging it and updating the dedicated Maestro runtime."
+            ),
+        }
+
+    def complete_approved_delivery(
+        self,
+        *,
+        task_id: uuid.UUID,
+        delivery_result: dict[str, Any],
+    ) -> WorkflowRun | None:
+        for item in self.session.scalars(select(WorkflowQueueItem)).all():
+            agent_run = (item.output_payload or {}).get("agent_run")
+            if not isinstance(agent_run, dict) or str(agent_run.get("task_id")) != str(task_id):
+                continue
+            completed = self.scheduler.complete_queue_item(
+                item.id,
+                output_payload={"delivery": delivery_result},
+            )
+            run = self.session.get(WorkflowRun, completed.workflow_run_id)
+            if run is not None and run.status == "completed":
+                self._finalize_completed_workflow_run(run)
+            return run
+        return None
+
     def _worker_user_context(self, run: WorkflowRun, item: WorkflowQueueItem) -> str:
         context = {
             "workflow_run_id": str(run.id),
@@ -281,6 +423,8 @@ class SchedulerWorkerService:
                 "stage_index": item.stage_index,
                 "dependency_keys": item.dependency_keys,
                 "resource_locks": item.resource_locks,
+                "required_skills": _queue_item_required_skills(item),
+                "model_profile": _queue_item_model_profile(run, item),
             },
             "completed_dependencies": self._completed_dependency_outputs(item),
         }
@@ -404,45 +548,113 @@ class SchedulerWorkerService:
         }
         self.session.commit()
 
-    def _post_workflow_completion_update(self, run: WorkflowRun) -> None:
+    def _finalize_completed_workflow_run(self, run: WorkflowRun) -> None:
+        """Persist independent completion outputs without letting one suppress the others."""
+        run_id = run.id
+        try:
+            self._stage_completed_workflow_run(run)
+        except Exception:
+            self.session.rollback()
+            logger.exception("Could not stage completion artifact for workflow run %s", run_id)
+            run = self.session.get(WorkflowRun, run_id)
+            if run is None:
+                return
+
+        completion_message = ""
+        try:
+            completion_message = self._post_workflow_completion_update(run)
+        except Exception:
+            self.session.rollback()
+            logger.exception("Could not post completion update for workflow run %s", run_id)
+            run = self.session.get(WorkflowRun, run_id)
+            if run is None:
+                return
+
+        try:
+            WorkflowOutputService(self.session).record_run_log(run)
+        except Exception:
+            self.session.rollback()
+            logger.exception("Could not record run log for workflow run %s", run_id)
+            run = self.session.get(WorkflowRun, run_id)
+            if run is None:
+                return
+
+        parent_task = self.session.get(Task, run.parent_task_id) if run.parent_task_id else None
+        if parent_task is not None:
+            parent_task.status = "completed"
+            parent_task.completed_at = run.completed_at or datetime.now(UTC)
+            parent_task.output_payload = {
+                **(parent_task.output_payload or {}),
+                "status": "completed",
+                "chat_summary": completion_message or (parent_task.output_payload or {}).get("chat_summary"),
+            }
+            self.session.commit()
+
+    def _post_workflow_completion_update(self, run: WorkflowRun) -> str:
         self.session.refresh(run)
         output_payload = run.output_payload or {}
-        if output_payload.get("completion_channel_message_posted"):
-            return
-        queue_items = self.scheduler._queue_items_for_run(run.id)
-        summaries: list[str] = []
-        for item in queue_items[:4]:
-            item_output = item.output_payload or {}
-            agent_run = item_output.get("agent_run") if isinstance(item_output.get("agent_run"), dict) else item_output
-            preview = str(
-                agent_run.get("output_preview")
-                or agent_run.get("execution_note")
-                or f"Finished with status {agent_run.get('status') or item.status}."
-            ).strip()
-            agent_name = str(agent_run.get("agent_name") or item.external_key)
-            summaries.append(f"- {agent_name}: {self._plain_text_preview(preview, max_chars=260)}")
-        message = f"I finished scheduled workflow `{self._run_title(run)}`."
-        if summaries:
-            message += "\n\nWhat came back:\n" + "\n".join(summaries)
-        else:
-            message += " No agent report text was available, but the queue items completed."
-        record_channel_message(
-            self.session,
-            sender="maestro",
-            content=message,
-            metadata={
-                "source": "scheduler_worker",
-                "status": "completed",
-                "workflow_run_id": str(run.id),
-                "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
-                "event_type": "workflow_completed",
-            },
-        )
-        run.output_payload = {
-            **(run.output_payload or {}),
-            "completion_channel_message_posted": True,
-        }
-        self.session.commit()
+        message = str(output_payload.get("completion_channel_message") or "")
+        if not message:
+            queue_items = self.scheduler._queue_items_for_run(run.id)
+            summaries: list[str] = []
+            for item in queue_items[:4]:
+                item_output = item.output_payload or {}
+                agent_run = item_output.get("agent_run") if isinstance(item_output.get("agent_run"), dict) else item_output
+                preview = str(
+                    agent_run.get("output_preview")
+                    or agent_run.get("execution_note")
+                    or f"Finished with status {agent_run.get('status') or item.status}."
+                ).strip()
+                agent_name = str(agent_run.get("agent_name") or item.external_key)
+                summaries.append(f"- {agent_name}: {self._plain_text_preview(preview, max_chars=260)}")
+            run_kind = "scheduled workflow" if run.workflow_definition_id else "workflow"
+            message = f"I finished the {run_kind} `{self._run_title(run)}`."
+            if summaries:
+                message += "\n\nWhat came back:\n" + "\n".join(summaries)
+            else:
+                message += " No agent report text was available, but the queue items completed."
+
+        if not output_payload.get("completion_channel_message_posted"):
+            record_channel_message(
+                self.session,
+                sender="maestro",
+                content=message,
+                metadata={
+                    "source": "scheduler_worker",
+                    "status": "completed",
+                    "workflow_run_id": str(run.id),
+                    "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
+                    "event_type": "workflow_completed",
+                },
+            )
+            run.output_payload = {
+                **(run.output_payload or {}),
+                "completion_channel_message_posted": True,
+                "completion_channel_message": message,
+            }
+            self.session.commit()
+
+        self.session.refresh(run)
+        if not (run.output_payload or {}).get("completion_notification_posted"):
+            WorkflowOutputService(self.session).create_notification(
+                run,
+                title=f"Workflow completed: {self._run_title(run)}",
+                message=message,
+                severity="info",
+                notification_type="workflow_completed",
+                status="delivered",
+                delivered_at=datetime.now(UTC),
+                metadata={
+                    "source": "scheduler_worker",
+                    "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
+                },
+            )
+            run.output_payload = {
+                **(run.output_payload or {}),
+                "completion_notification_posted": True,
+            }
+            self.session.commit()
+        return message
 
     def _post_channel_update(
         self,

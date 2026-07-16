@@ -1,11 +1,12 @@
 from typing import Any
 import asyncio
 import json
+import logging
 import uuid
 import re
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,16 +14,16 @@ from sqlalchemy.orm import Session
 from app.db.models import Conversation, Domain, Message, RoutedItem, RuntimeSetting, Task, Todo
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.llm.client import LLMClientError, OpenAILLMClient
 from app.maestro.channel import MAESTRO_CHANNEL_KEY, get_or_create_maestro_channel
+from app.maestro.context_assembler import MaestroContextAssembler, maestro_context_payload
 from app.maestro.intent_classifier import (
     classify_active_message_with_local_llm,
     resolve_topic_with_local_llm,
     understand_message_with_local_llm,
 )
 from app.maestro.scheduler import SchedulerService
-from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
 from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
@@ -32,6 +33,7 @@ from app.maestro.orchestrator import (
 )
 
 router = APIRouter(prefix="/maestro", tags=["maestro"])
+logger = logging.getLogger(__name__)
 
 
 class MaestroPlanBody(BaseModel):
@@ -51,6 +53,11 @@ class MaestroRunBody(BaseModel):
     conversation_id: uuid.UUID | None = None
 
 
+class MaestroPlanArchiveBody(BaseModel):
+    reason: str | None = None
+    conversation_id: uuid.UUID | None = None
+
+
 class MaestroSessionMessage(BaseModel):
     sender: str
     content: str
@@ -64,6 +71,21 @@ class MaestroSessionCloseBody(BaseModel):
 
 class MaestroSessionArchiveBody(BaseModel):
     archived: bool = True
+
+
+@router.get("/context-bundle")
+def build_maestro_context_bundle(
+    query_text: str | None = None,
+    domain_key: str | None = None,
+    max_chars: int = 6500,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    bundle = MaestroContextAssembler(db).build_bundle(
+        query_text=query_text,
+        domain_key=domain_key,
+        max_chars=max_chars,
+    )
+    return maestro_context_payload(bundle)
 
 
 class MaestroToolRejectBody(BaseModel):
@@ -90,7 +112,37 @@ def create_maestro_plan(body: MaestroPlanBody, db: Session = Depends(get_db)) ->
 @router.post("/respond")
 def respond_to_maestro(
     body: MaestroRespondBody,
+    background_tasks: BackgroundTasks,
+    x_maestro_async: str | None = Header(default=None),
     db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if x_maestro_async == "true":
+        background_tasks.add_task(_respond_to_maestro_in_background, body)
+        return {
+            "kind": "pending",
+            "classification": "pending",
+            "message": "I received that and am working through it now.",
+            "plan": None,
+            "chat_plan": None,
+            "active_plan": None,
+            "channel_context": None,
+            "conversation": None,
+        }
+    return _respond_to_maestro_sync(body, db)
+
+
+def _respond_to_maestro_in_background(body: MaestroRespondBody) -> None:
+    """Keep the shared channel responsive while local/model reasoning completes."""
+    with SessionLocal() as session:
+        try:
+            _respond_to_maestro_sync(body, session)
+        except Exception:
+            logger.exception("Maestro background response failed.")
+
+
+def _respond_to_maestro_sync(
+    body: MaestroRespondBody,
+    db: Session,
 ) -> dict[str, Any]:
     conversation = _get_or_create_maestro_conversation(db, body.conversation_id)
     normalized_message = _normalized_message_for_routing(body.message)
@@ -169,7 +221,11 @@ def respond_to_maestro(
             active_plan = service.get_plan(active_plan_id)
             classification = _classify_active_session_message(body.message, active_plan)
             if classification == "new_workflow":
-                plan = service.create_plan(planner_message, conversation_id=conversation.id)
+                plan = service.create_plan(
+                    planner_message,
+                    conversation_id=conversation.id,
+                    topic_id=str(topic_context.get("topic_id")) if topic_context.get("topic_id") else None,
+                )
                 kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else "planned")
             elif classification == "delete_workflow":
                 response_message = _delete_open_workflows_response(
@@ -207,6 +263,7 @@ def respond_to_maestro(
                 plan = service.create_plan(
                     body.message,
                     conversation_id=conversation.id,
+                    topic_id=str(topic_context.get("topic_id")) if topic_context.get("topic_id") else None,
                 )
                 kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else "planned")
                 response_active_plan = active_plan
@@ -236,7 +293,11 @@ def respond_to_maestro(
                     "channel_context": topic_context,
                     "conversation": _conversation_payload(db, conversation),
                 }
-            plan = service.create_plan(planner_message, conversation_id=conversation.id)
+            plan = service.create_plan(
+                planner_message,
+                conversation_id=conversation.id,
+                topic_id=str(topic_context.get("topic_id")) if topic_context.get("topic_id") else None,
+            )
             kind = "routed" if plan.is_routing_only else ("chat_only" if plan.is_chat_only else "planned")
             classification = kind
     except MaestroOrchestratorError as exc:
@@ -314,23 +375,33 @@ def run_maestro_plan(
 ) -> dict[str, Any]:
     conversation = _get_or_create_maestro_conversation(db, body.conversation_id)
     try:
-        run = MaestroOrchestratorService(db).run_plan(
-            plan_id,
-            execute_llm=body.execute_llm,
-            auto_tool_loop=body.auto_tool_loop,
-            max_tool_iterations=body.max_tool_iterations,
-        )
+        run = MaestroOrchestratorService(db).enqueue_plan(plan_id)
     except MaestroOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _record_session_message(
         db,
         conversation,
         "maestro",
-        run.chat_summary
-        if run.status in {"completed", "scheduled"}
-        else f"The workflow finished with status {run.status}.\n\n{run.chat_summary}",
+        run.chat_summary,
     )
     return {"run": _run_payload(run)}
+
+
+@router.post("/plans/{plan_id}/archive")
+def archive_maestro_plan(
+    plan_id: uuid.UUID,
+    body: MaestroPlanArchiveBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    reason = body.reason or "Candidate workflow cleared from Maestro chat."
+    try:
+        plan = MaestroOrchestratorService(db).archive_plan(plan_id, reason=reason)
+    except MaestroOrchestratorError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if body.conversation_id is not None:
+        conversation = _get_or_create_maestro_conversation(db, body.conversation_id)
+        _record_session_message(db, conversation, "maestro", "I cleared that candidate workflow.")
+    return {"plan": _plan_payload(plan)}
 
 
 @router.post("/tool-calls/{tool_call_id}/approve")
@@ -1048,7 +1119,12 @@ def _conversation_payload(
             if (message.metadata_ or {}).get("topic_id") == active_topic_id
         ]
     message_count = len(messages) if include_messages else len(all_messages)
-    plan = _latest_conversation_plan(db, conversation.id)
+    active_topic = _active_topic(conversation)
+    plan = _latest_conversation_plan(
+        db,
+        conversation.id,
+        topic_id=str(active_topic.get("id")) if active_topic and active_topic.get("id") else None,
+    )
     return {
         "id": str(conversation.id),
         "title": conversation.title or "Maestro session",
@@ -1072,14 +1148,23 @@ def _conversation_payload(
     }
 
 
-def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> MaestroPlan | None:
+def _latest_conversation_plan(
+    db: Session,
+    conversation_id: uuid.UUID,
+    *,
+    topic_id: str | None = None,
+) -> MaestroPlan | None:
+    active_statuses = {"proposed", "queued", "ready", "running", "blocked", "failed"}
+    filters = [
+        Task.conversation_id == conversation_id,
+        Task.workflow_key == "maestro.generic",
+        Task.status.in_(active_statuses),
+    ]
+    if topic_id:
+        filters.append(Task.input_payload["topic_id"].as_string() == topic_id)
     tasks = db.scalars(
         select(Task)
-        .where(
-            Task.conversation_id == conversation_id,
-            Task.workflow_key == "maestro.generic",
-            Task.status != "archived",
-        )
+        .where(*filters)
         .order_by(Task.created_at.desc(), Task.id.desc())
         .limit(20)
     ).all()
@@ -1094,12 +1179,18 @@ def _latest_conversation_plan(db: Session, conversation_id: uuid.UUID) -> Maestr
 
 
 def _resolve_channel_context(db: Session, conversation: Conversation) -> MaestroPlan | None:
-    plan = _latest_conversation_plan(db, conversation.id)
+    active_topic = _active_topic(conversation)
+    topic_id = str(active_topic.get("id")) if active_topic and active_topic.get("id") else None
+    plan = _latest_conversation_plan(db, conversation.id, topic_id=topic_id)
     if plan is not None:
         return plan
     active = _active_maestro_conversation(db)
     if active is not None and active.id != conversation.id:
-        return _latest_conversation_plan(db, active.id)
+        active_topic = _active_topic(active)
+        active_topic_id = (
+            str(active_topic.get("id")) if active_topic and active_topic.get("id") else None
+        )
+        return _latest_conversation_plan(db, active.id, topic_id=active_topic_id)
     return None
 
 
@@ -1709,28 +1800,30 @@ def _direct_chat_response(db: Session, message: str) -> str:
     if settings.llm_provider == "openai" and not settings.openai_api_key:
         return _fallback_direct_chat_response(message)
     try:
-        bundle = MemoryRetrievalService(db).build_context_bundle(
-            MemoryContextBundleRequest(
-                profile="agent_prompt",
-                audience="maestro",
-                query_text=message,
-                use_semantic=True,
-                max_items=6,
-                max_chars=1800,
-            )
+        context_bundle = MaestroContextAssembler(db).build_bundle(
+            query_text=message,
+            max_chars=4200,
+            memory_chars=1800,
+            routed_chars=1000,
+            report_limit=4,
+            run_log_limit=4,
+            artifact_limit=3,
         )
-        memory_text = bundle.rendered_text
+        context_text = context_bundle.rendered_text
     except Exception:
-        memory_text = ""
+        context_text = ""
     instructions = (
         "You are Maestro speaking directly with Chris. Answer conversationally and helpfully. "
         "Do not create a workflow, do not claim agents are working, and do not route memory unless "
         "Chris explicitly asked for that. If useful, mention that you can turn the conversation into "
-        "agent work later."
+        "agent work later. Use the provided Maestro context as background; do not dump raw context "
+        "or provenance unless Chris asks. Format responses as clean GitHub-flavored Markdown with "
+        "blank lines between paragraphs, numbered lists, and bullet lists. Do not put an entire "
+        "numbered list on one line."
     )
     input_text = (
         f"Chris's message:\n{message}\n\n"
-        f"Relevant Maestro memory, if any:\n{memory_text or '(none retrieved)'}"
+        f"Relevant Maestro context, if any:\n{context_text or '(none retrieved)'}"
     )
     try:
         response = OpenAILLMClient().text_response(

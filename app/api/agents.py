@@ -12,6 +12,8 @@ from app.agents.runtime import (
     InteractionArtifactPackage,
     PromptAggregationService,
     PromptPackageRequest,
+    SkillManifestItem,
+    SkillRegistryItem,
     ToolManifestItem,
 )
 from app.db.session import get_db
@@ -27,6 +29,8 @@ class PromptPackageBody(BaseModel):
     max_memory_items: int = 10
     max_memory_chars: int = 3500
     use_semantic: bool = True
+    required_skills: list[str] | None = None
+    model_profile: str | None = None
 
 
 class DomainContextBody(BaseModel):
@@ -47,6 +51,7 @@ class AgentCreateBody(BaseModel):
     memory_profile: str = "agent_prompt"
     model_profile: str = "default"
     tool_permissions: dict[str, Any] = Field(default_factory=dict)
+    skill_permissions: dict[str, Any] = Field(default_factory=dict)
     current_action: str | None = None
 
 
@@ -56,6 +61,7 @@ class AgentUpdateBody(BaseModel):
     memory_profile: str | None = None
     model_profile: str | None = None
     tool_permissions: dict[str, Any] | None = None
+    skill_permissions: dict[str, Any] | None = None
     current_action: str | None = None
     scheduled_actions: list[dict[str, Any]] | None = None
     is_active: bool | None = None
@@ -68,6 +74,17 @@ class ToolConnectionBody(BaseModel):
     auth_type: str = "manual"
     config: dict[str, Any] = Field(default_factory=dict)
     is_active: bool = True
+
+
+class SkillBody(BaseModel):
+    key: str
+    name: str
+    instruction: str
+    description: str | None = None
+    category: str = "general"
+    domain_key: str | None = None
+    is_active: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentToolRequestBody(BaseModel):
@@ -119,6 +136,7 @@ def create_agent(body: AgentCreateBody, db: Session = Depends(get_db)) -> dict[s
             memory_profile=body.memory_profile,
             model_profile=body.model_profile,
             tool_permissions=body.tool_permissions,
+            skill_permissions=body.skill_permissions,
             current_action=body.current_action,
         )
     except AgentRuntimeError as exc:
@@ -200,6 +218,30 @@ def list_tools(db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
 
+@router.get("/skills")
+def list_skills(db: Session = Depends(get_db)) -> dict[str, Any]:
+    skills = AgentRegistryService(db).list_skills()
+    return {"skills": [_skill_registry_payload(skill) for skill in skills]}
+
+
+@router.put("/skills")
+def upsert_skill(body: SkillBody, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        skill = AgentRegistryService(db).upsert_skill(
+            key=body.key,
+            name=body.name,
+            instruction=body.instruction,
+            description=body.description,
+            category=body.category,
+            domain_key=body.domain_key,
+            is_active=body.is_active,
+            metadata=body.metadata,
+        )
+    except AgentRuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"skill": _skill_registry_payload(skill)}
+
+
 @router.get("/tools/connections")
 def list_tool_connections(db: Session = Depends(get_db)) -> dict[str, Any]:
     connections = AgentRegistryService(db).list_tool_connections()
@@ -248,6 +290,7 @@ def update_agent(
             memory_profile=body.memory_profile,
             model_profile=body.model_profile,
             tool_permissions=body.tool_permissions,
+            skill_permissions=body.skill_permissions,
             current_action=body.current_action,
             scheduled_actions=body.scheduled_actions,
             is_active=body.is_active,
@@ -292,6 +335,8 @@ def build_prompt_package(
                 max_memory_items=body.max_memory_items,
                 max_memory_chars=body.max_memory_chars,
                 use_semantic=body.use_semantic,
+                required_skills=body.required_skills,
+                model_profile=body.model_profile,
             )
         )
     except AgentRuntimeError as exc:
@@ -316,6 +361,8 @@ def run_agent_once(
                 max_memory_items=body.max_memory_items,
                 max_memory_chars=body.max_memory_chars,
                 use_semantic=body.use_semantic,
+                required_skills=body.required_skills,
+                model_profile=body.model_profile,
             ),
             stage_interaction=body.stage_interaction,
             execute_llm=body.execute_llm,
@@ -395,6 +442,7 @@ def _agent_payload(spec) -> dict[str, Any]:
         "memory_profile": spec.memory_profile,
         "model_profile": spec.model_profile,
         "allowed_tools": [_tool_payload(tool) for tool in spec.allowed_tools],
+        "allowed_skills": [_skill_payload(skill) for skill in spec.allowed_skills],
         "is_active": spec.is_active,
         "current_action": spec.current_action,
         "scheduled_actions": spec.scheduled_actions,
@@ -409,6 +457,31 @@ def _tool_payload(tool: ToolManifestItem) -> dict[str, Any]:
         "description": tool.description,
         "connection_id": tool.connection_id,
         "auth_type": tool.auth_type,
+    }
+
+
+def _skill_payload(skill: SkillManifestItem) -> dict[str, Any]:
+    return {
+        "key": skill.key,
+        "name": skill.name,
+        "description": skill.description,
+        "category": skill.category,
+        "instruction": skill.instruction,
+        "domain_key": skill.domain_key,
+    }
+
+
+def _skill_registry_payload(skill: SkillRegistryItem) -> dict[str, Any]:
+    return {
+        "id": str(skill.id),
+        "key": skill.key,
+        "name": skill.name,
+        "description": skill.description,
+        "category": skill.category,
+        "instruction": skill.instruction,
+        "domain_key": skill.domain_key,
+        "is_active": skill.is_active,
+        "authorized_agents": skill.authorized_agents,
     }
 
 
@@ -449,6 +522,7 @@ def _prompt_package_payload(package) -> dict[str, Any]:
         "role_prompt": package.role_prompt,
         "user_context": package.user_context,
         "tool_manifest": [_tool_payload(tool) for tool in package.tool_manifest],
+        "skill_manifest": [_skill_payload(skill) for skill in package.skill_manifest],
         "output_contract": package.output_contract,
         "memory_context": {
             "profile": package.memory_context.request.profile,

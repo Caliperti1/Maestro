@@ -39,8 +39,13 @@ export type SchedulerQueueItem = {
   domain_key: string | null;
   agent_key: string | null;
   agent_name: string | null;
+  required_skills?: string[];
+  model_profile?: string | null;
+  model_tier?: string;
+  model_rationale?: string | null;
   lease_owner: string | null;
   error_message: string | null;
+  output_payload?: Record<string, unknown>;
 };
 
 export type SchedulerRun = {
@@ -210,6 +215,23 @@ export type MemorySource = {
   processed_at: string | null;
 };
 
+export type MemoryArtifact = {
+  id: string;
+  name: string;
+  artifact_type: string;
+  uri: string;
+  mime_type: string | null;
+  domain_key: string;
+  task_id: string | null;
+  report_id: string | null;
+  seed_package_id: string | null;
+  memory_count: number;
+  proposal_count: number;
+  canonical: boolean;
+  metadata: Record<string, unknown>;
+  created_at: string | null;
+};
+
 export type RoutedItem = {
   id: string;
   domain_key: string | null;
@@ -300,8 +322,54 @@ export type RoutedIdea = {
 };
 
 export type RoutedObjectSurface = "calendar" | "contacts" | "todos" | "organizations" | "ideas";
-export type ActiveSurface = "dashboard" | "domain" | "memory" | "tools" | RoutedObjectSurface;
+export type ActiveSurface =
+  | "dashboard"
+  | "run-log"
+  | "workflows"
+  | "reports"
+  | "skills"
+  | "domain"
+  | "memory"
+  | "tools"
+  | RoutedObjectSurface;
 export type RoutedObjectRecord = RoutedEvent | RoutedTodo | RoutedContact | RoutedEntity | RoutedIdea;
+
+export type WorkflowRunLogEntry = {
+  id: string;
+  workflow_run_id: string;
+  workflow_definition_id: string | null;
+  parent_task_id: string | null;
+  conversation_id: string | null;
+  domain_id: string | null;
+  domain_key: string | null;
+  status: string;
+  title: string;
+  summary: string;
+  run_started_at: string | null;
+  run_completed_at: string | null;
+  agent_work: Array<Record<string, unknown>>;
+  report_ids: string[];
+  routed_item_ids: string[];
+  artifact_ids: string[];
+  notification_ids: string[];
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkflowReport = {
+  id: string;
+  task_id: string;
+  domain_id: string | null;
+  domain_key: string | null;
+  title: string;
+  summary: string | null;
+  source_type: string;
+  archived: boolean;
+  body_markdown?: string;
+  created_at: string;
+  updated_at: string;
+};
 
 export type RetrievedMemory = MemoryItem & {
   domain_key: string;
@@ -338,6 +406,15 @@ export type AgentTool = {
   auth_type: string | null;
 };
 
+export type AgentSkill = {
+  key: string;
+  name: string;
+  description: string;
+  category: string;
+  instruction: string;
+  domain_key: string | null;
+};
+
 export type AgentSpec = {
   id: string;
   key: string;
@@ -349,6 +426,7 @@ export type AgentSpec = {
   memory_profile: string;
   model_profile: string;
   allowed_tools: AgentTool[];
+  allowed_skills: AgentSkill[];
   is_active: boolean;
   current_action: string | null;
   scheduled_actions: Array<Record<string, unknown>>;
@@ -396,6 +474,23 @@ export type ToolConnection = {
   auth_type: string;
   config: Record<string, unknown>;
   is_active: boolean;
+};
+
+export type SkillRegistryItem = {
+  id: string;
+  key: string;
+  name: string;
+  description: string | null;
+  category: string;
+  instruction: string;
+  domain_key: string | null;
+  is_active: boolean;
+  authorized_agents: Array<{
+    agent_key: string;
+    agent_name: string;
+    domain_key: string;
+    permission: string;
+  }>;
 };
 
 export type PromptPackage = {
@@ -449,6 +544,10 @@ export type MaestroSubtask = {
   rationale: string | null;
   work_item_ids: string[] | null;
   depends_on_work_item_ids: string[] | null;
+  required_skills?: string[] | null;
+  model_profile?: string | null;
+  model_tier?: string;
+  model_rationale?: string | null;
 };
 
 export type MaestroWorkItem = {
@@ -460,6 +559,10 @@ export type MaestroWorkItem = {
   priority: string;
   required_capabilities: string[];
   required_tools: string[];
+  required_skills: string[];
+  model_profile: string | null;
+  model_tier: string;
+  model_rationale: string;
   dependencies: string[];
   needs_agent: boolean;
   needs_user_input: boolean;
@@ -563,7 +666,7 @@ export type MaestroRun = {
 };
 
 export type MaestroRespond = {
-  kind: "chat_only" | "planned" | "refined" | "rfi_answered" | "routed";
+  kind: "chat_only" | "planned" | "refined" | "rfi_answered" | "routed" | "pending";
   classification: string;
   message: string;
   plan: MaestroPlan | null;
@@ -576,7 +679,7 @@ export type MaestroRespond = {
     started_new_topic?: boolean;
     reason?: string;
   };
-  conversation: MaestroSessionSummary;
+  conversation: MaestroSessionSummary | null;
 };
 
 export type MaestroToolCallResponse = {

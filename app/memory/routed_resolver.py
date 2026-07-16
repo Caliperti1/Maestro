@@ -47,11 +47,11 @@ class RoutedResolverLLM(Protocol):
 
 
 class OllamaRoutedResolverLLM:
-    def __init__(self, *, model: str | None = None, base_url: str | None = None, timeout_seconds: float = 8.0):
+    def __init__(self, *, model: str | None = None, base_url: str | None = None, timeout_seconds: float | None = None):
         settings = get_settings()
         self.model = model or settings.routed_resolver_llm_model
         self.base_url = (base_url or settings.routed_resolver_llm_base_url).rstrip("/")
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = timeout_seconds or settings.routed_resolver_llm_timeout_seconds
 
     def choose_match(
         self,

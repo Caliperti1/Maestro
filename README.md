@@ -198,7 +198,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 docker compose up -d postgres
 alembic upgrade head
-uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+make backend-reload
 ```
 
 Health check:
@@ -233,7 +233,11 @@ Common settings:
 DATABASE_URL=postgresql+psycopg://maestro:maestro@localhost:55432/maestro
 LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
-LLM_MODEL=openai/gpt-5.5
+LLM_MODEL=openai/gpt-5.6-sol
+LLM_QWEN_MODEL_PROFILE=ollama:qwen3:8b
+LLM_LUNA_MODEL_PROFILE=openrouter:openai/gpt-5.6-luna
+LLM_TERRA_MODEL_PROFILE=openrouter:openai/gpt-5.6-terra
+LLM_SOL_MODEL_PROFILE=openrouter:openai/gpt-5.6-sol
 MEMORY_DROPBOX_ROOT=maestro_dropbox
 EMBEDDING_PROVIDER=ollama
 EMBEDDING_MODEL=nomic-embed-text

@@ -30,6 +30,10 @@ work only when needed, and return to the conversation after tool-assisted resear
 | 1.4.a | User approves proposed workflow. | Workflow runs and returns the necessary code/context report. | Not run | | |
 | 1.4.b | Same approval flow | Maestro uses the returned information to jump back into the design conversation. | Not run | | |
 | 1.4.c | Same approval flow | Maestro answers the original interaction question using the returned agent report. | Not run | | |
+| 1.4.d | Same approval flow | Completed workflow disappears from active Workflows and appears in Run Log with report/artifact references. | Not run | | |
+| 1.4.e | Same approval flow | Generated report appears in Reports and renders Markdown cleanly. | Not run | | |
+| 1.4.f | Same approval flow | Chat dashboard right pane can render a selected report or latest workflow artifact without showing legacy queue/debug panels. | Not run | | |
+| 1.4.g | Reports cleanup | Reports can be archived from the Reports surface and archived reports disappear from default report/context retrieval. | Implementation pass / pending human validation | Existing local reports were soft-archived to start human testing from a clean report box. | Report content/format cleanup is logged in the backlog as a separate polish item. |
 | 1.5.a | After continued design conversation: "This feature design looks good add it as an issue" | Maestro creates a workflow to generate a GitHub issue. | Not run | | |
 | 1.5.b | Same as 1.5 | Workflow runs and notifies the user of required approvals. | Not run | | |
 | 1.5.c | Same as 1.5 | Maestro notifies the user when the run is complete. | Not run | | |
@@ -41,6 +45,14 @@ work only when needed, and return to the conversation after tool-assisted resear
 - Maestro starts a new topic/session when the user clearly opens a new design discussion.
 - Maestro escalates from conversation to workflow only when current codebase/tool context is needed.
 - Workflow approval, execution, and completion notifications surface through the main chat.
+- Active and durable workflows are inspected from Workflows, not from a queue/debug panel on the
+  main chat dashboard.
+- Reports render in the Reports tab, and selected reports can be viewed in the chat dashboard's
+  right-side artifact/report renderer.
+- Reports can be archived without deletion; archived reports are hidden from default Reports,
+  Maestro context, and agent report search.
+- Completed workflow history appears in Run Log with linked reports, artifacts, routed items, and
+  agent-work summaries.
 - After workflow completion, Maestro resumes the design conversation with the newly gathered code
   context rather than treating the agent report as a disconnected task.
 - GitHub issue creation happens only after the user asks to convert the agreed feature design into
@@ -268,3 +280,27 @@ sequenceDiagram
 | UI progress status | Fixed after run | Sending a new Maestro message now clears stale completed `maestroRun` state immediately, so the progress row does not keep showing the previous workflow's complete status. |
 | Cleanup | Done | Accidental Tailscale recurring workflow definition and related test runs were archived from the local DB. |
 | Prompt token usage | No material regression observed | The patch adds small classifier fields and prompt guidance, but avoids repeated bad scheduling loops and should reduce wasted planning turns. |
+
+### Run 6
+
+- Date: 2026-07-12
+- Branch: `codex/system-interaction-rework`
+- Tester: Automated backend/frontend regression
+- Notes: This PR implements the broader Maestro interaction rework. It adds canonical workflow
+  output storage, read APIs, Run Log / Reports / Workflows UI surfaces, Skills registry and
+  assignment, report retrieval tools for agents, the unified Maestro context assembler, and the
+  simplified main chat dashboard with a right-side artifact/report renderer. Manual rerun should
+  inspect workflow output through these durable surfaces instead of relying on chat snippets or
+  queue debug cards.
+
+| Matrix IDs Tested | Result | Notes / Defects |
+| --- | --- | --- |
+| 1.4 workflow execution outputs | Backend foundation pass | Scheduler worker completion writes a run-log entry, delivered notification, staged artifact linkage, and agent-work summary. |
+| 1.4 report inspection | UI foundation pass | Reports tab lists generated reports and renders selected report Markdown. |
+| 1.4 run history inspection | UI foundation pass | Run Log tab lists completed workflow runs with report/artifact ids and expandable agent-work summaries. |
+| 1.4 active workflow inspection | UI foundation pass | Workflows tab separates active runs, scheduled workflows, and trigger workflows from completed run history. |
+| 1.4 dashboard renderer | UI foundation pass | Main chat dashboard is now chat plus a right-side artifact/report renderer with compact attention items; the hidden legacy Queue panel was removed. |
+| 1.4 Maestro context | Backend foundation pass | Direct chat and planning now use `MaestroContextAssembler` to combine durable memory, routed objects, reports, run logs, artifact metadata, and web-search availability. |
+| 1.4 / 1.5 agent retrieval | Backend foundation pass | Agents receive safe internal `reports.search` and `reports.get` tools by default, separate from durable memory retrieval. |
+| Skill-scoped agent execution | Backend/UI foundation pass | Skills can be created, assigned to agents, and included in prompt aggregation only for assigned agents. |
+| Main UI simplification | Implementation pass / pending human validation | Maestro sidebar has Chat, Run Log, Workflows, Reports, plus Skills beside Tools. The chat dashboard no longer carries the old queue/debug panel. |

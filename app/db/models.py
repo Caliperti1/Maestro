@@ -58,9 +58,26 @@ class Agent(TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     tool_permissions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    skill_permissions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     domain: Mapped[Domain] = relationship(back_populates="agents")
+
+
+class Skill(TimestampMixin, Base):
+    __tablename__ = "skills"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(240), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(80), default="general", nullable=False)
+    instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
 
 
 class Conversation(TimestampMixin, Base):
@@ -616,6 +633,64 @@ class WorkflowRun(TimestampMixin, Base):
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WorkflowRunLogEntry(TimestampMixin, Base):
+    __tablename__ = "workflow_run_log_entries"
+    __table_args__ = (
+        UniqueConstraint("workflow_run_id", name="uq_workflow_run_log_entries_run"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workflow_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    workflow_definition_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("workflow_definitions.id", ondelete="SET NULL"), index=True
+    )
+    parent_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("tasks.id", ondelete="SET NULL"), index=True
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("conversations.id", ondelete="SET NULL"), index=True
+    )
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    run_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    run_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    agent_work: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    report_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    routed_item_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    artifact_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    notification_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class WorkflowNotification(TimestampMixin, Base):
+    __tablename__ = "workflow_notifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("workflow_runs.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("conversations.id", ondelete="SET NULL"), index=True
+    )
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    severity: Mapped[str] = mapped_column(String(40), default="info", nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    notification_type: Mapped[str] = mapped_column(String(80), default="workflow", nullable=False)
+    target: Mapped[str] = mapped_column(String(80), default="maestro_chat", nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
 class WorkflowQueueItem(TimestampMixin, Base):

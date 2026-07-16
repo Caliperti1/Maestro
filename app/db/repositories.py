@@ -17,13 +17,16 @@ from app.db.models import (
     Report,
     ScheduledRun,
     SeedPackage,
+    Skill,
     Task,
     ToolCall,
     ToolConnection,
     User,
     WorkflowDefinition,
+    WorkflowNotification,
     WorkflowQueueItem,
     WorkflowRun,
+    WorkflowRunLogEntry,
 )
 
 ModelT = TypeVar("ModelT")
@@ -76,6 +79,19 @@ class AgentRepository(Repository[Agent]):
 
     def list_by_domain(self, domain_id: uuid.UUID) -> Sequence[Agent]:
         return self.session.scalars(select(Agent).where(Agent.domain_id == domain_id)).all()
+
+
+class SkillRepository(Repository[Skill]):
+    def __init__(self, session: Session):
+        super().__init__(session, Skill)
+
+    def get_by_key(self, key: str) -> Skill | None:
+        return self.session.scalar(select(Skill).where(Skill.key == key))
+
+    def list_active(self) -> Sequence[Skill]:
+        return self.session.scalars(
+            select(Skill).where(Skill.is_active.is_(True)).order_by(Skill.category, Skill.key)
+        ).all()
 
 
 class ConversationRepository(Repository[Conversation]):
@@ -239,6 +255,36 @@ class WorkflowRunRepository(Repository[WorkflowRun]):
         return self.session.scalar(
             select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task_id)
         )
+
+
+class WorkflowRunLogRepository(Repository[WorkflowRunLogEntry]):
+    def __init__(self, session: Session):
+        super().__init__(session, WorkflowRunLogEntry)
+
+    def list_recent(self, *, limit: int = 50) -> Sequence[WorkflowRunLogEntry]:
+        return self.session.scalars(
+            select(WorkflowRunLogEntry)
+            .order_by(WorkflowRunLogEntry.run_completed_at.desc(), WorkflowRunLogEntry.created_at.desc())
+            .limit(limit)
+        ).all()
+
+    def get_by_run(self, workflow_run_id: uuid.UUID) -> WorkflowRunLogEntry | None:
+        return self.session.scalar(
+            select(WorkflowRunLogEntry).where(WorkflowRunLogEntry.workflow_run_id == workflow_run_id)
+        )
+
+
+class WorkflowNotificationRepository(Repository[WorkflowNotification]):
+    def __init__(self, session: Session):
+        super().__init__(session, WorkflowNotification)
+
+    def list_pending(self, *, limit: int = 50) -> Sequence[WorkflowNotification]:
+        return self.session.scalars(
+            select(WorkflowNotification)
+            .where(WorkflowNotification.status == "pending")
+            .order_by(WorkflowNotification.created_at.desc())
+            .limit(limit)
+        ).all()
 
 
 class WorkflowQueueItemRepository(Repository[WorkflowQueueItem]):

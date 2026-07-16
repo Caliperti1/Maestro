@@ -17,6 +17,7 @@ from app.api.agents import router as agents_router
 from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
 from app.api.scheduler import router as scheduler_router
+from app.api.workflow_outputs import router as workflow_outputs_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
@@ -60,6 +61,7 @@ def create_app() -> FastAPI:
     app.include_router(agents_router)
     app.include_router(maestro_router)
     app.include_router(scheduler_router)
+    app.include_router(workflow_outputs_router)
 
     return app
 

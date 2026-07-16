@@ -319,6 +319,18 @@ class SchedulerService:
         run = self.session.scalar(select(WorkflowRun).where(WorkflowRun.parent_task_id == parent_task_id))
         if run is None:
             return None
+        return self.archive_run(run.id, reason=reason, commit=commit)
+
+    def archive_run(
+        self,
+        run_id: uuid.UUID,
+        *,
+        reason: str = "Workflow was archived.",
+        commit: bool = True,
+    ) -> WorkflowRun | None:
+        run = self.session.get(WorkflowRun, run_id)
+        if run is None:
+            return None
         run.status = "archived"
         run.error_message = reason
         run.completed_at = run.completed_at or datetime.now(UTC)
@@ -704,11 +716,20 @@ class SchedulerService:
             "domain_key": domain.key if domain else None,
             "agent_key": agent.key if agent else None,
             "agent_name": agent.name if agent else None,
+            "required_skills": [
+                str(value)
+                for value in (item.input_payload or {}).get("required_skills", [])
+                if str(value).strip()
+            ],
+            "model_profile": (item.input_payload or {}).get("model_profile"),
+            "model_tier": (item.input_payload or {}).get("model_tier") or "auto",
+            "model_rationale": (item.input_payload or {}).get("model_rationale"),
             "lease_owner": item.lease_owner,
             "lease_expires_at": home_isoformat(item.lease_expires_at),
             "started_at": home_isoformat(item.started_at),
             "completed_at": home_isoformat(item.completed_at),
             "error_message": item.error_message,
+            "output_payload": item.output_payload or {},
         }
 
     def resource_lock_payload(self, lock: SchedulerResourceLock) -> dict[str, Any]:

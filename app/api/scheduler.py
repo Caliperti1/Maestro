@@ -185,7 +185,14 @@ def update_workflow_run(
     if run is None:
         raise HTTPException(status_code=404, detail="Unknown workflow run.")
     if body.status:
-        run.status = body.status
+        if body.status == "archived":
+            archived = SchedulerService(db).archive_run(
+                run.id,
+                reason="Workflow archived from UI.",
+            )
+            return {"run": SchedulerService(db).workflow_run_payload(archived, include_events=True)}
+        else:
+            run.status = body.status
     db.commit()
     db.refresh(run)
     return {"run": SchedulerService(db).workflow_run_payload(run, include_events=True)}

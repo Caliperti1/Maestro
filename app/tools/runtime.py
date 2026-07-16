@@ -7,6 +7,7 @@ contains several tool families; future cleanup should split adapters by provider
 """
 
 import base64
+import html
 import json
 import os
 import re
@@ -23,11 +24,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Agent, Domain, Task, ToolCall, ToolConnection
+from app.db.models import Agent, Domain, Report, RoutedItem, Task, ToolCall, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 from app.llm.client import OpenAILLMClient
 from app.memory.retrieval import (
@@ -38,6 +39,7 @@ from app.memory.retrieval import (
     MemoryRetrievalError,
     MemoryRetrievalService,
 )
+from app.memory.routed_service import RoutedMemoryService
 
 
 class ToolExecutionError(ValueError):
@@ -170,7 +172,21 @@ class ToolExecutionService:
                 connection_id=str(connection.id) if connection is not None else None,
             )
         except Exception as exc:
-            tool_call.status = "failed"
+            is_recoverable_runtime_block = (
+                tool_call.tool_name == "local.app.deploy_pr"
+                and "Runtime checkout has uncommitted changes" in str(exc)
+            )
+            tool_call.status = "approval_required" if is_recoverable_runtime_block else "failed"
+            if is_recoverable_runtime_block:
+                tool_call.output_payload = {
+                    **(tool_call.output_payload or {}),
+                    "approval_required": True,
+                    "write_status": "recovery_required",
+                    "recovery_required": True,
+                    "recovery_instruction": (
+                        "Inspect the runtime, approve a stash recovery if appropriate, then retry this delivery approval."
+                    ),
+                }
             tool_call.error_message = str(exc)
             tool_call.completed_at = datetime.now(UTC)
             self.session.commit()
@@ -412,6 +428,16 @@ class ToolExecutionService:
             )
             if provider is not None:
                 return provider
+            if tool_key.startswith("gmail."):
+                legacy_gmail = self.session.scalar(
+                    select(ToolConnection).where(
+                        ToolConnection.domain_id == domain.id,
+                        ToolConnection.tool_key == "gmail",
+                        ToolConnection.is_active.is_(True),
+                    )
+                )
+                if legacy_gmail is not None:
+                    return legacy_gmail
         exact = self.session.scalar(
             select(ToolConnection).where(
                 ToolConnection.domain_id == domain.id,
@@ -1505,6 +1531,330 @@ class GmailApiToolAdapter:
         return _gmail_message_payload(message, max_body_chars=0)
 
 
+class GoogleWorkspaceToolAdapter:
+    def __init__(self, key: str):
+        self.key = key
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if context.dry_run:
+            return {"dry_run": True, "tool": self.key, "payload": payload}
+        token = _gmail_access_token(context.connection)
+        if self.key == "google.drive.file.get":
+            return self._drive_file_get(payload, token=token)
+        if self.key == "google.drive.file.export":
+            return self._drive_file_export(payload, token=token)
+        if self.key == "google.docs.get":
+            return self._docs_get(payload, token=token)
+        if self.key == "google.slides.get":
+            return self._slides_get(payload, token=token)
+        if self.key == "google.sheets.get":
+            return self._sheets_get(payload, token=token)
+        if self.key == "google.sheets.values.get":
+            return self._sheets_values_get(payload, token=token)
+        if self.key == "google.meet.conference_records.list":
+            return self._meet_conference_records_list(payload, token=token)
+        if self.key == "google.meet.conference_records.get":
+            return self._meet_conference_record_get(payload, token=token)
+        raise ToolExecutionError(f"Unsupported Google Workspace tool: {self.key}")
+
+    def _drive_file_get(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        file_id = _google_file_id(payload)
+        fields = str(
+            payload.get("fields")
+            or "id,name,mimeType,webViewLink,webContentLink,modifiedTime,createdTime,owners(emailAddress,displayName),description,size"
+        )
+        file_metadata = _google_api_json(
+            "GET",
+            "https://www.googleapis.com",
+            f"/drive/v3/files/{quote(file_id, safe='')}",
+            token=token,
+            params={"fields": fields},
+        )
+        return {
+            "file": file_metadata,
+            "summary": {
+                "type": "google_drive_file",
+                "file_id": file_metadata.get("id") or file_id,
+                "name": file_metadata.get("name"),
+                "mime_type": file_metadata.get("mimeType"),
+                "web_view_link": file_metadata.get("webViewLink"),
+            },
+        }
+
+    def _drive_file_export(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        file_id = _google_file_id(payload)
+        mime_type = str(payload.get("mime_type") or "text/plain").strip()
+        max_chars = _bounded_int(payload.get("max_chars"), default=20000, minimum=500, maximum=100000)
+        content = _google_api_text(
+            "GET",
+            "https://www.googleapis.com",
+            f"/drive/v3/files/{quote(file_id, safe='')}/export",
+            token=token,
+            params={"mimeType": mime_type},
+        )
+        return {
+            "file_id": file_id,
+            "mime_type": mime_type,
+            "content_text": content[:max_chars],
+            "truncated": len(content) > max_chars,
+            "summary": {
+                "type": "google_drive_file_export",
+                "file_id": file_id,
+                "mime_type": mime_type,
+                "content_chars": min(len(content), max_chars),
+                "truncated": len(content) > max_chars,
+            },
+        }
+
+    def _docs_get(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        document_id = _google_file_id(payload)
+        max_chars = _bounded_int(payload.get("max_chars"), default=20000, minimum=500, maximum=100000)
+        document = _google_api_json(
+            "GET",
+            "https://docs.googleapis.com",
+            f"/v1/documents/{quote(document_id, safe='')}",
+            token=token,
+        )
+        content = _google_doc_text(document)
+        return {
+            "document_id": document_id,
+            "title": document.get("title"),
+            "content_text": content[:max_chars],
+            "truncated": len(content) > max_chars,
+            "document": document if _as_bool(payload.get("include_raw"), default=False) else None,
+            "summary": {
+                "type": "google_doc",
+                "document_id": document_id,
+                "title": document.get("title"),
+                "content_chars": min(len(content), max_chars),
+                "truncated": len(content) > max_chars,
+            },
+        }
+
+    def _slides_get(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        presentation_id = _google_file_id(payload)
+        max_chars = _bounded_int(payload.get("max_chars"), default=20000, minimum=500, maximum=100000)
+        presentation = _google_api_json(
+            "GET",
+            "https://slides.googleapis.com",
+            f"/v1/presentations/{quote(presentation_id, safe='')}",
+            token=token,
+        )
+        content = _google_slides_text(presentation)
+        return {
+            "presentation_id": presentation_id,
+            "title": presentation.get("title"),
+            "content_text": content[:max_chars],
+            "truncated": len(content) > max_chars,
+            "presentation": presentation if _as_bool(payload.get("include_raw"), default=False) else None,
+            "summary": {
+                "type": "google_slides",
+                "presentation_id": presentation_id,
+                "title": presentation.get("title"),
+                "slide_count": len(presentation.get("slides") or []),
+                "content_chars": min(len(content), max_chars),
+                "truncated": len(content) > max_chars,
+            },
+        }
+
+    def _sheets_get(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        spreadsheet_id = _google_file_id(payload)
+        include_grid_data = _as_bool(payload.get("include_grid_data"), default=False)
+        spreadsheet = _google_api_json(
+            "GET",
+            "https://sheets.googleapis.com",
+            f"/v4/spreadsheets/{quote(spreadsheet_id, safe='')}",
+            token=token,
+            params={"includeGridData": str(include_grid_data).lower()},
+        )
+        sheets = spreadsheet.get("sheets") if isinstance(spreadsheet.get("sheets"), list) else []
+        return {
+            "spreadsheet_id": spreadsheet_id,
+            "title": spreadsheet.get("properties", {}).get("title")
+            if isinstance(spreadsheet.get("properties"), dict)
+            else None,
+            "sheets": [
+                sheet.get("properties", {})
+                for sheet in sheets
+                if isinstance(sheet, dict) and isinstance(sheet.get("properties"), dict)
+            ],
+            "spreadsheet": spreadsheet if _as_bool(payload.get("include_raw"), default=False) else None,
+            "summary": {
+                "type": "google_sheets",
+                "spreadsheet_id": spreadsheet_id,
+                "title": spreadsheet.get("properties", {}).get("title")
+                if isinstance(spreadsheet.get("properties"), dict)
+                else None,
+                "sheet_count": len(sheets),
+            },
+        }
+
+    def _sheets_values_get(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        spreadsheet_id = _google_file_id(payload)
+        range_name = str(payload.get("range") or payload.get("range_name") or "").strip()
+        if not range_name:
+            raise ToolExecutionError("Google Sheets values tool requires range or range_name.")
+        values = _google_api_json(
+            "GET",
+            "https://sheets.googleapis.com",
+            f"/v4/spreadsheets/{quote(spreadsheet_id, safe='')}/values/{quote(range_name, safe='')}",
+            token=token,
+        )
+        rows = values.get("values") if isinstance(values.get("values"), list) else []
+        return {
+            "spreadsheet_id": spreadsheet_id,
+            "range": values.get("range") or range_name,
+            "major_dimension": values.get("majorDimension"),
+            "values": rows,
+            "summary": {
+                "type": "google_sheets_values",
+                "spreadsheet_id": spreadsheet_id,
+                "range": values.get("range") or range_name,
+                "row_count": len(rows),
+            },
+        }
+
+    def _meet_conference_records_list(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        page_size = _bounded_int(payload.get("page_size"), default=10, minimum=1, maximum=100)
+        params: dict[str, Any] = {"pageSize": page_size}
+        if payload.get("page_token"):
+            params["pageToken"] = str(payload["page_token"])
+        if payload.get("filter"):
+            params["filter"] = str(payload["filter"])
+        records = _google_api_json(
+            "GET",
+            "https://meet.googleapis.com",
+            "/v2/conferenceRecords",
+            token=token,
+            params=params,
+        )
+        conference_records = (
+            records.get("conferenceRecords")
+            if isinstance(records.get("conferenceRecords"), list)
+            else []
+        )
+        return {
+            "conference_records": conference_records,
+            "next_page_token": records.get("nextPageToken"),
+            "summary": {
+                "type": "google_meet_conference_records",
+                "record_count": len(conference_records),
+                "has_next_page": bool(records.get("nextPageToken")),
+            },
+        }
+
+    def _meet_conference_record_get(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        record_name = str(
+            payload.get("name") or payload.get("conference_record") or payload.get("conference_record_id") or ""
+        ).strip()
+        if not record_name:
+            raise ToolExecutionError(
+                "Google Meet conference record get requires name, conference_record, or conference_record_id."
+            )
+        if not record_name.startswith("conferenceRecords/"):
+            record_name = f"conferenceRecords/{record_name}"
+        record = _google_api_json(
+            "GET",
+            "https://meet.googleapis.com",
+            f"/v2/{quote(record_name, safe='/')}",
+            token=token,
+        )
+        return {
+            "conference_record": record,
+            "summary": {
+                "type": "google_meet_conference_record",
+                "name": record.get("name") or record_name,
+                "start_time": record.get("startTime"),
+                "end_time": record.get("endTime"),
+            },
+        }
+
+
+class RoutedItemCreateToolAdapter:
+    key = "routed.item.create"
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if context.dry_run:
+            return {"dry_run": True, "tool": self.key, "payload": payload}
+        raw_items = payload.get("items")
+        items = raw_items if isinstance(raw_items, list) else [payload]
+        created: list[RoutedItem] = []
+        for raw_item in items[:20]:
+            if not isinstance(raw_item, dict):
+                continue
+            route_type = _normalize_route_type(str(raw_item.get("route_type") or raw_item.get("type") or ""))
+            if not route_type:
+                raise ToolExecutionError("routed.item.create requires route_type.")
+            title = str(raw_item.get("title") or raw_item.get("name") or "").strip()
+            content = str(raw_item.get("content") or raw_item.get("description") or raw_item.get("summary") or "").strip()
+            if not title:
+                raise ToolExecutionError("routed.item.create requires title.")
+            if not content:
+                content = title
+            metadata = raw_item.get("metadata") if isinstance(raw_item.get("metadata"), dict) else {}
+            source_refs = _source_refs_from_payload(raw_item)
+            item = RoutedItem(
+                domain_id=context.domain.id,
+                agent_id=context.agent.id,
+                task_id=context.task.id,
+                route_type=route_type,
+                title=title[:240],
+                content=content,
+                priority=str(raw_item.get("priority") or "normal").strip() or "normal",
+                status=str(raw_item.get("status") or "open").strip() or "open",
+                source_refs=source_refs,
+                metadata_={
+                    **metadata,
+                    "created_by_tool": self.key,
+                    "agent_key": context.agent.key,
+                    "domain_key": context.domain.key,
+                },
+            )
+            context.session.add(item)
+            context.session.flush()
+            created.append(item)
+        promoted = RoutedMemoryService(context.session).promote_items(created) if created else []
+        context.session.commit()
+        return {
+            "created_count": len(created),
+            "promoted_count": len(promoted),
+            "items": [
+                {
+                    "id": str(item.id),
+                    "route_type": item.route_type,
+                    "title": item.title,
+                    "status": item.status,
+                    "metadata": item.metadata_,
+                }
+                for item in created
+            ],
+            "promotions": [
+                {
+                    "routed_item_id": str(result.routed_item_id),
+                    "route_type": result.route_type,
+                    "object_type": result.object_type,
+                    "object_id": str(result.object_id),
+                    "action": result.action,
+                }
+                for result in promoted
+            ],
+            "summary": {
+                "type": "routed_item_create",
+                "created_count": len(created),
+                "promoted_count": len(promoted),
+                "route_types": sorted({item.route_type for item in created}),
+            },
+        }
+
+
 class CodexCliToolAdapter:
     def __init__(self, key: str):
         self.key = key
@@ -1709,18 +2059,25 @@ class CodexCliToolAdapter:
         branch_name = str(payload.get("branch_name") or "").strip()
         if not branch_name:
             branch_name = self._generated_branch_name(context, payload)
+        remote_base = f"origin/{base_branch}"
+        try:
+            _run_local_text(["git", "fetch", "origin", base_branch], cwd=target_path, timeout=120)
+            base_ref = remote_base
+        except ToolExecutionError:
+            base_ref = base_branch
         worktree_path = self._worktree_path(context, payload, target_path, branch_name)
         if worktree_path.exists():
             _run_local_text(["git", "worktree", "remove", "--force", str(worktree_path)], cwd=target_path)
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
         _run_local_text(
-            ["git", "worktree", "add", "-B", branch_name, str(worktree_path), base_branch],
+            ["git", "worktree", "add", "-B", branch_name, str(worktree_path), base_ref],
             cwd=target_path,
             timeout=120,
         )
         return {
             "original_branch": original_branch,
             "base_branch": base_branch,
+            "base_ref": base_ref,
             "branch_name": branch_name,
             "worktree_path": str(worktree_path),
             "allow_dirty": allow_dirty,
@@ -1877,15 +2234,27 @@ class LocalAppReloadAdapter:
         context: ToolExecutionContext,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        if self.key == "local.app.inspect":
+            target_path = _local_target_path(context.connection, payload)
+            return _runtime_git_health(
+                target_path,
+                expected_branch=_runtime_branch(context.connection, payload),
+            )
+        if self.key == "local.app.recover":
+            return self._recover_runtime(context, payload)
+        if self.key == "local.app.deploy_pr":
+            return self._deploy_pr(context, payload)
         if self.key != "local.app.reload":
             raise ToolExecutionError(f"Unsupported local app tool: {self.key}")
         target_path = _local_target_path(context.connection, payload)
         pull_latest = _bool_setting(payload, context.connection, "pull_latest", default=True)
+        expected_branch = _runtime_branch(context.connection, payload)
+        health = _runtime_git_health(target_path, expected_branch=expected_branch)
+        _require_reloadable_runtime(health)
         commands: list[list[str]] = []
         if pull_latest:
-            branch = str(payload.get("branch") or _connection_config(context.connection).get("branch") or "").strip()
-            if branch:
-                commands.append(["git", "checkout", branch])
+            if expected_branch:
+                commands.append(["git", "checkout", expected_branch])
             commands.append(["git", "pull", "--ff-only"])
         commands.extend(_reload_commands(context.connection, payload))
         if not commands:
@@ -1905,6 +2274,7 @@ class LocalAppReloadAdapter:
         return {
             "target_path": str(target_path),
             "pull_latest": pull_latest,
+            "preflight": health,
             "commands": results,
             "write_status": "reloaded",
             "summary": {
@@ -1912,6 +2282,103 @@ class LocalAppReloadAdapter:
                 "target_path": str(target_path),
                 "command_count": len(results),
                 "pull_latest": pull_latest,
+            },
+        }
+
+    def _recover_runtime(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        target_path = _local_target_path(context.connection, payload)
+        expected_branch = _runtime_branch(context.connection, payload)
+        health = _runtime_git_health(target_path, expected_branch=expected_branch)
+        if health["is_clean"]:
+            return {
+                "target_path": str(target_path),
+                "write_status": "not_needed",
+                "preflight": health,
+                "summary": {
+                    "type": "local_app_recovery",
+                    "action": "not_needed",
+                    "target_path": str(target_path),
+                },
+            }
+        action = str(payload.get("action") or "stash").strip().lower()
+        if action != "stash":
+            raise ToolExecutionError(
+                "Runtime recovery supports only action=stash. Maestro will never discard or commit "
+                "unknown runtime changes automatically."
+            )
+        label = str(payload.get("message") or "Maestro runtime recovery").strip()
+        output = _run_local_text(
+            ["git", "stash", "push", "--include-untracked", "-m", label],
+            cwd=target_path,
+            timeout=120,
+        )
+        recovered = _runtime_git_health(target_path, expected_branch=expected_branch)
+        return {
+            "target_path": str(target_path),
+            "action": action,
+            "stash_output": output[-2000:],
+            "preflight": health,
+            "post_recovery": recovered,
+            "write_status": "recovered",
+            "summary": {
+                "type": "local_app_recovery",
+                "action": action,
+                "target_path": str(target_path),
+                "changed_file_count": len(health["changed_files"]),
+            },
+        }
+
+    def _deploy_pr(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        target_path = _local_target_path(context.connection, payload)
+        expected_branch = _runtime_branch(context.connection, payload)
+        health = _runtime_git_health(target_path, expected_branch=expected_branch)
+        _require_reloadable_runtime(health)
+        github_connection = context.session.scalar(
+            select(ToolConnection).where(
+                ToolConnection.domain_id == context.domain.id,
+                ToolConnection.tool_key == "github",
+                ToolConnection.is_active.is_(True),
+            )
+        )
+        if github_connection is None:
+            raise ToolExecutionError(
+                "Cannot deliver the PR because this domain has no active GitHub connection."
+            )
+        github_context = ToolExecutionContext(
+            session=context.session,
+            agent=context.agent,
+            domain=context.domain,
+            task=context.task,
+            connection=github_connection,
+            dry_run=context.dry_run,
+        )
+        merge_output = GitHubCliToolAdapter("github.pr.merge").execute(github_context, payload)
+        try:
+            reload_output = LocalAppReloadAdapter("local.app.reload").execute(context, payload)
+        except ToolExecutionError as exc:
+            raise ToolExecutionError(
+                "The PR merged successfully, but the runtime could not reload. "
+                f"Run local.app.inspect and resolve the reported runtime state: {exc}"
+            ) from exc
+        return {
+            "target_path": str(target_path),
+            "pr": merge_output,
+            "reload": reload_output,
+            "write_status": "merged_and_reloaded",
+            "summary": {
+                "type": "local_app_deploy_pr",
+                "target_path": str(target_path),
+                "pr_number": merge_output.get("pr_number"),
+                "merged": True,
+                "reloaded": True,
             },
         }
 
@@ -2072,6 +2539,76 @@ class MemoryContextBundleToolAdapter:
         return _memory_context_bundle_payload(bundle, domain_key=domain.key)
 
 
+class ReportRetrievalToolAdapter:
+    def __init__(self, key: str):
+        self.key = key
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.key == "reports.get":
+            return self._get_report(context, payload)
+        return self._search_reports(context, payload)
+
+    def _search_reports(self, context: ToolExecutionContext, payload: dict[str, Any]) -> dict[str, Any]:
+        query_text = str(payload.get("query_text") or payload.get("query") or context.task.objective or "").strip()
+        limit = _bounded_int(payload.get("limit") or payload.get("max_items"), default=8, minimum=1, maximum=25)
+        include_global = _optional_bool(payload.get("include_global"), default=True)
+        statement = select(Report).order_by(Report.created_at.desc()).limit(limit * 3)
+        domain_filters = [Report.domain_id == context.domain.id]
+        if include_global:
+            domain_filters.append(Report.domain_id.is_(None))
+        filters = [or_(*domain_filters)]
+        if query_text:
+            like = f"%{query_text}%"
+            filters.append(
+                or_(
+                    Report.title.ilike(like),
+                    Report.summary.ilike(like),
+                    Report.body_markdown.ilike(like),
+                )
+            )
+        reports = [
+            report
+            for report in context.session.scalars(statement.where(*filters)).all()
+            if not _report_is_archived(report)
+        ][:limit]
+        return {
+            "summary": {
+                "type": "reports_search",
+                "domain_key": context.domain.key,
+                "query_text": query_text,
+                "returned_count": len(reports),
+            },
+            "reports": [_compact_report_payload(report, include_body=False) for report in reports],
+        }
+
+    def _get_report(self, context: ToolExecutionContext, payload: dict[str, Any]) -> dict[str, Any]:
+        report_id = str(payload.get("report_id") or payload.get("id") or "").strip()
+        if not report_id:
+            raise ToolExecutionError("reports.get requires report_id.")
+        try:
+            parsed_id = uuid.UUID(report_id)
+        except ValueError as exc:
+            raise ToolExecutionError("reports.get report_id must be a UUID.") from exc
+        report = context.session.get(Report, parsed_id)
+        if report is None:
+            raise ToolExecutionError(f"Unknown report: {report_id}")
+        if report.domain_id not in (None, context.domain.id):
+            raise ToolExecutionError("This agent cannot access that report domain.")
+        return {
+            "summary": {
+                "type": "reports_get",
+                "domain_key": context.domain.key,
+                "report_id": str(report.id),
+                "title": report.title,
+            },
+            "report": _compact_report_payload(report, include_body=True),
+        }
+
+
 class StageInteractionArtifactToolAdapter:
     key = "artifact.stage_interaction"
 
@@ -2130,12 +2667,36 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
             )
         }
     )
+    adapters.update(
+        {
+            key: GoogleWorkspaceToolAdapter(key)
+            for key in (
+                "google.drive.file.get",
+                "google.drive.file.export",
+                "google.docs.get",
+                "google.slides.get",
+                "google.sheets.get",
+                "google.sheets.values.get",
+                "google.meet.conference_records.list",
+                "google.meet.conference_records.get",
+            )
+        }
+    )
     adapters["codex.task.run"] = CodexCliToolAdapter("codex.task.run")
     adapters["llm.gateway"] = LLMGatewayToolAdapter("llm.gateway")
     adapters["web.search"] = WebSearchToolAdapter("web.search")
     adapters["memory.context_bundle"] = MemoryContextBundleToolAdapter()
+    adapters["routed.item.create"] = RoutedItemCreateToolAdapter()
+    adapters["reports.search"] = ReportRetrievalToolAdapter("reports.search")
+    adapters["reports.get"] = ReportRetrievalToolAdapter("reports.get")
     adapters["artifact.stage_interaction"] = StageInteractionArtifactToolAdapter()
-    adapters["local.app.reload"] = LocalAppReloadAdapter("local.app.reload")
+    for key in (
+        "local.app.inspect",
+        "local.app.recover",
+        "local.app.reload",
+        "local.app.deploy_pr",
+    ):
+        adapters[key] = LocalAppReloadAdapter(key)
     return adapters
 
 
@@ -2413,8 +2974,15 @@ def _dedupe_strings(values: list[str]) -> list[str]:
 
 def _repo_from(connection: ToolConnection | None, payload: dict[str, Any]) -> str:
     repo = str(payload.get("repo") or "").strip()
+    owner = str(payload.get("owner") or "").strip()
+    if repo and owner and "/" not in repo:
+        repo = f"{owner}/{repo}"
     if not repo and connection is not None:
-        repo = str((connection.config or {}).get("repo") or "").strip()
+        config = connection.config or {}
+        repo = str(config.get("repo") or "").strip()
+        owner = str(config.get("owner") or "").strip()
+        if repo and owner and "/" not in repo:
+            repo = f"{owner}/{repo}"
     if not repo:
         raise ToolExecutionError("GitHub tool requires a repo, e.g. Caliperti1/Maestro.")
     if "/" not in repo:
@@ -2550,6 +3118,82 @@ def _local_target_path(connection: ToolConnection | None, payload: dict[str, Any
     return target
 
 
+def _runtime_branch(connection: ToolConnection | None, payload: dict[str, Any]) -> str:
+    return str(payload.get("branch") or _connection_config(connection).get("branch") or "main").strip()
+
+
+def _runtime_git_health(target_path: Path, *, expected_branch: str) -> dict[str, Any]:
+    if not (target_path / ".git").exists():
+        raise ToolExecutionError(f"Runtime target is not a Git checkout: {target_path}")
+    status_output = _run_local_text(["git", "status", "--porcelain=v1"], cwd=target_path)
+    changed_files = []
+    runtime_support_paths = {".venv", "frontend/node_modules"}
+    for line in status_output.splitlines():
+        if not line:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[-1]
+        if path in runtime_support_paths:
+            continue
+        changed_files.append({"status": line[:2], "path": path})
+    branch = _run_local_text(["git", "branch", "--show-current"], cwd=target_path).strip()
+    head = _run_local_text(["git", "rev-parse", "HEAD"], cwd=target_path).strip()
+    upstream = ""
+    ahead = behind = None
+    try:
+        upstream = _run_local_text(
+            ["git", "rev-parse", "--abbrev-ref", "@{upstream}"],
+            cwd=target_path,
+        ).strip()
+        counts = _run_local_text(
+            ["git", "rev-list", "--left-right", "--count", f"HEAD...{upstream}"],
+            cwd=target_path,
+        ).strip().split()
+        if len(counts) == 2:
+            ahead, behind = int(counts[0]), int(counts[1])
+    except ToolExecutionError:
+        upstream = None
+    is_clean = not changed_files
+    recovery_actions = []
+    if not is_clean:
+        recovery_actions.append("stash")
+    if branch != expected_branch:
+        recovery_actions.append("switch_to_expected_branch_after_review")
+    return {
+        "target_path": str(target_path),
+        "expected_branch": expected_branch,
+        "branch": branch or None,
+        "head": head,
+        "upstream": upstream,
+        "ahead": ahead,
+        "behind": behind,
+        "is_clean": is_clean,
+        "changed_files": changed_files,
+        "recovery_actions": recovery_actions,
+        "summary": {
+            "type": "local_app_runtime_health",
+            "target_path": str(target_path),
+            "branch": branch or None,
+            "expected_branch": expected_branch,
+            "is_clean": is_clean,
+            "changed_file_count": len(changed_files),
+            "ahead": ahead,
+            "behind": behind,
+        },
+    }
+
+
+def _require_reloadable_runtime(health: dict[str, Any]) -> None:
+    if not health.get("is_clean"):
+        paths = ", ".join(str(item.get("path")) for item in health.get("changed_files", [])[:8])
+        raise ToolExecutionError(
+            "Runtime checkout has uncommitted changes and was not modified. "
+            f"Changed files: {paths or 'unknown'}. Inspect it with local.app.inspect, then ask Chris "
+            "to approve local.app.recover with action=stash before retrying deployment."
+        )
+
+
 def _reload_commands(connection: ToolConnection | None, payload: dict[str, Any]) -> list[list[str]]:
     config = _connection_config(connection)
     raw_commands = payload.get("commands") or payload.get("reload_commands") or config.get("reload_commands") or []
@@ -2679,10 +3323,64 @@ def _provider_key(tool_key: str) -> str:
     if tool_key.startswith("github."):
         return "github"
     if tool_key.startswith("gmail."):
-        return "gmail"
+        return "google"
+    if tool_key.startswith("google."):
+        return "google"
     if tool_key.startswith("codex."):
         return "codex"
+    if tool_key.startswith("local.app."):
+        return "local.app.reload"
     return tool_key
+
+
+def _normalize_route_type(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    aliases = {
+        "todo": "task",
+        "to_do": "task",
+        "organization": "entity",
+        "org": "entity",
+        "decision": "decision_log",
+        "idea": "think_tank",
+        "rfi": "human_input",
+    }
+    normalized = aliases.get(normalized, normalized)
+    allowed = {
+        "task",
+        "human_input",
+        "event",
+        "contact",
+        "entity",
+        "think_tank",
+        "decision_log",
+        "project",
+        "integration_note",
+        "ignore",
+    }
+    return normalized if normalized in allowed else ""
+
+
+def _source_refs_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    source_refs = payload.get("source_refs")
+    if isinstance(source_refs, list):
+        cleaned = [item for item in source_refs if isinstance(item, dict)]
+        if cleaned:
+            return cleaned
+    refs: list[dict[str, Any]] = []
+    gmail_ref = {
+        key: payload.get(key)
+        for key in ("message_id", "thread_id", "subject", "from", "date")
+        if payload.get(key)
+    }
+    if gmail_ref:
+        refs.append({"type": "gmail_message", **gmail_ref})
+    report_id = str(payload.get("report_id") or "").strip()
+    if report_id:
+        refs.append({"type": "report", "report_id": report_id})
+    artifact_id = str(payload.get("artifact_id") or "").strip()
+    if artifact_id:
+        refs.append({"type": "artifact", "artifact_id": artifact_id})
+    return refs
 
 
 def _memory_context_bundle_payload(
@@ -2726,6 +3424,30 @@ def _memory_context_bundle_payload(
         "sections": [_memory_context_section_payload(section) for section in bundle.sections],
         "rendered_text": bundle.rendered_text,
     }
+
+
+def _compact_report_payload(report: Report, *, include_body: bool) -> dict[str, Any]:
+    payload = {
+        "id": str(report.id),
+        "task_id": str(report.task_id) if report.task_id else None,
+        "domain_id": str(report.domain_id) if report.domain_id else None,
+        "agent_id": str(report.agent_id) if report.agent_id else None,
+        "title": report.title,
+        "report_type": report.report_type,
+        "summary": report.summary,
+        "archived": _report_is_archived(report),
+        "created_at": report.created_at.isoformat(),
+        "updated_at": report.updated_at.isoformat(),
+    }
+    if include_body:
+        payload["body_markdown"] = report.body_markdown
+    else:
+        payload["body_preview"] = " ".join(report.body_markdown.split())[:800]
+    return payload
+
+
+def _report_is_archived(report: Report) -> bool:
+    return bool((report.structured_data or {}).get("archived"))
 
 
 def _memory_context_section_payload(section: MemoryContextSection) -> dict[str, Any]:
@@ -2972,10 +3694,173 @@ def _gmail_api_json(
     return parsed
 
 
+def _google_api_json(
+    method: str,
+    base_url: str,
+    path: str,
+    *,
+    token: str,
+    params: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+    timeout: int = 60,
+) -> dict[str, Any]:
+    raw = _google_api_raw(
+        method,
+        base_url,
+        path,
+        token=token,
+        params=params,
+        body=body,
+        timeout=timeout,
+    )
+    if not raw:
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ToolExecutionError("Google API returned an unexpected response.")
+    return parsed
+
+
+def _google_api_text(
+    method: str,
+    base_url: str,
+    path: str,
+    *,
+    token: str,
+    params: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+    timeout: int = 60,
+) -> str:
+    return _google_api_raw(
+        method,
+        base_url,
+        path,
+        token=token,
+        params=params,
+        body=body,
+        timeout=timeout,
+    )
+
+
+def _google_api_raw(
+    method: str,
+    base_url: str,
+    path: str,
+    *,
+    token: str,
+    params: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+    timeout: int = 60,
+) -> str:
+    query = ""
+    if params:
+        query_items: list[tuple[str, str]] = []
+        for key, value in params.items():
+            if value is None:
+                continue
+            if isinstance(value, list):
+                query_items.extend((key, str(item)) for item in value)
+            else:
+                query_items.append((key, str(value)))
+        query = f"?{urlencode(query_items)}" if query_items else ""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = Request(
+        f"{base_url}{path}{query}",
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json,text/plain,*/*",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise ToolExecutionError(f"Google API {method} {path} failed: {exc.code} {detail}") from exc
+    except URLError as exc:
+        raise ToolExecutionError(f"Google API {method} {path} failed: {exc.reason}") from exc
+
+
+def _google_file_id(payload: dict[str, Any]) -> str:
+    raw = str(
+        payload.get("file_id")
+        or payload.get("document_id")
+        or payload.get("presentation_id")
+        or payload.get("spreadsheet_id")
+        or payload.get("id")
+        or ""
+    ).strip()
+    if not raw:
+        raw = str(payload.get("url") or payload.get("web_view_link") or "").strip()
+    file_id = _google_file_id_from_url(raw) if raw.startswith("http") else raw
+    if not file_id:
+        raise ToolExecutionError("Google Workspace tool requires file_id, document_id, id, or a Google file URL.")
+    return file_id
+
+
+def _google_file_id_from_url(value: str) -> str | None:
+    patterns = [
+        r"/document/d/([^/?#]+)",
+        r"/spreadsheets/d/([^/?#]+)",
+        r"/presentation/d/([^/?#]+)",
+        r"/file/d/([^/?#]+)",
+        r"[?&]id=([^&#]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _google_doc_text(document: dict[str, Any]) -> str:
+    chunks: list[str] = []
+    body = document.get("body") if isinstance(document.get("body"), dict) else {}
+    for item in body.get("content") or []:
+        paragraph = item.get("paragraph") if isinstance(item, dict) else None
+        if not isinstance(paragraph, dict):
+            continue
+        for element in paragraph.get("elements") or []:
+            text_run = element.get("textRun") if isinstance(element, dict) else None
+            if isinstance(text_run, dict):
+                content = str(text_run.get("content") or "")
+                if content:
+                    chunks.append(content)
+    return "".join(chunks).strip()
+
+
+def _google_slides_text(presentation: dict[str, Any]) -> str:
+    slides = presentation.get("slides") if isinstance(presentation.get("slides"), list) else []
+    chunks: list[str] = []
+    for index, slide in enumerate(slides, start=1):
+        slide_chunks: list[str] = []
+        if not isinstance(slide, dict):
+            continue
+        for element in slide.get("pageElements") or []:
+            if not isinstance(element, dict):
+                continue
+            text_content = element.get("shape", {}).get("text") if isinstance(element.get("shape"), dict) else None
+            if not isinstance(text_content, dict):
+                continue
+            for item in text_content.get("textElements") or []:
+                text_run = item.get("textRun") if isinstance(item, dict) else None
+                if isinstance(text_run, dict):
+                    content = str(text_run.get("content") or "").strip()
+                    if content:
+                        slide_chunks.append(content)
+        if slide_chunks:
+            chunks.append(f"Slide {index}: " + " ".join(slide_chunks))
+    return "\n".join(chunks).strip()
+
+
 def _gmail_message_payload(message: dict[str, Any], *, max_body_chars: int) -> dict[str, Any]:
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
     headers = _gmail_headers(payload)
     body = _gmail_body_text(payload) if max_body_chars > 0 else ""
+    google_links = _google_workspace_links(body)
     return {
         "message_id": message.get("id"),
         "id": message.get("id"),
@@ -2991,6 +3876,10 @@ def _gmail_message_payload(message: dict[str, Any], *, max_body_chars: int) -> d
         "date": headers.get("date"),
         "body_text": body[:max_body_chars] if max_body_chars > 0 else "",
         "body_truncated": len(body) > max_body_chars if max_body_chars > 0 else False,
+        "google_workspace_links": google_links,
+        "meeting_notes": [
+            link for link in google_links if _looks_like_meeting_notes_link(link)
+        ],
         "headers": headers,
     }
 
@@ -3045,7 +3934,13 @@ def _base64url_decode(value: str) -> str:
 
 
 def _strip_html(value: str) -> str:
-    text = value.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    text = re.sub(
+        r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+        lambda match: f"{_strip_html(match.group(2))} ({html.unescape(match.group(1))})",
+        value,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
     output = []
     in_tag = False
     for char in text:
@@ -3057,7 +3952,47 @@ def _strip_html(value: str) -> str:
             continue
         if not in_tag:
             output.append(char)
-    return " ".join("".join(output).split())
+    return html.unescape(" ".join("".join(output).split()))
+
+
+def _google_workspace_links(text: str) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    for match in re.finditer(r"https?://(?:(?:docs|drive)\.google\.com|meet\.google\.com)/[^\s<>)\"']+", text):
+        url = match.group(0).rstrip(".,;]")
+        file_id = _google_file_id_from_url(url)
+        kind = _google_link_kind(url)
+        context_start = max(0, match.start() - 120)
+        context_end = min(len(text), match.end() + 120)
+        item = {
+            "url": url,
+            "file_id": file_id or "",
+            "kind": kind,
+            "context": text[context_start:context_end],
+        }
+        if item not in links:
+            links.append(item)
+    return links
+
+
+def _google_link_kind(url: str) -> str:
+    if "meet.google.com" in url:
+        return "meet"
+    if "/document/" in url:
+        return "document"
+    if "/spreadsheets/" in url:
+        return "spreadsheet"
+    if "/presentation/" in url:
+        return "presentation"
+    if "drive.google.com" in url:
+        return "drive_file"
+    return "google_workspace"
+
+
+def _looks_like_meeting_notes_link(link: dict[str, str]) -> bool:
+    haystack = f"{link.get('url', '')} {link.get('context', '')}".lower()
+    return link.get("kind") == "document" and any(
+        token in haystack for token in ("meeting", "notes", "minutes", "summary")
+    )
 
 
 def _gmail_rfc822_message(

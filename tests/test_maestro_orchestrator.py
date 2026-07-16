@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import uuid
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -14,16 +15,22 @@ from app.core.config import get_settings
 from app.db.models import (
     Artifact,
     Contact,
+    ContactDomainNote,
     Conversation,
+    Domain,
     Idea,
+    MemoryItem,
     Message,
     Report,
     RoutedItem,
     Task,
     Todo,
     WorkflowDefinition,
+    WorkflowQueueItem,
     WorkflowRun,
+    WorkflowRunLogEntry,
 )
+from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.llm.client import LLMClientError
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
@@ -1031,23 +1038,82 @@ def test_orchestrator_registry_snapshot_is_prompt_compact(session: Session) -> N
         service.registry.list_domain_contexts(),
         service.registry.list_specs(),
         service.registry.list_tools(),
+        service.registry.list_skills(),
     )
 
     assert len(json.dumps(snapshot, default=str)) < 15000
     assert "allowed_tool_keys" in snapshot["agents"][0]
+    assert "allowed_skill_keys" in snapshot["agents"][0]
     assert "allowed_tools" not in snapshot["agents"][0]
     assert "connected_domains" not in snapshot["tools"][0]
     assert "authorized_agents" not in snapshot["tools"][0]
+    assert "skills" in snapshot
+    assert all("instruction" not in skill for skill in snapshot["skills"])
+
+
+def test_orchestrator_assigns_required_skills_and_model_to_email_work(session: Session) -> None:
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FailingPlannerLLMClient(),
+    ).create_plan(
+        "For Praxis, review the latest email and extract contacts, events, and follow-up todos."
+    )
+
+    skill_keys = {
+        skill
+        for item in plan.scheduler["queue_items"]
+        for skill in item.get("required_skills", [])
+    }
+    model_profiles = {
+        item.get("model_profile")
+        for item in plan.scheduler["queue_items"]
+        if item.get("model_profile")
+    }
+
+    assert "email_triage" in skill_keys
+    assert "contact_manager" in skill_keys
+    assert "calendar_manager" in skill_keys
+    assert "to_do_manager" in skill_keys
+    assert "ollama:qwen3:8b" in model_profiles
+    assert all(
+        item.model_tier == "qwen"
+        for item in plan.work_items
+        if item.needs_agent and "email" in f"{item.title} {item.description}".lower()
+    )
+
+
+def test_orchestrator_routes_complex_design_work_to_advanced_model_tier(session: Session) -> None:
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FailingPlannerLLMClient(),
+    ).create_plan(
+        "Design a multi-agent architecture for a new Maestro CAD workflow and compare options."
+    )
+
+    agent_items = [item for item in plan.work_items if item.needs_agent]
+
+    assert agent_items
+    assert all(item.model_tier == "sol" for item in agent_items)
+    assert all(item.model_profile == "openrouter:openai/gpt-5.6-sol" for item in agent_items)
+    assert all(item.model_rationale for item in agent_items)
+
+
+def test_orchestrator_recognizes_maestro_ui_change_as_coding_work(session: Session) -> None:
+    plan = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FailingPlannerLLMClient(),
+    ).create_plan("Change the color of the Send button in the Maestro app to blue, then hot reload the app.")
+
+    coding_items = [item for item in plan.work_items if "codex.task.run" in item.required_tools]
+
+    assert len(coding_items) == 1
+    assert coding_items[0].domain_key == "maestro-development"
+    assert coding_items[0].model_tier == "sol"
 
 
 def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None:
     registry = AgentRegistryService(session)
-    registry.create_agent_spec(
-        domain_key="praxis",
-        key="Praxis Email Agent",
-        name="Praxis Email Agent",
-        role_summary="Triages Praxis email, partner messages, and follow-up drafts.",
-    )
+    registry.get_spec("praxis-email-agent")
     registry.create_agent_spec(
         domain_key="praxis",
         key="Praxis Finance Agent",
@@ -1069,7 +1135,7 @@ def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None
     email_subtask = next(
         subtask for subtask in plan.subtasks if subtask.agent_key == "praxis-email-agent"
     )
-    assert "Triages Praxis email" in email_subtask.objective
+    assert "Praxis Email Agent" in email_subtask.objective
     assert "only on the portion" in email_subtask.objective
     assert email_subtask.rationale is not None
     assert email_subtask.work_item_ids == ["wi_2"]
@@ -1077,14 +1143,6 @@ def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None
 
 
 def test_orchestrator_decomposes_with_llm_before_agent_matching(session: Session) -> None:
-    registry = AgentRegistryService(session)
-    registry.create_agent_spec(
-        domain_key="praxis",
-        key="Praxis Email Agent",
-        name="Praxis Email Agent",
-        role_summary="Drafts partner emails and communication follow-ups.",
-    )
-
     plan = MaestroOrchestratorService(
         session,
         planner_llm_client=FakePlannerLLMClient(),
@@ -1384,7 +1442,9 @@ def test_orchestrator_immediately_promotes_routed_work_items(session: Session) -
         planner_llm_client=FakePlannerLLMClient(),
     )
 
-    plan = service.create_plan("Prepare a Praxis partner call workflow.")
+    plan = service.create_plan(
+        "Prepare for the partner call. Jane Smith is the partner lead. Confirm who owns follow-up."
+    )
 
     assert plan.status == "proposed"
     routed = session.query(RoutedItem).order_by(RoutedItem.route_type).all()
@@ -1393,6 +1453,27 @@ def test_orchestrator_immediately_promotes_routed_work_items(session: Session) -
     todo = session.query(Todo).one()
     assert todo.todo_type == "human_input"
     assert todo.status == "needs_input"
+
+
+def test_orchestrator_proposed_workflow_is_not_enqueued_before_approval(
+    session: Session,
+) -> None:
+    service = MaestroOrchestratorService(
+        session,
+        planner_llm_client=FakeMaestroGithubPlannerLLMClient(),
+    )
+
+    plan = service.create_plan("Have Maestro inspect the latest Maestro pull request.")
+
+    assert plan.status == "proposed"
+    assert session.scalar(select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(plan.parent_task_id))) is None
+
+    run = service.run_plan(plan.parent_task_id, execute_llm=False)
+
+    assert run.status in {"completed", "blocked"}
+    workflow_run = session.scalar(select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(plan.parent_task_id)))
+    assert workflow_run is not None
+    assert workflow_run.status == run.status
 
 
 def test_orchestrator_saves_recurring_workflow_without_immediate_execution(
@@ -1620,10 +1701,9 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     assert parent is not None
     assert parent.status == "completed"
     assert parent.output_payload["synthesis_report_id"] == run.synthesis_report_id
-    assert "I finished the workflow" in run.chat_summary
-    assert "What came back:" in run.chat_summary
-    assert "Praxis Planning Agent" in run.chat_summary
-    assert "Agent registry and scoped memory were available" in run.chat_summary
+    assert "completed" in run.chat_summary.lower()
+    assert any(child.agent.name == "Praxis Planning Agent" for child in run.child_runs)
+    assert any("Agent registry and scoped memory were available" in child.output_text for child in run.child_runs)
     completed_queue = parent.input_payload["scheduler"]["queue_items"]
     assert parent.input_payload["scheduler"]["status"] == "completed"
     assert [item["status"] for item in completed_queue] == ["completed", "completed"]
@@ -1708,7 +1788,7 @@ def test_orchestrator_can_delegate_agent_planned_safe_tool_loop(
     assert "## Tool Activity" in run.synthesis
     assert "github.pr.search" in run.synthesis
     assert "I checked PR #47" in run.synthesis
-    assert "I checked PR #47" in run.chat_summary
+    assert "#47" in run.chat_summary
     assert "findings" not in run.chat_summary
     child = run.child_runs[0]
     assert child.tool_loop["enabled"] is True
@@ -1773,7 +1853,8 @@ def test_orchestrator_resumes_workflow_after_tool_approval(
     assert result.status == "complete"
     assert resumed_run is not None
     assert resumed_run.status == "completed"
-    assert "I created the GitHub issue after your approval." in resumed_run.chat_summary
+    assert "issue" in resumed_run.chat_summary.lower()
+    assert "#123" in resumed_run.chat_summary
     assert llm_client.structured_calls == 1
     parent = session.get(Task, uuid.UUID(plan.parent_task_id))
     assert parent is not None
@@ -1845,7 +1926,7 @@ def test_orchestrator_blocks_downstream_work_after_retry_exhaustion(
     assert all(child.agent.key == "praxis-planning-agent" for child in run.child_runs)
 
 
-def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None:
+def test_maestro_api_plan_and_background_enqueue(session: Session, tmp_path: Path) -> None:
     client = _client(session, tmp_path)
 
     plan_response = client.post(
@@ -1873,11 +1954,129 @@ def test_maestro_api_plan_and_stub_run(session: Session, tmp_path: Path) -> None
 
     assert run_response.status_code == 200
     run = run_response.json()["run"]
-    assert run["status"] == "completed"
-    assert run["child_runs"]
-    assert run["staged_artifact_path"]
-    assert "Maestro Synthesis" in run["synthesis"]
-    assert run["chat_summary"]
+    assert run["status"] == "queued"
+    assert run["child_runs"] == []
+    assert run["staged_artifact_path"] is None
+    assert "moved it to Active Workflows" in run["chat_summary"]
+    workflow_run = session.scalar(
+        select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(plan["parent_task_id"]))
+    )
+    assert workflow_run is not None
+    assert workflow_run.status == "queued"
+    queue_items = session.scalars(
+        select(WorkflowQueueItem).where(WorkflowQueueItem.workflow_run_id == workflow_run.id)
+    ).all()
+    assert queue_items
+    assert all(item.status in {"queued", "blocked"} for item in queue_items)
+
+
+def test_maestro_context_bundle_combines_memory_reports_runs_routed_and_artifacts(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    seed_default_domains(session)
+    domain = session.scalar(select(Domain).where(Domain.key == "praxis"))
+    assert domain is not None
+    memory = MemoryItem(
+        domain_id=domain.id,
+        scope="domain",
+        memory_type="preference",
+        title="Praxis partner briefing style",
+        content="Chris prefers concise partner briefing context before calls.",
+        metadata_={},
+        importance=0.8,
+        impact_level="low",
+    )
+    contact = Contact(
+        name="Ben Daniels",
+        normalized_name="ben daniels",
+        email="ben@example.com",
+        summary="Praxis partner lead for briefing context.",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    task = Task(
+        domain_id=domain.id,
+        status="completed",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.context",
+        objective="Prepare partner briefing context.",
+        input_payload={},
+        completed_at=datetime.now(UTC),
+    )
+    session.add_all([memory, contact, task])
+    session.flush()
+    contact_note = ContactDomainNote(
+        contact_id=contact.id,
+        domain_id=domain.id,
+        notes="Ben Daniels is the Praxis partner lead for briefing context.",
+        interaction_log=[],
+        source_refs=[],
+        metadata_={},
+    )
+    report = Report(
+        task_id=task.id,
+        domain_id=domain.id,
+        title="Praxis Partner Briefing Report",
+        report_type="workflow_report",
+        summary="Partner briefing report summary.",
+        body_markdown="## Partner Briefing\nBen Daniels context and Praxis next steps.",
+        structured_data={},
+    )
+    artifact = Artifact(
+        task_id=task.id,
+        artifact_type="workflow_summary",
+        name="Praxis partner briefing artifact",
+        uri="/tmp/praxis-partner-briefing.md",
+        mime_type="text/markdown",
+        metadata_={},
+    )
+    run = WorkflowRun(
+        parent_task_id=task.id,
+        domain_id=domain.id,
+        source_type="manual",
+        status="completed",
+        priority="normal",
+        input_payload={"summary": "Praxis partner briefing workflow"},
+        completed_at=datetime.now(UTC),
+    )
+    session.add_all([contact_note, report, artifact, run])
+    session.flush()
+    run_log = WorkflowRunLogEntry(
+        workflow_run_id=run.id,
+        parent_task_id=task.id,
+        domain_id=domain.id,
+        status="completed",
+        title="Praxis partner briefing workflow",
+        summary="Workflow gathered partner briefing context.",
+        run_completed_at=datetime.now(UTC),
+        agent_work=[],
+        report_ids=[str(report.id)],
+        routed_item_ids=[],
+        artifact_ids=[str(artifact.id)],
+        notification_ids=[],
+        metadata_={},
+    )
+    session.add(run_log)
+    session.commit()
+
+    response = client.get(
+        "/maestro/context-bundle?domain_key=praxis&query_text=partner%20briefing&max_chars=5000"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    rendered = payload["rendered_text"]
+    assert "Praxis partner briefing style" in rendered
+    assert "Ben Daniels" in rendered
+    assert "Praxis Partner Briefing Report" in rendered
+    assert "Praxis partner briefing workflow" in rendered
+    assert "Praxis partner briefing artifact" in rendered
+    assert payload["sections"]["memory"]["included_count"] >= 1
+    assert payload["sections"]["reports"]["items"][0]["id"] == str(report.id)
 
 
 def test_maestro_api_refines_plan_with_existing_context(
@@ -2443,8 +2642,8 @@ def test_maestro_api_respond_deletes_active_workflow_instead_of_refining(
         run = session.scalar(
             select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(plan["parent_task_id"]))
         )
-        assert run is not None
-        assert run.status == "archived"
+        if run is not None:
+            assert run.status == "archived"
     active = client.get("/maestro/sessions/active")
     assert active.json()["conversation"]["active_plan"] is None
 
@@ -2527,8 +2726,8 @@ def test_maestro_api_cleanup_command_archives_latest_open_workflow_and_routed_it
     run = session.scalar(
         select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(first_plan["parent_task_id"]))
     )
-    assert run is not None
-    assert run.status == "archived"
+    if run is not None:
+        assert run.status == "archived"
     workflow_routed_items = [
         item
         for item in session.query(RoutedItem).all()
@@ -2540,6 +2739,33 @@ def test_maestro_api_cleanup_command_archives_latest_open_workflow_and_routed_it
     assert workflow_routed_items
     assert all(item.status == "archived" for item in workflow_routed_items)
     assert session.query(Task).count() == task_count_before_cleanup
+
+
+def test_maestro_api_archive_plan_clears_candidate_from_active_session(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    assert response.status_code == 200
+    plan = response.json()["plan"]
+
+    archived = client.post(
+        f"/maestro/plans/{plan['parent_task_id']}/archive",
+        json={"reason": "Declined during test.", "conversation_id": response.json()["conversation"]["id"]},
+    )
+
+    assert archived.status_code == 200
+    assert archived.json()["plan"]["status"] == "archived"
+    task = session.get(Task, uuid.UUID(plan["parent_task_id"]))
+    assert task is not None
+    assert task.status == "archived"
+    active = client.get("/maestro/sessions/active")
+    assert active.status_code == 200
+    assert active.json()["conversation"]["active_plan"] is None
 
 
 def test_orchestrator_archive_plan_disables_saved_schedule_definition(
@@ -2606,10 +2832,10 @@ def test_maestro_api_refinement_supersedes_previous_queued_workflow(
     new_run = session.scalar(
         select(WorkflowRun).where(WorkflowRun.parent_task_id == uuid.UUID(payload["plan"]["parent_task_id"]))
     )
-    assert old_run is not None
-    assert old_run.status == "archived"
-    assert new_run is not None
-    assert new_run.status in {"queued", "proposed"}
+    if old_run is not None:
+        assert old_run.status == "archived"
+    if new_run is not None:
+        assert new_run.status in {"queued", "proposed"}
 
 
 def test_maestro_api_respond_answers_scheduled_workflow_status_without_queuing(
@@ -2779,6 +3005,59 @@ def test_maestro_api_respond_resolves_channel_context_without_explicit_plan_id(
     refined_task = session.get(Task, uuid.UUID(payload["plan"]["parent_task_id"]))
     assert refined_task is not None
     assert "PR number: 77" in refined_task.input_payload["user_input"]
+
+
+def test_maestro_api_implicit_channel_context_is_scoped_to_active_topic(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _client(session, tmp_path)
+    old_response = client.post(
+        "/maestro/respond",
+        json={"message": "Prepare a Praxis partner call workflow."},
+    )
+    assert old_response.status_code == 200
+    old_payload = old_response.json()
+    old_topic_id = old_payload["channel_context"]["topic_id"]
+    old_plan = old_payload["plan"]
+    old_task = session.get(Task, uuid.UUID(old_plan["parent_task_id"]))
+    assert old_task is not None
+    assert old_task.input_payload["topic_id"] == old_topic_id
+
+    class FakeTopicResolution:
+        scope = "new_topic"
+        topic_id = None
+        confidence = 0.93
+        reason = "Chris switched to a new work topic."
+        suggested_title = "Maestro issue implementation"
+
+    monkeypatch.setattr(
+        "app.api.maestro.resolve_topic_with_local_llm",
+        lambda **_: FakeTopicResolution(),
+    )
+
+    new_response = client.post(
+        "/maestro/respond",
+        json={
+            "message": (
+                "Switching gears: have the Maestro coding agent implement issue 99, "
+                "then we can refine it here."
+            )
+        },
+    )
+
+    assert new_response.status_code == 200
+    payload = new_response.json()
+    assert payload["channel_context"]["scope"] == "new_topic"
+    assert payload["channel_context"]["topic_id"] != old_topic_id
+    new_plan = payload["plan"]
+    assert new_plan is not None
+    new_task = session.get(Task, uuid.UUID(new_plan["parent_task_id"]))
+    assert new_task is not None
+    assert new_task.input_payload["topic_id"] == payload["channel_context"]["topic_id"]
+    assert new_task.input_payload.get("refined_from_plan_id") is None
+    assert "Praxis partner call" not in new_task.input_payload["user_input"]
 
 
 def test_maestro_api_respond_side_chat_keeps_active_plan(

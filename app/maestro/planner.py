@@ -17,6 +17,7 @@ WorkItemType = Literal[
     "direct_response",
 ]
 PlannerPriority = Literal["low", "normal", "high", "urgent"]
+PlannerModelTier = Literal["auto", "qwen", "luna", "terra", "sol"]
 
 MAESTRO_PLANNER_INSTRUCTIONS = load_prompt("maestro_planner.md")
 
@@ -40,6 +41,8 @@ class PlannerWorkItem(BaseModel):
     suggested_agent_keys: list[str]
     expected_output: str
     rationale: str
+    model_tier: PlannerModelTier
+    model_rationale: str
 
 
 class MaestroPlannerResponse(BaseModel):
