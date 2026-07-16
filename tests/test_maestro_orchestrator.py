@@ -2162,7 +2162,7 @@ def test_maestro_chat_approval_resumes_single_pending_tool_action(
     session.add(pending)
     session.commit()
     assert maestro_api._pending_tool_approvals_for_conversation(session, conversation) == [pending]
-    assert maestro_api._is_plain_approval_message("approved") is True
+    assert maestro_api._is_plain_approval_message("Approved to merge and continue") is True
 
     approved_ids: list[uuid.UUID] = []
 
@@ -2184,7 +2184,7 @@ def test_maestro_chat_approval_resumes_single_pending_tool_action(
 
     response = client.post(
         "/maestro/respond",
-        json={"conversation_id": str(conversation.id), "message": "Approved"},
+        json={"conversation_id": str(conversation.id), "message": "Approved to merge and continue"},
     )
 
     assert response.status_code == 200

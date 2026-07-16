@@ -344,17 +344,12 @@ def _respond_to_maestro_sync(
 
 def _is_plain_approval_message(message: str) -> bool:
     normalized = re.sub(r"[^a-z0-9 ]+", " ", message.lower()).strip()
-    return normalized in {
-        "approve",
-        "approved",
-        "yes approve",
-        "yes approved",
-        "go ahead",
-        "proceed",
-        "proceed with it",
-        "merge it",
-        "merge the pr",
-    }
+    if normalized in {"approve", "approved", "yes approve", "yes approved", "go ahead", "proceed"}:
+        return True
+    approval_prefixes = ("approve ", "approved ", "yes approve ", "yes approved ")
+    if not normalized.startswith(approval_prefixes):
+        return normalized in {"merge it", "merge the pr", "proceed with it", "continue"}
+    return not any(token in normalized for token in ("?", "why", "what", "how", "explain"))
 
 
 def _pending_tool_approvals_for_conversation(
