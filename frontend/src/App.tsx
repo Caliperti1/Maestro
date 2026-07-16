@@ -2717,7 +2717,11 @@ export function App() {
                   aria-label="Message Maestro"
                   rows={1}
                 />
-                <button type="submit" disabled={maestroBusy || !draftMessage.trim()}>
+                <button
+                  type="submit"
+                  className="maestro-send-button"
+                  disabled={maestroBusy || !draftMessage.trim()}
+                >
                   Send
                 </button>
               </form>
