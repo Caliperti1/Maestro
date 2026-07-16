@@ -9,9 +9,9 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
-from app.db.models import Conversation, Domain, Message, RoutedItem, RuntimeSetting, Task, Todo
+from app.db.models import Conversation, Domain, Message, RoutedItem, RuntimeSetting, Task, Todo, ToolCall
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal, get_db
@@ -154,6 +154,28 @@ def _respond_to_maestro_sync(
     )
     message_metadata = {"topic_id": topic_context.get("topic_id")} if topic_context.get("topic_id") else {}
     user_message = _record_session_message(db, conversation, "user", body.message, metadata=message_metadata)
+    pending_approvals = _pending_tool_approvals_for_conversation(db, conversation)
+    if _is_plain_approval_message(normalized_message) and pending_approvals:
+        if len(pending_approvals) == 1:
+            return _approve_pending_tool_from_chat(
+                db,
+                conversation=conversation,
+                tool_call=pending_approvals[0],
+                channel_context=topic_context,
+                message_metadata=message_metadata,
+            )
+        response_message = _ambiguous_tool_approval_message(pending_approvals)
+        _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
+        return {
+            "kind": "chat_only",
+            "classification": "approval_clarification",
+            "message": response_message,
+            "plan": None,
+            "chat_plan": None,
+            "active_plan": None,
+            "channel_context": topic_context,
+            "conversation": _conversation_payload(db, conversation),
+        }
     planner_message = _message_with_topic_context(
         db,
         conversation,
@@ -318,6 +340,87 @@ def _respond_to_maestro_sync(
         "channel_context": topic_context,
         "conversation": _conversation_payload(db, conversation),
     }
+
+
+def _is_plain_approval_message(message: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", message.lower()).strip()
+    return normalized in {
+        "approve",
+        "approved",
+        "yes approve",
+        "yes approved",
+        "go ahead",
+        "proceed",
+        "proceed with it",
+        "merge it",
+        "merge the pr",
+    }
+
+
+def _pending_tool_approvals_for_conversation(
+    db: Session,
+    conversation: Conversation,
+) -> list[ToolCall]:
+    child_task = aliased(Task)
+    parent_task = aliased(Task)
+    return list(
+        db.scalars(
+            select(ToolCall)
+            .join(child_task, ToolCall.task_id == child_task.id)
+            .outerjoin(parent_task, child_task.parent_task_id == parent_task.id)
+            .where(
+                ToolCall.status == "approval_required",
+                (child_task.conversation_id == conversation.id)
+                | (parent_task.conversation_id == conversation.id),
+            )
+            .order_by(ToolCall.created_at.desc())
+        ).all()
+    )
+
+
+def _approve_pending_tool_from_chat(
+    db: Session,
+    *,
+    conversation: Conversation,
+    tool_call: ToolCall,
+    channel_context: dict[str, Any],
+    message_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        result, run = MaestroOrchestratorService(db).approve_tool_call_and_resume(
+            tool_call.id,
+            execute_llm=True,
+            auto_tool_loop=True,
+            max_tool_iterations=2,
+        )
+    except (ToolExecutionError, MaestroOrchestratorError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result_payload = tool_result_payload(result)
+    response_message = _tool_approval_message(result_payload, approved=True)
+    if run is not None:
+        response_message = f"{response_message}\n\n{run.chat_summary}"
+    _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
+    return {
+        "kind": "tool_approved",
+        "classification": "tool_approved",
+        "message": response_message,
+        "plan": None,
+        "chat_plan": None,
+        "active_plan": None,
+        "tool_call": result_payload,
+        "run": _run_payload(run) if run is not None else None,
+        "channel_context": channel_context,
+        "conversation": _conversation_payload(db, conversation),
+    }
+
+
+def _ambiguous_tool_approval_message(tool_calls: list[ToolCall]) -> str:
+    labels = [call.tool_name for call in tool_calls[:3]]
+    joined = ", ".join(f"`{label}`" for label in labels)
+    return (
+        f"I have {len(tool_calls)} actions waiting for approval: {joined}. "
+        "Please tell me which action you want me to approve."
+    )
 
 
 @router.websocket("/channel/ws")
