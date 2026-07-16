@@ -4,6 +4,7 @@ import json
 import uuid
 from subprocess import CompletedProcess
 
+import pytest
 from sqlalchemy.orm import Session
 
 from app.agents.runtime import (
@@ -12,20 +13,31 @@ from app.agents.runtime import (
     InteractionArtifactPackager,
     PromptAggregationService,
     PromptPackageRequest,
+    _compact_tool_results_for_prompt,
+    _deterministic_tool_plan,
+    _llm_client_for_model_profile,
 )
 from app.core.config import get_settings
-from app.db.models import Artifact, MemoryItem, Task, ToolCall, ToolConnection
+from app.db.models import Artifact, Contact, MemoryItem, Report, Task, ToolCall, ToolConnection
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
 from app.tools.runtime import (
     CodexCliToolAdapter,
     GmailApiToolAdapter,
+    GoogleWorkspaceToolAdapter,
     GitHubCliToolAdapter,
+    LLMGatewayToolAdapter,
     LocalAppReloadAdapter,
+    MemoryContextBundleToolAdapter,
     ToolExecutionContext,
+    ToolExecutionError,
     ToolExecutionRequest,
     ToolExecutionService,
+    WebSearchToolAdapter,
+    RoutedItemCreateToolAdapter,
     _clean_github_search_query,
+    _github_read_search_terms,
+    default_tool_adapters,
 )
 
 
@@ -136,6 +148,79 @@ class FakeAutoToolLoopLLMClient:
         return "## Summary\nLatest PR reviewed.\n\n## Findings\nPR #44 is ready for inspection."
 
 
+class FakeAutoGitHubReadToolLoopLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def __init__(self):
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Inspect the repository with the aggregate read tool.",
+                "requires_final_answer": True,
+                "tool_calls": [
+                    {
+                        "tool_key": "github.read",
+                        "payload_json": '{"request":"Inspect repository architecture only."}',
+                        "rationale": "Read-only repository inspection.",
+                    }
+                ],
+            }
+        return {
+            "plan_summary": "Enough repository context has been gathered.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "github.read" in input_text
+        return "## Summary\nRepository architecture inspected with read-only GitHub context."
+
+
+class FakeGoogleSlidesFallbackLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        assert "execution planner" in instructions
+        assert "docs.google.com/presentation" in input_text
+        return {
+            "plan_summary": "No tool call selected.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "google.slides.get" in input_text
+        return "## Summary\nSlides deck access verified through fallback."
+
+
+class FakeGoogleSlidesLLMPlannerClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        assert "execution planner" in instructions
+        return {
+            "plan_summary": "Use the LLM-selected Drive metadata tool first.",
+            "requires_final_answer": True,
+            "tool_calls": [
+                {
+                    "tool_key": "google.drive.file.get",
+                    "payload_json": '{"file_id":"deck-123"}',
+                    "rationale": "The LLM planner chose Drive metadata.",
+                }
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "google.drive.file.get" in input_text
+        return "## Summary\nLLM-selected Google tool was used."
+
+
 class FakeAutoWriteToolLoopLLMClient:
     provider = "test"
     model = "test-agent-model"
@@ -158,6 +243,80 @@ class FakeAutoWriteToolLoopLLMClient:
         assert "approval_required" in input_text
         assert "github.issue.create" in input_text
         return "## Summary\nI proposed a GitHub issue creation for approval."
+
+
+class FakeAutoLLMGatewayToolLoopLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def __init__(self):
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        assert "internal_reasoning" in input_text
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Use the internal gateway for a focused research synthesis.",
+                "requires_final_answer": True,
+                "tool_calls": [
+                    {
+                        "tool_key": "llm.gateway",
+                        "payload_json": (
+                            '{"prompt":"Survey CAD-to-STL agent architecture options.",'
+                            '"context":"Maestro Development brainstorm"}'
+                        ),
+                        "rationale": "The task asks for architecture synthesis.",
+                    }
+                ],
+            }
+        return {
+            "plan_summary": "Internal synthesis is available.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "llm.gateway" in input_text
+        assert "CAD toolchain synthesis" in input_text
+        return "## Summary\nCAD integration options reviewed.\n\n## Next Steps\nPick a prototype path."
+
+
+class FakeAutoMemoryContextToolLoopLLMClient:
+    provider = "test"
+    model = "test-agent-model"
+
+    def __init__(self):
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Retrieve Maestro memory before answering.",
+                "requires_final_answer": True,
+                "tool_calls": [
+                    {
+                        "tool_key": "memory.context_bundle",
+                        "payload_json": (
+                            '{"query_text":"CAD tool STL generation architecture",'
+                            '"domain_key":"maestro-development","use_semantic":false,'
+                            '"max_items":6,"max_chars":1200}'
+                        ),
+                        "rationale": "The agent needs scoped RAG context before reporting.",
+                    }
+                ],
+            }
+        return {
+            "plan_summary": "Memory context is available.",
+            "requires_final_answer": True,
+            "tool_calls": [],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "memory.context_bundle" in input_text
+        assert "CAD design agents should use shared CAD tool infrastructure" in input_text
+        return "## Summary\nRetrieved Maestro memory before answering.\n\n## Next Steps\nUse the shared tool pattern."
 
 
 class FakeAutoMergeMissingPrNumberLLMClient:
@@ -258,6 +417,60 @@ class FakeGitHubIssueCreateAdapter:
         }
 
 
+class FakeLLMGatewayAdapter:
+    key = "llm.gateway"
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        assert context.domain.key == "maestro-development"
+        assert payload["prompt"] == "Survey CAD-to-STL agent architecture options."
+        return {
+            "summary": {"type": "llm_gateway_response", "model": "test-agent-model"},
+            "output_text": "CAD toolchain synthesis: consider FreeCAD, build123d, and Blender.",
+        }
+
+
+class FakeWebSearchLLMClient:
+    provider = "openrouter"
+    model = "test-web-model"
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def web_search_response(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        search_parameters: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        assert "research" in instructions.lower()
+        assert input_text == "current CAD AI STL generation tools"
+        assert search_parameters == {
+            "engine": "exa",
+            "max_results": 3,
+            "allowed_domains": ["freecad.org"],
+        }
+        return {
+            "output_text": "FreeCAD and build123d are relevant options.",
+            "annotations": [
+                {
+                    "type": "url_citation",
+                    "url_citation": {
+                        "url": "https://www.freecad.org/",
+                        "title": "FreeCAD",
+                        "content": "FreeCAD is an open source parametric 3D modeler.",
+                    },
+                }
+            ],
+            "usage": {"server_tool_use": {"web_search_requests": 1}},
+        }
+
+
 def test_seed_agent_registry_returns_domain_scoped_specs(session: Session) -> None:
     specs = AgentRegistryService(session).list_specs()
 
@@ -272,6 +485,8 @@ def test_seed_agent_registry_returns_domain_scoped_specs(session: Session) -> No
     coding = next(spec for spec in specs if spec.key == "maestro-coding-agent")
     assert coding.domain_key == "maestro-development"
     assert "codex.task.run" in [tool.key for tool in coding.allowed_tools]
+    introspection = next(spec for spec in specs if spec.key == "maestro-introspection-agent")
+    assert "web.search" in [tool.key for tool in introspection.allowed_tools]
 
 
 def test_prompt_aggregation_includes_scoped_memory_and_tools(session: Session) -> None:
@@ -291,6 +506,47 @@ def test_prompt_aggregation_includes_scoped_memory_and_tools(session: Session) -
     assert "Ophi private roadmap" not in package.assembled_prompt
     assert "memory.context_bundle" in package.assembled_prompt
     assert package.memory_context.included_count >= 1
+
+
+def test_prompt_aggregation_uses_domain_background_query_for_external_file_tasks(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    session.add(
+        MemoryItem(
+            scope="domain",
+            domain_id=praxis.id,
+            memory_type="fact",
+            title="Praxis operating context",
+            content=(
+                "Praxis Defense focuses on AI-enabled defense transition and training "
+                "workflows, not ground combat vehicle programs."
+            ),
+            impact_level="high",
+            importance=0.95,
+            metadata_={},
+        )
+    )
+    session.commit()
+
+    package = PromptAggregationService(session).build_prompt_package(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction=(
+                "Read this Google Slides deck and summarize what it says: "
+                "https://docs.google.com/presentation/d/deck-123/edit"
+            ),
+            query_text="https://docs.google.com/presentation/d/deck-123/edit",
+            use_semantic=False,
+        )
+    )
+
+    assert "Praxis Defense focuses on AI-enabled defense transition" in package.assembled_prompt
+    assert package.memory_context.included_count >= 1
+    assert "ground combat vehicle" in package.memory_context.rendered_text
+    assert "domain background for Praxis" in (package.memory_context.request.query_text or "")
 
 
 def test_updated_domain_context_flows_into_prompt_package(session: Session) -> None:
@@ -331,8 +587,8 @@ def test_create_agent_and_tool_connection_redacts_secret_config(session: Session
     registry = AgentRegistryService(session)
     agent = registry.create_agent_spec(
         domain_key="praxis",
-        key="Praxis Email Agent",
-        name="Praxis Email Agent",
+        key="Praxis Mailroom Agent",
+        name="Praxis Mailroom Agent",
         role_summary="Triages Praxis email.",
         tool_permissions={"gmail.read": {"permission": "read"}},
     )
@@ -344,10 +600,10 @@ def test_create_agent_and_tool_connection_redacts_secret_config(session: Session
         config={"api_key": "secret-value", "label": "praxis"},
     )
 
-    assert agent.key == "praxis-email-agent"
+    assert agent.key == "praxis-mailroom-agent"
     assert connection.config["api_key"] == "********"
     assert connection.config["label"] == "praxis"
-    assert registry.get_spec("praxis-email-agent").allowed_tools[0].connection_id is not None
+    assert registry.get_spec("praxis-mailroom-agent").allowed_tools[0].connection_id is not None
 
 
 def test_tool_manifest_can_attach_domain_connections(session: Session) -> None:
@@ -393,18 +649,18 @@ def test_tool_manifest_can_inherit_provider_level_github_connection(session: Ses
     assert "maestro-development" in registry_issue_search.connected_domains
 
 
-def test_tool_manifest_can_inherit_provider_level_gmail_connection(session: Session) -> None:
+def test_tool_manifest_can_inherit_google_family_connection_for_gmail(session: Session) -> None:
     registry = AgentRegistryService(session)
     registry.upsert_tool_connection(
         domain_key="praxis",
-        tool_key="gmail",
-        display_name="Praxis Gmail",
+        tool_key="google",
+        display_name="Praxis Google Workspace",
         auth_type="oauth",
         config={
             "user_id": "me",
             "client_id_env": "GOOGLE_CLIENT_ID",
             "client_secret_env": "GOOGLE_CLIENT_SECRET",
-            "refresh_token_env": "PRAXIS_GMAIL_REFRESH_TOKEN",
+            "refresh_token_env": "PRAXIS_GOOGLE_REFRESH_TOKEN",
         },
     )
 
@@ -448,6 +704,19 @@ def test_seed_agent_merge_adds_github_tool_permissions_to_existing_seed_agent(
     assert "codex.task.run" in [tool.key for tool in refreshed.allowed_tools]
 
 
+def test_internal_memory_tool_is_added_to_custom_agents_by_default(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    custom = registry.create_agent_spec(
+        domain_key="maestro-development",
+        key="custom-maestro-agent",
+        name="Custom Maestro Agent",
+        role_summary="Tests default internal memory tools.",
+        tool_permissions={},
+    )
+
+    assert "memory.context_bundle" in [tool.key for tool in custom.allowed_tools]
+
+
 def test_seed_agent_merge_adds_gmail_read_permissions_to_existing_praxis_agent(
     session: Session,
 ) -> None:
@@ -470,6 +739,290 @@ def test_seed_agent_merge_adds_gmail_read_permissions_to_existing_praxis_agent(
     assert "gmail.message.list_recent" in allowed
     assert "gmail.message.get" in allowed
     assert "gmail.thread.get" in allowed
+
+
+def test_seeded_praxis_email_agent_has_email_triage_tools_skills_and_local_model(
+    session: Session,
+) -> None:
+    spec = AgentRegistryService(session).get_spec("praxis-email-agent")
+
+    allowed_tools = [tool.key for tool in spec.allowed_tools]
+    allowed_skills = [skill.key for skill in spec.allowed_skills]
+
+    assert spec.domain_key == "praxis"
+    assert spec.model_profile == "ollama:qwen3:8b"
+    assert "gmail.message.list_recent" in allowed_tools
+    assert "gmail.message.get" in allowed_tools
+    assert "gmail.thread.get" in allowed_tools
+    assert "gmail.message.modify" in allowed_tools
+    assert "google.drive.file.get" in allowed_tools
+    assert "google.drive.file.export" in allowed_tools
+    assert "google.docs.get" in allowed_tools
+    assert "google.slides.get" in allowed_tools
+    assert "google.sheets.get" in allowed_tools
+    assert "google.sheets.values.get" in allowed_tools
+    assert "google.meet.conference_records.list" in allowed_tools
+    assert "google.meet.conference_records.get" in allowed_tools
+    assert "routed.item.create" in allowed_tools
+    assert "email_triage" in allowed_skills
+    assert "contact_manager" in allowed_skills
+    assert "to_do_manager" in allowed_skills
+    client = _llm_client_for_model_profile(spec.model_profile)
+    assert client.provider == "ollama"
+    assert client.timeout_seconds >= 90
+
+
+def test_prompt_package_can_scope_required_skills(
+    session: Session,
+) -> None:
+    package = PromptAggregationService(session).build_prompt_package(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction="Review latest Praxis email for contacts and calendar events.",
+            required_skills=["email_triage", "calendar_manager"],
+            use_semantic=False,
+        )
+    )
+
+    skill_keys = [skill.key for skill in package.skill_manifest]
+
+    assert skill_keys == ["email_triage", "calendar_manager"]
+    assert "Email Triage" in package.assembled_prompt
+    assert "Calendar Manager" in package.assembled_prompt
+    assert "Contact Manager" not in package.assembled_prompt
+
+
+def test_deterministic_email_tool_plan_splits_latest_email_retrieval(
+    session: Session,
+) -> None:
+    package = PromptAggregationService(session).build_prompt_package(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction="Review the latest Praxis inbox email and summarize it.",
+            required_skills=["email_triage"],
+        )
+    )
+
+    first_step = _deterministic_tool_plan(
+        package=package,
+        prior_results=[],
+        iteration=1,
+    )
+
+    assert first_step == [
+        {
+            "tool_key": "gmail.message.list_recent",
+            "payload": {
+                "limit": 1,
+                "newer_than_days": 365,
+                "unread_only": False,
+            },
+            "rationale": "Read recent Praxis Gmail message metadata before summarizing it.",
+        }
+    ]
+
+    second_step = _deterministic_tool_plan(
+        package=package,
+        prior_results=[
+            {
+                "tool_name": "gmail.message.list_recent",
+                "status": "complete",
+                "output_payload": {
+                    "messages": [
+                        {
+                            "message_id": "msg-123",
+                            "thread_id": "thread-123",
+                            "subject": "Praxis update",
+                        }
+                    ]
+                },
+            }
+        ],
+        iteration=2,
+    )
+
+    assert second_step == [
+        {
+            "tool_key": "gmail.message.get",
+            "payload": {
+                "message_id": "msg-123",
+                "max_body_chars": 6000,
+            },
+            "rationale": "Read the selected Gmail message body for triage.",
+        }
+    ]
+
+
+def test_deterministic_email_tool_plan_honors_latest_five_emails(
+    session: Session,
+) -> None:
+    package = PromptAggregationService(session).build_prompt_package(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction="Read the latest 5 emails in the Praxis inbox and summarize them.",
+            required_skills=["email_triage"],
+        )
+    )
+
+    first_step = _deterministic_tool_plan(
+        package=package,
+        prior_results=[],
+        iteration=1,
+    )
+
+    assert first_step[0]["tool_key"] == "gmail.message.list_recent"
+    assert first_step[0]["payload"]["limit"] == 5
+
+    second_step = _deterministic_tool_plan(
+        package=package,
+        prior_results=[
+            {
+                "tool_name": "gmail.message.list_recent",
+                "status": "complete",
+                "output_payload": {
+                    "messages": [
+                        {"message_id": f"msg-{index}", "subject": f"Email {index}"}
+                        for index in range(1, 6)
+                    ]
+                },
+            }
+        ],
+        iteration=2,
+    )
+
+    assert [item["tool_key"] for item in second_step] == ["gmail.message.get"] * 5
+    assert [item["payload"]["message_id"] for item in second_step] == [
+        "msg-1",
+        "msg-2",
+        "msg-3",
+        "msg-4",
+        "msg-5",
+    ]
+
+
+def test_deterministic_google_slides_plan_does_not_fall_back_to_email(
+    session: Session,
+) -> None:
+    slides_url = "https://docs.google.com/presentation/d/deck-123/edit"
+    package = PromptAggregationService(session).build_prompt_package(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction=(
+                "Verify access to this Google Slides file and report the title, file type, "
+                f"and whether content is readable: {slides_url}"
+            ),
+            required_skills=["email_triage"],
+        )
+    )
+
+    first_step = _deterministic_tool_plan(
+        package=package,
+        prior_results=[],
+        iteration=1,
+    )
+
+    assert first_step == [
+        {
+            "tool_key": "google.slides.get",
+            "payload": {"url": slides_url, "file_id": "deck-123"},
+            "rationale": "Read the linked Google Slides deck enough to verify readability.",
+        }
+    ]
+
+    second_step = _deterministic_tool_plan(
+        package=package,
+        prior_results=[
+            {
+                "tool_name": "google.slides.get",
+                "status": "complete",
+                "output_payload": {
+                    "summary": {
+                        "type": "google_slides",
+                        "presentation_id": "deck-123",
+                        "title": "Praxis deck",
+                    }
+                },
+            }
+        ],
+        iteration=2,
+    )
+
+    assert second_step == []
+
+
+def test_routed_item_create_tool_promotes_contact_candidate(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("praxis-email-agent")
+    agent = AgentRepository(session).get_by_key("praxis-email-agent")
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.routed_item_create",
+        objective="Route contact from latest Praxis email.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+
+    result = ToolExecutionService(
+        session,
+        adapters={"routed.item.create": RoutedItemCreateToolAdapter()},
+    ).execute_for_task(
+        ToolExecutionRequest(
+            agent_key="praxis-email-agent",
+            tool_key="routed.item.create",
+            payload={
+                "route_type": "contact",
+                "title": "Jane Smith",
+                "content": "Jane Smith at Example Corp asked about Praxis training.",
+                "metadata": {
+                    "name": "Jane Smith",
+                    "email": "jane@example.com",
+                    "organization": "Example Corp",
+                },
+                "message_id": "msg-1",
+                "thread_id": "thread-1",
+                "subject": "Praxis training",
+                "from": "Jane Smith <jane@example.com>",
+            },
+        ),
+        task=task,
+    )
+
+    assert result.status == "complete"
+    assert result.output is not None
+    assert result.output["created_count"] == 1
+    assert result.output["promoted_count"] == 1
+    contact = session.query(Contact).filter_by(email="jane@example.com").one()
+    assert contact.name == "Jane Smith"
+    assert contact.source_refs[0]["message_id"] == "msg-1"
+
+
+def test_research_agents_are_granted_web_search_permission(session: Session) -> None:
+    seed_default_domains(session)
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert domain is not None
+    AgentRepository(session).create(
+        domain_id=domain.id,
+        key="maestro-sota-researcher",
+        name="Maestro SOTA Researcher",
+        agent_type="domain_agent",
+        description="Researches current state-of-the-art tools and implementation patterns.",
+        capabilities={"role_summary": "SOTA research agent", "memory_profile": "agent_prompt"},
+        tool_permissions={"memory.context_bundle": {"permission": "read"}},
+    )
+
+    spec = AgentRegistryService(session).get_spec("maestro-sota-researcher")
+
+    assert "web.search" in [tool.key for tool in spec.allowed_tools]
 
 
 def test_codex_tool_manifest_inherits_codex_connection(session: Session, tmp_path: Path) -> None:
@@ -560,6 +1113,112 @@ def test_github_adapter_uses_domain_token_env_for_write_tools(
         "Created by a test.",
     ]
     assert captured["env"]["GH_TOKEN"] == "test-token"
+
+
+def test_github_adapter_accepts_owner_plus_repo_name_for_issue_create(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github.issue.create",
+        display_name="Maestro GitHub issue writer",
+        auth_type="gh_cli",
+        config={},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.github",
+        objective="Create a test issue.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="github.issue.create").one()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda name: "/usr/bin/gh")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return CompletedProcess(args=args, returncode=0, stdout="https://github.com/Praxis-Defense/GroundTruth/issues/99\n")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    output = GitHubCliToolAdapter("github.issue.create").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {
+            "owner": "Praxis-Defense",
+            "repo": "GroundTruth",
+            "title": "Tool-generated issue",
+            "body": "Created by a test.",
+        },
+    )
+
+    assert output["url"] == "https://github.com/Praxis-Defense/GroundTruth/issues/99"
+    assert "--repo" in captured["args"]
+    assert captured["args"][captured["args"].index("--repo") + 1] == "Praxis-Defense/GroundTruth"
+
+
+def test_web_search_adapter_uses_openrouter_server_tool_and_returns_citations(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    spec = registry.get_spec("maestro-introspection-agent")
+    agent = AgentRepository(session).get_by_key(spec.key)
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.web",
+        objective="Search for current CAD AI STL generation tools.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.OpenAILLMClient", FakeWebSearchLLMClient)
+
+    output = WebSearchToolAdapter().execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=None,
+        ),
+        {
+            "query": "current CAD AI STL generation tools",
+            "instructions": "Research current CAD AI tool options.",
+            "engine": "exa",
+            "max_results": 3,
+            "allowed_domains": ["freecad.org"],
+        },
+    )
+
+    assert output["summary"]["type"] == "web_search_response"
+    assert output["citations"][0]["url"] == "https://www.freecad.org/"
+    assert output["usage"]["server_tool_use"]["web_search_requests"] == 1
 
 
 def test_gmail_adapter_searches_and_decodes_message_metadata(
@@ -714,6 +1373,303 @@ def test_gmail_adapter_gets_full_message_body(
     assert output["message_id"] == "msg-2"
     assert output["body_text"] == "Full body text for Maestro."
     assert output["summary"]["subject"] == "Full update"
+
+
+def test_gmail_adapter_preserves_google_doc_meeting_notes_links(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="praxis",
+        tool_key="gmail",
+        display_name="Praxis Gmail",
+        auth_type="oauth",
+        config={"access_token": "inline-token"},
+    )
+    registry.get_spec("praxis-email-agent")
+    agent = AgentRepository(session).get_by_key("praxis-email-agent")
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.gmail",
+        objective="Read Gmail meeting notes link.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="gmail").one()
+    doc_url = "https://docs.google.com/document/d/doc-123/edit"
+    html_body = f'<p>Here are the <a href="{doc_url}">Meeting notes</a> from today.</p>'
+    encoded_body = base64.urlsafe_b64encode(html_body.encode("utf-8")).decode("ascii").rstrip("=")
+
+    def fake_gmail_api(method, path, *, token, params=None, body=None, timeout=60):
+        return {
+            "id": "msg-meeting",
+            "threadId": "thread-meeting",
+            "payload": {
+                "mimeType": "text/html",
+                "body": {"data": encoded_body},
+                "headers": [
+                    {"name": "Subject", "value": "Meeting summary"},
+                    {"name": "From", "value": "partner@example.com"},
+                ],
+            },
+        }
+
+    monkeypatch.setattr("app.tools.runtime._gmail_api_json", fake_gmail_api)
+
+    output = GmailApiToolAdapter("gmail.message.get").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {"message_id": "msg-meeting"},
+    )
+
+    assert doc_url in output["body_text"]
+    assert output["google_workspace_links"][0]["file_id"] == "doc-123"
+    assert output["meeting_notes"][0]["url"] == doc_url
+
+
+def test_gmail_tools_inherit_google_connection(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    google_connection = registry.upsert_tool_connection(
+        domain_key="praxis",
+        tool_key="google",
+        display_name="Praxis Google Workspace",
+        auth_type="oauth",
+        config={"access_token": "google-token"},
+    )
+    registry.get_spec("praxis-email-agent")
+    agent = AgentRepository(session).get_by_key("praxis-email-agent")
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.gmail.google_connection",
+        objective="Read Gmail through the Google family connection.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+
+    def fake_gmail_api(method, path, *, token, params=None, body=None, timeout=60):
+        assert token == "google-token"
+        return {
+            "id": "msg-google-family",
+            "threadId": "thread-google-family",
+            "payload": {
+                "mimeType": "text/plain",
+                "body": {
+                    "data": base64.urlsafe_b64encode(b"Google family Gmail body.")
+                    .decode("ascii")
+                    .rstrip("=")
+                },
+                "headers": [
+                    {"name": "Subject", "value": "Family connection"},
+                ],
+            },
+        }
+
+    monkeypatch.setattr("app.tools.runtime._gmail_api_json", fake_gmail_api)
+
+    result = ToolExecutionService(session).execute_for_task(
+        ToolExecutionRequest(
+            agent_key="praxis-email-agent",
+            tool_key="gmail.message.get",
+            payload={"message_id": "msg-google-family"},
+        ),
+        task=task,
+    )
+
+    assert result.status == "complete"
+    assert result.connection_id == str(google_connection.id)
+    assert result.output is not None
+    assert result.output["body_text"] == "Google family Gmail body."
+
+
+def test_google_workspace_tools_read_drive_and_docs(
+    session: Session,
+    monkeypatch,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="praxis",
+        tool_key="google",
+        display_name="Praxis Google Workspace",
+        auth_type="oauth",
+        config={"access_token": "google-token"},
+    )
+    registry.get_spec("praxis-email-agent")
+    agent = AgentRepository(session).get_by_key("praxis-email-agent")
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.google",
+        objective="Read Google meeting notes.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    connection = session.query(ToolConnection).filter_by(tool_key="google").one()
+
+    def fake_google_json(method, base_url, path, *, token, params=None, body=None, timeout=60):
+        assert token == "google-token"
+        if path.startswith("/drive/v3/files/"):
+            return {
+                "id": "doc-123",
+                "name": "Meeting Notes",
+                "mimeType": "application/vnd.google-apps.document",
+                "webViewLink": "https://docs.google.com/document/d/doc-123/edit",
+            }
+        if path.startswith("/v1/documents/"):
+            return {
+                "title": "Meeting Notes",
+                "body": {
+                    "content": [
+                        {
+                            "paragraph": {
+                                "elements": [
+                                    {"textRun": {"content": "Decision: move forward.\n"}}
+                                ]
+                            }
+                        }
+                    ]
+                },
+            }
+        if path.startswith("/v1/presentations/"):
+            return {
+                "title": "Pitch Deck",
+                "slides": [
+                    {
+                        "pageElements": [
+                            {
+                                "shape": {
+                                    "text": {
+                                        "textElements": [
+                                            {"textRun": {"content": "Problem statement"}},
+                                            {"textRun": {"content": "Solution overview"}},
+                                        ]
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ],
+            }
+        if path.startswith("/v4/spreadsheets/sheet-123/values/"):
+            return {
+                "range": "Sheet1!A1:B2",
+                "majorDimension": "ROWS",
+                "values": [["Name", "Status"], ["Praxis", "Active"]],
+            }
+        if path.startswith("/v4/spreadsheets/"):
+            return {
+                "spreadsheetId": "sheet-123",
+                "properties": {"title": "Praxis Tracker"},
+                "sheets": [
+                    {"properties": {"sheetId": 0, "title": "Sheet1", "index": 0}},
+                ],
+            }
+        if path == "/v2/conferenceRecords":
+            return {
+                "conferenceRecords": [
+                    {
+                        "name": "conferenceRecords/meet-123",
+                        "startTime": "2026-07-15T13:00:00Z",
+                    }
+                ]
+            }
+        if path.startswith("/v2/conferenceRecords/"):
+            return {
+                "name": "conferenceRecords/meet-123",
+                "startTime": "2026-07-15T13:00:00Z",
+                "endTime": "2026-07-15T13:30:00Z",
+            }
+        raise AssertionError(f"Unexpected Google JSON call: {base_url}{path}")
+
+    def fake_google_text(method, base_url, path, *, token, params=None, body=None, timeout=60):
+        assert token == "google-token"
+        assert params == {"mimeType": "text/plain"}
+        return "Meeting notes export text."
+
+    monkeypatch.setattr("app.tools.runtime._google_api_json", fake_google_json)
+    monkeypatch.setattr("app.tools.runtime._google_api_text", fake_google_text)
+
+    context = ToolExecutionContext(
+        session=session,
+        agent=agent,
+        domain=domain,
+        task=task,
+        connection=connection,
+    )
+    drive = GoogleWorkspaceToolAdapter("google.drive.file.get").execute(
+        context,
+        {"url": "https://docs.google.com/document/d/doc-123/edit"},
+    )
+    exported = GoogleWorkspaceToolAdapter("google.drive.file.export").execute(
+        context,
+        {"file_id": "doc-123"},
+    )
+    doc = GoogleWorkspaceToolAdapter("google.docs.get").execute(
+        context,
+        {"document_id": "doc-123"},
+    )
+    slides = GoogleWorkspaceToolAdapter("google.slides.get").execute(
+        context,
+        {"presentation_id": "deck-123"},
+    )
+    sheets = GoogleWorkspaceToolAdapter("google.sheets.get").execute(
+        context,
+        {"spreadsheet_id": "sheet-123"},
+    )
+    sheet_values = GoogleWorkspaceToolAdapter("google.sheets.values.get").execute(
+        context,
+        {"spreadsheet_id": "sheet-123", "range": "Sheet1!A1:B2"},
+    )
+    meet_records = GoogleWorkspaceToolAdapter("google.meet.conference_records.list").execute(
+        context,
+        {"page_size": 5},
+    )
+    meet_record = GoogleWorkspaceToolAdapter("google.meet.conference_records.get").execute(
+        context,
+        {"conference_record_id": "meet-123"},
+    )
+
+    assert drive["summary"]["file_id"] == "doc-123"
+    assert exported["content_text"] == "Meeting notes export text."
+    assert doc["title"] == "Meeting Notes"
+    assert "Decision: move forward." in doc["content_text"]
+    assert slides["title"] == "Pitch Deck"
+    assert "Problem statement" in slides["content_text"]
+    assert sheets["title"] == "Praxis Tracker"
+    assert sheet_values["values"][1] == ["Praxis", "Active"]
+    assert meet_records["summary"]["record_count"] == 1
+    assert meet_record["summary"]["name"] == "conferenceRecords/meet-123"
 
 
 def test_gmail_draft_create_builds_encoded_rfc822_message(
@@ -1623,6 +2579,7 @@ def test_local_app_reload_runs_configured_commands(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    (tmp_path / ".git").mkdir()
     registry = AgentRegistryService(session)
     registry.get_spec("maestro-introspection-agent")
     registry.upsert_tool_connection(
@@ -1657,7 +2614,15 @@ def test_local_app_reload_runs_configured_commands(
 
     def fake_run(args, **kwargs):
         calls.append(args)
-        return CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
+        if args[:3] == ["git", "status", "--porcelain=v1"]:
+            stdout = ""
+        elif args[:3] == ["git", "branch", "--show-current"]:
+            stdout = "main\n"
+        elif args[:2] == ["git", "rev-parse"]:
+            stdout = "abc123\n"
+        else:
+            stdout = "ok\n"
+        return CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
 
     monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
 
@@ -1673,7 +2638,63 @@ def test_local_app_reload_runs_configured_commands(
     )
 
     assert output["write_status"] == "reloaded"
-    assert calls == [["git", "pull", "--ff-only"], ["npm", "run", "build"]]
+    assert calls[-2:] == [["git", "pull", "--ff-only"], ["npm", "run", "build"]]
+
+
+def test_local_app_reload_blocks_dirty_runtime(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="local.app.reload",
+        display_name="Maestro Local Runtime",
+        auth_type="local",
+        config={"default_cwd": str(tmp_path), "allowed_roots": [str(tmp_path)], "branch": "main"},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="local.app.reload").one()
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.reload",
+        objective="Reload app.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        stdout = " M app/api/main.py\n" if args[:3] == ["git", "status", "--porcelain=v1"] else "main\n"
+        return CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("app.tools.runtime.subprocess.run", fake_run)
+
+    with pytest.raises(ToolExecutionError, match="uncommitted changes"):
+        LocalAppReloadAdapter("local.app.reload").execute(
+            ToolExecutionContext(
+                session=session,
+                agent=agent,
+                domain=domain,
+                task=task,
+                connection=connection,
+            ),
+            {"pull_latest": True},
+        )
+
+    assert ["git", "pull", "--ff-only"] not in calls
 
 
 def test_github_adapter_searches_files_in_repo(
@@ -2104,7 +3125,7 @@ def test_run_agent_once_prepares_prompt_and_optional_staged_artifact(
     )
 
     assert result.status == "prepared"
-    assert result.scheduler["status"] == "stubbed"
+    assert result.scheduler["status"] == "manual_run"
     assert result.prompt_package.agent.key == "praxis-planning-agent"
     assert result.staged_artifact_path is not None
     assert Path(result.staged_artifact_path).is_file()
@@ -2217,6 +3238,345 @@ def test_run_agent_once_can_auto_plan_safe_tool_calls_before_final_report(
     assert any(call["tool_name"] == "github.pr.search" for call in result.tool_calls)
     assert result.output_text is not None
     assert "Latest PR reviewed" in result.output_text
+
+
+def test_run_agent_once_auto_executes_aggregate_github_read_without_approval(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="github",
+        display_name="Maestro GitHub",
+        auth_type="gh_cli",
+        config={"repo": "Caliperti1/Maestro"},
+    )
+
+    class FakeGitHubReadAdapter:
+        key = "github.read"
+
+        def execute(self, context: ToolExecutionContext, payload: dict) -> dict:
+            assert payload["request"] == "Inspect repository architecture only."
+            return {"summary": "Read-only repository context returned."}
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeAutoGitHubReadToolLoopLLMClient(),
+        tool_adapters={"github.read": FakeGitHubReadAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Inspect the repo architecture for a planning task.",
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    github_read = next(call for call in result.tool_calls if call["tool_name"] == "github.read")
+    assert github_read["status"] == "complete"
+    assert not result.tool_loop["iterations"][0]["blocked"]
+    assert "Repository architecture inspected" in (result.output_text or "")
+
+
+def test_agent_tool_loop_prefers_llm_plan_over_deterministic_google_dispatch(
+    session: Session,
+) -> None:
+    class FakeDriveMetadataAdapter:
+        key = "google.drive.file.get"
+
+        def execute(self, context: ToolExecutionContext, payload: dict) -> dict:
+            assert payload["file_id"] == "deck-123"
+            return {
+                "summary": {
+                    "type": "google_drive_file",
+                    "file_id": "deck-123",
+                    "name": "LLM selected deck metadata",
+                }
+            }
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeGoogleSlidesLLMPlannerClient(),
+        tool_adapters={"google.drive.file.get": FakeDriveMetadataAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction=(
+                "Verify access to this Google Slides file: "
+                "https://docs.google.com/presentation/d/deck-123/edit"
+            ),
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    assert result.tool_loop["iterations"][0]["planner_source"] == "llm_planner"
+    assert result.tool_loop["iterations"][0]["requested_tools"][0]["tool_key"] == "google.drive.file.get"
+    assert any(call["tool_name"] == "google.drive.file.get" for call in result.tool_calls)
+    assert not any(call["tool_name"] == "google.slides.get" for call in result.tool_calls)
+
+
+def test_agent_tool_loop_uses_deterministic_fallback_for_obvious_google_link(
+    session: Session,
+) -> None:
+    class FakeSlidesAdapter:
+        key = "google.slides.get"
+
+        def execute(self, context: ToolExecutionContext, payload: dict) -> dict:
+            assert payload["file_id"] == "deck-123"
+            return {
+                "title": "Fallback deck",
+                "content_text": "Slide 1: fallback readable text",
+                "summary": {
+                    "type": "google_slides",
+                    "presentation_id": "deck-123",
+                    "title": "Fallback deck",
+                    "slide_count": 1,
+                },
+            }
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeGoogleSlidesFallbackLLMClient(),
+        tool_adapters={"google.slides.get": FakeSlidesAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction=(
+                "Verify access to this Google Slides file: "
+                "https://docs.google.com/presentation/d/deck-123/edit"
+            ),
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    assert result.tool_loop["iterations"][0]["planner_source"] == "deterministic_fallback"
+    assert result.tool_loop["iterations"][0]["requested_tools"][0]["tool_key"] == "google.slides.get"
+    planner_call = next(call for call in result.tool_calls if call["tool_name"] == "llm.tool_planner")
+    assert planner_call["output_payload"]["planner_source"] == "deterministic_fallback"
+    assert any(call["tool_name"] == "google.slides.get" for call in result.tool_calls)
+    assert "Slides deck access verified" in (result.output_text or "")
+
+
+def test_default_tools_include_safe_aggregate_github_read() -> None:
+    adapters = default_tool_adapters()
+
+    assert "github.read" in adapters
+    assert adapters["github.read"].key == "github.read"
+
+
+def test_report_retrieval_tools_search_and_get_domain_reports(session: Session) -> None:
+    registry = AgentRegistryService(session)
+    spec = registry.get_spec("praxis-planning-agent")
+    agent = AgentRepository(session).get_by_key(spec.key)
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.reports",
+        objective="Find partner report context.",
+        input_payload={},
+    )
+    session.add(task)
+    session.flush()
+    report = Report(
+        task_id=task.id,
+        domain_id=domain.id,
+        agent_id=agent.id,
+        title="Partner Follow-up Report",
+        report_type="workflow_report",
+        summary="Partner follow-up summary.",
+        body_markdown="## Partner Follow-up\nPraxis partner details and next steps.",
+        structured_data={},
+    )
+    session.add(report)
+    session.commit()
+
+    service = ToolExecutionService(session)
+    search = service.execute_for_task(
+        ToolExecutionRequest(
+            agent_key=agent.key,
+            tool_key="reports.search",
+            payload={"query_text": "partner"},
+        ),
+        task=task,
+    )
+    get = service.execute_for_task(
+        ToolExecutionRequest(
+            agent_key=agent.key,
+            tool_key="reports.get",
+            payload={"report_id": str(report.id)},
+        ),
+        task=task,
+    )
+
+    assert search.status == "complete"
+    assert search.output is not None
+    assert search.output["reports"][0]["id"] == str(report.id)
+    assert "body_preview" in search.output["reports"][0]
+    assert get.status == "complete"
+    assert get.output is not None
+    assert get.output["report"]["body_markdown"].startswith("## Partner")
+
+
+def test_github_read_search_terms_extract_architecture_hints() -> None:
+    terms = _github_read_search_terms(
+        "Inspect how Maestro's tool registry, credential handling, and workflow scheduler work."
+    )
+
+    assert "tool registry" in terms
+    assert "credential" in terms
+    assert "workflow" in terms
+    assert len(terms) <= 8
+
+
+def test_llm_gateway_accepts_task_payload_alias(session: Session) -> None:
+    AgentRegistryService(session).create_agent_spec(
+        domain_key="maestro-development",
+        key="Maestro LLM Gateway Tester",
+        name="Maestro LLM Gateway Tester",
+        role_summary="Tests internal LLM gateway payload handling.",
+        tool_permissions={"llm.gateway": {"permission": "use"}},
+    )
+    agent = AgentRepository(session).get_by_key("maestro-llm-gateway-tester")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.llm_gateway",
+        objective="Synthesize a test plan.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+
+    output = LLMGatewayToolAdapter().execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=None,
+            dry_run=True,
+        ),
+        {"task": "Synthesize a voice input feature plan.", "context": "Use Maestro constraints."},
+    )
+
+    assert output["dry_run"] is True
+    assert output["prompt_preview"] == "Synthesize a voice input feature plan."
+    assert output["context_chars"] > 0
+
+
+def test_tool_results_are_compacted_before_prompt_reuse() -> None:
+    raw_result = {
+        "id": "tool-call-1",
+        "tool_name": "memory.context_bundle",
+        "status": "complete",
+        "output_payload": {
+            "summary": {"type": "memory_context_bundle", "included_count": 8},
+            "rendered_text": "Important memory. " * 1000,
+        },
+    }
+
+    compact = _compact_tool_results_for_prompt([raw_result], max_total_chars=1800)
+
+    assert compact[0]["id"] == "tool-call-1"
+    assert compact[0]["summary"]["included_count"] == 8
+    assert compact[0]["raw_output_chars"] > 10000
+    assert len(json.dumps(compact, default=str)) < 2200
+    assert compact[0]["full_output"] == "stored_in_tool_call_output_payload"
+
+
+def test_run_agent_once_can_auto_execute_internal_llm_gateway_tool(
+    session: Session,
+) -> None:
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeAutoLLMGatewayToolLoopLLMClient(),
+        tool_adapters={"llm.gateway": FakeLLMGatewayAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Survey CAD-to-fabrication options for Maestro.",
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    assert result.tool_loop["enabled"] is True
+    assert result.tool_loop["iterations"][0]["requested_tools"][0]["tool_key"] == "llm.gateway"
+    assert result.tool_loop["iterations"][0]["executed"][0]["status"] == "complete"
+    assert not result.tool_loop["iterations"][0]["blocked"]
+    assert any(call["tool_name"] == "llm.gateway" for call in result.tool_calls)
+    assert result.output_text is not None
+    assert "CAD integration options reviewed" in result.output_text
+
+
+def test_run_agent_once_can_auto_execute_memory_context_bundle_tool(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    assert domain is not None
+    session.add(
+        MemoryItem(
+            scope="domain",
+            domain_id=domain.id,
+            memory_type="decision",
+            title="Shared CAD tool infrastructure",
+            content=(
+                "CAD design agents should use shared CAD tool infrastructure instead of "
+                "owning separate CAD integrations per agent."
+            ),
+            impact_level="medium",
+            importance=0.9,
+            metadata_={},
+        )
+    )
+    session.commit()
+
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeAutoMemoryContextToolLoopLLMClient(),
+        tool_adapters={"memory.context_bundle": MemoryContextBundleToolAdapter()},
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="maestro-introspection-agent",
+            task_instruction="Use memory to answer the CAD tool architecture question.",
+            use_semantic=False,
+        ),
+        auto_tool_loop=True,
+        execute_llm=True,
+    )
+
+    assert result.status == "completed"
+    assert result.tool_loop["iterations"][0]["requested_tools"][0]["tool_key"] == "memory.context_bundle"
+    assert result.tool_loop["iterations"][0]["executed"][0]["status"] == "complete"
+    assert not result.tool_loop["iterations"][0]["blocked"]
+    memory_call = next(call for call in result.tool_calls if call["tool_name"] == "memory.context_bundle")
+    assert memory_call["output_payload"]["summary"]["type"] == "memory_context_bundle"
+    assert memory_call["output_payload"]["included_count"] >= 1
+    assert result.output_text is not None
+    assert "Retrieved Maestro memory" in result.output_text
 
 
 def test_run_agent_once_blocks_auto_planned_write_tools_for_approval(

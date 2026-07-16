@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import (
+    Artifact,
     CalendarEvent,
     Contact,
     DecisionRecord,
@@ -230,6 +231,7 @@ def list_routed_objects(
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     return RoutedMemoryService(db).build_context_bundle(
         domain_id=domain_id,
@@ -246,6 +248,7 @@ def routed_context_bundle(
     max_chars: int = 3000,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     bundle = RoutedRetrievalService(db).build_context_bundle(
         domain_id=domain_id,
@@ -266,6 +269,8 @@ def run_routed_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
     report = RoutedHygieneService(db).run_once()
     return {
         "aliases_backfilled": report.aliases_backfilled,
+        "display_fields_canonicalized": report.display_fields_canonicalized,
+        "duplicates_merged": report.duplicates_merged,
         "suggestions": report.suggestions,
     }
 
@@ -277,6 +282,7 @@ def list_calendar_events(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(CalendarEvent)
     if domain_id is not None:
@@ -307,6 +313,7 @@ def list_todos(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(Todo)
     if domain_id is not None:
@@ -332,6 +339,7 @@ def update_todo(
 
 @router.get("/routed-objects/contacts")
 def list_contacts(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     contacts = db.scalars(select(Contact).order_by(Contact.updated_at.desc()).limit(limit)).all()
     return {"contacts": [_contact_payload(contact) for contact in contacts]}
 
@@ -364,8 +372,22 @@ def archive_routed_object(
 
 @router.get("/routed-objects/entities")
 def list_entities(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
+    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     entities = db.scalars(select(Entity).order_by(Entity.updated_at.desc()).limit(limit)).all()
     return {"entities": [_entity_payload(entity) for entity in entities]}
+
+
+@router.patch("/routed-objects/entities/{entity_id}")
+def update_entity(
+    entity_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        entity = RoutedEditService(db).update_entity(entity_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"entity": _entity_payload(entity)}
 
 
 @router.get("/routed-objects/ideas")
@@ -380,6 +402,19 @@ def list_ideas(
         query = query.where(Idea.domain_id == domain_id)
     ideas = db.scalars(query.order_by(Idea.updated_at.desc()).limit(limit)).all()
     return {"ideas": [_idea_payload(db, idea) for idea in ideas]}
+
+
+@router.patch("/routed-objects/ideas/{idea_id}")
+def update_idea(
+    idea_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        idea = RoutedEditService(db).update_idea(idea_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"idea": _idea_payload(db, idea)}
 
 
 @router.get("/routed-objects/decisions")
@@ -434,6 +469,23 @@ def list_memory_items(
     query = query.order_by(MemoryItem.created_at.desc()).limit(limit)
     items = db.scalars(query).all()
     return {"items": [_memory_item_payload(item) for item in items]}
+
+
+@router.get("/artifacts")
+def list_memory_artifacts(
+    limit: int = 20,
+    canonical_only: bool = True,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = select(Artifact).order_by(Artifact.created_at.desc()).limit(limit * 3)
+    artifacts = db.scalars(query).all()
+    if canonical_only:
+        artifacts = [
+            artifact
+            for artifact in artifacts
+            if _artifact_is_canonical_memory_source(artifact)
+        ]
+    return {"artifacts": [_artifact_payload(db, artifact) for artifact in artifacts[:limit]]}
 
 
 @router.delete("/items/{memory_item_id}")
@@ -859,6 +911,28 @@ def _memory_item_payload(item: MemoryItem) -> dict[str, Any]:
     }
 
 
+def _artifact_payload(db: Session, artifact: Artifact) -> dict[str, Any]:
+    memory_count = len(_items_for_artifact(db, artifact.id))
+    proposal_count = len(_proposals_for_artifact(db, artifact.id))
+    metadata = artifact.metadata_ or {}
+    return {
+        "id": str(artifact.id),
+        "name": artifact.name,
+        "artifact_type": artifact.artifact_type,
+        "uri": artifact.uri,
+        "mime_type": artifact.mime_type,
+        "domain_key": str(metadata.get("domain_key") or "global"),
+        "task_id": str(artifact.task_id) if artifact.task_id else None,
+        "report_id": str(artifact.report_id) if artifact.report_id else None,
+        "seed_package_id": str(artifact.seed_package_id) if artifact.seed_package_id else None,
+        "memory_count": memory_count,
+        "proposal_count": proposal_count,
+        "canonical": _artifact_is_canonical_memory_source(artifact),
+        "metadata": metadata,
+        "created_at": artifact.created_at.isoformat() if artifact.created_at else None,
+    }
+
+
 def _source_payload(
     db: Session,
     seed_package: SeedPackage,
@@ -901,6 +975,37 @@ def _proposals_for_seed_package(db: Session, seed_package_id: uuid.UUID) -> list
         for proposal in proposals
         if proposal.metadata_.get("seed_package_id") == str(seed_package_id)
     ]
+
+
+def _items_for_artifact(db: Session, artifact_id: uuid.UUID) -> list[MemoryItem]:
+    artifact_id_text = str(artifact_id)
+    items = db.scalars(select(MemoryItem).order_by(MemoryItem.created_at.desc())).all()
+    return [
+        item
+        for item in items
+        if item.metadata_.get("artifact_id") == artifact_id_text
+        or any(ref.get("id") == artifact_id_text for ref in item.metadata_.get("source_refs", []))
+    ]
+
+
+def _proposals_for_artifact(db: Session, artifact_id: uuid.UUID) -> list[MemoryProposal]:
+    artifact_id_text = str(artifact_id)
+    proposals = db.scalars(select(MemoryProposal).order_by(MemoryProposal.created_at.desc())).all()
+    return [
+        proposal
+        for proposal in proposals
+        if proposal.metadata_.get("artifact_id") == artifact_id_text
+        or any(ref.get("id") == artifact_id_text for ref in proposal.source_refs)
+    ]
+
+
+def _artifact_is_canonical_memory_source(artifact: Artifact) -> bool:
+    metadata = artifact.metadata_ or {}
+    return bool(
+        metadata.get("canonical_workflow_artifact")
+        or metadata.get("canonical_scheduled_workflow_artifact")
+        or metadata.get("canonical_session_artifact")
+    )
 
 
 def _domain_key_for_id(db: Session, domain_id: uuid.UUID | None) -> str:

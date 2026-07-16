@@ -76,6 +76,23 @@ Agent task lists are available through `GET /agents/{agent_key}/tasks`. Manual r
 records immediately. While future orchestration will enqueue work asynchronously, this endpoint is
 the first queue/read-model surface for both human-triggered and Maestro-triggered work.
 
+## Per-Work-Item Model Routing
+
+Maestro selects a model tier for every agent work item during planning, then resolves that tier to
+a runtime profile before the queue executes it. The selected tier, profile, and rationale are stored
+with the work item and visible in the workflow inspector.
+
+- `qwen`: local Qwen 8B for bounded extraction, routing, classification, and predictable
+  formatting.
+- `luna`: GPT-5.6 Luna for fast, cost-efficient cloud chat, drafting, and lightweight agent work.
+- `terra`: GPT-5.6 Terra for balanced everyday reasoning, drafting, and bounded analysis.
+- `sol`: GPT-5.6 Sol for brainstorming, design, coding, strategic reasoning, ambiguous synthesis,
+  and current-state research.
+
+Profiles are configured independently of the policy with `LLM_QWEN_MODEL_PROFILE`,
+`LLM_LUNA_MODEL_PROFILE`, `LLM_TERRA_MODEL_PROFILE`, and `LLM_SOL_MODEL_PROFILE`. A profile can
+be `default`, `ollama:<model>`, `openrouter:<provider/model>`, or `openai:<model>`.
+
 ### Prompt Aggregation
 
 Prompt aggregation assembles the package an agent would receive before an LLM call. It includes:
@@ -129,7 +146,18 @@ provenance, and optionally stages an interaction artifact for memory curation. S
 `tool_requests` can be provided for MVP tool execution; the runtime executes those tools first,
 records their `tool_calls`, appends the results to the assembled prompt, and then calls the LLM.
 Set `auto_tool_loop: true` to let the agent LLM plan safe read-only tool calls from its tasking and
-tool manifest before the final report.
+tool manifest before the final report. The loop is LLM-led by default:
+
+1. The LLM planner receives the enriched prompt, allowed tools, prior tool results, and iteration
+   number.
+2. Approved safe tools run automatically; write/action tools are proposed for Chris approval.
+3. Tool outputs are compacted and fed back into the next planner iteration.
+4. The LLM may stop, call another tool, or replan if the prior result was insufficient.
+5. The final report is written with the collected tool evidence.
+
+Deterministic planning is only a fallback for obvious supported inputs, such as a direct Google
+Workspace URL or a simple "latest email" request, and only after the LLM planner fails or returns no
+executable tool calls. It should not become the agent's reasoning layer.
 
 API:
 
@@ -163,16 +191,15 @@ Expected:
 - `tool_calls` includes any explicit tools requested before `llm.gateway`
 - `tool_loop` explains any agent-planned tool iterations when `auto_tool_loop` is true
 - `report_id` and `output_text` are set when execution succeeds
-- `scheduler.status` is `stubbed`
+- `scheduler.status` is `manual_run`
 - if `stage_interaction` is true, a package lands in `maestro_dropbox/<domain>/inbox`
 
 The resulting interaction artifact contains the agent output, task ID, tool call summary, generated
 report reference, run ID, and execution status. The memory curator can process that artifact just
 like a manually dropped file.
 
-The scheduler is deliberately separate. Maestro will need a master scheduler service that can
-coordinate recurring work, resource locks, exclusive tools, queue priority, and user approvals
-without individual agents fighting over the same capabilities.
+The durable scheduler is deliberately separate from this direct run-once path. Recurring or
+queued Maestro work should enter the scheduler, while manual agent tests can still bypass it.
 
 ### Agent-Planned Tool Loop
 

@@ -1,3 +1,11 @@
+"""Top-level Maestro planning, delegation, execution, and synthesis service.
+
+This module is intentionally the current orchestration center: it turns a user message into a plan,
+routes direct operational items, delegates agent work, resumes blocked tool approvals, synthesizes
+results, and stages one canonical workflow artifact for memory curation. The cleanup roadmap in
+`docs/CODEBASE_CLEANUP.md` tracks how to split these responsibilities once behavior stabilizes.
+"""
+
 import json
 import re
 import uuid
@@ -20,15 +28,89 @@ from app.core.time import home_isoformat
 from app.db.models import Artifact, Report, RoutedItem, Task, ToolCall
 from app.db.repositories import DomainRepository
 from app.llm.client import LLMClient, LLMClientError, OpenAILLMClient
+from app.maestro.context_assembler import MaestroContextAssembler, maestro_context_payload
 from app.maestro.planner import (
     LLMMaestroPlanner,
     MaestroPlannerResponse,
     PlannerWorkItem,
 )
+from app.maestro.planner_rules import (
+    DOMAIN_HINTS,
+    action_for_work_item,
+    domain_matches,
+    intent_type_for_work_item,
+    meaningful_tokens,
+    route_type_for_work_item,
+)
 from app.maestro.scheduler import SchedulerService
-from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
 from app.memory.routed_service import RoutedMemoryService
-from app.tools.runtime import ToolExecutionResult, ToolExecutionService, tool_result_payload
+from app.tools.runtime import (
+    ToolExecutionRequest,
+    ToolExecutionResult,
+    ToolExecutionService,
+    tool_result_payload,
+)
+
+
+def _strip_hidden_context(value: str) -> str:
+    stripped = re.sub(
+        r"<maestro_hidden_context\b[^>]*>.*?</maestro_hidden_context>",
+        "",
+        value,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    stripped = re.sub(
+        r"<latest_chris_message>\s*(.*?)\s*</latest_chris_message>",
+        r"\1",
+        stripped,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return " ".join(stripped.split())
+
+
+def _coding_pr_number(tool_calls: list[dict[str, Any]]) -> int | None:
+    for call in reversed(tool_calls):
+        if call.get("tool_name") != "codex.task.run":
+            continue
+        output = call.get("output_payload")
+        if not isinstance(output, dict):
+            continue
+        number = output.get("pr_number")
+        if number is None and isinstance(output.get("pr"), dict):
+            number = output["pr"].get("number") or output["pr"].get("pr_number")
+        try:
+            return int(number)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _truncate_registry_text(value: str | None, max_chars: int) -> str:
+    normalized = " ".join(str(value or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _hydrate_work_item_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "required_skills": payload.get("required_skills") or [],
+        "model_profile": payload.get("model_profile"),
+        "model_tier": payload.get("model_tier") or "auto",
+        "model_rationale": payload.get("model_rationale") or "",
+    }
+
+
+def _hydrate_subtask_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "required_skills": payload.get("required_skills") or [],
+        "model_profile": payload.get("model_profile"),
+        "model_tier": payload.get("model_tier") or "auto",
+        "model_rationale": payload.get("model_rationale"),
+    }
+
 
 IntentType = Literal[
     "direct_chat",
@@ -64,6 +146,10 @@ class MaestroSubtask:
     rationale: str | None = None
     work_item_ids: list[str] | None = None
     depends_on_work_item_ids: list[str] | None = None
+    required_skills: list[str] | None = None
+    model_profile: str | None = None
+    model_tier: str = "auto"
+    model_rationale: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +162,10 @@ class MaestroWorkItem:
     priority: str
     required_capabilities: list[str]
     required_tools: list[str]
+    required_skills: list[str]
+    model_profile: str | None
+    model_tier: str
+    model_rationale: str
     dependencies: list[str]
     needs_agent: bool
     needs_user_input: bool
@@ -150,31 +240,51 @@ class MaestroOrchestratorService:
         user_input: str,
         *,
         conversation_id: uuid.UUID | None = None,
+        topic_id: str | None = None,
     ) -> MaestroPlan:
         cleaned_input = user_input.strip()
         if not cleaned_input:
             raise MaestroOrchestratorError("Maestro input cannot be blank.")
+        visible_input = _strip_hidden_context(cleaned_input)
 
         agents = self.registry.list_specs()
         domains = self.registry.list_domain_contexts()
         tools = self.registry.list_tools()
-        registry_snapshot = self._registry_snapshot(domains, agents, tools)
+        skills = self.registry.list_skills()
+        registry_snapshot = self._registry_snapshot(domains, agents, tools, skills)
+        maestro_context = self._planning_context_bundle(visible_input)
         decomposition, planner_mode = self._decompose_request(
             cleaned_input,
             registry_snapshot=registry_snapshot,
+            maestro_context=maestro_context,
+        )
+        decomposition = MaestroPlannerResponse(
+            plan_summary=_strip_hidden_context(decomposition.plan_summary),
+            direct_response=_strip_hidden_context(decomposition.direct_response)
+            if decomposition.direct_response
+            else None,
+            planner_notes=_strip_hidden_context(decomposition.planner_notes),
+            work_items=decomposition.work_items,
         )
         work_items = self._harden_work_items(
-            [self._work_item_from_planner(item) for item in decomposition.work_items]
+            [self._work_item_from_planner(item) for item in decomposition.work_items],
+            user_input=visible_input,
         )
         is_routing_only = self._is_routing_only(work_items)
         is_chat_only = self._is_chat_only(work_items, decomposition) or is_routing_only
         selected_agents = self._select_agents_for_work_items(work_items, agents)
         intents = self._intents_from_work_items(work_items, selected_agents)
-        subtasks = self._build_subtasks(cleaned_input, selected_agents, intents, work_items)
+        subtasks = self._build_subtasks(visible_input, selected_agents, intents, work_items)
         execution_stages = self._execution_stage_keys(subtasks)
         workflow_graph = self._workflow_graph(work_items, subtasks)
         queue_items = [] if is_chat_only else self._queue_items(subtasks)
-        schedule_candidate = self._schedule_candidate_from_input(cleaned_input, work_items, subtasks)
+        schedule_guidance = self._schedule_guidance_from_classifier(cleaned_input)
+        schedule_candidate = self._schedule_candidate_from_input(
+            visible_input,
+            work_items,
+            subtasks,
+            schedule_guidance=schedule_guidance,
+        )
         summary = decomposition.plan_summary or self._plan_summary(cleaned_input, intents, subtasks)
         direct_response = decomposition.direct_response
         if is_routing_only:
@@ -189,9 +299,20 @@ class MaestroOrchestratorService:
             objective=summary,
             input_payload={
                 "plan_id": plan_id,
-                "user_input": cleaned_input,
+                "topic_id": topic_id,
+                "user_input": visible_input,
                 "execution_mode": "propose_first",
                 "planner_mode": planner_mode,
+                "planner_prompt_metrics": getattr(self, "_last_planner_prompt_metrics", {}),
+                "maestro_context_metrics": {
+                    "used_chars": maestro_context.get("used_chars"),
+                    "max_chars": maestro_context.get("max_chars"),
+                    "memory_count": maestro_context.get("sections", {})
+                    .get("memory", {})
+                    .get("included_count"),
+                    "report_count": len(maestro_context.get("sections", {}).get("reports", {}).get("items", [])),
+                    "run_log_count": len(maestro_context.get("sections", {}).get("run_log", {}).get("items", [])),
+                },
                 "work_items": [work_item.__dict__ for work_item in work_items],
                 "intents": [intent.__dict__ for intent in intents],
                 "subtasks": [subtask.__dict__ for subtask in subtasks],
@@ -219,8 +340,6 @@ class MaestroOrchestratorService:
         self.session.commit()
         self.session.refresh(parent_task)
         self._route_direct_work_items(parent_task, work_items)
-        if not is_chat_only:
-            SchedulerService(self.session).enqueue_maestro_plan(parent_task)
         return self._plan_from_task(parent_task)
 
     def get_plan(self, plan_id: uuid.UUID | str) -> MaestroPlan:
@@ -252,6 +371,7 @@ class MaestroOrchestratorService:
         plan = self.create_plan(
             refined_input,
             conversation_id=previous_task.conversation_id if previous_task else None,
+            topic_id=(previous_task.input_payload or {}).get("topic_id") if previous_task else None,
         )
         if previous_task is not None and previous_task.status in {
             "proposed",
@@ -420,7 +540,7 @@ class MaestroOrchestratorService:
         return routed_items
 
     def _route_type_for_work_item(self, item: MaestroWorkItem) -> str | None:
-        route_type = _ROUTE_TYPE_BY_WORK_ITEM.get(item.type)
+        route_type = route_type_for_work_item(item.type)
         if item.type == "standalone_task":
             text = f"{item.title}\n{item.description}\n{item.expected_output}".lower()
             if any(token in text for token in ("contact", "crm", "relationship context", "partner lead")):
@@ -589,6 +709,10 @@ class MaestroOrchestratorService:
         parent_task.started_at = datetime.now(UTC)
         self._set_scheduler_status(parent_task, "running")
         self.session.commit()
+        scheduler_service = SchedulerService(self.session)
+        scheduler_service.enqueue_maestro_plan(parent_task)
+        scheduler_service.sync_run_status_from_task(parent_task)
+        self.session.refresh(parent_task)
 
         child_runs: list[AgentRunResult] = []
         completed_outputs_by_work_item: dict[str, str] = {}
@@ -645,8 +769,15 @@ class MaestroOrchestratorService:
                             approved_tool_results_by_child_task,
                         ),
                     )
-                    child_runs.extend(run["attempts"])
                     final_run = run["final"]
+                    if not resume:
+                        final_run = self._queue_coding_delivery_review(
+                            parent_task,
+                            subtask,
+                            final_run,
+                        )
+                        run["attempts"][-1] = final_run
+                    child_runs.extend(run["attempts"])
                     stage_runs.append(final_run)
                     if final_run.status == "failed":
                         failed_work_item_ids.update(subtask.work_item_ids or [])
@@ -763,6 +894,94 @@ class MaestroOrchestratorService:
             SchedulerService(self.session).sync_run_status_from_task(parent_task)
             raise
 
+    def enqueue_plan(self, plan_id: uuid.UUID | str) -> MaestroRun:
+        plan = self.get_plan(plan_id)
+        parent_task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
+        if parent_task is None:
+            raise MaestroOrchestratorError(f"Plan parent task was not found: {plan.parent_task_id}")
+        if plan.is_chat_only:
+            raise MaestroOrchestratorError("Direct chat responses do not have an executable plan.")
+        if parent_task.status not in {"proposed", "queued", "failed"}:
+            raise MaestroOrchestratorError(
+                f"Plan cannot be queued from status {parent_task.status}."
+            )
+        if self._is_schedule_definition_request(plan):
+            return self._save_scheduled_workflow(parent_task, plan)
+        self._upsert_schedule_definition_if_requested(parent_task, plan)
+        blocking_dependency_ids = self._blocked_work_item_ids(plan.work_items)
+        executable_subtasks = [
+            subtask
+            for subtask in plan.subtasks
+            if not (
+                set(subtask.depends_on_work_item_ids or []) & blocking_dependency_ids
+                or set(subtask.work_item_ids or []) & blocking_dependency_ids
+            )
+        ]
+        has_attached_blocking_dependency = any(
+            set(item.dependencies) & {
+                blocking_item.id
+                for blocking_item in plan.work_items
+                if blocking_item.needs_user_input and blocking_item.blocks_execution
+            }
+            for item in plan.work_items
+        )
+        if blocking_dependency_ids and (not executable_subtasks or not has_attached_blocking_dependency):
+            titles = ", ".join(
+                item.title
+                for item in plan.work_items
+                if item.needs_user_input and item.blocks_execution
+            )
+            raise MaestroOrchestratorError(
+                f"Plan needs Chris before execution can start: {titles}"
+            )
+
+        queue_items = self._queue_with_status(plan.scheduler, "queued")
+        for item in queue_items:
+            work_item_ids = set(item.get("work_item_ids") or [])
+            dependency_ids = set(item.get("depends_on_work_item_ids") or [])
+            if work_item_ids & blocking_dependency_ids or dependency_ids & blocking_dependency_ids:
+                item["status"] = "blocked"
+                item["error_message"] = "Waiting for blocking user input."
+        self._replace_scheduler(
+            parent_task,
+            queue_items=queue_items,
+            scheduler_status="queued",
+        )
+        parent_task.status = "queued"
+        parent_task.started_at = None
+        parent_task.completed_at = None
+        summary = (
+            f"I queued `{plan.summary}` and moved it to Active Workflows. "
+            "I’ll keep working in the background and report back here if it finishes or needs you."
+        )
+        parent_task.output_payload = {
+            "plan_id": plan.plan_id,
+            "status": "queued",
+            "chat_summary": summary,
+            "scheduler": dict((parent_task.input_payload or {}).get("scheduler", {})),
+        }
+        parent_task.error_message = None
+        self.session.commit()
+        scheduler_service = SchedulerService(self.session)
+        scheduler_service.enqueue_maestro_plan(parent_task)
+        scheduler_service.sync_run_status_from_task(parent_task)
+        self.session.refresh(parent_task)
+        return MaestroRun(
+            plan=self._plan_from_task(parent_task),
+            status="queued",
+            parent_task_id=str(parent_task.id),
+            child_runs=[],
+            synthesis_report_id=None,
+            synthesis=summary,
+            chat_summary=summary,
+            staged_artifact_path=None,
+            artifact_id=None,
+            scheduler=dict((parent_task.input_payload or {}).get("scheduler", {})),
+            execution_stages=plan.execution_stages,
+            tool_activity=[],
+            error_message=None,
+        )
+
     def approve_tool_call_and_resume(
         self,
         tool_call_id: uuid.UUID | str,
@@ -785,6 +1004,14 @@ class MaestroOrchestratorService:
         if parent_task is None or parent_task.workflow_key != "maestro.generic":
             return result, None
         if result.status != "complete":
+            return result, None
+        if child_task.workflow_key == "scheduler.workflow_item" and result.tool_key == "local.app.deploy_pr":
+            from app.maestro.scheduler_worker import SchedulerWorkerService
+
+            SchedulerWorkerService(self.session).complete_approved_delivery(
+                task_id=child_task.id,
+                delivery_result=tool_result_payload(result),
+            )
             return result, None
         run = self.run_plan(
             parent_task.id,
@@ -833,11 +1060,13 @@ class MaestroOrchestratorService:
         user_input: str,
         *,
         registry_snapshot: dict[str, Any],
+        maestro_context: dict[str, Any],
     ) -> tuple[MaestroPlannerResponse, str]:
         planning_context = {
             "global_context": self.registry.get_global_context().context,
             "registry": registry_snapshot,
-            "retrieved_memory": self._planning_memory_context(user_input),
+            "maestro_context": maestro_context,
+            "retrieved_memory": maestro_context.get("sections", {}).get("memory", {}),
             "scheduler": self._scheduler_payload(),
         }
         llm_client = self.planner_llm_client
@@ -850,35 +1079,40 @@ class MaestroOrchestratorService:
                 if settings.llm_provider == "openai" and not settings.openai_api_key:
                     raise LLMClientError("OPENAI_API_KEY is not configured.")
                 llm_client = OpenAILLMClient()
+            planner = LLMMaestroPlanner(llm_client)
+            response = planner.decompose(
+                user_input=user_input,
+                planning_context=planning_context,
+            )
+            self._last_planner_prompt_metrics = planner.last_prompt_metrics
             return (
-                LLMMaestroPlanner(llm_client).decompose(
-                    user_input=user_input,
-                    planning_context=planning_context,
-                ),
+                response,
                 planner_mode,
             )
         except Exception:
+            self._last_planner_prompt_metrics = {
+                "system_prompt_chars": 0,
+                "input_chars": 0,
+                "schema_chars": 0,
+                "planning_context_chars": len(str(planning_context)),
+                "registry_chars": len(str(registry_snapshot)),
+                "memory_chars": len(str(planning_context.get("retrieved_memory", {}).get("rendered_text", ""))),
+                "maestro_context_chars": len(str(maestro_context.get("rendered_text", ""))),
+                "fallback": 1,
+            }
             return self._deterministic_decomposition(user_input, registry_snapshot), "deterministic"
 
-    def _planning_memory_context(self, user_input: str) -> dict[str, Any]:
-        try:
-            bundle = MemoryRetrievalService(self.session).build_context_bundle(
-                MemoryContextBundleRequest(
-                    profile="agent_prompt",
-                    audience="maestro",
-                    query_text=user_input,
-                    use_semantic=True,
-                    max_items=8,
-                    max_chars=2500,
-                )
-            )
-        except Exception:
-            return {"status": "unavailable", "rendered_text": ""}
-        return {
-            "status": bundle.semantic_status,
-            "included_count": bundle.included_count,
-            "rendered_text": bundle.rendered_text,
-        }
+    def _planning_context_bundle(self, user_input: str) -> dict[str, Any]:
+        bundle = MaestroContextAssembler(self.session).build_bundle(
+            query_text=user_input,
+            max_chars=6500,
+            memory_chars=2500,
+            routed_chars=1800,
+            report_limit=6,
+            run_log_limit=6,
+            artifact_limit=6,
+        )
+        return maestro_context_payload(bundle)
 
     def _deterministic_decomposition(
         self,
@@ -892,10 +1126,27 @@ class MaestroOrchestratorService:
             token in lowered
             for token in ("plan only", "minimal plan", "no code changes", "do not make code")
         )
-        if not planning_only and any(
+        is_maestro_ui_change = (
+            any(token in lowered for token in ("maestro app", "maestro ui", "frontend", "ui", "button", "css"))
+            and any(token in lowered for token in ("change", "update", "edit", "color", "style"))
+        )
+        coding_request = any(
             token in lowered
             for token in ("implement", "code", "coding", "fix", "action issue", "work issue")
-        ):
+        ) or is_maestro_ui_change
+        feature_planning = any(
+            token in lowered
+            for token in (
+                "new feature",
+                "feature for maestro",
+                "plan a new",
+                "design a new",
+                "brainstorm a new",
+                "interact with",
+                "integration",
+            )
+        ) and not coding_request
+        if not planning_only and coding_request:
             work_items.append(
                 PlannerWorkItem(
                     id="wi_1",
@@ -913,10 +1164,81 @@ class MaestroOrchestratorService:
                     can_log_directly=False,
                     suggested_agent_keys=["maestro-coding-agent"],
                     expected_output="Codex task result with changed files, validation run, and follow-up risks.",
+                    model_tier="auto",
+                    model_rationale="Runtime routing will select the coding-appropriate tier.",
                     rationale="The request asks Maestro to execute coding work.",
                 )
             )
-        if any(token in lowered for token in ("plan", "prepare", "coordinate", "workflow")):
+        if feature_planning:
+            work_items.append(
+                PlannerWorkItem(
+                    id=f"wi_{len(work_items) + 1}",
+                    type="workflow_task",
+                    title="Draft Maestro feature architecture",
+                    description=(
+                        "Turn Chris's feature idea into a scoped Maestro architecture concept, "
+                        "including user-facing behavior, agent/tool boundaries, permissions, "
+                        f"memory/artifact handling, and rollout risks. Feature idea: {user_input}"
+                    ),
+                    domain_key=domain_key or "maestro-development",
+                    priority="high",
+                    required_capabilities=[
+                        "Maestro architecture",
+                        "tool-boundary design",
+                        "agent workflow design",
+                        "approval and permission design",
+                    ],
+                    required_tools=["memory.context_bundle"],
+                    dependencies=[],
+                    needs_agent=True,
+                    needs_user_input=False,
+                    blocks_execution=False,
+                    can_log_directly=False,
+                    suggested_agent_keys=["maestro-chief-engineer"],
+                    expected_output=(
+                        "Conversational feature architecture sketch with scope, user flow, "
+                        "agent/tool boundaries, permissions, risks, and recommended next steps."
+                    ),
+                    model_tier="auto",
+                    model_rationale="Runtime routing will select the architecture-appropriate tier.",
+                    rationale="Fallback decomposition for a Maestro feature-design request.",
+                )
+            )
+            if any(token in lowered for token in ("google", "drive", "docs", "sheets", "api", "integration")):
+                work_items.append(
+                    PlannerWorkItem(
+                        id=f"wi_{len(work_items) + 1}",
+                        type="workflow_task",
+                        title="Research Google Workspace integration options",
+                        description=(
+                            "Research practical Google Drive, Docs, and Sheets integration options "
+                            "for Maestro, including APIs, OAuth scopes, document-editing patterns, "
+                            f"and safety constraints. Feature idea: {user_input}"
+                        ),
+                        domain_key=domain_key or "maestro-development",
+                        priority="normal",
+                        required_capabilities=[
+                            "current-state research",
+                            "integration research",
+                            "API capability analysis",
+                        ],
+                        required_tools=["web.search"],
+                        dependencies=[],
+                        needs_agent=True,
+                        needs_user_input=False,
+                        blocks_execution=False,
+                        can_log_directly=False,
+                        suggested_agent_keys=["maestro-sota-researcher"],
+                    expected_output=(
+                        "Research report summarizing Google Workspace API options, auth/scopes, "
+                        "document editing approaches, constraints, and links/citations."
+                    ),
+                    model_tier="auto",
+                    model_rationale="Runtime routing will select the research-appropriate tier.",
+                    rationale="Google Workspace integration depends on current external API/tool context.",
+                    )
+                )
+        elif any(token in lowered for token in ("plan", "prepare", "coordinate", "workflow")):
             work_items.append(
                 PlannerWorkItem(
                     id=f"wi_{len(work_items) + 1}",
@@ -926,7 +1248,7 @@ class MaestroOrchestratorService:
                     domain_key=domain_key,
                     priority="high",
                     required_capabilities=self._capabilities_from_text(lowered),
-                    required_tools=[],
+                    required_tools=self._research_tools_from_text(lowered),
                     dependencies=[],
                     needs_agent=True,
                     needs_user_input=False,
@@ -934,7 +1256,90 @@ class MaestroOrchestratorService:
                     can_log_directly=False,
                     suggested_agent_keys=[],
                     expected_output="Role-scoped workflow contribution and recommended next steps.",
+                    model_tier="auto",
+                    model_rationale="Runtime routing will select the appropriate execution tier.",
                     rationale="The request asks Maestro to prepare or coordinate work.",
+                )
+            )
+            if any(token in lowered for token in ("email", "message", "follow-up", "follow up", "outreach")):
+                work_items.append(
+                    PlannerWorkItem(
+                        id=f"wi_{len(work_items) + 1}",
+                        type="workflow_task",
+                        title="Draft role-scoped follow-up communication",
+                        description=(
+                            "Prepare the communication-specific portion of the request, focusing "
+                            f"only on the email, partner message, or follow-up draft needed for: {user_input}"
+                        ),
+                        domain_key=domain_key,
+                        priority="high",
+                        required_capabilities=[
+                            "email triage",
+                            "partner communications",
+                            "follow-up drafting",
+                        ],
+                        required_tools=[],
+                        dependencies=[],
+                        needs_agent=True,
+                        needs_user_input=False,
+                        blocks_execution=False,
+                        can_log_directly=False,
+                        suggested_agent_keys=self._agent_keys_matching(
+                            registry_snapshot,
+                            domain_key=domain_key,
+                            include_any=("email", "message", "communication", "follow-up", "follow up", "outreach"),
+                            exclude_any=("finance", "budget", "invoice"),
+                        ),
+                        expected_output=(
+                            "Communication-focused contribution with draft language, assumptions, "
+                            "and any missing recipient/context questions."
+                        ),
+                        model_tier="auto",
+                        model_rationale="Runtime routing will select the drafting-appropriate tier.",
+                        rationale="The request contains an email or follow-up drafting lane.",
+                    )
+                )
+        if (
+            any(token in lowered for token in ("email", "gmail", "inbox", "message"))
+            and any(token in lowered for token in ("review", "triage", "latest", "new", "extract", "route", "classify"))
+        ):
+            work_items.append(
+                PlannerWorkItem(
+                    id=f"wi_{len(work_items) + 1}",
+                    type="workflow_task",
+                    title="Triage latest domain email",
+                    description=user_input,
+                    domain_key=domain_key,
+                    priority="normal",
+                    required_capabilities=[
+                        "email triage",
+                        "routed item extraction",
+                        "contact extraction",
+                        "calendar extraction",
+                        "task extraction",
+                    ],
+                    required_tools=[
+                        "gmail.message.list_recent",
+                        "gmail.message.get",
+                        "routed.item.create",
+                    ],
+                    dependencies=[],
+                    needs_agent=True,
+                    needs_user_input=False,
+                    blocks_execution=False,
+                    can_log_directly=False,
+                    suggested_agent_keys=self._agent_keys_matching(
+                        registry_snapshot,
+                        domain_key=domain_key,
+                        include_any=("email", "gmail", "inbox", "triage"),
+                    ),
+                    expected_output=(
+                        "Email classification, notification recommendation, routed candidates "
+                        "created with provenance, and concise run report."
+                    ),
+                    model_tier="auto",
+                    model_rationale="Runtime routing will select the routine email-triage tier.",
+                    rationale="The request requires fetching email before routed items can be created.",
                 )
             )
         if (
@@ -959,6 +1364,8 @@ class MaestroOrchestratorService:
                     can_log_directly=False,
                     suggested_agent_keys=[],
                     expected_output="Recurring or event-triggered workflow ready for Maestro scheduling.",
+                    model_tier="auto",
+                    model_rationale="Runtime routing will select the appropriate scheduling tier.",
                     rationale="The request asks Maestro to create work that should run on a trigger.",
                 )
             )
@@ -980,6 +1387,8 @@ class MaestroOrchestratorService:
                     can_log_directly=True,
                     suggested_agent_keys=[],
                     expected_output="Task candidate routed for review.",
+                    model_tier="auto",
+                    model_rationale="This routed item does not require agent execution.",
                     rationale="The request contains task or follow-up language.",
                 )
             )
@@ -1001,6 +1410,8 @@ class MaestroOrchestratorService:
                     can_log_directly=True,
                     suggested_agent_keys=[],
                     expected_output="Contact or relationship candidate routed for review.",
+                    model_tier="auto",
+                    model_rationale="This routed item does not require agent execution.",
                     rationale="The request mentions partner/contact relationship context.",
                 )
             )
@@ -1022,6 +1433,8 @@ class MaestroOrchestratorService:
                     can_log_directly=True,
                     suggested_agent_keys=[],
                     expected_output="Event candidate routed for review.",
+                    model_tier="auto",
+                    model_rationale="This routed item does not require agent execution.",
                     rationale="The request mentions a time-bound meeting or call.",
                 )
             )
@@ -1043,6 +1456,8 @@ class MaestroOrchestratorService:
                     can_log_directly=True,
                     suggested_agent_keys=[],
                     expected_output="RFI routed for your answer.",
+                    model_tier="auto",
+                    model_rationale="This routed item does not require agent execution.",
                     rationale="The request asks or implies a question.",
                 )
             )
@@ -1064,24 +1479,94 @@ class MaestroOrchestratorService:
                     can_log_directly=False,
                     suggested_agent_keys=[],
                     expected_output="Direct Maestro response.",
+                    model_tier="auto",
+                    model_rationale="Direct chat does not require agent execution.",
                     rationale="No workflow or routed operational item was detected.",
                 )
             )
         return MaestroPlannerResponse(
             plan_summary=f"Proposed decomposition with {len(work_items)} work item(s): {user_input[:180]}",
-            direct_response=None if any(item.needs_agent for item in work_items) else user_input,
+            direct_response=(
+                self._deterministic_direct_response(user_input, work_items)
+            ),
             work_items=work_items,
             planner_notes="Deterministic fallback planner used because the LLM planner was unavailable.",
         )
 
+    def _deterministic_direct_response(
+        self,
+        user_input: str,
+        work_items: list[PlannerWorkItem],
+    ) -> str:
+        if any(item.needs_agent for item in work_items):
+            workflow_items = [item for item in work_items if item.needs_agent]
+            titles = ", ".join(item.title for item in workflow_items[:3])
+            if any("feature" in f"{item.title} {item.description}".lower() for item in workflow_items):
+                return (
+                    "I can help you think this through here first. I’ll treat this as a "
+                    "feature-design conversation, not an implementation request. I prepared a "
+                    "focused plan that separates the architecture/design work from any supporting "
+                    f"research: {titles}. Once you review it, we can either run the research/design "
+                    "agents or keep brainstorming here before tasking anyone."
+                )
+            return (
+                f"I prepared a focused plan for this with {len(workflow_items)} executable work "
+                f"item{'' if len(workflow_items) == 1 else 's'}: {titles}. Review it here and I’ll "
+                "run it only after you approve."
+            )
+        if any(item.type == "direct_response" for item in work_items):
+            lowered = user_input.lower()
+            if any(token in lowered for token in ("brainstorm", "think through", "design", "idea")):
+                return (
+                    "I can help you think this through here first. I will keep this as a "
+                    "conversation until we decide there is concrete agent work, routing, or an "
+                    "issue to create."
+                )
+            if "?" in user_input:
+                return (
+                    "I can answer this directly here. If we need codebase context, web research, "
+                    "or another agent's help, I will turn that into a proposed workflow first."
+                )
+            return (
+                "I can handle this directly here. If it turns into concrete work, I will propose "
+                "a plan before tasking agents."
+            )
+        return ""
+
     def _domain_for_input(self, lowered_input: str, registry_snapshot: dict[str, Any]) -> str | None:
         for domain in registry_snapshot.get("domains", []):
-            key = str(domain.get("key") or "")
-            if key and (key in lowered_input or key.replace("-", " ") in lowered_input):
-                return key
-            if any(token in lowered_input for token in _DOMAIN_HINTS.get(key, [])):
-                return key
+            if domain_matches(lowered_input, domain):
+                return str(domain.get("key") or "")
         return None
+
+    def _agent_keys_matching(
+        self,
+        registry_snapshot: dict[str, Any],
+        *,
+        domain_key: str | None,
+        include_any: tuple[str, ...],
+        exclude_any: tuple[str, ...] = (),
+        limit: int = 1,
+    ) -> list[str]:
+        matches: list[tuple[int, str]] = []
+        for agent in registry_snapshot.get("agents", []):
+            if domain_key and agent.get("domain_key") != domain_key:
+                continue
+            text = " ".join(
+                str(value or "")
+                for value in (
+                    agent.get("key"),
+                    agent.get("name"),
+                    agent.get("role_summary"),
+                )
+            ).lower()
+            if exclude_any and any(token in text for token in exclude_any):
+                continue
+            score = sum(1 for token in include_any if token in text)
+            if score:
+                matches.append((score, str(agent.get("key") or "")))
+        matches.sort(key=lambda pair: (-pair[0], pair[1]))
+        return [key for _, key in matches[:limit] if key]
 
     def _capabilities_from_text(self, lowered_input: str) -> list[str]:
         capabilities: list[str] = ["planning"]
@@ -1096,9 +1581,54 @@ class MaestroOrchestratorService:
         return capabilities
 
     def _work_item_from_planner(self, item: PlannerWorkItem) -> MaestroWorkItem:
-        return MaestroWorkItem(**item.model_dump())
+        payload = item.model_dump()
+        for key in ("title", "description", "rationale", "expected_output"):
+            if isinstance(payload.get(key), str):
+                payload[key] = _strip_hidden_context(payload[key])
+        payload["required_skills"] = self._skills_for_work_item_payload(payload)
+        model_selection = self._model_selection_for_work_item_payload(payload)
+        payload.update(model_selection)
+        return MaestroWorkItem(**payload)
 
-    def _harden_work_items(self, work_items: list[MaestroWorkItem]) -> list[MaestroWorkItem]:
+    def _harden_work_items(
+        self,
+        work_items: list[MaestroWorkItem],
+        *,
+        user_input: str = "",
+    ) -> list[MaestroWorkItem]:
+        work_items = [
+            replace(
+                item,
+                type="think_tank",
+                can_log_directly=True,
+                rationale=(
+                    item.rationale
+                    + " Hardened by Maestro: this is an immature idea or feature concept, "
+                    "so it belongs in Think Tank rather than durable RAG memory."
+                ),
+            )
+            if self._is_think_tank_candidate(item)
+            else replace(
+                item,
+                type="contact",
+                can_log_directly=True,
+                rationale=(
+                    item.rationale
+                    + " Hardened by Maestro: this is person-specific context or a preference, "
+                    "so it belongs with the relevant contact record."
+                ),
+            )
+            if self._is_contact_context_candidate(item)
+            else item
+            for item in work_items
+        ]
+        has_agent_work = any(item.needs_agent for item in work_items)
+        if has_agent_work:
+            work_items = [
+                item
+                for item in work_items
+                if item.type != "standalone_task" or self._is_user_reminder_candidate(item)
+            ]
         intake_rfis = [
             item
             for item in work_items
@@ -1167,6 +1697,165 @@ class MaestroOrchestratorService:
                 hardened.append(item)
         return hardened
 
+    def _skills_for_work_item_payload(self, payload: dict[str, Any]) -> list[str]:
+        text = " ".join(
+            str(payload.get(key) or "")
+            for key in ("type", "title", "description", "expected_output", "rationale")
+        ).lower()
+        text = " ".join(
+            [
+                text,
+                " ".join(str(value).lower() for value in payload.get("required_capabilities") or []),
+                " ".join(str(value).lower() for value in payload.get("required_tools") or []),
+            ]
+        )
+        if (
+            payload.get("type") == "workflow_task"
+            and str(payload.get("title") or "").lower() == "coordinate requested workflow"
+        ):
+            return []
+        skills: list[str] = []
+        if any(token in text for token in ("email", "gmail", "inbox", "message", "triage")):
+            skills.append("email_triage")
+        if payload.get("type") == "contact" or any(token in text for token in ("contact", "crm", "person", "partner lead")):
+            skills.append("contact_manager")
+        if payload.get("type") in {"standalone_task", "workflow_task"} and any(
+            token in text for token in ("todo", "to do", "task", "due-out", "due out", "follow-up", "follow up")
+        ):
+            skills.append("to_do_manager")
+        if payload.get("type") == "event" or any(token in text for token in ("calendar", "event", "meeting", "call", "sync")):
+            skills.append("calendar_manager")
+        if any(token in text for token in ("organization", "company", "vendor", "agency", "unit", "partner organization")):
+            skills.append("organization_manager")
+        return list(dict.fromkeys(skills))
+
+    def _model_selection_for_work_item_payload(self, payload: dict[str, Any]) -> dict[str, str]:
+        requested_tier = str(payload.get("model_tier") or "auto").strip().lower()
+        requested_tier = {
+            "local_routine": "qwen",
+            "cloud_standard": "terra",
+            "cloud_advanced": "sol",
+        }.get(requested_tier, requested_tier)
+        text = " ".join(
+            [
+                str(payload.get("type") or ""),
+                str(payload.get("title") or ""),
+                str(payload.get("description") or ""),
+                " ".join(str(value) for value in payload.get("required_tools") or []),
+            ]
+        ).lower()
+        if requested_tier not in {"qwen", "luna", "terra", "sol"}:
+            if any(
+                token in text
+                for token in (
+                    "codex.task.run",
+                    "web.search",
+                    "sota",
+                    "research",
+                    "architecture",
+                    "strategy",
+                    "brainstorm",
+                    "design",
+                    "complex",
+                )
+            ):
+                requested_tier = "sol"
+            elif payload.get("can_log_directly") or any(
+                token in text
+                for token in ("email", "gmail", "inbox", "extract", "route", "contact", "calendar", "todo")
+            ):
+                requested_tier = "qwen"
+            else:
+                requested_tier = "terra"
+
+        settings = get_settings()
+        profile_by_tier = {
+            "qwen": settings.llm_qwen_model_profile,
+            "luna": settings.llm_luna_model_profile,
+            "terra": settings.llm_terra_model_profile,
+            "sol": settings.llm_sol_model_profile,
+        }
+        fallback_rationales = {
+            "qwen": "Routine, bounded extraction or routing work is suitable for the local Qwen tier.",
+            "luna": "This straightforward task benefits from the fast, cost-efficient cloud tier.",
+            "terra": "This task benefits from balanced cloud reasoning and drafting without needing the flagship tier.",
+            "sol": "This task needs the strongest reasoning tier for ambiguity, synthesis, research, design, or strategy.",
+        }
+        planner_rationale = str(payload.get("model_rationale") or "").strip()
+        return {
+            "model_tier": requested_tier,
+            "model_profile": profile_by_tier[requested_tier].strip() or "default",
+            "model_rationale": planner_rationale or fallback_rationales[requested_tier],
+        }
+
+    def _model_profile_for_work_item_payload(self, payload: dict[str, Any]) -> str | None:
+        """Compatibility shim for callers that only need the resolved runtime profile."""
+        return self._model_selection_for_work_item_payload(payload)["model_profile"]
+
+    def _is_think_tank_candidate(self, item: MaestroWorkItem) -> bool:
+        if item.type != "memory_candidate":
+            return False
+        text = " ".join(
+            [
+                item.title,
+                item.description,
+                item.expected_output,
+                item.rationale,
+            ]
+        ).lower()
+        idea_markers = (
+            "idea",
+            "concept",
+            "brainstorm",
+            "feature",
+            "possible",
+            "proposal",
+            "prototype",
+            "explore",
+            "future",
+            "think tank",
+        )
+        return any(marker in text for marker in idea_markers)
+
+    def _is_contact_context_candidate(self, item: MaestroWorkItem) -> bool:
+        if item.type != "memory_candidate":
+            return False
+        text = " ".join([item.title, item.description, item.expected_output, item.rationale])
+        lowered = text.lower()
+        contact_markers = (
+            "prefers",
+            "preference",
+            "likes",
+            "dislikes",
+            "partner lead",
+            "contact",
+            "email",
+            "phone",
+            "works at",
+            "works with",
+        )
+        if not any(marker in lowered for marker in contact_markers):
+            return False
+        return bool(re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", text))
+
+    def _is_user_reminder_candidate(self, item: MaestroWorkItem) -> bool:
+        if item.type != "standalone_task":
+            return False
+        text = f"{item.title} {item.description} {item.rationale}".lower()
+        user_markers = (
+            "remind me",
+            "reminder for me",
+            "i need to",
+            "i should",
+            "my todo",
+            "my to do",
+            "for chris to",
+            "chris needs to",
+            "due-out for me",
+            "due out for me",
+        )
+        return any(marker in text for marker in user_markers)
+
     def _select_agents_for_work_items(
         self,
         work_items: list[MaestroWorkItem],
@@ -1216,6 +1905,7 @@ class MaestroOrchestratorService:
                 item.expected_output,
                 " ".join(item.required_capabilities),
                 " ".join(item.required_tools),
+                " ".join(item.required_skills),
             ]
         ).lower()
         agent_text = " ".join(
@@ -1226,17 +1916,37 @@ class MaestroOrchestratorService:
                 agent.current_action or "",
                 " ".join(tool.key for tool in agent.allowed_tools),
                 " ".join(tool.name for tool in agent.allowed_tools),
+                " ".join(skill.key for skill in agent.allowed_skills),
+                " ".join(skill.name for skill in agent.allowed_skills),
             ]
         ).lower()
-        domain_noise = _meaningful_tokens(
+        if "coding" in agent.key and not (
+            set(item.required_tools) & {"codex.task.run"}
+            or any(
+                token in item_text
+                for token in (
+                    "code",
+                    "coding",
+                    "implement",
+                    "implementation",
+                    "repository editing",
+                    "test execution",
+                    "codex",
+                )
+            )
+        ):
+            return 0.0
+        domain_noise = meaningful_tokens(
             " ".join([agent.domain_key, agent.domain_key.replace("-", " "), "agent"])
         )
-        overlap = (_meaningful_tokens(item_text) - domain_noise) & (
-            _meaningful_tokens(agent_text) - domain_noise
+        overlap = (meaningful_tokens(item_text) - domain_noise) & (
+            meaningful_tokens(agent_text) - domain_noise
         )
         score += min(len(overlap), 8) * 0.75
         agent_tool_keys = {tool.key for tool in agent.allowed_tools}
         score += len(agent_tool_keys & set(item.required_tools)) * 1.5
+        agent_skill_keys = {skill.key for skill in agent.allowed_skills}
+        score += len(agent_skill_keys & set(item.required_skills)) * 1.25
         if any(token in agent.key for token in ("planning", "chief", "manager", "lead")):
             score += 0.5
         return score
@@ -1245,7 +1955,7 @@ class MaestroOrchestratorService:
         score = 0.0
         rationale: list[str] = []
         domain_tokens = [agent.domain_key, agent.domain_key.replace("-", " ")]
-        domain_tokens.extend(_DOMAIN_HINTS.get(agent.domain_key, []))
+        domain_tokens.extend(DOMAIN_HINTS.get(agent.domain_key, []))
         if any(token and token in lowered_input for token in domain_tokens):
             score += 3.0
             rationale.append(f"domain match: {agent.domain_key}")
@@ -1259,9 +1969,9 @@ class MaestroOrchestratorService:
                 " ".join(tool.key for tool in agent.allowed_tools),
             ]
         )
-        input_tokens = _meaningful_tokens(lowered_input)
-        agent_tokens = _meaningful_tokens(agent_text.lower())
-        domain_noise = _meaningful_tokens(
+        input_tokens = meaningful_tokens(lowered_input)
+        agent_tokens = meaningful_tokens(agent_text.lower())
+        domain_noise = meaningful_tokens(
             " ".join([agent.domain_key, agent.domain_key.replace("-", " "), "agent"])
         )
         agent_tokens = agent_tokens - domain_noise
@@ -1287,19 +1997,47 @@ class MaestroOrchestratorService:
             assigned_items = self._work_items_for_agent(agent, work_items)
             if not assigned_items:
                 continue
-            grouped_items: dict[tuple[str, ...], list[MaestroWorkItem]] = {}
             assigned_item_ids = {item.id for item in assigned_items}
-            for item in assigned_items:
-                dependencies = tuple(
-                    sorted(
-                        dependency
-                        for dependency in item.dependencies
-                        if dependency not in assigned_item_ids
+            prior_agent_work_item_ids: list[str] = []
+            remaining_items = list(assigned_items)
+            while remaining_items:
+                ready_items = [
+                    item
+                    for item in remaining_items
+                    if set(item.dependencies or []) & assigned_item_ids <= set(prior_agent_work_item_ids)
+                ]
+                if not ready_items:
+                    ready_items = [remaining_items[0]]
+                grouped_items: dict[tuple[tuple[str, ...], str], list[MaestroWorkItem]] = {}
+                for item in ready_items:
+                    dependencies = tuple(
+                        sorted(
+                            dependency
+                            for dependency in item.dependencies
+                            if dependency not in assigned_item_ids
+                        )
+                    )
+                    model_profile = item.model_profile or "default"
+                    grouped_items.setdefault((dependencies, model_profile), []).append(item)
+                (dependencies, _model_profile), group_items = sorted(
+                    grouped_items.items(),
+                    key=lambda pair: (len(pair[0][0]), pair[0]),
+                )[0]
+                priority = "high" if any(item.priority in {"high", "urgent"} for item in group_items) else "normal"
+                effective_dependencies = list(dict.fromkeys([*dependencies, *prior_agent_work_item_ids]))
+                required_skills = list(
+                    dict.fromkeys(
+                        skill
+                        for item in group_items
+                        for skill in (item.required_skills or [])
                     )
                 )
-                grouped_items.setdefault(dependencies, []).append(item)
-            for dependencies, group_items in grouped_items.items():
-                priority = "high" if any(item.priority in {"high", "urgent"} for item in group_items) else "normal"
+                model_profile = next((item.model_profile for item in group_items if item.model_profile), None)
+                model_tier = next((item.model_tier for item in group_items if item.model_tier), "auto")
+                model_rationale = next(
+                    (item.model_rationale for item in group_items if item.model_rationale),
+                    None,
+                )
                 subtasks.append(
                     MaestroSubtask(
                         agent_key=agent.key,
@@ -1310,9 +2048,17 @@ class MaestroOrchestratorService:
                         priority=priority,
                         rationale=self._subtask_rationale_for_items(agent, group_items),
                         work_item_ids=[item.id for item in group_items],
-                        depends_on_work_item_ids=list(dependencies),
+                        depends_on_work_item_ids=effective_dependencies,
+                        required_skills=required_skills,
+                        model_profile=model_profile,
+                        model_tier=model_tier,
+                        model_rationale=model_rationale,
                     )
                 )
+                prior_agent_work_item_ids.extend(item.id for item in group_items)
+                for item in group_items:
+                    if item in remaining_items:
+                        remaining_items.remove(item)
         return subtasks
 
     def _work_items_for_agent(self, agent, work_items: list[MaestroWorkItem]) -> list[MaestroWorkItem]:
@@ -1345,6 +2091,10 @@ class MaestroOrchestratorService:
                 if score > 0 and agent.key == best_agent_key and best_score >= 2.0:
                     assigned.append(item)
                 continue
+            if not self._allows_multi_agent_assignment(item):
+                if score > 0 and agent.key == best_agent_key and best_score >= 2.0:
+                    assigned.append(item)
+                continue
             top_score = best_score
             if score > 0 and score >= max(2.0, top_score * 0.5) and (
                 top_score <= 3.5 or score > 3.0
@@ -1352,102 +2102,26 @@ class MaestroOrchestratorService:
                 assigned.append(item)
         return assigned
 
-    def _classify_intents(self, user_input: str, selected_agents) -> list[MaestroIntent]:
-        lowered = user_input.lower()
-        default_domain = selected_agents[0].domain_key if selected_agents else None
-        intents: list[MaestroIntent] = []
-        if any(token in lowered for token in ("plan", "prepare", "coordinate", "workflow")):
-            intents.append(
-                MaestroIntent(
-                    type="workflow",
-                    summary="Coordinate a multi-step plan.",
-                    target=user_input[:180],
-                    domain_key=default_domain,
-                    priority="high",
-                    action="Generate an executable workflow plan and delegate work by agent specialty.",
-                )
+    def _allows_multi_agent_assignment(self, item: MaestroWorkItem) -> bool:
+        text = " ".join(
+            [
+                item.title,
+                item.description,
+                item.expected_output,
+                item.rationale,
+                " ".join(item.required_capabilities),
+            ]
+        ).lower()
+        return any(
+            token in text
+            for token in (
+                "cross-domain",
+                "multi-agent",
+                "parallel lanes",
+                "synthesis from multiple",
+                "all relevant agents",
             )
-        if any(token in lowered for token in ("task", "todo", "due", "follow up", "follow-up")):
-            intents.append(
-                MaestroIntent(
-                    type="task",
-                    summary="Capture or delegate a concrete follow-up.",
-                    target=user_input[:180],
-                    domain_key=default_domain,
-                    action="Identify concrete due-outs and owners rather than storing them as memory.",
-                )
-            )
-        if any(token in lowered for token in ("contact", "lead", "partner", "crm")):
-            intents.append(
-                MaestroIntent(
-                    type="contact",
-                    summary="Extract or use relationship/contact context.",
-                    target=user_input[:180],
-                    domain_key=default_domain,
-                    action="Identify contact facts and relationship context for CRM routing.",
-                )
-            )
-        if any(token in lowered for token in ("event", "calendar", "meeting", "call", "sync")):
-            intents.append(
-                MaestroIntent(
-                    type="event",
-                    summary="Extract or reason over schedule context.",
-                    target=user_input[:180],
-                    domain_key=default_domain,
-                    action="Identify time-bound events or calendar implications.",
-                )
-            )
-        if any(token in lowered for token in ("decision", "decide", "tradeoff", "recommend")):
-            intents.append(
-                MaestroIntent(
-                    type="decision",
-                    summary="Surface a decision or recommendation.",
-                    target=user_input[:180],
-                    domain_key=default_domain,
-                    action="Separate recommendations and decisions from factual memory.",
-                )
-            )
-        if any(token in lowered for token in ("?", "confirm", "need from me", "rfi", "question")):
-            intents.append(
-                MaestroIntent(
-                    type="rfi",
-                    summary="Identify information needed from Chris.",
-                    target=user_input[:180],
-                    domain_key=default_domain,
-                    action="Surface questions that block execution or improve output quality.",
-                )
-            )
-        if any(token in lowered for token in ("remember", "memory", "standing instruction", "preference")):
-            intents.append(
-                MaestroIntent(
-                    type="memory_route",
-                    summary="Route durable context through memory curation.",
-                    target=user_input[:180],
-                    domain_key=default_domain,
-                    action="Send durable context to the memory curation pipeline at session close.",
-                )
-            )
-        if not intents:
-            intents.append(
-                MaestroIntent(
-                    type="direct_chat",
-                    summary="Respond directly unless the user approves further work.",
-                    target=user_input[:180],
-                    domain_key=default_domain,
-                    action="Prepare a concise direct answer and avoid unnecessary delegation.",
-                )
-            )
-        if selected_agents and not any(intent.type == "workflow" for intent in intents):
-            intents.append(
-                MaestroIntent(
-                    type="workflow",
-                    summary="Use available agents if Chris approves execution.",
-                    target=user_input[:180],
-                    domain_key=default_domain,
-                    action="Create agent-specific subtasks before execution.",
-                )
-            )
-        return intents
+        )
 
     def _intents_from_work_items(
         self,
@@ -1457,7 +2131,7 @@ class MaestroOrchestratorService:
         default_domain = selected_agents[0].domain_key if selected_agents else None
         intent_by_type: dict[str, MaestroIntent] = {}
         for item in work_items:
-            intent_type = _INTENT_TYPE_BY_WORK_ITEM.get(item.type, "direct_chat")
+            intent_type = intent_type_for_work_item(item.type)
             existing = intent_by_type.get(intent_type)
             if existing is not None:
                 continue
@@ -1467,10 +2141,18 @@ class MaestroOrchestratorService:
                 target=item.description[:180],
                 domain_key=item.domain_key or default_domain,
                 priority=item.priority,
-                action=_ACTION_BY_WORK_ITEM_TYPE.get(item.type, item.rationale),
+                action=action_for_work_item(item.type, item.rationale),
             )
         if not intent_by_type:
-            return self._classify_intents(" ".join(item.description for item in work_items), selected_agents)
+            return [
+                MaestroIntent(
+                    type="direct_chat",
+                    summary="Respond directly unless the user approves further work.",
+                    target="",
+                    domain_key=default_domain,
+                    action="Prepare a concise direct answer and avoid unnecessary delegation.",
+                )
+            ]
         return list(intent_by_type.values())
 
     def _subtask_objective(
@@ -1649,26 +2331,50 @@ class MaestroOrchestratorService:
 
     def _is_routing_only(self, work_items: list[MaestroWorkItem]) -> bool:
         return bool(work_items) and not any(item.needs_agent for item in work_items) and any(
-            _ROUTE_TYPE_BY_WORK_ITEM.get(item.type) is not None for item in work_items
+            route_type_for_work_item(item.type) is not None for item in work_items
         )
 
     def _routed_direct_response(self, work_items: list[MaestroWorkItem]) -> str:
         routed = [
             item
             for item in work_items
-            if _ROUTE_TYPE_BY_WORK_ITEM.get(item.type) is not None
+            if route_type_for_work_item(item.type) is not None
         ]
         if not routed:
             return "I captured that context."
+        blocking_rfis = [
+            item for item in routed if item.type == "rfi" and item.needs_user_input
+        ]
+        if blocking_rfis and len(routed) == 1:
+            item = blocking_rfis[0]
+            detail = item.description.strip() if item.description else item.title
+            return f"I need one bit of context before I can answer that well: {detail}"
+        think_tank_items = [item for item in routed if item.type == "think_tank"]
+        if think_tank_items and len(routed) == len(think_tank_items):
+            if len(think_tank_items) == 1:
+                item = think_tank_items[0]
+                return (
+                    f'I saved this in Think Tank as "{item.title}". We can keep '
+                    "brainstorming here, and when it matures I can turn it into a workflow, "
+                    "GitHub issue, or durable memory."
+                )
+            return (
+                f"I saved {len(think_tank_items)} ideas in Think Tank. We can keep "
+                "working them here and promote the useful ones when they get sharper."
+            )
         route_counts: dict[str, int] = {}
         for item in routed:
-            route_type = _ROUTE_TYPE_BY_WORK_ITEM.get(item.type) or "item"
+            route_type = route_type_for_work_item(item.type) or "item"
             route_counts[route_type] = route_counts.get(route_type, 0) + 1
         summary = ", ".join(
             f"{count} {route_type.replace('_', ' ')}{'' if count == 1 else 's'}"
             for route_type, count in sorted(route_counts.items())
         )
-        return f"Captured and routed {summary}. These were written to their routed stores with provenance."
+        examples = "; ".join(item.title for item in routed[:3])
+        return (
+            f"I routed {summary} into the right store with provenance. "
+            f"Top item{'s' if len(routed[:3]) != 1 else ''}: {examples}."
+        )
 
     def _dependency_context(
         self,
@@ -1788,6 +2494,69 @@ class MaestroOrchestratorService:
     def _run_has_pending_approval(self, run: AgentRunResult) -> bool:
         return any(call.get("status") == "approval_required" for call in run.tool_calls)
 
+    def _queue_coding_delivery_review(
+        self,
+        parent_task: Task,
+        subtask: MaestroSubtask,
+        run: AgentRunResult,
+    ) -> AgentRunResult:
+        """Hold a coding workflow at a deliberate PR review checkpoint."""
+        if run.status != "completed" or not run.task_id:
+            return run
+        if any(call.get("tool_name") == "local.app.deploy_pr" for call in run.tool_calls):
+            return run
+        pr_number = _coding_pr_number(run.tool_calls)
+        if pr_number is None:
+            return run
+        try:
+            child_task = self.session.get(Task, uuid.UUID(run.task_id))
+        except (TypeError, ValueError):
+            return run
+        if child_task is None:
+            return run
+        proposed = ToolExecutionService(
+            self.session,
+            adapters=self.runtime.tool_adapters,
+        ).propose_for_task(
+            ToolExecutionRequest(
+                agent_key=run.agent.key,
+                tool_key="local.app.deploy_pr",
+                payload={"pr_number": pr_number, "method": "squash", "delete_branch": True},
+            ),
+            task=child_task,
+            rationale=(
+                f"Codex created PR #{pr_number}. Chris must review it before Maestro merges it "
+                "and updates the dedicated runtime."
+            ),
+            safety_level="production_code_delivery",
+            reason=(
+                f"PR #{pr_number} is ready for Chris's review. Approval will merge it and pull "
+                "the result into the dedicated runtime checkout."
+            ),
+        )
+        approval_payload = tool_result_payload(proposed)
+        child_task.status = "blocked"
+        child_task.error_message = f"Waiting for Chris to review PR #{pr_number} and approve delivery."
+        child_task.completed_at = None
+        self.session.commit()
+        self._update_queue_item(
+            parent_task,
+            subtask,
+            status="approval_required",
+            child_task_id=run.task_id,
+            child_report_id=run.report_id,
+            error_message=child_task.error_message,
+        )
+        return replace(
+            run,
+            status="blocked",
+            execution_note=(
+                f"Coding is complete and PR #{pr_number} is ready for your review. "
+                "The workflow will resume after you approve delivery."
+            ),
+            tool_calls=[*run.tool_calls, approval_payload],
+        )
+
     def _queue_item_for_subtask(
         self,
         task: Task,
@@ -1856,6 +2625,28 @@ class MaestroOrchestratorService:
                     "completed_at": None,
                 }
                 changed = True
+            if str(item.get("child_task_id")) in approved_child_ids and item.get("status") == "approval_required":
+                approved_results = approved_tool_results_by_child_task.get(str(item.get("child_task_id")), [])
+                is_delivery = any(
+                    result.get("tool_name") == "local.app.deploy_pr" and result.get("status") == "complete"
+                    for result in approved_results
+                )
+                if is_delivery:
+                    item = {
+                        **item,
+                        "status": "completed",
+                        "error_message": None,
+                        "completed_at": datetime.now(UTC).isoformat(),
+                    }
+                    changed = True
+                else:
+                    item = {
+                        **item,
+                        "status": "pending",
+                        "error_message": None,
+                        "completed_at": None,
+                    }
+                    changed = True
             queue_items.append(item)
         if changed:
             scheduler["queue_items"] = queue_items
@@ -1895,10 +2686,14 @@ class MaestroOrchestratorService:
             f"{len(intents)} detected intent(s): {user_input[:180]}"
         )
 
-    def _registry_snapshot(self, domains, agents, tools) -> dict[str, Any]:
+    def _registry_snapshot(self, domains, agents, tools, skills=None) -> dict[str, Any]:
         return {
             "domains": [
-                {"key": domain.key, "name": domain.name, "context": domain.context}
+                {
+                    "key": domain.key,
+                    "name": domain.name,
+                    "context": _truncate_registry_text(domain.context, 500),
+                }
                 for domain in domains
             ],
             "agents": [self._selected_agent_payload(agent) for agent in agents],
@@ -1907,10 +2702,18 @@ class MaestroOrchestratorService:
                     "key": tool.key,
                     "name": tool.name,
                     "exclusive": tool.exclusive,
-                    "connected_domains": tool.connected_domains,
-                    "authorized_agents": tool.authorized_agents,
                 }
                 for tool in tools
+            ],
+            "skills": [
+                {
+                    "key": skill.key,
+                    "name": skill.name,
+                    "category": skill.category,
+                    "domain_key": skill.domain_key,
+                    "description": _truncate_registry_text(skill.description or skill.instruction, 260),
+                }
+                for skill in (skills or [])
             ],
         }
 
@@ -1919,17 +2722,10 @@ class MaestroOrchestratorService:
             "key": agent.key,
             "name": agent.name,
             "domain_key": agent.domain_key,
-            "role_summary": agent.role_summary,
-            "current_action": agent.current_action,
-            "allowed_tools": [
-                {
-                    "key": tool.key,
-                    "name": tool.name,
-                    "permission": tool.permission,
-                    "connection_id": tool.connection_id,
-                }
-                for tool in agent.allowed_tools
-            ],
+            "role_summary": _truncate_registry_text(agent.role_summary, 260),
+            "allowed_tool_keys": [tool.key for tool in agent.allowed_tools],
+            "allowed_skill_keys": [skill.key for skill in agent.allowed_skills],
+            "model_profile": agent.model_profile,
         }
         if user_input is not None:
             payload["selection_rationale"] = self._subtask_rationale(user_input, agent)
@@ -1954,7 +2750,7 @@ class MaestroOrchestratorService:
             "recurring_scheduler": "planned",
             "active_stage_index": None,
             "active_queue_item_id": None,
-            "current_step": "Not started.",
+            "current_step": "Proposed plan ready for review.",
             "queue_items": queue_items or [],
             "schedule_candidate": schedule_candidate,
             "scheduled_definition_id": None,
@@ -1965,9 +2761,15 @@ class MaestroOrchestratorService:
         user_input: str,
         work_items: list[MaestroWorkItem],
         subtasks: list[MaestroSubtask],
+        *,
+        schedule_guidance: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         lowered = user_input.lower()
-        trigger_type = self._schedule_trigger_type(lowered)
+        trigger_type = self._trigger_type_from_schedule_guidance(schedule_guidance)
+        if schedule_guidance and trigger_type is None:
+            return None
+        if trigger_type is None:
+            trigger_type = self._schedule_trigger_type(lowered)
         if trigger_type is None:
             return None
         if not any(item.needs_agent for item in work_items):
@@ -1975,16 +2777,19 @@ class MaestroOrchestratorService:
         primary_domain = subtasks[0].domain_key if subtasks else (work_items[0].domain_key if work_items else None)
         name_seed = next((item.title for item in work_items if item.needs_agent), "Scheduled Maestro workflow")
         key_seed = self._slug(f"{primary_domain or 'maestro'}-{name_seed}")
+        schedule_details = dict((schedule_guidance or {}).get("schedule_details") or {})
         if trigger_type == "event":
             trigger_config = {
-                "event_type": self._event_type_from_text(lowered),
+                "event_type": schedule_details.get("event_type") or self._event_type_from_text(lowered),
                 "filters": self._event_filters_from_text(lowered, primary_domain),
                 "source": "maestro_plan",
             }
+            if isinstance(schedule_details.get("filters"), dict):
+                trigger_config["filters"] = schedule_details["filters"]
         else:
             trigger_config = {
-                "time_of_day": self._time_of_day_from_text(lowered),
-                "interval_minutes": 1440,
+                "time_of_day": schedule_details.get("time_of_day") or self._time_of_day_from_text(lowered),
+                "interval_minutes": int(schedule_details.get("interval_minutes") or 1440),
                 "source": "maestro_plan",
             }
         return {
@@ -1998,7 +2803,77 @@ class MaestroOrchestratorService:
             "fairness_group": primary_domain or "maestro",
         }
 
+    def _schedule_guidance_from_classifier(self, user_input: str) -> dict[str, Any] | None:
+        match = re.search(
+            r"<maestro_hidden_context\b[^>]*purpose=\"message_intent\"[^>]*>(.*?)</maestro_hidden_context>",
+            user_input,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if not match:
+            return None
+        body = match.group(1)
+        json_start = body.find("{")
+        json_end = body.rfind("}")
+        if json_start < 0 or json_end <= json_start:
+            return None
+        try:
+            payload = json.loads(body[json_start : json_end + 1])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        intents = payload.get("intents") if isinstance(payload, dict) else None
+        if not isinstance(intents, list):
+            return None
+        timing_priority = {
+            "delete_schedule": 100,
+            "modify_schedule": 90,
+            "one_time": 80,
+            "triggered": 70,
+            "recurring": 65,
+            "scheduled": 60,
+            "unspecified": 0,
+        }
+        best: dict[str, Any] | None = None
+        best_score = 0
+        for intent in intents:
+            if not isinstance(intent, dict):
+                continue
+            if float(intent.get("confidence") or 0.0) < 0.55:
+                continue
+            if intent.get("type") not in {"workflow_request", "plan_refinement", "system_command"}:
+                continue
+            timing = str(intent.get("workflow_timing") or "unspecified")
+            score = timing_priority.get(timing, 0)
+            if score <= best_score:
+                continue
+            best_score = score
+            best = {
+                "workflow_timing": timing,
+                "schedule_details": intent.get("schedule_details") if isinstance(intent.get("schedule_details"), dict) else {},
+                "recommended_next_step": intent.get("recommended_next_step"),
+                "span": intent.get("span"),
+                "reason": intent.get("reason"),
+            }
+        return best
+
+    def _trigger_type_from_schedule_guidance(self, guidance: dict[str, Any] | None) -> str | None:
+        if not guidance:
+            return None
+        timing = str(guidance.get("workflow_timing") or "unspecified")
+        if timing in {"one_time", "modify_schedule", "delete_schedule", "unspecified"}:
+            return None
+        details = guidance.get("schedule_details") if isinstance(guidance.get("schedule_details"), dict) else {}
+        trigger_type = str(details.get("trigger_type") or "").lower()
+        if trigger_type == "event" or timing == "triggered":
+            return "event"
+        if trigger_type in {"scheduled", "recurring"}:
+            return "recurring"
+        if timing in {"scheduled", "recurring"}:
+            return "recurring"
+        return None
+
     def _schedule_trigger_type(self, lowered_input: str) -> str | None:
+        if self._negates_scheduling(lowered_input):
+            return None
         event_tokens = (
             "each time",
             "every time",
@@ -2023,6 +2898,21 @@ class MaestroOrchestratorService:
         if any(token in lowered_input for token in recurring_tokens):
             return "recurring"
         return None
+
+    def _negates_scheduling(self, lowered_input: str) -> bool:
+        negation_patterns = (
+            r"\bdo\s+not\s+schedu\w*",
+            r"\bdon't\s+schedu\w*",
+            r"\bnot\s+(?:a\s+)?(?:recurring|scheduled|schedule)",
+            r"\bno\s+(?:recurring|scheduled|schedule)",
+            r"\bnot\s+recurring\b",
+            r"\bone[-\s]?time\b",
+            r"\bonly\s+needs?\s+to\s+happen\s+once\b",
+            r"\brun\s+now\b",
+            r"\bqueue\s+it\s+for\s+execution\b",
+            r"\bnot\s+a\s+schedule\b",
+        )
+        return any(re.search(pattern, lowered_input) for pattern in negation_patterns)
 
     def _time_of_day_from_text(self, lowered_input: str) -> str:
         before_match = re.search(r"before\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", lowered_input)
@@ -2066,12 +2956,22 @@ class MaestroOrchestratorService:
         return filters
 
     def _tools_from_scheduled_text(self, lowered_input: str) -> list[str]:
+        return self._tools_from_request_text(lowered_input)
+
+    def _tools_from_request_text(self, lowered_input: str) -> list[str]:
         tools: list[str] = []
         if "email" in lowered_input or "gmail" in lowered_input:
             tools.extend(["gmail.message.search", "gmail.message.get"])
         if "backlog" in lowered_input or "github" in lowered_input:
             tools.extend(["github.issue.search", "github.issue.get"])
+        if any(token in lowered_input for token in ("sota", "state of the art", "web", "latest", "current", "research")):
+            tools.append("web.search")
         return tools
+
+    def _research_tools_from_text(self, lowered_input: str) -> list[str]:
+        if any(token in lowered_input for token in ("sota", "state of the art", "web", "latest", "current", "research")):
+            return ["web.search"]
+        return []
 
     def _is_schedule_definition_request(self, plan: MaestroPlan) -> bool:
         candidate = plan.scheduler.get("schedule_candidate")
@@ -2162,6 +3062,7 @@ class MaestroOrchestratorService:
             "scheduler": scheduler,
         }
         self.session.commit()
+        SchedulerService(self.session).enqueue_maestro_plan(task)
         SchedulerService(self.session).sync_run_status_from_task(task)
         self.session.refresh(task)
         return MaestroRun(
@@ -2204,6 +3105,10 @@ class MaestroOrchestratorService:
                     "work_item_ids": [item.id],
                     "depends_on_work_item_ids": item.dependencies,
                     "required_tools": item.required_tools,
+                    "required_skills": item.required_skills,
+                    "model_profile": item.model_profile,
+                    "model_tier": item.model_tier,
+                    "model_rationale": item.model_rationale,
                 }
             )
         return queue_items
@@ -2226,6 +3131,10 @@ class MaestroOrchestratorService:
                         "priority": subtask.priority,
                         "work_item_ids": subtask.work_item_ids or [],
                         "depends_on_work_item_ids": subtask.depends_on_work_item_ids or [],
+                        "required_skills": subtask.required_skills or [],
+                        "model_profile": subtask.model_profile,
+                        "model_tier": subtask.model_tier,
+                        "model_rationale": subtask.model_rationale,
                         "child_task_id": None,
                         "child_report_id": None,
                         "retry_count": 0,
@@ -2326,15 +3235,38 @@ class MaestroOrchestratorService:
         self.session.commit()
 
     def _current_scheduler_step(self, queue_items: list[dict[str, Any]]) -> dict[str, Any]:
-        priority_statuses = ("running", "retrying", "ready", "blocked", "pending", "failed")
+        if not queue_items:
+            return {
+                "active_stage_index": None,
+                "active_queue_item_id": None,
+                "current_step": "No executable agent work.",
+            }
+        priority_statuses = (
+            "running",
+            "retrying",
+            "approval_required",
+            "blocked",
+            "failed",
+            "ready",
+            "queued",
+            "pending",
+            "proposed",
+            "scheduled",
+        )
         for status in priority_statuses:
             item = next((item for item in queue_items if item.get("status") == status), None)
             if item:
                 agent_name = item.get("agent_name") or item.get("agent_key") or "agent"
                 if status == "blocked":
                     current_step = f"Waiting on {agent_name}: {item.get('error_message') or 'blocked'}"
-                elif status == "pending":
+                elif status == "approval_required":
+                    current_step = f"Waiting for approval: {agent_name}"
+                elif status == "scheduled":
+                    current_step = f"Scheduled: {agent_name}"
+                elif status == "queued":
                     current_step = f"Queued: {agent_name}"
+                elif status == "pending":
+                    current_step = f"Ready to queue: {agent_name}"
                 elif status == "failed":
                     current_step = f"Failed: {agent_name}"
                 else:
@@ -2344,10 +3276,22 @@ class MaestroOrchestratorService:
                     "active_queue_item_id": item.get("id"),
                     "current_step": current_step,
                 }
+        if all(item.get("status") == "completed" for item in queue_items):
+            return {
+                "active_stage_index": None,
+                "active_queue_item_id": None,
+                "current_step": "Workflow complete.",
+            }
+        if all(item.get("status") == "archived" for item in queue_items):
+            return {
+                "active_stage_index": None,
+                "active_queue_item_id": None,
+                "current_step": "Workflow archived.",
+            }
         return {
             "active_stage_index": None,
             "active_queue_item_id": None,
-            "current_step": "Workflow complete.",
+            "current_step": "Workflow state unknown.",
         }
 
     def _refined_plan_input(self, previous_plan: MaestroPlan, refinement: str) -> str:
@@ -2446,11 +3390,11 @@ class MaestroOrchestratorService:
             execution_mode=str(payload.get("execution_mode") or "propose_first"),
             planner_mode=str(payload.get("planner_mode") or "deterministic"),
             work_items=[
-                MaestroWorkItem(**work_item)
+                MaestroWorkItem(**_hydrate_work_item_payload(work_item))
                 for work_item in payload.get("work_items", [])
             ],
             intents=[MaestroIntent(**intent) for intent in payload.get("intents", [])],
-            subtasks=[MaestroSubtask(**subtask) for subtask in payload.get("subtasks", [])],
+            subtasks=[MaestroSubtask(**_hydrate_subtask_payload(subtask)) for subtask in payload.get("subtasks", [])],
             execution_stages=list(payload.get("execution_stages", [])),
             workflow_graph=dict(payload.get("workflow_graph", {})),
             is_chat_only=bool(payload.get("is_chat_only", False)),
@@ -2820,7 +3764,11 @@ class MaestroOrchestratorService:
         if not lines:
             completed = sum(1 for run in child_runs if run.status == "completed")
             lines.append(
-                f"I ran {len(child_runs)} delegated agent task(s); {completed} completed and the workflow status is `{status}`."
+                self._workflow_completion_lead(
+                    child_runs=child_runs,
+                    completed=completed,
+                    status=status,
+                )
             )
 
         if conversation:
@@ -2828,14 +3776,9 @@ class MaestroOrchestratorService:
         elif isinstance(change_summary, str) and change_summary.strip():
             lines.append(change_summary.strip())
         else:
-            agent_summaries = [
-                (run.output_text or run.execution_note or "").strip()
-                for run in child_runs
-                if (run.output_text or run.execution_note)
-                and not self._looks_like_json(run.output_text or "")
-            ]
+            agent_summaries = self._agent_completion_summaries(child_runs)
             if agent_summaries:
-                lines.append(self._plain_text_preview(agent_summaries[0], max_chars=450))
+                lines.append("What came back:\n" + "\n".join(agent_summaries[:4]))
 
         if isinstance(ci_status, str) and ci_status.strip():
             lines.append(f"Validation note: {ci_status.strip()}")
@@ -2853,7 +3796,116 @@ class MaestroOrchestratorService:
         if manual_test:
             lines.append(f"Manual test I recommend: {manual_test}")
 
-        return "\n\n".join(lines)
+        fallback = "\n\n".join(lines)
+        return self._conversational_completion_summary(
+            plan=plan,
+            child_runs=child_runs,
+            status=status,
+            fallback=fallback,
+            tool_activity=tool_activity,
+        )
+
+    def _conversational_completion_summary(
+        self,
+        *,
+        plan: MaestroPlan,
+        child_runs: list[AgentRunResult],
+        status: str,
+        fallback: str,
+        tool_activity: list[dict[str, Any]],
+    ) -> str:
+        settings = get_settings()
+        if settings.llm_provider == "openrouter" and not settings.openrouter_api_key:
+            return fallback
+        if settings.llm_provider == "openai" and not settings.openai_api_key:
+            return fallback
+        agent_evidence = []
+        for run in child_runs[:4]:
+            agent_evidence.append(
+                {
+                    "agent": run.agent.name,
+                    "status": run.status,
+                    "report_excerpt": self._plain_text_preview(
+                        run.output_text or run.execution_note or "",
+                        max_chars=1200,
+                    ),
+                    "error": run.error_message,
+                }
+            )
+        instructions = (
+            "You are Maestro speaking directly to Chris after a workflow run. Write like a capable "
+            "human assistant: concise, conversational, and clear about what matters. Do not simply "
+            "regurgitate the agent report. Mention the outcome, the most important finding, any "
+            "required action from Chris, and whether a report/artifact is available. Use first person "
+            "singular for Maestro. Keep it under 180 words. Use clean Markdown paragraphs or bullets."
+        )
+        input_text = json.dumps(
+            {
+                "workflow": plan.summary,
+                "status": status,
+                "fallback_summary": fallback,
+                "agent_evidence": agent_evidence,
+                "tool_activity": tool_activity[:8],
+            },
+            default=str,
+        )
+        try:
+            response = OpenAILLMClient().text_response(
+                instructions=instructions,
+                input_text=input_text,
+            )
+        except (LLMClientError, OSError, ValueError):
+            return fallback
+        return _strip_hidden_context(response.strip()) or fallback
+
+    def _workflow_completion_lead(
+        self,
+        *,
+        child_runs: list[AgentRunResult],
+        completed: int,
+        status: str,
+    ) -> str:
+        if status == "completed":
+            if len(child_runs) == 1:
+                return "I finished the workflow and brought the agent's findings back here."
+            return (
+                f"I finished the workflow and brought back reports from {completed} "
+                "delegated agent tasks."
+            )
+        if completed:
+            return (
+                f"The workflow is `{status}`. {completed} delegated agent task"
+                f"{'' if completed == 1 else 's'} completed, and I brought back what is available."
+            )
+        return f"The workflow finished with status `{status}`."
+
+    def _agent_completion_summaries(self, child_runs: list[AgentRunResult]) -> list[str]:
+        summaries: list[str] = []
+        for run in child_runs:
+            text = (run.output_text or run.execution_note or "").strip()
+            if not text or self._looks_like_json(text):
+                continue
+            summary = self._markdown_section(text, "Summary") or text
+            findings = self._markdown_section(text, "Findings")
+            next_steps = self._markdown_section(text, "Next Steps")
+            parts = [self._plain_text_preview(summary, max_chars=260)]
+            if findings:
+                parts.append("Found: " + self._plain_text_preview(findings, max_chars=220))
+            if next_steps:
+                parts.append("Next: " + self._plain_text_preview(next_steps, max_chars=180))
+            summaries.append(f"- {run.agent.name}: {' '.join(part for part in parts if part)}")
+        return summaries
+
+    def _markdown_section(self, text: str, heading: str) -> str | None:
+        pattern = re.compile(
+            rf"^##+\s+{re.escape(heading)}\s*$([\s\S]*?)(?=^##+\s+|\Z)",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        match = pattern.search(text)
+        if not match:
+            return None
+        content = match.group(1).strip()
+        return content or None
 
     def _conversation_from_output(self, parsed_output: dict[str, Any]) -> str | None:
         for key in ("conversation", "conversational_summary", "chat_summary"):
@@ -2973,85 +4025,3 @@ class MaestroOrchestratorService:
             }
             self.session.commit()
         return staged
-
-
-_DOMAIN_HINTS = {
-    "personal": ["personal", "calendar", "family", "life", "preference"],
-    "maestro-development": ["maestro", "orchestrator", "agent", "memory", "system", "code"],
-    "praxis": ["praxis", "partner", "tactical innovation", "transition", "training"],
-    "ophi": ["ophi", "product", "market", "research"],
-    "usma": ["usma", "cadet", "class", "teaching", "academic"],
-    "personal-irad-projects": ["irad", "prototype", "project"],
-    "l3": ["l3"],
-}
-
-_INTENT_TYPE_BY_WORK_ITEM = {
-    "workflow_task": "workflow",
-    "standalone_task": "task",
-    "contact": "contact",
-    "event": "event",
-    "decision": "decision",
-    "rfi": "rfi",
-    "memory_candidate": "memory_route",
-    "think_tank": "direct_chat",
-    "direct_response": "direct_chat",
-}
-
-_ROUTE_TYPE_BY_WORK_ITEM = {
-    "standalone_task": "task",
-    "contact": "contact",
-    "event": "event",
-    "decision": "decision_log",
-    "rfi": "human_input",
-    "think_tank": "think_tank",
-}
-
-_ACTION_BY_WORK_ITEM_TYPE = {
-    "workflow_task": "Generate agent-specific tasking and execute after approval.",
-    "standalone_task": "Route as a task/due-out unless it becomes part of a workflow.",
-    "contact": "Route as contact or CRM context.",
-    "event": "Route as event/calendar context.",
-    "decision": "Route as an auditable decision.",
-    "rfi": "Ask you directly or surface as human input needed.",
-    "memory_candidate": "Stage for memory curation at session close.",
-    "think_tank": "Capture as a think tank note until it matures.",
-    "direct_response": "Respond directly without workflow execution.",
-}
-
-_STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "by",
-    "for",
-    "from",
-    "have",
-    "in",
-    "is",
-    "it",
-    "me",
-    "of",
-    "on",
-    "or",
-    "our",
-    "that",
-    "the",
-    "this",
-    "to",
-    "we",
-    "with",
-    "you",
-}
-
-
-def _meaningful_tokens(text: str) -> set[str]:
-    normalized = "".join(character if character.isalnum() else " " for character in text.lower())
-    return {
-        token
-        for token in normalized.split()
-        if len(token) > 2 and token not in _STOPWORDS
-    }

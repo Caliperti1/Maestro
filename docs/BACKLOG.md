@@ -21,6 +21,12 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Maestro Development domain can create implementation work and support code changes through GitHub/Codex from the beginning.
 - Remote access path is documented using Tailscale or equivalent secure tunnel.
 
+## Near-Term Polish
+
+- Harden workflow report shape: standardize titles, executive summaries, findings, decisions,
+  links to run-log/provenance, generated artifacts, and explicit follow-up sections so reports are
+  pleasant for Chris to read and reliable for agents to retrieve.
+
 ---
 
 ## Milestone 0: Repository Foundation
@@ -32,11 +38,11 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Create `/app/api`
 - Create `/app/core`
 - Create `/app/agents`
-- Create `/app/domains`
 - Create `/app/memory`
 - Create `/app/tools`
 - Create `/app/db`
-- Create `/app/workflows`
+- Create `/app/llm`
+- Create `/app/maestro`
 - Create `/alembic`
 - Create `/tests`
 
@@ -416,6 +422,14 @@ Each domain brief should return:
 - Recommend follow-up meetings.
 - Log approved follow-ups as tasks.
 
+### 9.4.1 Email trigger hardening
+
+- Add a Gmail history/watch or polling trigger that enqueues domain email workflows when new mail
+  arrives.
+- Add per-domain email workflow templates so Praxis, Ophi, Maestro Development, and Personal can
+  reuse the same triage pattern with different credentials, skills, and notification policies.
+- Add domain policy controls for safe autonomous email writes such as marking obvious spam read.
+
 ### 9.5 Backlog grooming
 
 - Analyze current codebase gaps.
@@ -469,6 +483,26 @@ Recommended order:
 - Human approval required for write actions.
 - Log every tool call.
 - Store input/output payloads unless sensitive.
+- Add workflow-level model override policy when a recurring workflow should temporarily use a
+  different provider/model than the assigned agent default.
+- Implement approval-gated Google Workspace write tools now that OAuth setup includes future write
+  scopes: Docs create/update, Sheets create/update/append, Slides create/update, Gmail send/draft
+  policy hardening, and Calendar event creation once Calendar is added to the Google family.
+- Keep child-agent tool use LLM-led by default: each agent should plan tool calls with an LLM, run
+  tools, reason over tool outputs with the LLM, and replan for additional tool calls when results
+  are insufficient. Deterministic tool planning should remain a narrow fallback or direct URL/tool
+  dispatch helper, not a growing replacement for agent reasoning.
+
+### 11.2.1 Scheduler execution cutover
+
+- Change immediate workflow approval from inline `run_plan` execution to enqueue-and-return
+  semantics.
+- After Chris approves a workflow, move it to Active Workflows immediately and free the main Maestro
+  chat for unrelated work.
+- Let the scheduler worker claim runnable queue items in the background, respecting dependencies,
+  resource locks, and fairness across workflows.
+- Surface blockers, approvals, RFIs, completion notifications, reports, and run-log entries back
+  through the main Maestro channel without tying the chat to the active workflow.
 
 ### 11.3 Memory governance
 
@@ -476,6 +510,8 @@ Recommended order:
 - Add memory edit/delete workflow.
 - Add domain separation checks.
 - Add provenance display.
+- Add scoped auto-curation for completed workflow/session artifacts so the worker can process the
+  just-staged artifact without sweeping every historical dropbox inbox file.
 
 ### 11.4 Secrets management
 

@@ -61,6 +61,10 @@ export class MaestroApiBridge {
 
   private pollTimer: number | null = null;
 
+  private websocket: WebSocket | null = null;
+
+  private usingWebsocket = false;
+
   constructor(baseUrl: string, pollIntervalMs: number) {
     this.baseUrl = baseUrl;
     this.pollIntervalMs = pollIntervalMs;
@@ -85,24 +89,21 @@ export class MaestroApiBridge {
     this.connected = true;
     this.emit({ type: "connected" });
     this.ingestConversation(session.conversation);
-    this.startPolling();
+    this.startWebsocket();
   }
 
   async startNewSession(): Promise<void> {
-    const session = await apiJson<MaestroSessionResponse>(
-      this.baseUrl,
-      "/maestro/sessions/start",
-      { method: "POST" },
-    );
+    const session = await apiJson<MaestroSessionResponse>(this.baseUrl, "/maestro/sessions/active", {
+      method: "GET",
+    });
     this.conversationId = session.conversation.id;
-    this.seenMessageIds.clear();
     this.ingestConversation(session.conversation);
     this.emit({
       type: "incoming_message",
       message: createMessage(
         "system",
         "event",
-        "Started a new Maestro session from glasses double-click.",
+        "Listening in persistent Maestro channel.",
       ),
     });
   }
@@ -110,6 +111,7 @@ export class MaestroApiBridge {
   disconnect(): void {
     if (!this.connected) return;
     this.stopPolling();
+    this.stopWebsocket();
     this.connected = false;
     this.emit({ type: "disconnected" });
   }
@@ -209,6 +211,7 @@ export class MaestroApiBridge {
   }
 
   private startPolling(): void {
+    if (this.usingWebsocket) return;
     this.stopPolling();
     this.pollTimer = window.setInterval(() => {
       this.pollNow().catch((error: unknown) => {
@@ -226,6 +229,69 @@ export class MaestroApiBridge {
       window.clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+  }
+
+  private startWebsocket(): void {
+    this.stopWebsocket();
+
+    const wsUrl = this.toWebsocketUrl("/maestro/channel/ws");
+    try {
+      this.websocket = new WebSocket(wsUrl);
+    } catch {
+      this.usingWebsocket = false;
+      this.startPolling();
+      return;
+    }
+
+    this.websocket.onopen = () => {
+      this.usingWebsocket = true;
+      this.stopPolling();
+    };
+
+    this.websocket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as {
+          type?: string;
+          conversation?: MaestroConversation;
+        };
+        if (payload.type !== "conversation" || !payload.conversation) return;
+        this.conversationId = payload.conversation.id;
+        this.ingestConversation(payload.conversation);
+      } catch {
+        // Ignore malformed websocket payloads.
+      }
+    };
+
+    this.websocket.onerror = () => {
+      this.usingWebsocket = false;
+      this.startPolling();
+    };
+
+    this.websocket.onclose = () => {
+      this.usingWebsocket = false;
+      if (this.connected) {
+        this.startPolling();
+      }
+    };
+  }
+
+  private stopWebsocket(): void {
+    if (this.websocket) {
+      this.websocket.close();
+      this.websocket = null;
+    }
+    this.usingWebsocket = false;
+  }
+
+  private toWebsocketUrl(path: string): string {
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    if (this.baseUrl.startsWith("https://")) {
+      return `wss://${this.baseUrl.slice("https://".length)}${normalizedPath}`;
+    }
+    if (this.baseUrl.startsWith("http://")) {
+      return `ws://${this.baseUrl.slice("http://".length)}${normalizedPath}`;
+    }
+    return `ws://${this.baseUrl}${normalizedPath}`;
   }
 
   private emit(event: BridgeEvent): void {

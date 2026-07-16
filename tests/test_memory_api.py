@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import UTC, datetime
+import uuid
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.main import create_app
 from app.core.config import get_settings
 from app.db.models import (
+    Artifact,
     CalendarEvent,
     Contact,
     ContactAlias,
@@ -217,6 +219,35 @@ def test_routed_items_endpoint_can_return_all_statuses(
         "needs_input",
         "scheduled",
     }
+
+
+def test_routed_objects_api_promotes_pending_items_before_returning_stores(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    session.add(
+        RoutedItem(
+            domain_id=praxis.id,
+            route_type="contact",
+            title="Capture Alice Park as Praxis contact",
+            content="Alice Park is the Praxis technical lead.",
+            priority="normal",
+            status="open",
+            source_refs=[],
+            metadata_={},
+        )
+    )
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.get("/memory/routed-objects/contacts")
+
+    assert response.status_code == 200
+    assert response.json()["contacts"][0]["name"] == "Alice Park"
+    assert session.query(Contact).filter_by(name="Alice Park").count() == 1
 
 
 def test_routed_objects_api_returns_canonical_stores(
@@ -463,6 +494,117 @@ def test_routed_memory_service_dedupes_events(session: Session, tmp_path: Path) 
     assert [result.action for result in results] == ["created", "updated"]
 
 
+def test_routed_memory_service_canonicalizes_event_metadata_title(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Recorded meeting metadata",
+        content="Meeting with Ben Daniels about the Praxis partner follow-up.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "meeting-metadata"}],
+        metadata_={
+            "event_title": "Partner follow-up with Ben Daniels",
+            "summary": "Discuss Praxis partner follow-up.",
+            "attendees": [{"name": "Ben Daniels"}],
+            "location": "Zoom",
+        },
+    )
+    session.add(routed_item)
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([routed_item])
+
+    event = session.query(CalendarEvent).one()
+    assert event.title == "Partner follow-up with Ben Daniels"
+    assert event.summary == "Discuss Praxis partner follow-up."
+    assert event.location == "Zoom"
+    contact = session.query(Contact).one()
+    assert contact.name == "Ben Daniels"
+    assert event.attendees == [{"name": "Ben Daniels", "contact_id": str(contact.id)}]
+
+
+def test_routed_memory_service_enriches_event_fields_from_messy_text(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Capture event/calendar context",
+        content="Meeting with Chris F at 12 over Google Meet about the Praxis finance plan.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "messy-event"}],
+        metadata_={},
+    )
+    session.add(routed_item)
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([routed_item])
+
+    event = session.query(CalendarEvent).one()
+    contact = session.query(Contact).one()
+    assert event.title == "Meeting with Chris F"
+    assert event.start_at is not None
+    assert event.end_at is not None
+    assert (event.end_at - event.start_at).total_seconds() == 3600
+    assert event.location == "Google Meet"
+    assert event.attendees == [{"name": "Chris F", "contact_id": str(contact.id)}]
+    assert routed_item.metadata_["enrichment_source"] == "routed_item_enricher"
+
+
+def test_routed_memory_service_updates_incomplete_event_from_followup_reference(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    initial = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Recorded meeting metadata",
+        content="Meeting with Ben Daniels about the Praxis partner follow-up.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "initial"}],
+        metadata_={"attendees": [{"name": "Ben Daniels"}]},
+    )
+    followup = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Meeting with Ben",
+        content="That meeting with Ben was at 2.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "test", "id": "followup"}],
+        metadata_={"start_at": "2026-07-09T14:00:00-04:00", "attendees": [{"name": "Ben Daniels"}]},
+    )
+    session.add_all([initial, followup])
+    session.commit()
+
+    results = RoutedMemoryService(session).promote_items([initial, followup])
+
+    assert [result.action for result in results] == ["created", "updated"]
+    assert session.query(CalendarEvent).count() == 1
+    event = session.query(CalendarEvent).one()
+    assert event.title == "Meeting with Ben Daniels"
+    assert event.start_at is not None
+    assert "That meeting with Ben was at 2" in event.summary
+    contact = session.query(Contact).one()
+    assert event.attendees == [{"name": "Ben Daniels", "contact_id": str(contact.id)}]
+
+
 def test_routed_memory_service_resolves_events_by_time_and_title(
     session: Session,
     tmp_path: Path,
@@ -564,7 +706,15 @@ def test_routed_retrieval_and_edit_services(session: Session, tmp_path: Path) ->
         provenance={},
         metadata_={},
     )
-    session.add_all([contact, todo])
+    entity = Entity(
+        name="Example Corp",
+        normalized_name="example corp",
+        summary="Praxis partner organization.",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([contact, todo, entity])
     session.commit()
 
     client = _client(session, tmp_path)
@@ -580,6 +730,21 @@ def test_routed_retrieval_and_edit_services(session: Session, tmp_path: Path) ->
 
     assert update.status_code == 200
     assert update.json()["contact"]["summary"] == "Updated Praxis engagement contact."
+
+    todo_update = client.patch(
+        f"/memory/routed-objects/todos/{todo.id}",
+        json={"updates": {"due_at": "2026-07-10T17:00:00+00:00", "status": "in_progress"}},
+    )
+    entity_update = client.patch(
+        f"/memory/routed-objects/entities/{entity.id}",
+        json={"updates": {"name": "Example Corporation", "website": "https://example.com"}},
+    )
+
+    assert todo_update.status_code == 200
+    assert todo_update.json()["todo"]["status"] == "in_progress"
+    assert todo_update.json()["todo"]["due_at"].startswith("2026-07-10T17:00:00")
+    assert entity_update.status_code == 200
+    assert entity_update.json()["entity"]["name"] == "Example Corporation"
 
 
 def test_routed_hygiene_backfills_aliases_and_suggests_duplicates(
@@ -612,7 +777,117 @@ def test_routed_hygiene_backfills_aliases_and_suggests_duplicates(
     report = RoutedHygieneService(session).run_once()
 
     assert report.aliases_backfilled >= 2
-    assert any(item["object_type"] == "contact" for item in report.suggestions)
+    assert report.duplicates_merged == 1
+    assert session.query(Contact).filter(Contact.status != "archived").count() == 1
+
+
+def test_routed_hygiene_canonicalizes_display_fields(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    contact = Contact(
+        name="Capture Ben Daniels from XVIII Airborne Corps as Praxis engagement contact",
+        normalized_name="capture ben daniels from xviii airborne corps as praxis engagement contact",
+        summary="Ben Daniels is associated with XVIII Airborne Corps.",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    event = CalendarEvent(
+        domain_id=praxis.id,
+        title="Record meeting metadata: Ben Daniels meeting",
+        summary="Meeting with Ben Daniels occurred yesterday at 2 PM over Google Meet.",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([contact, event])
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+
+    assert report.display_fields_canonicalized == 2
+    assert session.query(Contact).one().name == "Ben Daniels"
+    assert session.query(CalendarEvent).one().title == "Meeting with Ben Daniels"
+
+
+def test_routed_hygiene_merges_high_confidence_duplicates(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    first_contact = Contact(
+        name="Ben Daniels",
+        normalized_name="ben daniels",
+        email="ben@example.com",
+        summary="First note.",
+        source_refs=[{"id": "contact-one"}],
+        provenance={},
+        metadata_={},
+    )
+    second_contact = Contact(
+        name="Ben Daniels",
+        normalized_name="ben daniels",
+        email=None,
+        summary="Second note.",
+        source_refs=[{"id": "contact-two"}],
+        provenance={},
+        metadata_={},
+    )
+    first_event = CalendarEvent(
+        domain_id=praxis.id,
+        title="Partner sync",
+        summary="First event note.",
+        start_at=datetime(2026, 7, 10, 16, 0, tzinfo=UTC),
+        source_refs=[{"id": "event-one"}],
+        provenance={},
+        metadata_={},
+    )
+    second_event = CalendarEvent(
+        domain_id=praxis.id,
+        title="Partner sync",
+        summary="Second event note.",
+        start_at=datetime(2026, 7, 10, 16, 0, tzinfo=UTC),
+        source_refs=[{"id": "event-two"}],
+        provenance={},
+        metadata_={},
+    )
+    first_todo = Todo(
+        domain_id=praxis.id,
+        title="Draft follow-up",
+        description="First todo note.",
+        source_refs=[{"id": "todo-one"}],
+        provenance={},
+        metadata_={},
+    )
+    second_todo = Todo(
+        domain_id=praxis.id,
+        title="Draft follow-up",
+        description="Second todo note.",
+        source_refs=[{"id": "todo-two"}],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([first_contact, second_contact, first_event, second_event, first_todo, second_todo])
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+
+    assert report.duplicates_merged == 3
+    contacts = session.query(Contact).all()
+    events = session.query(CalendarEvent).all()
+    todos = session.query(Todo).all()
+    assert len([contact for contact in contacts if contact.status != "archived"]) == 1
+    assert len([event for event in events if event.status != "archived"]) == 1
+    assert len([todo for todo in todos if todo.status != "archived"]) == 1
+    assert "Second note" in next(contact for contact in contacts if contact.status != "archived").summary
+    assert "Second event note" in next(event for event in events if event.status != "archived").summary
+    assert "Second todo note" in next(todo for todo in todos if todo.status != "archived").description
 
 
 def test_archive_memory_item_endpoint_hides_from_default_list(
@@ -649,6 +924,63 @@ def test_archive_memory_item_endpoint_hides_from_default_list(
     assert archive.json()["status"] == "archived"
     assert active.json()["items"] == []
     assert archived.json()["items"][0]["title"] == "Temporary API memory"
+
+
+def test_memory_artifacts_endpoint_lists_canonical_workflow_sources(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    artifact_id = uuid.uuid4()
+    artifact = Artifact(
+        id=artifact_id,
+        artifact_type="interaction_package",
+        name="Workflow run package",
+        uri=str(tmp_path / "workflow.md"),
+        mime_type="text/markdown",
+        metadata_={
+            "canonical_workflow_artifact": True,
+            "domain_key": "maestro-development",
+        },
+    )
+    ignored = Artifact(
+        artifact_type="raw_file",
+        name="Manual upload",
+        uri=str(tmp_path / "manual.md"),
+        mime_type="text/markdown",
+        metadata_={},
+    )
+    memory = MemoryItem(
+        scope="domain",
+        memory_type="summary",
+        title="Workflow artifact memory",
+        content="The workflow artifact generated durable context.",
+        impact_level="low",
+        importance=0.6,
+        metadata_={"artifact_id": str(artifact_id)},
+    )
+    proposal = MemoryProposal(
+        scope="domain",
+        memory_type="decision",
+        title="Workflow artifact proposal",
+        content="Review workflow artifact memory.",
+        impact_level="high",
+        status="proposed",
+        source_refs=[{"type": "artifact", "id": str(artifact_id)}],
+        metadata_={},
+    )
+    session.add_all([artifact, ignored, memory, proposal])
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.get("/memory/artifacts")
+
+    assert response.status_code == 200
+    artifacts = response.json()["artifacts"]
+    assert [item["name"] for item in artifacts] == ["Workflow run package"]
+    assert artifacts[0]["canonical"] is True
+    assert artifacts[0]["memory_count"] == 1
+    assert artifacts[0]["proposal_count"] == 1
 
 
 def test_memory_preview_listing_marks_in_progress_writes(

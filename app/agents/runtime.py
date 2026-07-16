@@ -1,3 +1,11 @@
+"""Agent registry, prompt aggregation, run-once execution, and artifact packaging.
+
+Agents are configured per domain, receive prompts through the aggregation service, and may request
+tools through the shared tool runtime. This module also packages agent interactions into artifacts
+that can enter the memory pipeline, which keeps execution traces separate from durable memory
+writes.
+"""
+
 import json
 import re
 import uuid
@@ -16,18 +24,20 @@ from app.db.models import (
     Domain,
     Report,
     RuntimeSetting,
+    Skill,
     Task,
     ToolCall,
     ToolConnection,
 )
-from app.db.repositories import AgentRepository, DomainRepository
+from app.db.repositories import AgentRepository, DomainRepository, SkillRepository
 from app.db.seed import seed_default_domains
-from app.llm.client import LLMClient, OpenAILLMClient
+from app.llm.client import LLMClient, OllamaLLMClient, OpenAILLMClient
 from app.memory.retrieval import (
     MemoryContextBundle,
     MemoryContextBundleRequest,
     MemoryRetrievalService,
 )
+from app.prompts import load_prompt
 from app.tools.runtime import (
     ToolExecutionRequest,
     ToolExecutionService,
@@ -48,6 +58,16 @@ class ToolManifestItem:
 
 
 @dataclass(frozen=True)
+class SkillManifestItem:
+    key: str
+    name: str
+    description: str
+    category: str
+    instruction: str
+    domain_key: str | None = None
+
+
+@dataclass(frozen=True)
 class AgentSpec:
     id: uuid.UUID
     key: str
@@ -59,6 +79,7 @@ class AgentSpec:
     memory_profile: str
     model_profile: str
     allowed_tools: list[ToolManifestItem]
+    allowed_skills: list[SkillManifestItem]
     is_active: bool
     current_action: str | None = None
     scheduled_actions: list[dict[str, Any]] = field(default_factory=list)
@@ -80,6 +101,19 @@ class ToolRegistryItem:
     description: str
     exclusive: bool
     connected_domains: list[str]
+    authorized_agents: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class SkillRegistryItem:
+    id: uuid.UUID
+    key: str
+    name: str
+    description: str | None
+    category: str
+    instruction: str
+    domain_key: str | None
+    is_active: bool
     authorized_agents: list[dict[str, str]]
 
 
@@ -122,6 +156,8 @@ class PromptPackageRequest:
     max_memory_items: int = 10
     max_memory_chars: int = 3500
     use_semantic: bool = True
+    required_skills: list[str] | None = None
+    model_profile: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +178,7 @@ class PromptPackage:
     user_context: str | None
     memory_context: MemoryContextBundle
     tool_manifest: list[ToolManifestItem]
+    skill_manifest: list[SkillManifestItem]
     output_contract: dict[str, Any]
     assembled_prompt: str
     created_at: str
@@ -201,6 +238,7 @@ class AgentRegistryService:
 
     def ensure_seed_agents(self) -> list[Agent]:
         seed_default_domains(self.session)
+        self._ensure_seed_skills()
         created_or_existing: list[Agent] = []
         repo = AgentRepository(self.session)
         domain_repo = DomainRepository(self.session)
@@ -208,17 +246,30 @@ class AgentRegistryService:
             existing = repo.get_by_key(seed["key"])
             if existing is not None:
                 capabilities = dict(existing.capabilities or {})
+                changed_existing = False
+                if not capabilities.get("model_profile") and seed.get("model_profile"):
+                    capabilities["model_profile"] = seed["model_profile"]
+                    existing.capabilities = capabilities
+                    changed_existing = True
                 if not capabilities.get("manual_tool_permissions"):
                     merged_permissions = dict(existing.tool_permissions or {})
-                    changed = False
                     for tool_key, permission in seed["tool_permissions"].items():
                         if tool_key not in merged_permissions:
                             merged_permissions[tool_key] = permission
-                            changed = True
-                    if changed:
+                            changed_existing = True
+                    if changed_existing:
                         existing.tool_permissions = merged_permissions
-                        self.session.commit()
-                        self.session.refresh(existing)
+                if not capabilities.get("manual_skill_permissions"):
+                    merged_skill_permissions = dict(existing.skill_permissions or {})
+                    for skill_key, permission in (seed.get("skill_permissions") or {}).items():
+                        if skill_key not in merged_skill_permissions:
+                            merged_skill_permissions[skill_key] = permission
+                            changed_existing = True
+                    if changed_existing:
+                        existing.skill_permissions = merged_skill_permissions
+                if changed_existing:
+                    self.session.commit()
+                    self.session.refresh(existing)
                 created_or_existing.append(existing)
                 continue
             domain = domain_repo.get_by_key(seed["domain_key"])
@@ -241,9 +292,96 @@ class AgentRegistryService:
                         "output_contract": _DEFAULT_OUTPUT_CONTRACT,
                     },
                     tool_permissions=seed["tool_permissions"],
+                    skill_permissions=seed.get("skill_permissions") or {},
                 )
             )
+        self._ensure_internal_default_tools()
+        self._ensure_research_agents_can_search_web()
         return created_or_existing
+
+    def _ensure_internal_default_tools(self) -> None:
+        changed = False
+        for agent in self.session.scalars(select(Agent).where(Agent.is_active.is_(True))).all():
+            permissions = _with_internal_default_tool_permissions(agent.tool_permissions or {})
+            if permissions == (agent.tool_permissions or {}):
+                continue
+            agent.tool_permissions = permissions
+            changed = True
+        if changed:
+            self.session.commit()
+
+    def _ensure_seed_skills(self) -> None:
+        domain_repo = DomainRepository(self.session)
+        skill_repo = SkillRepository(self.session)
+        changed = False
+        now = datetime.now(UTC)
+        for seed in _SEED_SKILLS:
+            domain = domain_repo.get_by_key(seed["domain_key"]) if seed.get("domain_key") else None
+            existing = skill_repo.get_by_key(seed["key"])
+            if existing is None:
+                self.session.add(
+                    Skill(
+                        key=seed["key"],
+                        name=seed["name"],
+                        description=seed["description"],
+                        category=seed["category"],
+                        instruction=seed["instruction"],
+                        domain_id=domain.id if domain else None,
+                        metadata_=seed.get("metadata") or {},
+                        is_active=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                changed = True
+                continue
+            if (existing.metadata_ or {}).get("manual_edit"):
+                continue
+            updates = {
+                "name": seed["name"],
+                "description": seed["description"],
+                "category": seed["category"],
+                "instruction": seed["instruction"],
+                "domain_id": domain.id if domain else None,
+                "metadata_": seed.get("metadata") or {},
+                "is_active": True,
+            }
+            for key, value in updates.items():
+                if getattr(existing, key) != value:
+                    setattr(existing, key, value)
+                    changed = True
+            if changed:
+                existing.updated_at = now
+        if changed:
+            self.session.commit()
+
+    def _ensure_research_agents_can_search_web(self) -> None:
+        changed = False
+        for agent in self.session.scalars(select(Agent).where(Agent.is_active.is_(True))).all():
+            permissions = dict(agent.tool_permissions or {})
+            if "web.search" in permissions:
+                continue
+            capabilities = agent.capabilities or {}
+            role_text = " ".join(
+                str(value or "")
+                for value in (
+                    agent.key,
+                    agent.name,
+                    agent.description,
+                    capabilities.get("role_summary") if isinstance(capabilities, dict) else "",
+                    capabilities.get("role_prompt") if isinstance(capabilities, dict) else "",
+                )
+            ).lower()
+            if "sota" not in role_text and "research" not in role_text:
+                continue
+            permissions["web.search"] = {
+                "permission": "read",
+                "description": "Search the web for current SOTA/research context with citations.",
+            }
+            agent.tool_permissions = permissions
+            changed = True
+        if changed:
+            self.session.commit()
 
     def list_specs(self) -> list[AgentSpec]:
         self.ensure_seed_agents()
@@ -335,6 +473,7 @@ class AgentRegistryService:
         memory_profile: str = "agent_prompt",
         model_profile: str = "default",
         tool_permissions: dict[str, Any] | None = None,
+        skill_permissions: dict[str, Any] | None = None,
         current_action: str | None = None,
     ) -> AgentSpec:
         self.ensure_seed_agents()
@@ -365,7 +504,8 @@ class AgentRegistryService:
             agent_type=agent_type.strip() or "domain_agent",
             description=capabilities["role_summary"],
             capabilities=capabilities,
-            tool_permissions=tool_permissions or {},
+            tool_permissions=_with_internal_default_tool_permissions(tool_permissions or {}),
+            skill_permissions=skill_permissions or {},
         )
         return self._spec_for_agent(agent, domain=domain)
 
@@ -378,6 +518,7 @@ class AgentRegistryService:
         memory_profile: str | None = None,
         model_profile: str | None = None,
         tool_permissions: dict[str, Any] | None = None,
+        skill_permissions: dict[str, Any] | None = None,
         current_action: str | None = None,
         scheduled_actions: list[dict[str, Any]] | None = None,
         is_active: bool | None = None,
@@ -401,8 +542,10 @@ class AgentRegistryService:
         if scheduled_actions is not None:
             capabilities["scheduled_actions"] = scheduled_actions
         if tool_permissions is not None:
-            agent.tool_permissions = tool_permissions
+            agent.tool_permissions = _with_internal_default_tool_permissions(tool_permissions)
             capabilities["manual_tool_permissions"] = True
+        if skill_permissions is not None:
+            agent.skill_permissions = skill_permissions
         if is_active is not None:
             agent.is_active = is_active
         agent.capabilities = capabilities
@@ -496,6 +639,96 @@ class AgentRegistryService:
             for tool_key in sorted(known_tool_keys)
         ]
 
+    def list_skills(self) -> list[SkillRegistryItem]:
+        self.ensure_seed_agents()
+        domains_by_id = {
+            domain.id: domain for domain in DomainRepository(self.session).list_active()
+        }
+        authorized_agents: dict[str, list[dict[str, str]]] = {}
+        for agent in self.session.scalars(select(Agent).where(Agent.is_active.is_(True))).all():
+            domain = domains_by_id.get(agent.domain_id)
+            if domain is None:
+                continue
+            for skill_key, value in (agent.skill_permissions or {}).items():
+                permission = value if isinstance(value, str) else value.get("permission", "use")
+                authorized_agents.setdefault(skill_key, []).append(
+                    {
+                        "agent_key": agent.key,
+                        "agent_name": agent.name,
+                        "domain_key": domain.key,
+                        "permission": str(permission),
+                    }
+                )
+        return [
+            SkillRegistryItem(
+                id=skill.id,
+                key=skill.key,
+                name=skill.name,
+                description=skill.description,
+                category=skill.category,
+                instruction=skill.instruction,
+                domain_key=domains_by_id.get(skill.domain_id).key
+                if skill.domain_id and domains_by_id.get(skill.domain_id)
+                else None,
+                is_active=skill.is_active,
+                authorized_agents=sorted(
+                    authorized_agents.get(skill.key, []),
+                    key=lambda item: (item["domain_key"], item["agent_key"]),
+                ),
+            )
+            for skill in SkillRepository(self.session).list_active()
+        ]
+
+    def upsert_skill(
+        self,
+        *,
+        key: str,
+        name: str,
+        instruction: str,
+        description: str | None = None,
+        category: str = "general",
+        domain_key: str | None = None,
+        is_active: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> SkillRegistryItem:
+        seed_default_domains(self.session)
+        cleaned_key = _slug(key)
+        if not cleaned_key:
+            raise AgentRuntimeError("Skill key cannot be blank.")
+        cleaned_name = name.strip()
+        cleaned_instruction = instruction.strip()
+        if not cleaned_name:
+            raise AgentRuntimeError("Skill name cannot be blank.")
+        if not cleaned_instruction:
+            raise AgentRuntimeError("Skill instruction cannot be blank.")
+        domain = DomainRepository(self.session).get_by_key(domain_key) if domain_key else None
+        if domain_key and domain is None:
+            raise AgentRuntimeError(f"Unknown domain: {domain_key}")
+        skill = SkillRepository(self.session).get_by_key(cleaned_key)
+        if skill is None:
+            skill = Skill(
+                key=cleaned_key,
+                name=cleaned_name,
+                instruction=cleaned_instruction,
+                description=description,
+                category=category.strip() or "general",
+                domain_id=domain.id if domain else None,
+                metadata_=metadata or {},
+                is_active=is_active,
+            )
+            self.session.add(skill)
+        else:
+            skill.name = cleaned_name
+            skill.instruction = cleaned_instruction
+            skill.description = description
+            skill.category = category.strip() or "general"
+            skill.domain_id = domain.id if domain else None
+            skill.metadata_ = metadata or {}
+            skill.is_active = is_active
+        self.session.commit()
+        self.session.refresh(skill)
+        return next(item for item in self.list_skills() if item.key == skill.key)
+
     def list_tool_connections(self) -> list[ToolConnectionSpec]:
         seed_default_domains(self.session)
         domains_by_id = {
@@ -588,10 +821,44 @@ class AgentRegistryService:
             memory_profile=capabilities.get("memory_profile") or "agent_prompt",
             model_profile=capabilities.get("model_profile") or "default",
             allowed_tools=self._tool_manifest(agent, domain=domain),
+            allowed_skills=self._skill_manifest(agent, domain=domain),
             is_active=agent.is_active,
             current_action=capabilities.get("current_action"),
             scheduled_actions=list(capabilities.get("scheduled_actions") or []),
         )
+
+    def _skill_manifest(self, agent: Agent, *, domain: Domain) -> list[SkillManifestItem]:
+        permissions = agent.skill_permissions or {}
+        if not permissions:
+            return []
+        skills = {
+            skill.key: skill
+            for skill in self.session.scalars(
+                select(Skill).where(Skill.is_active.is_(True))
+            ).all()
+        }
+        domains_by_id = {
+            found.id: found for found in DomainRepository(self.session).list_active()
+        }
+        manifest: list[SkillManifestItem] = []
+        for key in sorted(permissions):
+            skill = skills.get(key)
+            if skill is None:
+                continue
+            skill_domain = domains_by_id.get(skill.domain_id) if skill.domain_id else None
+            if skill_domain is not None and skill_domain.id != domain.id:
+                continue
+            manifest.append(
+                SkillManifestItem(
+                    key=skill.key,
+                    name=skill.name,
+                    description=skill.description or "",
+                    category=skill.category,
+                    instruction=skill.instruction,
+                    domain_key=skill_domain.key if skill_domain else None,
+                )
+            )
+        return manifest
 
     def _tool_manifest(self, agent: Agent, *, domain: Domain) -> list[ToolManifestItem]:
         permissions = agent.tool_permissions or {}
@@ -649,7 +916,13 @@ class PromptAggregationService:
         if domain is None:
             raise AgentRuntimeError(f"Unknown domain for agent: {spec.domain_key}")
 
-        query_text = request.query_text or request.task_instruction
+        query_text = _memory_query_for_prompt_package(
+            request=request,
+            agent=spec,
+            domain_name=domain.name,
+            domain_key=domain.key,
+            domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
+        )
         memory_context = MemoryRetrievalService(self.session).build_context_bundle(
             MemoryContextBundleRequest(
                 profile=spec.memory_profile,  # type: ignore[arg-type]
@@ -664,6 +937,8 @@ class PromptAggregationService:
         )
         global_context = self.registry.get_global_context().context
         output_contract = _DEFAULT_OUTPUT_CONTRACT
+        prompt_task_instruction = _compact_task_instruction_for_prompt(request.task_instruction)
+        skill_manifest = _scoped_skill_manifest(spec.allowed_skills, request.required_skills)
         return PromptPackage(
             agent=spec,
             task_instruction=request.task_instruction,
@@ -674,15 +949,17 @@ class PromptAggregationService:
             user_context=request.user_context,
             memory_context=memory_context,
             tool_manifest=spec.allowed_tools,
+            skill_manifest=skill_manifest,
             output_contract=output_contract,
             assembled_prompt=self._render_prompt(
                 global_context=global_context,
                 domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
                 role_prompt=spec.role_prompt,
-                task_instruction=request.task_instruction,
+                task_instruction=prompt_task_instruction,
                 user_context=request.user_context,
                 memory_text=memory_context.rendered_text,
                 tools=spec.allowed_tools,
+                skills=skill_manifest,
                 output_contract=output_contract,
             ),
             created_at=datetime.now(UTC).isoformat(),
@@ -698,6 +975,7 @@ class PromptAggregationService:
         user_context: str | None,
         memory_text: str,
         tools: list[ToolManifestItem],
+        skills: list[SkillManifestItem],
         output_contract: dict[str, Any],
     ) -> str:
         sections = [
@@ -710,6 +988,12 @@ class PromptAggregationService:
             sections.append(("User Context", user_context))
         if memory_text:
             sections.append(("Retrieved Memory", memory_text))
+        if skills:
+            skills_text = "\n\n".join(
+                f"### {skill.name} (`{skill.key}`)\n{skill.instruction}"
+                for skill in skills
+            )
+            sections.append(("Assigned Skills", skills_text))
         tools_text = "\n".join(
             f"- {tool.key} ({tool.permission}): {tool.description or tool.name}"
             for tool in tools
@@ -751,6 +1035,7 @@ class PromptAggregationService:
                 "run_id": run_id,
                 "caller": request.caller,
                 "query_text": request.query_text,
+                "memory_query_text": package.memory_context.request.query_text,
                 "execute_llm": execute_llm,
                 "stage_interaction": stage_interaction,
                 "auto_tool_loop": auto_tool_loop,
@@ -759,6 +1044,10 @@ class PromptAggregationService:
                     "task_instruction": request.task_instruction,
                     "user_context": request.user_context,
                     "assembled_prompt_chars": len(package.assembled_prompt),
+                    "raw_task_instruction_chars": len(request.task_instruction),
+                    "prompt_task_instruction_chars": len(
+                        _compact_task_instruction_for_prompt(request.task_instruction)
+                    ),
                     "memory_included_count": package.memory_context.included_count,
                     "semantic_status": package.memory_context.semantic_status,
                 },
@@ -807,10 +1096,8 @@ class PromptAggregationService:
         if execute_llm:
             llm_client = self.llm_client
             if llm_client is None:
-                llm_client = OpenAILLMClient(
-                    model=(
-                        package.agent.model_profile if package.agent.model_profile != "default" else None
-                    )
+                llm_client = _llm_client_for_model_profile(
+                    request.model_profile or package.agent.model_profile
                 )
             if auto_tool_loop:
                 loop_results = self._run_auto_tool_loop(
@@ -823,13 +1110,14 @@ class PromptAggregationService:
                 tool_call_payloads.extend(loop_results["tool_calls"])
                 tool_loop_trace = loop_results["trace"]
             if any(call.get("status") == "approval_required" for call in tool_call_payloads):
+                user_display_name = get_settings().user_display_name
                 task.status = "blocked"
                 task.output_payload = {
                     "run_id": run_id,
                     "tool_call_count": len(tool_call_payloads),
                     "approval_required": True,
                 }
-                task.error_message = "Waiting for Chris to approve tool use."
+                task.error_message = f"Waiting for {user_display_name} to approve tool use."
                 self._set_agent_current_action(
                     package.agent.key,
                     f"Waiting for approval: {request.task_instruction[:160]}",
@@ -837,18 +1125,21 @@ class PromptAggregationService:
                 )
                 self.session.commit()
                 self.session.refresh(task)
-                execution_note = "Agent run paused while waiting for Chris to approve tool use."
+                execution_note = f"Agent run paused while waiting for {user_display_name} to approve tool use."
                 status = "blocked"
             else:
                 assembled_prompt = package.assembled_prompt
                 if tool_call_payloads:
+                    compact_tool_results = _compact_tool_results_for_prompt(tool_call_payloads)
                     assembled_prompt = (
                         f"{assembled_prompt}\n\n## Tool Results\n"
-                        "The following tool calls have already been executed by Maestro. "
+                        "The following compact tool-result evidence has already been executed by Maestro. "
+                        "Full raw tool outputs remain stored in Maestro by tool_call_id; use these "
+                        "summaries as evidence and call out if a full artifact/file read is needed. "
                         "Use these results as evidence in your report. Do not emit tool-call XML, "
                         "JSON function-call requests, or instructions to call more tools; instead, "
                         "state any additional tool access needed as an open question or next step.\n\n"
-                        f"{json.dumps(tool_call_payloads, indent=2)}"
+                        f"{json.dumps(compact_tool_results, indent=2)}"
                     )
                 tool_call = ToolCall(
                     task_id=task.id,
@@ -856,8 +1147,15 @@ class PromptAggregationService:
                     tool_name="llm.gateway",
                     input_payload={
                         "provider": getattr(llm_client, "provider", "configured"),
-                        "model": package.agent.model_profile,
+                        "model": request.model_profile or package.agent.model_profile,
                         "prompt_chars": len(assembled_prompt),
+                        "base_prompt_chars": len(package.assembled_prompt),
+                        "tool_result_raw_chars": len(json.dumps(tool_call_payloads, default=str)),
+                        "tool_result_prompt_chars": len(
+                            json.dumps(_compact_tool_results_for_prompt(tool_call_payloads), default=str)
+                        )
+                        if tool_call_payloads
+                        else 0,
                     },
                     status="running",
                     started_at=datetime.now(UTC),
@@ -969,7 +1267,7 @@ class PromptAggregationService:
             self.session.commit()
             self.session.refresh(task)
             execution_note = (
-                "Manual run prepared without an LLM call. The scheduler is stubbed, but prompt, "
+                "Manual run prepared without an LLM call. Prompt, "
                 "scoped memory, tool manifest, and artifact packaging are verified."
             )
 
@@ -1021,10 +1319,9 @@ class PromptAggregationService:
             agent=package.agent,
             prompt_package=package,
             scheduler={
-                "status": "stubbed",
+                "status": "manual_run",
                 "reason": (
-                    "Master scheduler/resource-conflict policy is planned "
-                    "but not implemented."
+                    "This direct run-once path bypasses the durable scheduler queue."
                 ),
             },
             execution_note=execution_note,
@@ -1069,17 +1366,51 @@ class PromptAggregationService:
             self.session.commit()
             self.session.refresh(planner_call)
             try:
+                tool_planner_input = self._render_tool_planner_input(
+                    package=package,
+                    prior_results=prior_results,
+                    iteration=index + 1,
+                )
+                planner_call.input_payload = {
+                    **planner_call.input_payload,
+                    "prompt_chars": len(tool_planner_input),
+                    "base_prompt_chars": len(package.assembled_prompt),
+                    "prior_result_raw_chars": len(json.dumps(prior_results, default=str)),
+                    "prior_result_prompt_chars": len(
+                        json.dumps(_compact_tool_results_for_prompt(prior_results), default=str)
+                    ),
+                }
+                self.session.commit()
+                planner_source = "llm_planner"
                 plan = llm_client.structured_response(
                     instructions=_TOOL_PLANNER_INSTRUCTIONS,
-                    input_text=self._render_tool_planner_input(
-                        package=package,
-                        prior_results=prior_results,
-                        iteration=index + 1,
-                    ),
+                    input_text=tool_planner_input,
                     schema_name="agent_tool_plan",
                     schema=_TOOL_PLAN_SCHEMA,
                 )
                 requested = _normalize_tool_plan(plan)
+                fallback_reason = ""
+                if not requested and _should_try_deterministic_tool_fallback(package, prior_results):
+                    requested = _deterministic_tool_plan(
+                        package=package,
+                        prior_results=prior_results,
+                        iteration=index + 1,
+                    )
+                    if requested:
+                        planner_source = "deterministic_fallback"
+                        fallback_reason = "LLM planner returned no executable tool calls for an obvious supported input."
+                        plan = {
+                            "plan_summary": "Used deterministic fallback after the LLM planner returned no executable tool calls.",
+                            "requires_final_answer": True,
+                            "tool_calls": [
+                                {
+                                    "tool_key": item["tool_key"],
+                                    "payload_json": json.dumps(item.get("payload") or {}),
+                                    "rationale": item.get("rationale") or "",
+                                }
+                                for item in requested
+                            ],
+                        }
                 requested = _hydrate_pr_tool_payloads(
                     requested,
                     prior_results,
@@ -1090,6 +1421,8 @@ class PromptAggregationService:
                     "plan_summary": plan.get("plan_summary"),
                     "tool_call_count": len(requested),
                     "requires_final_answer": bool(plan.get("requires_final_answer", True)),
+                    "planner_source": planner_source,
+                    "fallback_reason": fallback_reason or None,
                 }
                 planner_call.completed_at = datetime.now(UTC)
                 self.session.commit()
@@ -1106,6 +1439,8 @@ class PromptAggregationService:
                 iteration_trace = {
                     "iteration": index + 1,
                     "plan_summary": plan.get("plan_summary"),
+                    "planner_source": planner_source,
+                    "fallback_reason": fallback_reason or None,
                     "requested_tools": requested,
                     "executed": [],
                     "blocked": [],
@@ -1113,57 +1448,68 @@ class PromptAggregationService:
                 if not requested:
                     trace["iterations"].append(iteration_trace)
                     break
-                for requested_tool in requested:
-                    tool_key = requested_tool["tool_key"]
-                    if tool_key not in _AUTO_TOOL_SAFE_TOOL_KEYS:
-                        policy = _TOOL_SAFETY_POLICIES.get(
-                            tool_key,
-                            {
-                                "level": "approval_required",
-                                "reason": "Tool is not approved for autonomous execution.",
-                            },
-                        )
-                        blocked = {
-                            "tool_key": tool_key,
-                            "payload": requested_tool.get("payload") or {},
-                            "safety_level": policy["level"],
-                            "reason": policy["reason"],
-                            "rationale": requested_tool.get("rationale"),
-                        }
-                        iteration_trace["blocked"].append(blocked)
-                        proposed = tool_service.propose_for_task(
-                            ToolExecutionRequest(
-                                agent_key=package.agent.key,
-                                tool_key=tool_key,
-                                payload=requested_tool.get("payload") or {},
-                                dry_run=False,
-                            ),
-                            task=task,
-                            rationale=requested_tool.get("rationale"),
-                            safety_level=str(policy["level"]),
-                            reason=str(policy["reason"]),
-                        )
-                        blocked_payload = tool_result_payload(proposed)
-                        executed_calls.append(blocked_payload)
-                        prior_results.append(blocked_payload)
-                        continue
-                    result = tool_service.execute_for_task(
-                        ToolExecutionRequest(
-                            agent_key=package.agent.key,
-                            tool_key=tool_key,
-                            payload=requested_tool.get("payload") or {},
-                            dry_run=False,
-                        ),
-                        task=task,
-                    )
-                    payload = tool_result_payload(result)
-                    executed_calls.append(payload)
-                    prior_results.append(payload)
-                    iteration_trace["executed"].append(payload)
+                self._execute_auto_tool_requests(
+                    tool_service=tool_service,
+                    package=package,
+                    task=task,
+                    requested=requested,
+                    iteration_trace=iteration_trace,
+                    executed_calls=executed_calls,
+                    prior_results=prior_results,
+                )
                 trace["iterations"].append(iteration_trace)
                 if iteration_trace["blocked"] or not iteration_trace["executed"]:
                     break
             except Exception as exc:
+                fallback_requested = _deterministic_tool_plan(
+                    package=package,
+                    prior_results=prior_results,
+                    iteration=index + 1,
+                )
+                if fallback_requested:
+                    planner_call.status = "complete"
+                    planner_call.error_message = None
+                    planner_call.output_payload = {
+                        "plan_summary": "Used deterministic fallback after the LLM tool planner failed.",
+                        "tool_call_count": len(fallback_requested),
+                        "requires_final_answer": True,
+                        "planner_source": "deterministic_fallback",
+                        "fallback_reason": str(exc),
+                    }
+                    planner_call.completed_at = datetime.now(UTC)
+                    self.session.commit()
+                    self.session.refresh(planner_call)
+                    planner_payload = {
+                        "id": str(planner_call.id),
+                        "tool_name": planner_call.tool_name,
+                        "status": planner_call.status,
+                        "error_message": planner_call.error_message,
+                        "input_payload": planner_call.input_payload,
+                        "output_payload": planner_call.output_payload,
+                    }
+                    executed_calls.append(planner_payload)
+                    iteration_trace = {
+                        "iteration": index + 1,
+                        "plan_summary": planner_call.output_payload["plan_summary"],
+                        "planner_source": "deterministic_fallback",
+                        "fallback_reason": str(exc),
+                        "requested_tools": fallback_requested,
+                        "executed": [],
+                        "blocked": [],
+                    }
+                    self._execute_auto_tool_requests(
+                        tool_service=tool_service,
+                        package=package,
+                        task=task,
+                        requested=fallback_requested,
+                        iteration_trace=iteration_trace,
+                        executed_calls=executed_calls,
+                        prior_results=prior_results,
+                    )
+                    trace["iterations"].append(iteration_trace)
+                    if iteration_trace["blocked"] or not iteration_trace["executed"]:
+                        break
+                    continue
                 planner_call.status = "failed"
                 planner_call.error_message = str(exc)
                 planner_call.completed_at = datetime.now(UTC)
@@ -1192,6 +1538,66 @@ class PromptAggregationService:
         trace["max_iterations"] = bounded_iterations
         return {"tool_calls": executed_calls, "trace": trace}
 
+    def _execute_auto_tool_requests(
+        self,
+        *,
+        tool_service: ToolExecutionService,
+        package: PromptPackage,
+        task: Task,
+        requested: list[dict[str, Any]],
+        iteration_trace: dict[str, Any],
+        executed_calls: list[dict[str, Any]],
+        prior_results: list[dict[str, Any]],
+    ) -> None:
+        for requested_tool in requested:
+            tool_key = requested_tool["tool_key"]
+            payload = requested_tool.get("payload") or {}
+            if tool_key not in _AUTO_TOOL_SAFE_TOOL_KEYS:
+                policy = _TOOL_SAFETY_POLICIES.get(
+                    tool_key,
+                    {
+                        "level": "approval_required",
+                        "reason": "Tool is not approved for autonomous execution.",
+                    },
+                )
+                blocked = {
+                    "tool_key": tool_key,
+                    "payload": payload,
+                    "safety_level": policy["level"],
+                    "reason": policy["reason"],
+                    "rationale": requested_tool.get("rationale"),
+                }
+                iteration_trace["blocked"].append(blocked)
+                proposed = tool_service.propose_for_task(
+                    ToolExecutionRequest(
+                        agent_key=package.agent.key,
+                        tool_key=tool_key,
+                        payload=payload,
+                        dry_run=False,
+                    ),
+                    task=task,
+                    rationale=requested_tool.get("rationale"),
+                    safety_level=str(policy["level"]),
+                    reason=str(policy["reason"]),
+                )
+                blocked_payload = tool_result_payload(proposed)
+                executed_calls.append(blocked_payload)
+                prior_results.append(blocked_payload)
+                continue
+            result = tool_service.execute_for_task(
+                ToolExecutionRequest(
+                    agent_key=package.agent.key,
+                    tool_key=tool_key,
+                    payload=payload,
+                    dry_run=False,
+                ),
+                task=task,
+            )
+            result_payload = tool_result_payload(result)
+            executed_calls.append(result_payload)
+            prior_results.append(result_payload)
+            iteration_trace["executed"].append(result_payload)
+
     def _render_tool_planner_input(
         self,
         *,
@@ -1202,23 +1608,15 @@ class PromptAggregationService:
         allowed_tools = [
             {
                 "key": tool.key,
-                "name": tool.name,
                 "permission": tool.permission,
-                "description": tool.description,
-                "safety": _TOOL_SAFETY_POLICIES.get(
-                    tool.key,
-                    {
-                        "level": "approval_required",
-                        "auto_executable": False,
-                        "reason": "Tool is not approved for autonomous execution.",
-                    },
-                ),
+                "safety": _compact_tool_safety(tool.key),
             }
             for tool in package.tool_manifest
         ]
+        prompt_brief = _tool_planning_prompt_brief(package)
         return "\n\n".join(
             [
-                package.assembled_prompt,
+                prompt_brief,
                 "## Tool Planning Context",
                 (
                     f"Iteration: {iteration}\n"
@@ -1230,7 +1628,10 @@ class PromptAggregationService:
                     "report and let Maestro propose additional external actions separately."
                 ),
                 "## Allowed Tool Manifest\n" + json.dumps(allowed_tools, indent=2),
-                "## Prior Tool Results\n" + json.dumps(prior_results, indent=2),
+                "## Prior Tool Results\n" + json.dumps(
+                    _compact_tool_results_for_prompt(prior_results),
+                    indent=2,
+                ),
             ]
         )
 
@@ -1390,6 +1791,193 @@ def _normalize_tool_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return normalized[:5]
 
 
+def _deterministic_tool_plan(
+    *,
+    package: PromptPackage,
+    prior_results: list[dict[str, Any]],
+    iteration: int,
+) -> list[dict[str, Any]]:
+    allowed = {tool.key for tool in package.tool_manifest}
+    task_text = package.task_instruction.lower()
+    prompt = f"{package.task_instruction}\n\n{package.assembled_prompt}".lower()
+    google_plan = _deterministic_google_workspace_file_plan(
+        allowed=allowed,
+        prompt=prompt,
+        prior_results=prior_results,
+    )
+    if google_plan:
+        return google_plan
+    if (
+        "gmail.message.list_recent" in allowed
+        and "gmail.message.get" in allowed
+        and "email" in task_text
+        and any(token in task_text for token in ("latest", "recent", "inbox"))
+    ):
+        requested_count = _requested_email_count(task_text)
+        if not _has_tool_result(prior_results, "gmail.message.list_recent"):
+            return [
+                {
+                    "tool_key": "gmail.message.list_recent",
+                    "payload": {
+                        "limit": requested_count,
+                        "newer_than_days": 365,
+                        "unread_only": False,
+                    },
+                    "rationale": "Read recent Praxis Gmail message metadata before summarizing it.",
+                }
+            ]
+        missing_message_ids = _gmail_message_ids_missing_body(prior_results)[:requested_count]
+        if missing_message_ids:
+            return [
+                {
+                    "tool_key": "gmail.message.get",
+                    "payload": {
+                        "message_id": message_id,
+                        "max_body_chars": 6000,
+                    },
+                    "rationale": "Read the selected Gmail message body for triage.",
+                }
+                for message_id in missing_message_ids
+            ]
+    return []
+
+
+def _should_try_deterministic_tool_fallback(
+    package: PromptPackage,
+    prior_results: list[dict[str, Any]],
+) -> bool:
+    allowed = {tool.key for tool in package.tool_manifest}
+    task_text = package.task_instruction.lower()
+    prompt = f"{package.task_instruction}\n\n{package.assembled_prompt}".lower()
+    if _deterministic_google_workspace_file_plan(
+        allowed=allowed,
+        prompt=prompt,
+        prior_results=prior_results,
+    ):
+        return True
+    return (
+        "gmail.message.list_recent" in allowed
+        and "gmail.message.get" in allowed
+        and "email" in task_text
+        and any(token in task_text for token in ("latest", "recent", "inbox"))
+    )
+
+
+def _deterministic_google_workspace_file_plan(
+    *,
+    allowed: set[str],
+    prompt: str,
+    prior_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    url = _google_workspace_url_from_text(prompt)
+    if not url:
+        return []
+    file_id = _google_file_id_from_url_text(url)
+    payload = {"url": url}
+    if file_id:
+        payload["file_id"] = file_id
+    if "/presentation/" in url and "google.slides.get" in allowed and not _has_tool_result(prior_results, "google.slides.get"):
+        return [
+            {
+                "tool_key": "google.slides.get",
+                "payload": payload,
+                "rationale": "Read the linked Google Slides deck enough to verify readability.",
+            }
+        ]
+    if "/document/" in url and "google.docs.get" in allowed and not _has_tool_result(prior_results, "google.docs.get"):
+        return [
+            {
+                "tool_key": "google.docs.get",
+                "payload": payload,
+                "rationale": "Read the linked Google Doc enough to verify readability.",
+            }
+        ]
+    if "/spreadsheets/" in url and "google.sheets.get" in allowed and not _has_tool_result(prior_results, "google.sheets.get"):
+        return [
+            {
+                "tool_key": "google.sheets.get",
+                "payload": payload,
+                "rationale": "Read Google Sheets metadata for the linked spreadsheet.",
+            }
+        ]
+    if any(marker in url for marker in ("/presentation/", "/document/", "/spreadsheets/")):
+        return []
+    if "google.drive.file.get" in allowed and not _has_tool_result(prior_results, "google.drive.file.get"):
+        return [
+            {
+                "tool_key": "google.drive.file.get",
+                "payload": payload,
+                "rationale": "Read Google Drive metadata for the linked Google Workspace file.",
+            }
+        ]
+    return []
+
+
+def _google_workspace_url_from_text(text: str) -> str | None:
+    match = re.search(r"https?://(?:(?:docs|drive)\.google\.com|meet\.google\.com)/[^\s<>)\"']+", text)
+    if not match:
+        return None
+    return match.group(0).rstrip(".,;]")
+
+
+def _google_file_id_from_url_text(url: str) -> str | None:
+    for pattern in (
+        r"/document/d/([^/?#]+)",
+        r"/spreadsheets/d/([^/?#]+)",
+        r"/presentation/d/([^/?#]+)",
+        r"/file/d/([^/?#]+)",
+        r"[?&]id=([^&#]+)",
+    ):
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _has_tool_result(prior_results: list[dict[str, Any]], tool_name: str) -> bool:
+    return any(
+        isinstance(result, dict)
+        and result.get("tool_name") == tool_name
+        and result.get("status") in {"complete", "approval_required"}
+        for result in prior_results
+    )
+
+
+def _requested_email_count(prompt: str) -> int:
+    match = re.search(r"\b(?:latest|recent|last)\s+(\d{1,2})\s+(?:emails?|messages?)\b", prompt)
+    if not match:
+        return 1
+    return max(1, min(int(match.group(1)), 5))
+
+
+def _gmail_message_ids_missing_body(prior_results: list[dict[str, Any]]) -> list[str]:
+    fetched_ids = {
+        str(output.get("message_id") or output.get("id"))
+        for result in prior_results
+        if isinstance(result, dict) and result.get("tool_name") == "gmail.message.get"
+        for output in [result.get("output_payload")]
+        if isinstance(output, dict) and (output.get("message_id") or output.get("id"))
+    }
+    for result in reversed(prior_results):
+        if not isinstance(result, dict) or result.get("tool_name") != "gmail.message.list_recent":
+            continue
+        output = result.get("output_payload")
+        if not isinstance(output, dict):
+            continue
+        messages = output.get("messages")
+        if not isinstance(messages, list) or not messages:
+            continue
+        message_ids = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            message_id = message.get("message_id") or message.get("id")
+            if message_id and str(message_id) not in fetched_ids:
+                message_ids.append(str(message_id))
+        return message_ids
+    return []
+
+
 def _hydrate_pr_tool_payloads(
     requested_tools: list[dict[str, Any]],
     prior_results: list[dict[str, Any]],
@@ -1522,6 +2110,41 @@ _DEFAULT_OUTPUT_CONTRACT = {
 }
 
 _TOOL_SAFETY_POLICIES = {
+    "memory.context_bundle": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Internal read-only retrieval from Maestro memory for RAG context.",
+    },
+    "routed.item.create": {
+        "level": "internal_write",
+        "auto_executable": True,
+        "reason": "Creates internal routed-memory candidates with provenance inside Maestro.",
+    },
+    "reports.search": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Internal read-only retrieval from completed workflow reports.",
+    },
+    "reports.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Internal read-only retrieval of a specific workflow report.",
+    },
+    "artifact.stage_interaction": {
+        "level": "internal_artifact_staging",
+        "auto_executable": True,
+        "reason": "Internal deferred artifact staging; Maestro stages final reports after completion.",
+    },
+    "llm.gateway": {
+        "level": "internal_reasoning",
+        "auto_executable": True,
+        "reason": "Internal LLM reasoning call for an authorized agent task.",
+    },
+    "web.search": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only web search and synthesis through the authorized LLM provider.",
+    },
     "github.repo.get": {
         "level": "safe_read",
         "auto_executable": True,
@@ -1571,6 +2194,11 @@ _TOOL_SAFETY_POLICIES = {
         "level": "safe_read",
         "auto_executable": True,
         "reason": "Read-only pull request check inspection.",
+    },
+    "github.read": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only aggregate GitHub repository inspection.",
     },
     "github.pr.merge": {
         "level": "external_write",
@@ -1627,6 +2255,46 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": False,
         "reason": "Modifies Gmail labels/read state and requires Chris approval.",
     },
+    "google.drive.file.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Drive file metadata retrieval.",
+    },
+    "google.drive.file.export": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Drive file content export.",
+    },
+    "google.docs.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Docs document retrieval.",
+    },
+    "google.slides.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Slides presentation retrieval.",
+    },
+    "google.sheets.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Sheets spreadsheet metadata retrieval.",
+    },
+    "google.sheets.values.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Sheets cell values retrieval.",
+    },
+    "google.meet.conference_records.list": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Meet conference record listing.",
+    },
+    "google.meet.conference_records.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Meet conference record retrieval.",
+    },
     "codex.task.run": {
         "level": "branch_sandbox_code_execution",
         "auto_executable": True,
@@ -1640,27 +2308,28 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": False,
         "reason": "Updates/reloads a local application checkout and requires Chris approval.",
     },
+    "local.app.inspect": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only inspection of the dedicated local runtime checkout.",
+    },
+    "local.app.recover": {
+        "level": "local_app_recovery",
+        "auto_executable": False,
+        "reason": "Stashes unexpected runtime changes after Chris approves preserving them.",
+    },
+    "local.app.deploy_pr": {
+        "level": "production_code_delivery",
+        "auto_executable": False,
+        "reason": "Merges an approved PR and updates the dedicated runtime checkout.",
+    },
 }
 
 _AUTO_TOOL_SAFE_TOOL_KEYS = {
     key for key, policy in _TOOL_SAFETY_POLICIES.items() if policy["auto_executable"]
 }
 
-_TOOL_PLANNER_INSTRUCTIONS = (
-    "You are an execution planner for a Maestro domain agent. Return only JSON matching the "
-    "schema. Choose only tools from the allowed manifest. Prefer read-only tools and the smallest "
-    "number of calls needed. Read-only tools marked safe can run automatically. `codex.task.run` "
-    "can run automatically because it works on an isolated feature branch and returns a PR for "
-    "Chris review; do not ask for approval before requesting it. Other write/action tools must "
-    "only be requested when explicitly needed; they will be proposed for Chris approval instead "
-    "of executed automatically. Return tool payloads as JSON strings in "
-    "`payload_json`. Do not include repo placeholders such as repo:CURRENT or "
-    "repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies the repo. "
-    "For a request like 'check out the latest PR', use GitHub PR search/list tools first, then "
-    "details/checks/diff if useful. For email triage, use Gmail search/list tools first, then "
-    "fetch full message or thread details only when needed. If prior tool results include a PR number and the current "
-    "request refers to 'the PR', 'that PR', or 'it', pass that number as `pr_number`."
-)
+_TOOL_PLANNER_INSTRUCTIONS = load_prompt("agent_tool_planner.md")
 
 _TOOL_PLAN_SCHEMA = {
     "type": "object",
@@ -1700,6 +2369,21 @@ _TOOL_DESCRIPTIONS = {
         "name": "Memory Context Bundle",
         "description": "Retrieve scoped, prompt-ready memory through the Memory Retrieval service.",
     },
+    "routed.item.create": {
+        "name": "Create Routed Candidate",
+        "description": (
+            "Create internal routed candidates for contacts, todos, events, organizations, "
+            "ideas, decisions, or RFIs and promote them into routed stores."
+        ),
+    },
+    "reports.search": {
+        "name": "Report Search",
+        "description": "Search completed workflow reports and return compact report summaries.",
+    },
+    "reports.get": {
+        "name": "Report Get",
+        "description": "Read the full markdown body for a specific completed workflow report.",
+    },
     "artifact.stage_interaction": {
         "name": "Stage Interaction Artifact",
         "description": "Package interaction outputs for curator processing.",
@@ -1707,6 +2391,13 @@ _TOOL_DESCRIPTIONS = {
     "llm.gateway": {
         "name": "LLM Gateway",
         "description": "Call the configured LLM provider through Maestro's shared gateway.",
+    },
+    "web.search": {
+        "name": "Web Search",
+        "description": (
+            "Use OpenRouter's server-side web search to gather current web context and cited "
+            "findings for research tasks."
+        ),
     },
     "github": {
         "name": "GitHub",
@@ -1810,6 +2501,42 @@ _TOOL_DESCRIPTIONS = {
         "name": "Gmail Message Modify",
         "description": "Apply or remove Gmail labels after Chris approval.",
     },
+    "google": {
+        "name": "Google Workspace",
+        "description": "Shared Google Workspace OAuth/config inherited by Drive, Docs, Slides, and related tools.",
+    },
+    "google.drive.file.get": {
+        "name": "Google Drive File Metadata",
+        "description": "Read Google Drive file metadata and links through the authorized domain account.",
+    },
+    "google.drive.file.export": {
+        "name": "Google Drive File Export",
+        "description": "Export readable Google Workspace file content, such as Docs to text/plain.",
+    },
+    "google.docs.get": {
+        "name": "Google Docs Read",
+        "description": "Read a Google Doc and extract its text through the authorized domain account.",
+    },
+    "google.slides.get": {
+        "name": "Google Slides Read",
+        "description": "Read a Google Slides presentation and extract slide text through the authorized domain account.",
+    },
+    "google.sheets.get": {
+        "name": "Google Sheets Read",
+        "description": "Read Google Sheets spreadsheet metadata and sheet tabs through the authorized domain account.",
+    },
+    "google.sheets.values.get": {
+        "name": "Google Sheets Values Read",
+        "description": "Read values from a specific range in a Google Sheet through the authorized domain account.",
+    },
+    "google.meet.conference_records.list": {
+        "name": "Google Meet Conference Records List",
+        "description": "List recent Google Meet conference records visible to the authorized domain account.",
+    },
+    "google.meet.conference_records.get": {
+        "name": "Google Meet Conference Record Read",
+        "description": "Read a Google Meet conference record visible to the authorized domain account.",
+    },
     "codex": {
         "name": "Codex",
         "description": "Shared local Codex CLI configuration inherited by Codex tools.",
@@ -1827,6 +2554,18 @@ _TOOL_DESCRIPTIONS = {
             "Update a configured local application checkout and run approved reload commands."
         ),
     },
+    "local.app.inspect": {
+        "name": "Local Runtime Inspect",
+        "description": "Inspect the dedicated runtime checkout without changing files.",
+    },
+    "local.app.recover": {
+        "name": "Local Runtime Recovery",
+        "description": "Preserve unexpected runtime changes in an approved Git stash.",
+    },
+    "local.app.deploy_pr": {
+        "name": "Deploy Approved PR",
+        "description": "Merge a reviewed pull request and update the dedicated local runtime.",
+    },
 }
 
 
@@ -1834,20 +2573,454 @@ def _provider_connection_key(tool_key: str) -> str:
     if tool_key.startswith("github."):
         return "github"
     if tool_key.startswith("gmail."):
-        return "gmail"
+        return "google"
+    if tool_key.startswith("google."):
+        return "google"
     if tool_key.startswith("codex."):
         return "codex"
+    if tool_key.startswith("local.app."):
+        return "local.app.reload"
     return tool_key
 
 
 def _inherited_connection_tool_keys(tool_key: str) -> list[str]:
     if tool_key == "github":
         return [key for key in _TOOL_DESCRIPTIONS if key.startswith("github.")]
-    if tool_key == "gmail":
-        return [key for key in _TOOL_DESCRIPTIONS if key.startswith("gmail.")]
+    if tool_key == "google":
+        return [
+            key
+            for key in _TOOL_DESCRIPTIONS
+            if key.startswith("google.") or key.startswith("gmail.")
+        ]
     if tool_key == "codex":
         return [key for key in _TOOL_DESCRIPTIONS if key.startswith("codex.")]
     return []
+
+
+def _with_internal_default_tool_permissions(raw_permissions: dict[str, Any]) -> dict[str, Any]:
+    permissions = dict(raw_permissions or {})
+    permissions.setdefault(
+        "memory.context_bundle",
+        {
+            "permission": "read",
+            "description": "Retrieve domain-scoped memory bundles for RAG.",
+        },
+    )
+    permissions.setdefault(
+        "reports.search",
+        {
+            "permission": "read",
+            "description": "Search completed workflow reports visible to this domain.",
+        },
+    )
+    permissions.setdefault(
+        "reports.get",
+        {
+            "permission": "read",
+            "description": "Read a specific completed workflow report.",
+        },
+    )
+    return permissions
+
+
+def _compact_task_instruction_for_prompt(task_instruction: str) -> str:
+    text = task_instruction.strip()
+    marker = "Assigned decomposed work items:"
+    if marker not in text:
+        return _truncate_text(text, 4000)
+    assigned = text.split(marker, 1)[1].strip()
+    preamble_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("You are "):
+            preamble_lines.append(stripped)
+        if stripped.startswith("Your specialty:"):
+            preamble_lines.append(stripped)
+        if len(preamble_lines) >= 2:
+            break
+    compact = "\n".join(
+        [
+            "Agent task brief:",
+            *preamble_lines,
+            "",
+            marker,
+            assigned,
+        ]
+    )
+    return _truncate_text(compact, 5000)
+
+
+def _memory_query_for_prompt_package(
+    *,
+    request: PromptPackageRequest,
+    agent: AgentSpec,
+    domain_name: str,
+    domain_key: str,
+    domain_context: str,
+) -> str:
+    """Build a retrieval query that includes stable domain anchors plus the task."""
+    query_parts = [
+        request.query_text,
+        request.task_instruction,
+        request.user_context,
+        f"domain background for {domain_name or domain_key} {domain_key}",
+        f"agent role {agent.name} {agent.role_summary}",
+        "stable operating context Chris preferences domain identity prior decisions",
+        domain_context,
+    ]
+    query = "\n".join(part.strip() for part in query_parts if part and part.strip())
+    return _truncate_text(query, 2500)
+
+
+def _tool_planning_prompt_brief(package: PromptPackage) -> str:
+    tools = ", ".join(tool.key for tool in package.tool_manifest) or "none"
+    sections = [
+        ("Agent", f"{package.agent.name} ({package.agent.key}) in {package.agent.domain_key}"),
+        ("Role", _truncate_text(package.role_prompt or package.agent.role_summary, 700)),
+        ("Task", _compact_task_instruction_for_prompt(package.task_instruction)),
+        ("Memory Summary", _truncate_text(package.memory_context.rendered_text, 1200)),
+        ("Allowed Tool Keys", _truncate_text(tools, 1200)),
+    ]
+    return "\n\n".join(f"## {title}\n{body}".strip() for title, body in sections if body)
+
+
+def _compact_tool_safety(tool_key: str) -> dict[str, Any]:
+    policy = _TOOL_SAFETY_POLICIES.get(
+        tool_key,
+        {
+            "level": "approval_required",
+            "auto_executable": False,
+            "reason": "Tool is not approved for autonomous execution.",
+        },
+    )
+    return {
+        "level": policy.get("level"),
+        "auto_executable": bool(policy.get("auto_executable")),
+    }
+
+
+def _compact_tool_results_for_prompt(
+    tool_results: list[dict[str, Any]],
+    *,
+    max_total_chars: int = 7000,
+) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    remaining = max_total_chars
+    for result in tool_results:
+        if remaining <= 0:
+            compact.append(
+                {
+                    "id": result.get("id"),
+                    "tool_name": result.get("tool_name"),
+                    "status": result.get("status"),
+                    "omitted": "Prompt evidence budget exhausted; full output remains stored by tool_call_id.",
+                }
+            )
+            continue
+        item = _compact_single_tool_result(result, max_chars=min(remaining, 2200))
+        item_chars = len(json.dumps(item, default=str))
+        if item_chars > remaining:
+            item["evidence"] = _truncate_text(str(item.get("evidence") or ""), max(120, remaining - 400))
+            item["truncated"] = True
+            item_chars = len(json.dumps(item, default=str))
+        compact.append(item)
+        remaining -= item_chars
+    return compact
+
+
+def _compact_single_tool_result(result: dict[str, Any], *, max_chars: int) -> dict[str, Any]:
+    output = result.get("output_payload")
+    compact: dict[str, Any] = {
+        "id": result.get("id"),
+        "tool_name": result.get("tool_name"),
+        "status": result.get("status"),
+    }
+    if result.get("error_message"):
+        compact["error_message"] = _truncate_text(str(result.get("error_message")), 500)
+    if result.get("connection_id"):
+        compact["connection_id"] = result.get("connection_id")
+    if output is None:
+        compact["summary"] = "No output payload."
+        return compact
+    compact["summary"] = _compact_output_summary(output)
+    evidence = _evidence_text(output)
+    if evidence:
+        compact["evidence"] = _truncate_text(evidence, max(200, max_chars - 700))
+    compact["raw_output_chars"] = len(json.dumps(output, default=str))
+    if compact["raw_output_chars"] > len(json.dumps(compact, default=str)):
+        compact["full_output"] = "stored_in_tool_call_output_payload"
+    return compact
+
+
+def _compact_output_summary(output: Any) -> Any:
+    if not isinstance(output, dict):
+        return _truncate_text(str(output), 600)
+    summary = output.get("summary")
+    if summary is not None:
+        return _truncate_nested(summary, max_text_chars=500)
+    keys = list(output.keys())
+    compact = {
+        "type": output.get("type") or output.get("object") or "tool_output",
+        "keys": keys[:12],
+    }
+    for count_key in ("included_count", "dropped_count", "total_count", "count", "issue_count", "result_count"):
+        if count_key in output:
+            compact[count_key] = output[count_key]
+    for id_key in ("url", "html_url", "number", "title", "path", "repo", "branch", "pr_number"):
+        if id_key in output:
+            compact[id_key] = _truncate_nested(output[id_key], max_text_chars=220)
+    return compact
+
+
+def _evidence_text(output: Any) -> str:
+    if not isinstance(output, dict):
+        return str(output)
+    parts: list[str] = []
+    for key in (
+        "rendered_text",
+        "output_text",
+        "body",
+        "content",
+        "text",
+        "markdown",
+        "diff",
+        "output_preview",
+    ):
+        value = output.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{key}:\n{value.strip()}")
+    for key in ("annotations", "citations", "results", "issues", "pull_requests", "files", "items"):
+        value = output.get(key)
+        if value:
+            parts.append(f"{key}:\n{json.dumps(_truncate_nested(value), default=str)}")
+    if not parts:
+        parts.append(json.dumps(_truncate_nested(output), default=str))
+    return "\n\n".join(parts)
+
+
+def _truncate_nested(value: Any, *, max_text_chars: int = 350, max_items: int = 5) -> Any:
+    if isinstance(value, str):
+        return _truncate_text(value, max_text_chars)
+    if isinstance(value, list):
+        return [_truncate_nested(item, max_text_chars=max_text_chars, max_items=max_items) for item in value[:max_items]]
+    if isinstance(value, dict):
+        return {
+            str(key): _truncate_nested(item, max_text_chars=max_text_chars, max_items=max_items)
+            for key, item in list(value.items())[:12]
+        }
+    return value
+
+
+def _truncate_text(value: str, max_chars: int) -> str:
+    normalized = " ".join(str(value or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _llm_client_for_model_profile(model_profile: str | None) -> LLMClient:
+    profile = (model_profile or "default").strip()
+    settings = get_settings()
+    if not profile or profile == "default":
+        return OpenAILLMClient()
+    if profile.startswith("ollama:"):
+        model = profile.removeprefix("ollama:").strip()
+        if not model:
+            raise AgentRuntimeError("Ollama model profile must include a model name.")
+        return OllamaLLMClient(
+            model=model,
+            base_url=settings.embedding_base_url,
+            timeout_seconds=settings.ollama_llm_timeout_seconds,
+        )
+    if profile.startswith("openrouter:"):
+        model = profile.removeprefix("openrouter:").strip()
+        return OpenAILLMClient(provider="openrouter", model=model or None)
+    if profile.startswith("openai:"):
+        model = profile.removeprefix("openai:").strip()
+        return OpenAILLMClient(provider="openai", model=model or None)
+    return OpenAILLMClient(model=profile)
+
+
+def _scoped_skill_manifest(
+    skills: list[SkillManifestItem],
+    required_skills: list[str] | None,
+) -> list[SkillManifestItem]:
+    requested = [key.strip() for key in (required_skills or []) if key and key.strip()]
+    if not requested:
+        return skills
+    by_key = {skill.key: skill for skill in skills}
+    return [by_key[key] for key in requested if key in by_key]
+
+
+_SEED_SKILLS = [
+    {
+        "key": "email_triage",
+        "name": "Email Triage",
+        "category": "workflow",
+        "description": "Classify incoming domain email and decide what to notify, route, or ignore.",
+        "domain_key": None,
+        "instruction": """## Purpose
+Classify incoming domain email and decide what should be ignored, surfaced to Chris, routed into Maestro stores, or processed by follow-on work.
+
+## Use When
+- A work item asks you to review Gmail, an inbox, a message, or a thread.
+- An email may contain contacts, organizations, events, due-outs, or useful context.
+
+## Do Not Use When
+- The source is not an email/message/thread.
+- The task is only drafting a reply from already-known context.
+
+## Procedure
+1. Read message metadata first: sender, recipients, subject, date, message_id, thread_id, labels.
+2. Fetch full message or thread only when needed.
+3. Classify as `spam_noise`, `response_needed`, `useful_info`, or `action_required`.
+4. If Chris needs to respond or decide, include a notification/open question in the report.
+5. Extract routed candidates only for durable objects: contacts, events, organizations, and Chris-owned todos.
+6. Never create todos for your own agent steps such as "record contact" or "triage email".
+7. Preserve Gmail provenance in every candidate: message_id, thread_id, subject, sender, and date.
+
+## Output Contract
+- Email classification and confidence.
+- Whether Chris needs to be notified.
+- Routed candidates created, grouped by type.
+- Any approval requests such as marking read or creating a draft.
+- Brief evidence for each decision.
+
+## Validation
+- If it is spam/noise, explain why before requesting any Gmail modification.
+- If a candidate lacks enough identity/date/title information, create an RFI instead of guessing.""",
+        "metadata": {"seeded_by": "maestro"},
+    },
+    {
+        "key": "contact_manager",
+        "name": "Contact Manager",
+        "category": "routed_memory",
+        "description": "Create or update contact candidates from interactions.",
+        "domain_key": None,
+        "instruction": """## Purpose
+Create high-quality contact candidates for real people so the routed resolver can create or update canonical contacts.
+
+## Use When
+- A person is mentioned with useful identity, role, relationship, or contact information.
+- A message/report describes a relationship, affiliation, preference, or interaction with a person.
+
+## Do Not Use When
+- The item is an organization, team, project, or abstract role with no person.
+- The only action is for Maestro/agent to record the contact; that is not a Chris todo.
+
+## Procedure
+1. Use the person's canonical display name as the candidate title.
+2. Put extracted fields in metadata: `name`, `email`, `phone`, `linkedin`, `organization`, `summary`, `relationship_context`, `last_contact_at`, `aliases`.
+3. Keep content as a short human-readable summary of why this contact matters.
+4. Include source_refs with the source message/report/artifact.
+5. Do not dedupe manually. If it might match an existing person, include aliases and provenance; the routed resolver adjudicates merge/update.
+
+## Output Contract
+Call `routed.item.create` with route_type `contact`, title as the person name, content summary, metadata fields, and source_refs.
+
+## Validation
+- Title must not be generic like "record contact" or "partner lead".
+- If only a first name is known, include contextual aliases/source refs and note uncertainty in metadata.""",
+        "metadata": {"seeded_by": "maestro"},
+    },
+    {
+        "key": "to_do_manager",
+        "name": "To Do Manager",
+        "category": "routed_memory",
+        "description": "Create Chris-owned task/reminder candidates from interactions.",
+        "domain_key": None,
+        "instruction": """## Purpose
+Create todo/reminder candidates only for obligations that Chris personally needs to track.
+
+## Use When
+- Chris needs to do, decide, send, review, approve, bring, pay, call, or follow up on something.
+- A due-out/reminder belongs on Chris's task list even if an agent discovered it.
+
+## Do Not Use When
+- The action is agent-internal work such as "extract contact", "record event", "summarize email", or "route this item".
+- The task belongs to another agent or an external person unless Chris needs to monitor it.
+
+## Procedure
+1. Title must be a concrete action phrase.
+2. Description explains context, source, and why it matters.
+3. Metadata may include `due_at`, `owner_type=user`, `owner_ref=Chris`, `related_contact`, `related_event`, `blocking`.
+4. Set priority based on deadline/impact.
+5. Include source_refs.
+
+## Output Contract
+Call `routed.item.create` with route_type `task`, title, description/content, priority, metadata, and source_refs.
+
+## Validation
+- If the task is for Maestro or an agent to execute immediately, do not create a todo; it belongs in workflow work.
+- If due date is ambiguous, create the task with uncertainty in metadata instead of inventing a date.""",
+        "metadata": {"seeded_by": "maestro"},
+    },
+    {
+        "key": "calendar_manager",
+        "name": "Calendar Manager",
+        "category": "routed_memory",
+        "description": "Create or update event candidates from interactions.",
+        "domain_key": None,
+        "instruction": """## Purpose
+Create event candidates for meetings, calls, deadlines with time windows, travel, ceremonies, and other calendar-worthy items.
+
+## Use When
+- A source contains a date/time, meeting/call/sync, appointment, travel window, or event summary.
+- A prior event is being updated with new time/location/attendee details.
+
+## Do Not Use When
+- The item is only an undated task or general reminder.
+- The time/date is too ambiguous to be useful; create an RFI instead.
+
+## Procedure
+1. Title should be what would appear on a calendar, e.g. "Partner sync with Jane Smith".
+2. Metadata should include `event_title`, `start_at`, `end_at`, `duration_minutes`, `location`, `attendees`, and `summary` when known.
+3. If attendees are mentioned and contacts do not exist, still include attendee names; the routed resolver can create/link contacts.
+4. Infer a reasonable duration only when the source implies a typical meeting and uncertainty is low.
+5. Include source_refs.
+
+## Output Contract
+Call `routed.item.create` with route_type `event`, title, content summary, metadata, and source_refs.
+
+## Validation
+- Do not title events "recorded meeting metadata" or similar system language.
+- Ask for clarification if missing date/time would cause a bad calendar entry.""",
+        "metadata": {"seeded_by": "maestro"},
+    },
+    {
+        "key": "organization_manager",
+        "name": "Organization Manager",
+        "category": "routed_memory",
+        "description": "Create or update organization candidates from interactions.",
+        "domain_key": None,
+        "instruction": """## Purpose
+Create organization candidates for companies, agencies, military units, vendors, partners, schools, labs, and institutions.
+
+## Use When
+- A source names an organization with useful relationship, context, website, contact, or opportunity information.
+- A person/contact is affiliated with an organization and the organization itself matters.
+
+## Do Not Use When
+- The name is a person, product feature, event, or vague group with no durable identity.
+
+## Procedure
+1. Use the organization name as the title.
+2. Metadata may include `entity_name`, `website`, `summary`, `relationship_context`, `domain_context`, `known_contacts`, and `aliases`.
+3. Content should summarize the domain-specific relevance.
+4. Include source_refs.
+5. Do not dedupe manually; provide aliases/provenance and let the routed resolver merge/update.
+
+## Output Contract
+Call `routed.item.create` with route_type `entity`, title as organization name, content summary, metadata, and source_refs.
+
+## Validation
+- Do not create organization candidates for generic nouns like "partner" or "customer" unless a named organization is known.""",
+        "metadata": {"seeded_by": "maestro"},
+    },
+]
+
 
 _SEED_AGENTS = [
     {
@@ -1859,12 +3032,7 @@ _SEED_AGENTS = [
             "Prepares Praxis planning context, partner follow-ups, and tactical innovation "
             "recommendations."
         ),
-        "role_prompt": (
-            "You are the Praxis Planning Agent. Work only inside the Praxis domain. "
-            "Use retrieved memory to ground recommendations in Praxis strategy, partner context, "
-            "training design, and transition priorities. Produce practical next steps and cite "
-            "memory or artifact references when available."
-        ),
+        "role_prompt": load_prompt("agents/praxis_planning_agent.md"),
         "memory_profile": "agent_prompt",
         "model_profile": "default",
         "tool_permissions": {
@@ -1899,6 +3067,104 @@ _SEED_AGENTS = [
         },
     },
     {
+        "domain_key": "praxis",
+        "key": "praxis-email-agent",
+        "name": "Praxis Email Agent",
+        "agent_type": "domain_agent",
+        "role_summary": (
+            "Triages Praxis Gmail, identifies email requiring Chris' attention, and routes "
+            "contacts, organizations, events, and Chris-owned todos into Maestro stores."
+        ),
+        "role_prompt": load_prompt("agents/praxis_email_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "ollama:qwen3:8b",
+        "tool_permissions": {
+            "memory.context_bundle": {
+                "permission": "read",
+                "description": "Retrieve Praxis-scoped memory bundles.",
+            },
+            "reports.search": {
+                "permission": "read",
+                "description": "Search prior Praxis reports for email context.",
+            },
+            "reports.get": {
+                "permission": "read",
+                "description": "Read relevant prior Praxis reports.",
+            },
+            "artifact.stage_interaction": {
+                "permission": "write",
+                "description": "Stage Praxis email triage interaction packages.",
+            },
+            "llm.gateway": {
+                "permission": "use",
+                "description": "Use Maestro's shared LLM gateway.",
+            },
+            "gmail.message.search": {
+                "permission": "read",
+                "description": "Search Praxis Gmail for triage context.",
+            },
+            "gmail.message.list_recent": {
+                "permission": "read",
+                "description": "List recent Praxis Gmail messages for triage.",
+            },
+            "gmail.message.get": {
+                "permission": "read",
+                "description": "Read selected Praxis Gmail messages.",
+            },
+            "gmail.thread.get": {
+                "permission": "read",
+                "description": "Read Praxis Gmail conversation threads.",
+            },
+            "gmail.message.modify": {
+                "permission": "use",
+                "description": "Mark spam/noise messages read when approved.",
+            },
+            "routed.item.create": {
+                "permission": "write",
+                "description": "Create routed candidates for contacts, todos, events, organizations, and ideas.",
+            },
+            "google.drive.file.get": {
+                "permission": "read",
+                "description": "Read metadata for linked Google Workspace files in Praxis emails.",
+            },
+            "google.drive.file.export": {
+                "permission": "read",
+                "description": "Export readable linked Google Workspace files when authorized.",
+            },
+            "google.docs.get": {
+                "permission": "read",
+                "description": "Read linked Google Docs such as meeting notes when authorized.",
+            },
+            "google.slides.get": {
+                "permission": "read",
+                "description": "Read linked Google Slides decks when authorized.",
+            },
+            "google.sheets.get": {
+                "permission": "read",
+                "description": "Read linked Google Sheets metadata when authorized.",
+            },
+            "google.sheets.values.get": {
+                "permission": "read",
+                "description": "Read linked Google Sheets values when authorized.",
+            },
+            "google.meet.conference_records.list": {
+                "permission": "read",
+                "description": "List Google Meet conference records when authorized.",
+            },
+            "google.meet.conference_records.get": {
+                "permission": "read",
+                "description": "Read Google Meet conference records when authorized.",
+            },
+        },
+        "skill_permissions": {
+            "email_triage": {"permission": "use"},
+            "contact_manager": {"permission": "use"},
+            "to_do_manager": {"permission": "use"},
+            "calendar_manager": {"permission": "use"},
+            "organization_manager": {"permission": "use"},
+        },
+    },
+    {
         "domain_key": "maestro-development",
         "key": "maestro-introspection-agent",
         "name": "Maestro Introspection Agent",
@@ -1906,11 +3172,7 @@ _SEED_AGENTS = [
         "role_summary": (
             "Reviews Maestro behavior, identifies system gaps, and proposes improvements."
         ),
-        "role_prompt": (
-            "You are the Maestro Introspection Agent. Work only inside the Maestro Development "
-            "domain. Evaluate what is working, what is brittle, and what should be improved next. "
-            "Prefer concrete implementation proposals with clear risks and validation steps."
-        ),
+        "role_prompt": load_prompt("agents/maestro_introspection_agent.md"),
         "memory_profile": "agent_prompt",
         "model_profile": "default",
         "tool_permissions": {
@@ -1925,6 +3187,10 @@ _SEED_AGENTS = [
             "llm.gateway": {
                 "permission": "use",
                 "description": "Use Maestro's shared LLM gateway.",
+            },
+            "web.search": {
+                "permission": "read",
+                "description": "Search the web for current SOTA/tooling context with citations.",
             },
             "github.read": {
                 "permission": "read",
@@ -1998,6 +3264,18 @@ _SEED_AGENTS = [
                 "permission": "use",
                 "description": "Reload configured local Maestro app surfaces when approved.",
             },
+            "local.app.inspect": {
+                "permission": "read",
+                "description": "Inspect runtime Git state before deployment.",
+            },
+            "local.app.recover": {
+                "permission": "use",
+                "description": "Preserve unexpected runtime changes when Chris approves recovery.",
+            },
+            "local.app.deploy_pr": {
+                "permission": "use",
+                "description": "Merge a reviewed PR and update the dedicated Maestro runtime.",
+            },
         },
     },
     {
@@ -2009,13 +3287,7 @@ _SEED_AGENTS = [
             "Executes scoped Maestro coding tasks through the local Codex tool and reports "
             "implementation results back to Maestro."
         ),
-        "role_prompt": (
-            "You are the Maestro Coding Agent. Work only inside the Maestro Development domain. "
-            "Use the local Codex task tool for implementation work after Chris approves the tool "
-            "plan. Keep coding tasks scoped, preserve unrelated work, run the requested validation "
-            "when practical, and return a concise report with changed files, tests, and follow-up "
-            "risks."
-        ),
+        "role_prompt": load_prompt("agents/maestro_coding_agent.md"),
         "memory_profile": "agent_prompt",
         "model_profile": "default",
         "tool_permissions": {
@@ -2050,6 +3322,18 @@ _SEED_AGENTS = [
             "local.app.reload": {
                 "permission": "use",
                 "description": "Reload configured local Maestro app surfaces when approved.",
+            },
+            "local.app.inspect": {
+                "permission": "read",
+                "description": "Inspect runtime Git state before deployment.",
+            },
+            "local.app.recover": {
+                "permission": "use",
+                "description": "Preserve unexpected runtime changes when Chris approves recovery.",
+            },
+            "local.app.deploy_pr": {
+                "permission": "use",
+                "description": "Merge a reviewed PR and update the dedicated Maestro runtime.",
             },
         },
     },

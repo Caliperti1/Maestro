@@ -122,9 +122,11 @@ provenance.
 
 The orchestration endpoint accepts `auto_tool_loop` and `max_tool_iterations`. When enabled, each
 child agent receives its normal enriched prompt package, asks the LLM for tool calls, executes
-currently approved read tools, and then writes the final report using those tool results as
-evidence. Write/action tools are recorded as `approval_required` proposals with their payload and
-rationale instead of being executed automatically.
+currently approved read tools, reasons over those results, and may replan for more tool calls until
+the result is sufficient or the iteration limit is reached. Write/action tools are recorded as
+`approval_required` proposals with their payload and rationale instead of being executed
+automatically. Deterministic tool dispatch is a narrow fallback for planner failures or obvious
+direct artifact links; it should not replace the child agent's LLM planning pass.
 
 The current runner enforces parallel-ready queue semantics, retry policy, dependency blocking, and
 phase synthesis. Actual concurrent worker execution is intentionally left behind the queue contract

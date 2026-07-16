@@ -7,7 +7,7 @@ Current state:
 - Even Hub SDK installed
 - Even Hub simulator tooling installed
 - Switchable transport mode: Live Maestro API or local mock bridge
-- Text and simulated voice messages can be sent through existing Maestro endpoints
+- Text and simulated voice messages flow through one persistent Maestro chat channel
 
 ## Prerequisites
 
@@ -66,13 +66,16 @@ npm run build
 
 ## Live Mode API Usage
 
-The live bridge uses existing Maestro endpoints:
+The live bridge uses a websocket-first persistent channel:
+
+- `WS /maestro/channel/ws`
+
+It also uses existing Maestro endpoints for bootstrap and sends:
 
 - `GET /maestro/sessions/active`
-- `GET /maestro/sessions/{conversation_id}`
 - `POST /maestro/respond`
 
-No new backend endpoint is required for this first integration slice.
+Polling remains as a fallback if websocket is unavailable.
 
 ## Port Layout
 
@@ -93,7 +96,7 @@ This lets both frontends run side-by-side.
 - This prototype intentionally mirrors a thin-client model: display state and send simple interaction events.
 - Latest status/message text is also pushed to an Even SDK text container so the simulator glasses display is populated.
 - Gesture workflow (live mode):
-	- Double tap: start a new Maestro session, then enter listening mode.
+	- Double tap: enter listening mode in the same persistent Maestro chat.
 	- Single tap: start listening again in the same session.
 	- Swipe up / swipe down: clear display, except in approval mode where up=approve and down=disapprove.
 - Listening mode uses typed input for simulator realism: type in the composer and press `Send` to conclude listening and send as voice input.

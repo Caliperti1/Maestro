@@ -153,8 +153,8 @@ def test_create_agent_endpoint_adds_domain_agent(
         "/agents",
         json={
             "domain_key": "praxis",
-            "key": "Praxis Email Agent",
-            "name": "Praxis Email Agent",
+            "key": "Praxis Outreach Agent",
+            "name": "Praxis Outreach Agent",
             "role_summary": "Triages Praxis inbox.",
             "tool_permissions": {"gmail.read": {"permission": "read"}},
         },
@@ -162,7 +162,7 @@ def test_create_agent_endpoint_adds_domain_agent(
 
     assert response.status_code == 200
     agent = response.json()["agent"]
-    assert agent["key"] == "praxis-email-agent"
+    assert agent["key"] == "praxis-outreach-agent"
     assert agent["domain_key"] == "praxis"
     assert agent["allowed_tools"][0]["key"] == "gmail.read"
 
@@ -192,7 +192,11 @@ def test_agent_update_and_tool_registry_endpoint(
     agent = update.json()["agent"]
     assert agent["role_summary"] == "Updated Praxis planning role."
     assert agent["current_action"] == "Drafting partner-call prep."
-    assert [tool["key"] for tool in agent["allowed_tools"]] == ["memory.context_bundle"]
+    assert [tool["key"] for tool in agent["allowed_tools"]] == [
+        "memory.context_bundle",
+        "reports.get",
+        "reports.search",
+    ]
     assert tools.status_code == 200
     memory_tool = next(
         tool for tool in tools.json()["tools"] if tool["key"] == "memory.context_bundle"
@@ -201,6 +205,42 @@ def test_agent_update_and_tool_registry_endpoint(
         authorized["agent_key"] == "praxis-planning-agent"
         for authorized in memory_tool["authorized_agents"]
     )
+
+
+def test_skill_registry_assigns_skills_to_agent_prompt(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+
+    skill = client.put(
+        "/agents/skills",
+        json={
+            "key": "issue-design",
+            "name": "Issue Design",
+            "category": "software",
+            "description": "Turn a feature idea into a clean implementation story.",
+            "instruction": "When designing an issue, preserve open questions and acceptance criteria.",
+            "domain_key": "maestro-development",
+        },
+    )
+    update = client.patch(
+        "/agents/maestro-introspection-agent",
+        json={"skill_permissions": {"issue-design": {"permission": "use"}}},
+    )
+    prompt = client.post(
+        "/agents/maestro-introspection-agent/prompt-package",
+        json={"task_instruction": "Draft an issue for a new UI feature.", "use_semantic": False},
+    )
+
+    assert skill.status_code == 200
+    assert skill.json()["skill"]["key"] == "issue-design"
+    assert update.status_code == 200
+    assert update.json()["agent"]["allowed_skills"][0]["key"] == "issue-design"
+    assert prompt.status_code == 200
+    package = prompt.json()["prompt_package"]
+    assert package["skill_manifest"][0]["key"] == "issue-design"
+    assert "When designing an issue" in package["assembled_prompt"]
 
 
 def test_delete_agent_archives_agent_and_removes_from_list(
@@ -253,7 +293,7 @@ def test_tool_connection_endpoint_redacts_config(
     assert connections.json()["connections"][0]["display_name"] == "Praxis Gmail"
 
 
-def test_run_once_endpoint_prepares_stubbed_run(
+def test_run_once_endpoint_prepares_manual_run(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -273,7 +313,7 @@ def test_run_once_endpoint_prepares_stubbed_run(
     assert response.status_code == 200
     payload = response.json()["run"]
     assert payload["status"] == "prepared"
-    assert payload["scheduler"]["status"] == "stubbed"
+    assert payload["scheduler"]["status"] == "manual_run"
     assert payload["prompt_package"]["agent"]["key"] == "praxis-planning-agent"
     assert payload["task_id"] is not None
     assert payload["output_text"] is None

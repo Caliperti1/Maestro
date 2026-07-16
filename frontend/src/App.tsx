@@ -1,13 +1,18 @@
 import {
+  Archive,
   Bot,
+  Building2,
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
+  CircleAlert,
   Clock3,
   Database,
   FileText,
   HardDriveUpload,
   Inbox,
+  ListTodo,
   Menu,
   MessageSquareText,
   PanelLeftClose,
@@ -18,677 +23,331 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Users,
   Wrench,
+  X,
 } from "lucide-react";
+import { Calendar, dateFnsLocalizer, View, Views } from "react-big-calendar";
+import { format, getDay, parse, startOfWeek } from "date-fns";
+import { enUS } from "date-fns/locale/en-US";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { API_BASE_URL, apiJson, websocketUrl } from "./api";
+import {
+  domainKeysByLabel,
+  domainLabels,
+  domains,
+  dropboxDomainDefaults,
+  hiddenRoutedStatuses,
+  routedGroups,
+} from "./constants";
+import type {
+  ActiveSurface,
+  AgentRun,
+  AgentSpec,
+  AgentTask,
+  ChatMessage,
+  DomainContext,
+  DropboxDomain,
+  MaestroPlan,
+  MaestroRespond,
+  MaestroRun,
+  MaestroSessionSummary,
+  MaestroSubtask,
+  MaestroToolCallResponse,
+  MaestroQueueItem,
+  MemoryArtifact,
+  MemoryItem,
+  MemoryPreview,
+  MemorySource,
+  PendingProposal,
+  PromptPackage,
+  RetrievedMemory,
+  RoutedEvent,
+  RoutedItem,
+  RoutedObjectRecord,
+  RoutedObjectSurface,
+  RoutedTodo,
+  SchedulerDashboard,
+  SchedulerDefinition,
+  SchedulerQueueItem,
+  SchedulerRun,
+  SchedulerWorkerAgentRun,
+  SchedulerWorkerStatus,
+  SkillRegistryItem,
+  ToolConnection,
+  ToolRegistryItem,
+  WorkflowReport,
+  WorkflowRunLogEntry,
+} from "./types";
+import {
+  candidateResultClass,
+  candidateResultLabel,
+  definitionQueueItems,
+  formatDateOnly,
+  formatDateTime,
+  messageReferencesActivePlan,
+  previewTime,
+  routedObjectDomain,
+  routedObjectTitle,
+  safeJson,
+  triggerSummary,
+  unassignedDefinitionItemCount,
+} from "./uiHelpers";
 
-type ChatMessage = {
-  id: string;
-  sender: "user" | "maestro";
-  content: string;
-};
+const calendarLocalizer = dateFnsLocalizer({
+  format,
+  parse,
+  startOfWeek,
+  getDay,
+  locales: { "en-US": enUS },
+});
 
-type MaestroSessionSummary = {
-  id: string;
-  title: string;
-  messages: ChatMessage[];
-  message_count?: number;
-  created_at?: string | null;
-  updated_at?: string | null;
-  stagedArtifactPath: string | null;
-  active_plan?: MaestroPlan | null;
-  archived?: boolean;
-  archived_at?: string | null;
-};
+const staleWorkflowProgressLabels = new Set(["Not started.", "Not Started", "not_started"]);
 
-type SchedulerQueueItem = {
-  id: string;
-  workflow_run_id: string;
-  external_key: string;
-  status: string;
-  priority: string;
-  stage_index: number;
-  position: number;
-  objective: string;
-  dependency_keys: string[];
-  resource_locks: Array<Record<string, unknown>>;
-  fairness_group: string | null;
-  domain_key: string | null;
-  agent_key: string | null;
-  agent_name: string | null;
-  lease_owner: string | null;
-  error_message: string | null;
-};
+function queueAgentLabel(item: MaestroQueueItem) {
+  return item.agent_name || item.agent_key || item.work_item_ids.join(", ") || "agent";
+}
 
-type SchedulerRun = {
-  id: string;
-  workflow_definition_id: string | null;
-  parent_task_id: string | null;
-  conversation_id: string | null;
-  source_type: string;
-  status: string;
-  priority: string;
-  fairness_group: string | null;
-  summary: string | null;
-  created_at: string | null;
-  input_payload?: Record<string, unknown>;
-  output_payload?: Record<string, unknown>;
-  error_message?: string | null;
-  events?: SchedulerEvent[];
-  queue_items: SchedulerQueueItem[];
-};
-
-type SchedulerEvent = {
-  id: string;
-  event_type: string;
-  message: string;
-  queue_item_id: string | null;
-  payload: Record<string, unknown>;
-  created_at: string | null;
-};
-
-type SchedulerDefinition = {
-  id: string;
-  domain_key: string | null;
-  key: string;
-  name: string;
-  description: string | null;
-  trigger_type: string;
-  trigger_config: Record<string, unknown>;
-  workflow_spec?: Record<string, unknown>;
-  priority: string;
-  fairness_group: string | null;
-  is_active: boolean;
-};
-
-type SchedulerDashboard = {
-  definitions: SchedulerDefinition[];
-  runs: SchedulerRun[];
-  runnable_batches: Array<{
-    workflow_run_id: string;
-    status: string;
-    fairness_group: string | null;
-    parallel_ready: SchedulerQueueItem[];
-  }>;
-  active_locks: Array<Record<string, unknown>>;
-};
-
-type SchedulerWorkerAgentRun = {
-  run_id: string;
-  status: string;
-  agent_key: string;
-  agent_name: string;
-  task_id: string | null;
-  report_id: string | null;
-  execution_note: string;
-  output_preview: string;
-  tool_calls: AgentRun["tool_calls"];
-  staged_artifact_path: string | null;
-  artifact_id: string | null;
-  error_message: string | null;
-};
-
-type SchedulerWorkerStatus = {
-  enabled: boolean;
-  interval_seconds: number;
-  claim_limit: number;
-  execute_llm: boolean;
-  auto_tool_loop: boolean;
-  source: string;
-};
-
-type DropboxDomain = {
-  key: string;
-  inbox: number;
-  processing: number;
-  processed: number;
-  failed: number;
-  previews: number;
-};
-
-type MemoryPreview = {
-  domain_key: string;
-  filename: string;
-  source_file: string | null;
-  status: string | null;
-  is_processing: boolean;
-  generated_at: string | null;
-  candidate_count: number;
-  result_count: number;
-  written_count: number;
-  deduped_count: number;
-  pending_approval_count: number;
-  progress_count: number;
-  progress_total: number;
-  routed_count: number;
-  payload: {
-    candidates?: Array<{
-      title?: string;
-      content?: string;
-      impact_level?: string;
-      scope?: string;
-      memory_type?: string;
-    }>;
-    results?: Array<{
-      outcome?: string;
-      memory_item_id?: string | null;
-      proposal_id?: string | null;
-      proposal_status?: string | null;
-      related_memory_id?: string | null;
-      evaluation?: {
-        decision?: string;
-        confidence?: number;
-        rationale?: string | null;
-        related_memory_id?: string | null;
-      };
-    }>;
-    routed_items?: Array<{
-      route_type?: string;
-      title?: string;
-      content?: string;
-      priority?: string;
-      status?: string;
-    }>;
-  };
-};
-
-type PreviewResult = NonNullable<MemoryPreview["payload"]["results"]>[number];
-
-type PendingProposal = {
-  id: string;
-  scope: string;
-  memory_type: string;
-  title: string;
-  content: string;
-  rationale: string | null;
-  impact_level: string;
-  status: string;
-  created_at: string | null;
-};
-
-type MemoryItem = {
-  id: string;
-  scope: string;
-  memory_type: string;
-  title: string;
-  content: string;
-  impact_level: string;
-  importance: number;
-  created_at: string | null;
-};
-
-type MemorySource = {
-  id: string;
-  name: string;
-  status: string;
-  domain_key: string;
-  memory_count: number;
-  proposal_count: number;
-  processed_at: string | null;
-};
-
-type RoutedItem = {
-  id: string;
-  domain_key: string | null;
-  route_type: string;
-  title: string;
-  content: string;
-  priority: string;
-  status: string;
-  source_refs: Array<Record<string, unknown>>;
-  metadata: Record<string, unknown>;
-  created_at: string | null;
-};
-
-type RetrievedMemory = MemoryItem & {
-  domain_key: string;
-  agent_id: string | null;
-  score: number;
-  query_relevance: number;
-  semantic_similarity: number | null;
-  score_reasons: string[];
-  provenance: {
-    source_refs: Array<Record<string, unknown>>;
-    seed_package: { id: string; name: string; source_type: string; status: string } | null;
-    artifact: {
-      id: string;
-      name: string;
-      artifact_type: string;
-      uri: string;
-      mime_type: string | null;
-    } | null;
-    processed_path: string | null;
-  };
-  links: Array<{
-    relation_type: string;
-    direction: string;
-    memory: MemoryItem & { domain_key: string };
-  }>;
-};
-
-type AgentTool = {
-  key: string;
-  name: string;
-  permission: string;
-  description: string;
-  connection_id: string | null;
-  auth_type: string | null;
-};
-
-type AgentSpec = {
-  id: string;
-  key: string;
-  name: string;
-  domain_key: string;
-  agent_type: string;
-  role_summary: string;
-  role_prompt: string;
-  memory_profile: string;
-  model_profile: string;
-  allowed_tools: AgentTool[];
-  is_active: boolean;
-  current_action: string | null;
-  scheduled_actions: Array<Record<string, unknown>>;
-};
-
-type AgentTask = {
-  id: string;
-  status: string;
-  priority: string;
-  source_type: string;
-  workflow_key: string | null;
-  objective: string;
-  started_at: string | null;
-  completed_at: string | null;
-  error_message: string | null;
-};
-
-type DomainContext = {
-  id: string;
-  key: string;
-  name: string;
-  context: string;
-  is_active: boolean;
-};
-
-type ToolRegistryItem = {
-  key: string;
-  name: string;
-  description: string;
-  exclusive: boolean;
-  connected_domains: string[];
-  authorized_agents: Array<{
-    agent_key: string;
-    agent_name: string;
-    domain_key: string;
-    permission: string;
-  }>;
-};
-
-type ToolConnection = {
-  id: string;
-  domain_key: string;
-  tool_key: string;
-  display_name: string;
-  auth_type: string;
-  config: Record<string, unknown>;
-  is_active: boolean;
-};
-
-type PromptPackage = {
-  assembled_prompt: string;
-  memory_context: {
-    included_count: number;
-    semantic_status: string;
-  };
-};
-
-type AgentRun = {
-  run_id: string;
-  status: string;
-  execution_note: string;
-  output_text: string | null;
-  task_id: string | null;
-  report_id: string | null;
-  error_message: string | null;
-  tool_calls?: Array<{
-    id: string;
-    tool_name: string;
-    status: string;
-    error_message: string | null;
-    output_payload?: Record<string, unknown> | null;
-  }>;
-  scheduler?: {
-    status: string;
-    reason: string;
-  };
-  tool_loop?: Record<string, unknown>;
-  prompt_package: PromptPackage;
-  staged_artifact_path: string | null;
-};
-
-type MaestroIntent = {
-  type: string;
-  summary: string;
-  target: string;
-  domain_key: string | null;
-  priority: string;
-  action: string | null;
-};
-
-type MaestroSubtask = {
-  agent_key: string;
-  agent_name: string;
-  domain_key: string;
-  objective: string;
-  expected_output: string;
-  priority: string;
-  rationale: string | null;
-  work_item_ids: string[] | null;
-  depends_on_work_item_ids: string[] | null;
-};
-
-type MaestroWorkItem = {
-  id: string;
-  type: string;
-  title: string;
-  description: string;
-  domain_key: string | null;
-  priority: string;
-  required_capabilities: string[];
-  required_tools: string[];
-  dependencies: string[];
-  needs_agent: boolean;
-  needs_user_input: boolean;
-  blocks_execution: boolean;
-  can_log_directly: boolean;
-  suggested_agent_keys: string[];
-  expected_output: string;
-  rationale: string;
-};
-
-type MaestroQueueItem = {
-  id: string;
-  stage_index: number;
-  position: number;
-  status: string;
-  agent_key: string;
-  agent_name: string;
-  domain_key: string;
-  objective: string;
-  priority: string;
-  work_item_ids: string[];
-  depends_on_work_item_ids: string[];
-  child_task_id: string | null;
-  child_report_id: string | null;
-  retry_count?: number;
-  started_at: string | null;
-  completed_at: string | null;
-  error_message: string | null;
-};
-
-type MaestroPlan = {
-  plan_id: string;
-  parent_task_id: string;
-  status: string;
-  user_input: string;
-  summary: string;
-  execution_mode: string;
-  planner_mode: string;
-  work_items: MaestroWorkItem[];
-  intents: MaestroIntent[];
-  subtasks: MaestroSubtask[];
-  execution_stages: string[][];
-  workflow_graph: {
-    nodes?: Array<Record<string, unknown>>;
-    edges?: Array<Record<string, unknown>>;
-    stages?: Array<Record<string, unknown>>;
-  };
-  is_chat_only: boolean;
-  is_routing_only: boolean;
-  selected_agents: Array<Record<string, unknown>>;
-  approval_required: boolean;
-  scheduler: Record<string, unknown> & {
-    queue_items?: MaestroQueueItem[];
-    current_step?: string;
-    active_queue_item_id?: string | null;
-    active_stage_index?: number | null;
-  };
-  created_at: string;
-  direct_response: string | null;
-  planner_notes: string | null;
-};
-
-type MaestroRun = {
-  plan: MaestroPlan;
-  status: string;
-  parent_task_id: string;
-  synthesis_report_id: string | null;
-  synthesis: string;
-  chat_summary: string;
-  staged_artifact_path: string | null;
-  artifact_id: string | null;
-  error_message: string | null;
-  execution_stages: string[][];
-  tool_activity: Array<{
-    tool_call_id: string | null;
-    agent_key: string;
-    agent_name: string;
-    domain_key: string;
-    tool_name: string;
-    status: string;
-    error_message: string | null;
-    details: string;
-    output_payload?: Record<string, unknown>;
-  }>;
-  child_runs: Array<{
-    run_id: string;
-    status: string;
-    agent: {
-      key: string;
-      name: string;
-      domain_key: string;
-    };
-    task_id: string | null;
-    report_id: string | null;
-    execution_note: string;
-    output_text: string | null;
-    error_message: string | null;
-    tool_calls?: AgentRun["tool_calls"];
-    tool_loop?: Record<string, unknown>;
-  }>;
-};
-
-type MaestroRespond = {
-  kind: "chat_only" | "planned" | "refined" | "rfi_answered" | "routed";
-  classification: string;
-  message: string;
+function workflowProgressLabel({
+  plan,
+  run,
+  busyToolCallId,
+  maestroStatus,
+}: {
   plan: MaestroPlan | null;
-  chat_plan: MaestroPlan | null;
-  active_plan: MaestroPlan | null;
-  conversation: MaestroSessionSummary;
-};
+  run: MaestroRun | null;
+  busyToolCallId: string | null;
+  maestroStatus: string;
+}) {
+  if (busyToolCallId) return "Running approved tool";
+  const activePlan = run?.plan ?? plan;
+  const queueItems = activePlan?.scheduler.queue_items ?? [];
+  const runStatus = run?.status;
+  const planStatus = activePlan?.status;
 
-type MaestroToolCallResponse = {
-  tool_call: {
-    id: string;
-    tool_name: string;
-    status: string;
-    error_message: string | null;
-    output_payload?: Record<string, unknown> | null;
+  const itemWithStatus = (statuses: string[]) =>
+    queueItems.find((item) => statuses.includes(item.status));
+
+  const running = itemWithStatus(["running", "retrying"]);
+  if (running) {
+    return `${running.status === "retrying" ? "Retrying" : "Running"}: ${queueAgentLabel(running)}`;
+  }
+  const approval = itemWithStatus(["approval_required"]);
+  if (approval) return `Waiting for approval: ${queueAgentLabel(approval)}`;
+  const blocked = itemWithStatus(["blocked"]);
+  if (blocked) {
+    return `Waiting on ${queueAgentLabel(blocked)}${
+      blocked.error_message ? `: ${blocked.error_message}` : ""
+    }`;
+  }
+  const failed = itemWithStatus(["failed"]);
+  if (failed) return `Failed: ${queueAgentLabel(failed)}`;
+  const queued = itemWithStatus(["ready", "queued"]);
+  if (queued) return `Queued: ${queueAgentLabel(queued)}`;
+  const pending = itemWithStatus(["pending", "proposed"]);
+  if (pending) {
+    return planStatus === "running" || runStatus === "running"
+      ? `Preparing: ${queueAgentLabel(pending)}`
+      : "Proposed plan ready for review";
+  }
+  const scheduled = itemWithStatus(["scheduled"]);
+  if (scheduled) return `Scheduled: ${queueAgentLabel(scheduled)}`;
+  if (queueItems.length > 0 && queueItems.every((item) => item.status === "completed")) {
+    return "Workflow complete";
+  }
+  if (queueItems.length > 0 && queueItems.every((item) => item.status === "archived")) {
+    return "Workflow archived";
+  }
+  if (runStatus === "completed") return "Workflow complete";
+  if (runStatus === "scheduled") return "Scheduled workflow saved";
+  if (runStatus === "blocked") return "Workflow waiting on input";
+  if (runStatus === "failed") return "Workflow failed";
+  const currentStep = String(activePlan?.scheduler.current_step ?? "").trim();
+  if (currentStep && !staleWorkflowProgressLabels.has(currentStep)) return currentStep;
+  if (maestroStatus && maestroStatus !== "Idle") return maestroStatus;
+  return "Ready";
+}
+
+function shouldShowPlanPreview(plan: MaestroPlan | null) {
+  return Boolean(plan && plan.status === "proposed");
+}
+
+function shouldShowInlineRunPreview(_run: MaestroRun | null) {
+  return false;
+}
+
+function queueItemAgentRun(item: SchedulerQueueItem): SchedulerWorkerAgentRun | null {
+  const payload = item.output_payload ?? {};
+  const agentRun = payload.agent_run;
+  if (!agentRun || typeof agentRun !== "object") return null;
+  return agentRun as SchedulerWorkerAgentRun;
+}
+
+function queueItemToolCalls(item: SchedulerQueueItem): NonNullable<AgentRun["tool_calls"]> {
+  return queueItemAgentRun(item)?.tool_calls ?? [];
+}
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g);
+  return tokens
+    .filter((token) => token.length > 0)
+    .map((token, index) => {
+      const key = `${keyPrefix}-${index}`;
+      if (token.startsWith("`") && token.endsWith("`")) {
+        return <code key={key}>{token.slice(1, -1)}</code>;
+      }
+      if (token.startsWith("**") && token.endsWith("**")) {
+        return <strong key={key}>{token.slice(2, -2)}</strong>;
+      }
+      if (token.startsWith("*") && token.endsWith("*")) {
+        return <em key={key}>{token.slice(1, -1)}</em>;
+      }
+      const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (linkMatch) {
+        const [, label, href] = linkMatch;
+        const safeHref = /^(https?:|mailto:)/i.test(href) ? href : "";
+        if (safeHref) {
+          return (
+            <a key={key} href={safeHref} target="_blank" rel="noreferrer">
+              {label}
+            </a>
+          );
+        }
+        return <span key={key}>{label}</span>;
+      }
+      return token;
+    });
+}
+
+function normalizeMarkdownContent(content: string) {
+  return content
+    .replace(/([^\n])\s+(\d+\.\s+\*\*)/g, "$1\n\n$2")
+    .split(/\r?\n/)
+    .map((line) => {
+      if (/^\s*\d+\.\s+/.test(line) && line.includes(" - ")) {
+        return line.replace(/\s+-\s+/g, "\n- ");
+      }
+      return line;
+    })
+    .join("\n");
+}
+
+function MarkdownMessage({ content }: { content: string }) {
+  const normalizedContent = normalizeMarkdownContent(content);
+  const lines = normalizedContent.split(/\r?\n/);
+  const blocks: ReactNode[] = [];
+  let paragraph: string[] = [];
+  let listItems: string[] = [];
+  let orderedItems: string[] = [];
+  let codeLines: string[] = [];
+  let inCodeBlock = false;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push(
+      <p key={`p-${blocks.length}`}>
+        {paragraph.map((text, index) => (
+          <span key={`p-${blocks.length}-${index}`}>
+            {index > 0 && <br />}
+            {renderInlineMarkdown(text, `p-${blocks.length}-${index}`)}
+          </span>
+        ))}
+      </p>,
+    );
+    paragraph = [];
   };
-  message: string;
-  run?: MaestroRun | null;
-};
+  const flushList = () => {
+    if (listItems.length) {
+      blocks.push(
+        <ul key={`ul-${blocks.length}`}>
+          {listItems.map((item, index) => (
+            <li key={`li-${index}`}>{renderInlineMarkdown(item, `ul-${blocks.length}-${index}`)}</li>
+          ))}
+        </ul>,
+      );
+      listItems = [];
+    }
+    if (orderedItems.length) {
+      blocks.push(
+        <ol key={`ol-${blocks.length}`}>
+          {orderedItems.map((item, index) => (
+            <li key={`oli-${index}`}>{renderInlineMarkdown(item, `ol-${blocks.length}-${index}`)}</li>
+          ))}
+        </ol>,
+      );
+      orderedItems = [];
+    }
+  };
+  const flushCode = () => {
+    if (!codeLines.length) return;
+    blocks.push(
+      <pre key={`pre-${blocks.length}`}>
+        <code>{codeLines.join("\n")}</code>
+      </pre>,
+    );
+    codeLines = [];
+  };
+  const headingBlock = (level: number, text: string) => {
+    const children = renderInlineMarkdown(text, `h-${blocks.length}`);
+    if (level <= 1) return <h3 key={`h-${blocks.length}`}>{children}</h3>;
+    if (level === 2) return <h4 key={`h-${blocks.length}`}>{children}</h4>;
+    if (level === 3) return <h5 key={`h-${blocks.length}`}>{children}</h5>;
+    return <h6 key={`h-${blocks.length}`}>{children}</h6>;
+  };
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      if (inCodeBlock) {
+        flushCode();
+        inCodeBlock = false;
+      } else {
+        flushParagraph();
+        flushList();
+        inCodeBlock = true;
+      }
+      return;
+    }
+    if (inCodeBlock) {
+      codeLines.push(line);
+      return;
+    }
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      return;
+    }
+    const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(headingMatch[1].length, 4);
+      blocks.push(headingBlock(level, headingMatch[2]));
+      return;
+    }
+    const bulletMatch = trimmed.match(/^[-*]\s+(.+)$/);
+    if (bulletMatch) {
+      flushParagraph();
+      if (orderedItems.length) flushList();
+      listItems.push(bulletMatch[1]);
+      return;
+    }
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (orderedMatch) {
+      flushParagraph();
+      if (listItems.length) flushList();
+      orderedItems.push(orderedMatch[1]);
+      return;
+    }
+    paragraph.push(trimmed);
+  });
 
-const domainLabels: Record<string, string> = {
-  global: "Global",
-  personal: "Personal",
-  "maestro-development": "Maestro Development",
-  praxis: "Praxis",
-  ophi: "Ophi",
-  usma: "USMA",
-  "personal-irad-projects": "Personal IRAD",
-  l3: "L3",
-};
+  flushParagraph();
+  flushList();
+  flushCode();
 
-const dropboxDomainDefaults: DropboxDomain[] = Object.keys(domainLabels).map((key) => ({
-  key,
-  inbox: 0,
-  processing: 0,
-  processed: 0,
-  failed: 0,
-  previews: 0,
-}));
-
-const domains = [
-  "Personal",
-  "Maestro Development",
-  "Praxis",
-  "Ophi",
-  "USMA",
-  "Personal IRAD",
-  "L3",
-];
-
-const domainKeysByLabel: Record<string, string> = Object.fromEntries(
-  Object.entries(domainLabels).map(([key, label]) => [label, key]),
-);
-
-const routedGroups = [
-  { key: "human_input", label: "RFIs", empty: "No open RFIs." },
-  { key: "task", label: "Tasks", empty: "No open tasks." },
-  { key: "event", label: "Events", empty: "No extracted events." },
-  { key: "contact", label: "Contacts", empty: "No extracted contacts." },
-  { key: "decision_log", label: "Decisions", empty: "No recent decisions." },
-  { key: "think_tank", label: "Think Tank", empty: "No think tank notes." },
-];
-
-const hiddenRoutedStatuses = new Set(["done", "archived"]);
-
-function resultLabel(result?: PreviewResult) {
-  if (!result) return "Preview only";
-  if (result.memory_item_id) return "Written to memory";
-  if (result.outcome === "duplicate_skipped") return "Duplicate skipped";
-  if (result.outcome === "reinforced") return "Reinforced existing memory";
-  if (result.outcome === "rejected") return "Rejected by memory manager";
-  if (result.outcome === "pending_user_approval") return "Needs approval";
-  if (result.proposal_status) return `Proposal ${result.proposal_status}`;
-  return result.outcome ?? "Processed";
-}
-
-function resultClass(result?: PreviewResult) {
-  if (!result) return "preview-only";
-  if (result.memory_item_id) return "written";
-  if (result.outcome === "duplicate_skipped" || result.outcome === "reinforced") return "deduped";
-  if (result.outcome === "rejected") return "rejected";
-  if (result.outcome === "pending_user_approval") return "pending";
-  return "processed";
-}
-
-function candidateResultLabel(preview: MemoryPreview, index: number) {
-  const result = preview.payload.results?.[index];
-  if (result) return resultLabel(result);
-  if (preview.is_processing) return "Queued for write";
-  return "Preview only";
-}
-
-function candidateResultClass(preview: MemoryPreview, index: number) {
-  const result = preview.payload.results?.[index];
-  if (result) return resultClass(result);
-  if (preview.is_processing) return "processing";
-  return "preview-only";
-}
-
-function previewTime(preview: MemoryPreview) {
-  const time = preview.generated_at ? Date.parse(preview.generated_at) : 0;
-  return Number.isFinite(time) ? time : 0;
-}
-
-async function apiJson<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(body.detail ?? response.statusText);
-  }
-  return response.json() as Promise<T>;
-}
-
-function websocketUrl(path: string) {
-  const url = new URL(path, API_BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString();
-}
-
-function definitionQueueItems(definition: SchedulerDefinition) {
-  return Array.isArray(definition.workflow_spec?.queue_items)
-    ? (definition.workflow_spec.queue_items as Array<Record<string, unknown>>)
-    : [];
-}
-
-function unassignedDefinitionItemCount(definition: SchedulerDefinition) {
-  return definitionQueueItems(definition).filter((item) => !item.agent_key).length;
-}
-
-function triggerSummary(triggerType: string, triggerConfig: Record<string, unknown>) {
-  if (triggerType === "event") {
-    return `When ${String(triggerConfig.event_type ?? "event arrives")}`;
-  }
-  if (typeof triggerConfig.time_of_day === "string") {
-    return `Daily at ${triggerConfig.time_of_day}`;
-  }
-  if (typeof triggerConfig.next_run_at === "string") {
-    return `Next ${triggerConfig.next_run_at}`;
-  }
-  if (typeof triggerConfig.interval_minutes === "number") {
-    return `Every ${triggerConfig.interval_minutes} minutes`;
-  }
-  return triggerType;
-}
-
-function messageReferencesActivePlan(message: string) {
-  const normalized = message.trim().toLowerCase();
-  if (!normalized) return false;
-  return [
-    "this plan",
-    "that plan",
-    "the plan",
-    "current plan",
-    "active plan",
-    "this workflow",
-    "that workflow",
-    "the workflow",
-    "current workflow",
-    "active workflow",
-    "merge the pr",
-    "merge pr",
-    "merge it",
-    "merge that",
-    "hot reload",
-    "reload the app",
-    "make it live",
-    "ship it",
-    "approved",
-    "approve",
-    "reject",
-    "run it",
-    "save it",
-    "save schedule",
-    "change the plan",
-    "update the plan",
-    "refine",
-    "instead",
-    "also include",
-    "remove ",
-    "drop ",
-    "only ",
-    "belongs in",
-    "move this",
-    "do this first",
-    "do that first",
-  ].some((token) => normalized.includes(token));
+  return <div className="markdown-message">{blocks.length > 0 ? blocks : <p>{normalizedContent}</p>}</div>;
 }
 
 function RoutedItemsBoard({
@@ -810,17 +469,837 @@ function RoutedItemsBoard({
   );
 }
 
+const routedSurfaceConfig: Record<
+  RoutedObjectSurface,
+  {
+    title: string;
+    eyebrow: string;
+    endpoint: string;
+    responseKey: "events" | "contacts" | "todos" | "entities" | "ideas";
+    icon: typeof CalendarDays;
+    empty: string;
+  }
+> = {
+  calendar: {
+    title: "Calendar",
+    eyebrow: "Routed events",
+    endpoint: "/memory/routed-objects/events",
+    responseKey: "events",
+    icon: CalendarDays,
+    empty: "No routed events yet.",
+  },
+  contacts: {
+    title: "Contacts",
+    eyebrow: "Routed CRM",
+    endpoint: "/memory/routed-objects/contacts",
+    responseKey: "contacts",
+    icon: Users,
+    empty: "No contacts yet.",
+  },
+  todos: {
+    title: "To Do List",
+    eyebrow: "Routed action items",
+    endpoint: "/memory/routed-objects/todos",
+    responseKey: "todos",
+    icon: ListTodo,
+    empty: "No routed to dos yet.",
+  },
+  organizations: {
+    title: "Organizations",
+    eyebrow: "Routed organizations",
+    endpoint: "/memory/routed-objects/entities",
+    responseKey: "entities",
+    icon: Building2,
+    empty: "No organizations yet.",
+  },
+  ideas: {
+    title: "Think Tank",
+    eyebrow: "Routed ideas",
+    endpoint: "/memory/routed-objects/ideas",
+    responseKey: "ideas",
+    icon: Sparkles,
+    empty: "No think tank ideas yet.",
+  },
+};
+
+function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string> {
+  if (!item) return {};
+  if ("attendees" in item) {
+    return {
+      title: item.title ?? "",
+      summary: item.summary ?? "",
+      start_at: item.start_at ?? "",
+      end_at: item.end_at ?? "",
+      location: item.location ?? "",
+      status: item.status ?? "scheduled",
+    };
+  }
+  if ("todo_type" in item) {
+    return {
+      title: item.title ?? "",
+      description: item.description ?? "",
+      due_at: item.due_at ?? "",
+      priority: item.priority ?? "normal",
+      status: item.status ?? "open",
+      owner_type: item.owner_type ?? "user",
+      owner_ref: item.owner_ref ?? "",
+    };
+  }
+  if ("email" in item) {
+    return {
+      name: item.name ?? "",
+      email: item.email ?? "",
+      phone: item.phone ?? "",
+      linkedin: item.linkedin ?? "",
+      summary: item.summary ?? "",
+      origination: item.origination ?? "",
+      status: item.status ?? "active",
+    };
+  }
+  if ("content" in item) {
+    return {
+      title: item.title ?? "",
+      content: item.content ?? "",
+      status: item.status ?? "open",
+    };
+  }
+  return {
+    name: item.name ?? "",
+    website: item.website ?? "",
+    summary: item.summary ?? "",
+    status: item.status ?? "active",
+  };
+}
+
+function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
+  const config = routedSurfaceConfig[surface];
+  const Icon = config.icon;
+  const [items, setItems] = useState<RoutedObjectRecord[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [domainFilter, setDomainFilter] = useState("all");
+  const [showArchived, setShowArchived] = useState(false);
+  const [showDone, setShowDone] = useState(false);
+  const [calendarView, setCalendarView] = useState<View>(Views.WEEK);
+  const [calendarDate, setCalendarDate] = useState(new Date());
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [statusMessage, setStatusMessage] = useState("Ready");
+  const [busy, setBusy] = useState(false);
+
+  const supportsDomainFilter = surface === "calendar" || surface === "todos" || surface === "ideas";
+  const supportsLifecycleFilters = surface === "calendar" || surface === "todos" || surface === "ideas";
+  const visibleItems = useMemo(
+    () =>
+      items.filter((item) => {
+        if (!showArchived && item.status === "archived") return false;
+        if (!showDone && item.status === "done") return false;
+        return true;
+      }),
+    [items, showArchived, showDone],
+  );
+  const selectedItem =
+    visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0] ?? null;
+  const calendarItems = useMemo(
+    () =>
+      visibleItems
+        .filter((item): item is RoutedEvent => "start_at" in item && Boolean(item.start_at))
+        .map((item) => {
+          const start = new Date(item.start_at!);
+          const end = item.end_at ? new Date(item.end_at) : new Date(start.getTime() + 60 * 60 * 1000);
+          return {
+            id: item.id,
+            title: item.title,
+            start,
+            end,
+            resource: item,
+          };
+        }),
+    [visibleItems],
+  );
+  const unscheduledCalendarItems = visibleItems.filter(
+    (item): item is RoutedEvent => "start_at" in item && !item.start_at,
+  );
+
+  const refreshItems = useCallback(async () => {
+    const params = new URLSearchParams({ limit: "100" });
+    if (supportsDomainFilter && domainFilter !== "all") {
+      params.set("domain_key", domainFilter);
+    }
+    const response = await apiJson<Record<string, RoutedObjectRecord[]>>(
+      `${config.endpoint}?${params.toString()}`,
+    );
+    const nextItems = response[config.responseKey] ?? [];
+    setItems(nextItems);
+    setSelectedId((current) =>
+      current && nextItems.some((item) => item.id === current) ? current : (nextItems[0]?.id ?? null),
+    );
+    setStatusMessage("Ready");
+  }, [config.endpoint, config.responseKey, domainFilter, supportsDomainFilter]);
+
+  useEffect(() => {
+    refreshItems().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : `Unable to load ${config.title}.`),
+    );
+  }, [refreshItems, config.title]);
+
+  useEffect(() => {
+    setDraft(routedDraftFor(selectedItem));
+  }, [selectedItem?.id]);
+
+  const updateDraft = (key: string, value: string) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  const saveSelected = async () => {
+    if (!selectedItem) return;
+    setBusy(true);
+    try {
+      await apiJson(`${config.endpoint}/${selectedItem.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          updates: Object.fromEntries(
+            Object.entries(draft).map(([key, value]) => [key, value.trim() || null]),
+          ),
+        }),
+      });
+      setStatusMessage(`${config.title} item saved.`);
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const archiveSelected = async () => {
+    if (!selectedItem) return;
+    const objectType =
+      surface === "calendar"
+        ? "event"
+        : surface === "todos"
+          ? "todo"
+          : surface === "contacts"
+            ? "contact"
+            : surface === "ideas"
+              ? "idea"
+              : "entity";
+    setBusy(true);
+    try {
+      await apiJson(`/memory/routed-objects/${objectType}/${selectedItem.id}/archive`, {
+        method: "PATCH",
+      });
+      setStatusMessage("Item archived.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Archive failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const markSelectedDone = async () => {
+    if (!selectedItem || !(surface === "calendar" || surface === "todos" || surface === "ideas")) return;
+    setBusy(true);
+    try {
+      await apiJson(`${config.endpoint}/${selectedItem.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates: { status: "done" } }),
+      });
+      setStatusMessage("Item marked done.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Done update failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="routed-object-workspace">
+      <section className="memory-panel routed-object-list-panel" aria-labelledby={`${surface}-heading`}>
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">{config.eyebrow}</p>
+            <h3 id={`${surface}-heading`}>{config.title}</h3>
+          </div>
+          <button className="icon-button" onClick={refreshItems} title={`Refresh ${config.title}`}>
+            <RefreshCw size={18} />
+          </button>
+        </div>
+
+        {supportsDomainFilter && (
+          <label className="routed-filter">
+            <span>Domain</span>
+            <select value={domainFilter} onChange={(event) => setDomainFilter(event.target.value)}>
+              <option value="all">All domains</option>
+              {Object.entries(domainLabels)
+                .filter(([key]) => key !== "global")
+                .map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+            </select>
+          </label>
+        )}
+
+        {supportsLifecycleFilters && (
+          <div className="routed-filter-row">
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(event) => setShowArchived(event.target.checked)}
+              />
+              Show archived
+            </label>
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={showDone}
+                onChange={(event) => setShowDone(event.target.checked)}
+              />
+              Show done
+            </label>
+          </div>
+        )}
+
+        {surface === "calendar" && (
+          <div className="calendar-shell">
+            <Calendar
+              localizer={calendarLocalizer}
+              events={calendarItems}
+              startAccessor="start"
+              endAccessor="end"
+              view={calendarView}
+              date={calendarDate}
+              views={[Views.MONTH, Views.WEEK, Views.DAY, Views.AGENDA]}
+              onView={(view) => setCalendarView(view)}
+              onNavigate={(date) => setCalendarDate(date)}
+              onSelectEvent={(event) => setSelectedId(event.id)}
+              eventPropGetter={(event) => ({
+                className:
+                  event.resource.status === "done"
+                    ? "calendar-event-done"
+                    : event.resource.status === "archived"
+                      ? "calendar-event-archived"
+                      : "",
+              })}
+            />
+          </div>
+        )}
+
+        {surface === "calendar" && unscheduledCalendarItems.length > 0 && (
+          <div className="unscheduled-list">
+            <span>Unscheduled</span>
+            {unscheduledCalendarItems.map((item) => (
+              <button
+                className={item.id === selectedItem?.id ? "routed-object-row active" : "routed-object-row"}
+                key={item.id}
+                onClick={() => setSelectedId(item.id)}
+                type="button"
+              >
+                <CalendarDays size={18} />
+                <span>
+                  <strong>{item.title}</strong>
+                  <small>{item.status}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="routed-object-list">
+          {visibleItems.map((item) => (
+            <button
+              className={item.id === selectedItem?.id ? "routed-object-row active" : "routed-object-row"}
+              key={item.id}
+              onClick={() => setSelectedId(item.id)}
+              type="button"
+            >
+              {item.status === "done" ? <CheckCircle2 size={18} /> : <Icon size={18} />}
+              <span>
+                <strong>{routedObjectTitle(item)}</strong>
+                <small>
+                  {surface === "calendar" && "start_at" in item
+                    ? `${formatDateOnly(item.start_at)} / ${item.status}`
+                    : surface === "todos" && "due_at" in item
+                      ? `${domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"} / ${item.status} / ${item.priority}`
+                      : item.status}
+                </small>
+              </span>
+            </button>
+          ))}
+          {visibleItems.length === 0 && <p className="empty-state">{config.empty}</p>}
+        </div>
+      </section>
+
+      <section className="memory-panel routed-object-detail-panel" aria-labelledby={`${surface}-detail`}>
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Details</p>
+            <h3 id={`${surface}-detail`}>{selectedItem ? routedObjectTitle(selectedItem) : config.title}</h3>
+          </div>
+          <Icon size={18} />
+        </div>
+
+        {selectedItem ? (
+          <div className="routed-object-detail">
+            {"attendees" in selectedItem && (
+              <>
+                <label>
+                  Title
+                  <input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} />
+                </label>
+                <label>
+                  Summary
+                  <textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} />
+                </label>
+                <div className="two-column-fields">
+                  <label>
+                    Start
+                    <input value={draft.start_at ?? ""} onChange={(event) => updateDraft("start_at", event.target.value)} />
+                  </label>
+                  <label>
+                    End
+                    <input value={draft.end_at ?? ""} onChange={(event) => updateDraft("end_at", event.target.value)} />
+                  </label>
+                </div>
+                <label>
+                  Location
+                  <input value={draft.location ?? ""} onChange={(event) => updateDraft("location", event.target.value)} />
+                </label>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+                <details>
+                  <summary>Attendees and supporting content</summary>
+                  <pre>{safeJson({ attendees: selectedItem.attendees, supporting_refs: selectedItem.supporting_refs })}</pre>
+                </details>
+              </>
+            )}
+
+            {"todo_type" in selectedItem && (
+              <>
+                <label>
+                  Title
+                  <input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} />
+                </label>
+                <label>
+                  Description
+                  <textarea value={draft.description ?? ""} onChange={(event) => updateDraft("description", event.target.value)} />
+                </label>
+                <div className="two-column-fields">
+                  <label>
+                    Due
+                    <input value={draft.due_at ?? ""} onChange={(event) => updateDraft("due_at", event.target.value)} />
+                  </label>
+                  <label>
+                    Priority
+                    <input value={draft.priority ?? ""} onChange={(event) => updateDraft("priority", event.target.value)} />
+                  </label>
+                </div>
+                <div className="two-column-fields">
+                  <label>
+                    Owner type
+                    <input value={draft.owner_type ?? ""} onChange={(event) => updateDraft("owner_type", event.target.value)} />
+                  </label>
+                  <label>
+                    Owner
+                    <input value={draft.owner_ref ?? ""} onChange={(event) => updateDraft("owner_ref", event.target.value)} />
+                  </label>
+                </div>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+              </>
+            )}
+
+            {"email" in selectedItem && (
+              <>
+                <label>
+                  Name
+                  <input value={draft.name ?? ""} onChange={(event) => updateDraft("name", event.target.value)} />
+                </label>
+                <div className="two-column-fields">
+                  <label>
+                    Email
+                    <input value={draft.email ?? ""} onChange={(event) => updateDraft("email", event.target.value)} />
+                  </label>
+                  <label>
+                    Phone
+                    <input value={draft.phone ?? ""} onChange={(event) => updateDraft("phone", event.target.value)} />
+                  </label>
+                </div>
+                <label>
+                  LinkedIn
+                  <input value={draft.linkedin ?? ""} onChange={(event) => updateDraft("linkedin", event.target.value)} />
+                </label>
+                <label>
+                  Summary
+                  <textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} />
+                </label>
+                <label>
+                  Origination
+                  <textarea value={draft.origination ?? ""} onChange={(event) => updateDraft("origination", event.target.value)} />
+                </label>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+                <div className="preview-meta">
+                  <span>{selectedItem.organization_entity_id ? `Organization ${selectedItem.organization_entity_id.slice(0, 8)}` : "No linked organization"}</span>
+                  <span>{selectedItem.scheduled_event_ids.length} scheduled contacts</span>
+                </div>
+              </>
+            )}
+
+            {"website" in selectedItem && !("email" in selectedItem) && (
+              <>
+                <label>
+                  Name
+                  <input value={draft.name ?? ""} onChange={(event) => updateDraft("name", event.target.value)} />
+                </label>
+                <label>
+                  Website
+                  <input value={draft.website ?? ""} onChange={(event) => updateDraft("website", event.target.value)} />
+                </label>
+                <label>
+                  Summary
+                  <textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} />
+                </label>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+              </>
+            )}
+
+            {"content" in selectedItem && (
+              <>
+                <label>
+                  Title
+                  <input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} />
+                </label>
+                <label>
+                  Idea
+                  <textarea value={draft.content ?? ""} onChange={(event) => updateDraft("content", event.target.value)} />
+                </label>
+                <label>
+                  Status
+                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                </label>
+              </>
+            )}
+
+            <div className="routed-detail-actions">
+              {(surface === "calendar" || surface === "todos" || surface === "ideas") && selectedItem.status !== "done" && (
+                <button className="planner-action" onClick={markSelectedDone} disabled={busy}>
+                  <CheckCircle2 size={16} />
+                  Done
+                </button>
+              )}
+              <button className="planner-action" onClick={saveSelected} disabled={busy}>
+                Save
+              </button>
+              <button className="danger-action" onClick={archiveSelected} disabled={busy}>
+                <Trash2 size={16} />
+                Archive
+              </button>
+            </div>
+
+            <div className="routed-object-meta">
+              <div className="preview-meta">
+                <span>{domainLabels[routedObjectDomain(selectedItem) ?? "global"] ?? routedObjectDomain(selectedItem) ?? "Global"}</span>
+                <span>Created {formatDateTime(selectedItem.created_at)}</span>
+                <span>{selectedItem.source_refs.length} source refs</span>
+              </div>
+              <details>
+                <summary>Provenance</summary>
+                <pre>{safeJson(selectedItem.provenance)}</pre>
+              </details>
+              <details>
+                <summary>Metadata</summary>
+                <pre>{safeJson(selectedItem.metadata)}</pre>
+              </details>
+              <details>
+                <summary>Source refs</summary>
+                <pre>{safeJson(selectedItem.source_refs)}</pre>
+              </details>
+            </div>
+            <p className="memory-status">{statusMessage}</p>
+          </div>
+        ) : (
+          <p className="empty-state">{config.empty}</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function NeedsAttentionPanel({
+  schedulerDashboard,
+  pendingToolApprovals,
+  busyToolCallId,
+  onApproveToolCall,
+  onRejectToolCall,
+  onSubmitAttentionResponse,
+  onArchiveRun,
+}: {
+  schedulerDashboard: SchedulerDashboard | null;
+  pendingToolApprovals: MaestroRun["tool_activity"];
+  busyToolCallId: string | null;
+  onApproveToolCall: (toolCallId: string) => Promise<void>;
+  onRejectToolCall: (toolCallId: string) => Promise<void>;
+  onSubmitAttentionResponse: (run: SchedulerRun, message: string) => Promise<void>;
+  onArchiveRun: (runId: string) => Promise<void>;
+}) {
+  const [todos, setTodos] = useState<RoutedTodo[]>([]);
+  const [statusMessage, setStatusMessage] = useState("Ready");
+  const [responseDrafts, setResponseDrafts] = useState<Record<string, string>>({});
+  const [busyResponseRunId, setBusyResponseRunId] = useState<string | null>(null);
+  const [busyTodoId, setBusyTodoId] = useState<string | null>(null);
+
+  const refreshTodos = useCallback(async () => {
+    const response = await apiJson<{ todos: RoutedTodo[] }>(
+      "/memory/routed-objects/todos?status=needs_input&limit=20",
+    );
+    setTodos(response.todos);
+    setStatusMessage("Ready");
+  }, []);
+
+  useEffect(() => {
+    refreshTodos().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : "Unable to load attention items."),
+    );
+  }, [refreshTodos]);
+
+  const blockedRuns =
+    schedulerDashboard?.runs.filter((run) =>
+      run.status === "blocked" ||
+      run.status === "failed" ||
+      run.queue_items.some((item) => ["blocked", "approval_required", "failed"].includes(item.status)),
+    ) ?? [];
+  const transientApprovalIds = new Set(
+    pendingToolApprovals.flatMap((activity) => activity.tool_call_id ? [activity.tool_call_id] : []),
+  );
+  const runToolApprovals = blockedRuns.flatMap((run) => {
+    const activity = Array.isArray(run.output_payload?.tool_activity)
+      ? run.output_payload.tool_activity as MaestroRun["tool_activity"]
+      : [];
+    return activity
+      .filter((item) => item.status === "approval_required" && item.tool_call_id && !transientApprovalIds.has(item.tool_call_id))
+      .map((item) => ({ ...item, run }));
+  });
+
+  const submitResponse = async (run: SchedulerRun) => {
+    const message = (responseDrafts[run.id] ?? "").trim();
+    if (!message) return;
+    setBusyResponseRunId(run.id);
+    try {
+      await onSubmitAttentionResponse(run, message);
+      setResponseDrafts((drafts) => ({ ...drafts, [run.id]: "" }));
+      setStatusMessage("Response sent to Maestro.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not send response.");
+    } finally {
+      setBusyResponseRunId(null);
+    }
+  };
+
+  const updateAttentionTodo = async (todoId: string, status: "done" | "archived") => {
+    setBusyTodoId(todoId);
+    try {
+      await apiJson(`/memory/routed-objects/todos/${todoId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates: { status } }),
+      });
+      setStatusMessage(status === "done" ? "Attention item marked done." : "Attention item archived.");
+      await refreshTodos();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not update attention item.");
+    } finally {
+      setBusyTodoId(null);
+    }
+  };
+
+  return (
+    <section className="attention-strip" aria-labelledby="attention-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Action items</p>
+          <h3 id="attention-heading">Needs attention</h3>
+        </div>
+        <button className="icon-button" onClick={refreshTodos} title="Refresh attention items">
+          <RefreshCw size={18} />
+        </button>
+      </div>
+      <div className="attention-grid">
+        {pendingToolApprovals.map((activity) => (
+          <article className="attention-card" key={activity.tool_call_id ?? `${activity.agent_key}-${activity.tool_name}`}>
+            <CircleAlert size={18} />
+            <div>
+              <span>{activity.tool_name}</span>
+              <h4>{activity.agent_name} needs approval</h4>
+              <p>{activity.details || "Review this tool request before Maestro continues."}</p>
+              {activity.tool_call_id && (
+                <div className="tool-approval-actions">
+                  <button
+                    className="planner-action"
+                    onClick={() => onApproveToolCall(activity.tool_call_id!)}
+                    disabled={busyToolCallId === activity.tool_call_id}
+                    type="button"
+                  >
+                    Approve
+                  </button>
+                  <button
+                    className="danger-action"
+                    onClick={() => onRejectToolCall(activity.tool_call_id!)}
+                    disabled={busyToolCallId === activity.tool_call_id}
+                    type="button"
+                  >
+                    Reject
+                  </button>
+                </div>
+              )}
+            </div>
+          </article>
+        ))}
+        {runToolApprovals.map((activity) => (
+          <article className="attention-card" key={activity.tool_call_id ?? `${activity.run.id}-${activity.tool_name}`}>
+            <CircleAlert size={18} />
+            <div>
+              <span>{activity.tool_name}</span>
+              <h4>{activity.agent_name} needs approval</h4>
+              <p>{activity.details || activity.run.error_message || "Review this tool request before Maestro continues."}</p>
+              {activity.tool_call_id && (
+                <div className="tool-approval-actions">
+                  <button
+                    className="planner-action"
+                    onClick={() => onApproveToolCall(activity.tool_call_id!)}
+                    disabled={busyToolCallId === activity.tool_call_id}
+                    type="button"
+                  >
+                    Approve
+                  </button>
+                  <button
+                    className="danger-action"
+                    onClick={() => onRejectToolCall(activity.tool_call_id!)}
+                    disabled={busyToolCallId === activity.tool_call_id}
+                    type="button"
+                  >
+                    Reject
+                  </button>
+                </div>
+              )}
+            </div>
+          </article>
+        ))}
+        {blockedRuns.map((run) => (
+          <article className="attention-card" key={run.id}>
+            <CircleAlert size={18} />
+            <div>
+              <span>{run.status}</span>
+              <h4>{run.summary || "Workflow needs attention"}</h4>
+              <p>{run.error_message || "Open Workflows to inspect blocked or failed work."}</p>
+              <div className="attention-blocker-list">
+                {run.queue_items
+                  .filter((item) => ["blocked", "approval_required", "failed"].includes(item.status))
+                  .map((item) => (
+                    <div className="attention-blocker-row" key={item.id}>
+                      <strong>{item.agent_name ?? item.agent_key ?? "Unassigned"}</strong>
+                      <span>{item.status}</span>
+                      <p>{item.error_message || item.objective}</p>
+                    </div>
+                  ))}
+              </div>
+              <div className="attention-response">
+                <textarea
+                  value={responseDrafts[run.id] ?? ""}
+                  onChange={(event) =>
+                    setResponseDrafts((drafts) => ({ ...drafts, [run.id]: event.target.value }))
+                  }
+                  placeholder="Answer the blocker or add a short instruction..."
+                  rows={2}
+                />
+                <button
+                  className="planner-action"
+                  onClick={() => submitResponse(run)}
+                  disabled={busyResponseRunId === run.id || !(responseDrafts[run.id] ?? "").trim()}
+                  type="button"
+                >
+                  Send & resume
+                </button>
+                <button
+                  className="danger-action"
+                  onClick={() => onArchiveRun(run.id)}
+                  type="button"
+                >
+                  Kill workflow
+                </button>
+              </div>
+            </div>
+          </article>
+        ))}
+        {todos.map((todo) => (
+          <article className="attention-card" key={todo.id}>
+            <ListTodo size={18} />
+            <div>
+              <span>{domainLabels[todo.domain_key ?? "global"] ?? todo.domain_key ?? "Global"}</span>
+              <h4>{todo.title}</h4>
+              <p>{todo.description}</p>
+              <div className="attention-actions">
+                <button
+                  className="planner-action"
+                  onClick={() => updateAttentionTodo(todo.id, "done")}
+                  disabled={busyTodoId === todo.id}
+                  type="button"
+                >
+                  <CheckCircle2 size={15} />
+                  Done
+                </button>
+                <button
+                  className="danger-action"
+                  onClick={() => updateAttentionTodo(todo.id, "archived")}
+                  disabled={busyTodoId === todo.id}
+                  type="button"
+                >
+                  <Archive size={15} />
+                  Archive
+                </button>
+              </div>
+            </div>
+          </article>
+        ))}
+        {pendingToolApprovals.length === 0 && runToolApprovals.length === 0 && blockedRuns.length === 0 && todos.length === 0 && (
+          <p className="empty-state">No blocked workflows, approvals, or RFIs are waiting right now.</p>
+        )}
+      </div>
+      <p className="memory-status">{statusMessage}</p>
+    </section>
+  );
+}
+
 export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeDomain, setActiveDomain] = useState("Maestro");
-  const [activeSurface, setActiveSurface] = useState<"dashboard" | "domain" | "memory" | "tools">(
-    "dashboard",
-  );
+  const [activeSurface, setActiveSurface] = useState<ActiveSurface>("dashboard");
+  const [maestroNavOpen, setMaestroNavOpen] = useState(false);
+  const [memoryNavOpen, setMemoryNavOpen] = useState(false);
+  const [domainsNavOpen, setDomainsNavOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const [sessionHistory, setSessionHistory] = useState<MaestroSessionSummary[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [schedulerDashboard, setSchedulerDashboard] = useState<SchedulerDashboard | null>(null);
+  const [workflowRunLog, setWorkflowRunLog] = useState<WorkflowRunLogEntry[]>([]);
+  const [workflowReports, setWorkflowReports] = useState<WorkflowReport[]>([]);
+  const [selectedWorkflowReport, setSelectedWorkflowReport] = useState<WorkflowReport | null>(null);
+  const [workflowOutputsStatus, setWorkflowOutputsStatus] = useState("");
   const [showSessionHistory, setShowSessionHistory] = useState(false);
   const [draftMessage, setDraftMessage] = useState("");
   const [maestroPlan, setMaestroPlan] = useState<MaestroPlan | null>(null);
@@ -934,7 +1413,9 @@ export function App() {
     const blocked = queueItems.filter((item) => item.status === "blocked").length;
     const failed = queueItems.filter((item) => item.status === "failed").length;
     const running = queueItems.filter((item) =>
-      ["ready", "running", "retrying", "pending"].includes(item.status),
+      ["approval_required", "queued", "ready", "running", "retrying", "pending"].includes(
+        item.status,
+      ),
     ).length;
     return {
       id: plan.parent_task_id,
@@ -952,12 +1433,22 @@ export function App() {
     };
   }, [maestroPlan, maestroRun, queueStages.length]);
 
+  const activeWorkflowCount = useMemo(
+    () =>
+      (schedulerDashboard?.runs ?? []).filter((run) =>
+        ["queued", "ready", "running", "blocked", "approval_required", "retrying"].includes(run.status),
+      ).length,
+    [schedulerDashboard],
+  );
+
   const planScheduleCandidate = useMemo(() => {
     const candidate = maestroPlan?.scheduler.schedule_candidate;
     return candidate && typeof candidate === "object"
       ? (candidate as Record<string, unknown>)
       : null;
   }, [maestroPlan]);
+  const showPlanPreview = shouldShowPlanPreview(maestroPlan);
+  const showInlineRunPreview = shouldShowInlineRunPreview(maestroRun);
 
   const scheduledWorkflowDefinitions = useMemo(
     () =>
@@ -982,6 +1473,15 @@ export function App() {
       ),
     [maestroRun],
   );
+
+  const conductingMessage = useMemo(() => {
+    return workflowProgressLabel({
+      plan: maestroPlan,
+      run: maestroRun,
+      busyToolCallId,
+      maestroStatus,
+    });
+  }, [busyToolCallId, maestroPlan, maestroRun, maestroStatus]);
 
   const codexReviewPayload = (activity: MaestroRun["tool_activity"][number]) => {
     const payload = activity.output_payload ?? {};
@@ -1026,7 +1526,7 @@ export function App() {
   const applyConversation = useCallback((conversation: MaestroSessionSummary) => {
     setActiveConversationId(conversation.id);
     setChatMessages(conversation.messages ?? []);
-    setMaestroPlan(conversation.active_plan ?? null);
+    setMaestroPlan(shouldShowPlanPreview(conversation.active_plan ?? null) ? conversation.active_plan ?? null : null);
   }, []);
 
   const pollActiveChannel = useCallback(async () => {
@@ -1035,7 +1535,8 @@ export function App() {
     );
     setActiveConversationId(response.conversation.id);
     setChatMessages(response.conversation.messages ?? []);
-    setMaestroPlan((currentPlan) => currentPlan ?? response.conversation.active_plan ?? null);
+    const responsePlan = response.conversation.active_plan ?? null;
+    setMaestroPlan(shouldShowPlanPreview(responsePlan) ? responsePlan : null);
   }, []);
 
   const loadActiveSession = useCallback(async () => {
@@ -1048,7 +1549,47 @@ export function App() {
   const loadSchedulerDashboard = useCallback(async () => {
     const response = await apiJson<SchedulerDashboard>("/scheduler/dashboard");
     setSchedulerDashboard(response);
+    setSelectedSchedulerRun((selected) => {
+      if (!selected) return selected;
+      return response.runs.find((run) => run.id === selected.id) ?? null;
+    });
   }, []);
+
+  const loadWorkflowOutputs = useCallback(async () => {
+    const [runLogResponse, reportsResponse] = await Promise.all([
+      apiJson<{ entries: WorkflowRunLogEntry[] }>("/workflow-outputs/run-log?limit=50"),
+      apiJson<{ reports: WorkflowReport[] }>("/workflow-outputs/reports?limit=50"),
+    ]);
+    setWorkflowRunLog(runLogResponse.entries);
+    setWorkflowReports(reportsResponse.reports);
+    setWorkflowOutputsStatus("Workflow outputs refreshed.");
+  }, []);
+
+  const openWorkflowReport = async (reportId: string) => {
+    const response = await apiJson<{ report: WorkflowReport }>(
+      `/workflow-outputs/reports/${reportId}`,
+    );
+    setSelectedWorkflowReport(response.report);
+    setActiveSurface("reports");
+  };
+
+  const archiveWorkflowReport = async (reportId: string) => {
+    await apiJson<{ report: WorkflowReport }>(`/workflow-outputs/reports/${reportId}/archive`, {
+      method: "PATCH",
+    });
+    if (selectedWorkflowReport?.id === reportId) {
+      setSelectedWorkflowReport(null);
+    }
+    await loadWorkflowOutputs();
+  };
+
+  const archiveAllWorkflowReports = async () => {
+    await apiJson<{ archived_count: number }>("/workflow-outputs/reports/archive", {
+      method: "POST",
+    });
+    setSelectedWorkflowReport(null);
+    await loadWorkflowOutputs();
+  };
 
   const loadSchedulerWorkerStatus = useCallback(async () => {
     const response = await apiJson<{ worker: SchedulerWorkerStatus }>("/scheduler/worker/status");
@@ -1179,7 +1720,8 @@ export function App() {
     const response = await apiJson<{ conversation: MaestroSessionSummary }>(
       `/maestro/sessions/${run.conversation_id}`,
     );
-    setMaestroPlan(response.conversation.active_plan ?? maestroPlan);
+    const responsePlan = response.conversation.active_plan ?? maestroPlan;
+    setMaestroPlan(shouldShowPlanPreview(responsePlan) ? responsePlan : null);
     setSchedulerStatusMessage("Referenced this workflow in the main Maestro channel.");
   };
 
@@ -1228,6 +1770,7 @@ export function App() {
       `Worker enqueued ${response.enqueued.length}, claimed ${response.claimed.length}, completed ${completed}, blocked ${blocked}, failed ${failed}.`,
     );
     await loadSchedulerDashboard();
+    await loadWorkflowOutputs();
   };
 
   const triggerSchedulerEvent = async () => {
@@ -1255,15 +1798,23 @@ export function App() {
     loadSessionHistory().catch(() => undefined);
     loadSchedulerDashboard().catch(() => undefined);
     loadSchedulerWorkerStatus().catch(() => undefined);
-  }, [loadActiveSession, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadSessionHistory]);
+    loadWorkflowOutputs().catch(() => undefined);
+  }, [
+    loadActiveSession,
+    loadSchedulerDashboard,
+    loadSchedulerWorkerStatus,
+    loadSessionHistory,
+    loadWorkflowOutputs,
+  ]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
       loadSchedulerDashboard().catch(() => undefined);
       loadSchedulerWorkerStatus().catch(() => undefined);
+      loadWorkflowOutputs().catch(() => undefined);
     }, 3000);
     return () => window.clearInterval(interval);
-  }, [loadSchedulerDashboard, loadSchedulerWorkerStatus]);
+  }, [loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
 
   useEffect(() => {
     let closed = false;
@@ -1385,8 +1936,8 @@ export function App() {
       );
       applyToolCallUpdate(response.tool_call);
       if (response.run) {
-        setMaestroRun(response.run);
-        setMaestroPlan(response.run.plan);
+        setMaestroRun(shouldShowInlineRunPreview(response.run) ? response.run : null);
+        setMaestroPlan(shouldShowPlanPreview(response.run.plan) ? response.run.plan : null);
       }
       await pollActiveChannel().catch(() => {
         setChatMessages((messages) => [
@@ -1402,7 +1953,10 @@ export function App() {
             : "Tool approval finished.",
       );
       loadSessionHistory().catch(() => undefined);
-      loadSchedulerDashboard().catch(() => undefined);
+      await Promise.all([
+        loadSchedulerDashboard().catch(() => undefined),
+        loadWorkflowOutputs().catch(() => undefined),
+      ]);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Tool approval failed.";
       setChatMessages((messages) => [
@@ -1452,6 +2006,57 @@ export function App() {
     }
   };
 
+  const submitAttentionResponse = async (run: SchedulerRun, message: string) => {
+    setMaestroBusy(true);
+    setMaestroStatus("Sending response to blocked workflow...");
+    try {
+      const response = await apiJson<MaestroRespond>("/maestro/respond", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Maestro-Async": "true" },
+        body: JSON.stringify({
+          message,
+          active_plan_id: run.parent_task_id,
+          conversation_id: run.conversation_id ?? activeConversationId,
+        }),
+      });
+      if (response.conversation) {
+        setActiveConversationId(response.conversation.id);
+        setChatMessages(response.conversation.messages ?? []);
+      } else {
+        setChatMessages((messages) => [
+          ...messages,
+          { id: crypto.randomUUID(), sender: "user", content: message },
+          { id: crypto.randomUUID(), sender: "maestro", content: response.message },
+        ]);
+      }
+      const responsePlan = response.plan ?? response.active_plan ?? null;
+      setMaestroPlan(shouldShowPlanPreview(responsePlan) ? responsePlan : null);
+      setMaestroRun(null);
+      await apiJson("/scheduler/worker/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: "maestro-ui-unblock",
+          claim_limit: 3,
+          execute_llm: executeMaestroLLM,
+          auto_tool_loop: autoMaestroToolLoop,
+        }),
+      }).catch(() => undefined);
+      setMaestroStatus("Response applied. Maestro attempted to resume ready workflow work.");
+      await Promise.all([
+        loadSchedulerDashboard().catch(() => undefined),
+        loadWorkflowOutputs().catch(() => undefined),
+        loadSessionHistory().catch(() => undefined),
+      ]);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Could not send response.";
+      setMaestroStatus(errorMessage);
+      throw error;
+    } finally {
+      setMaestroBusy(false);
+    }
+  };
+
   const sendMaestroMessage = async () => {
     if (!draftMessage.trim()) return;
     const outgoingMessage: ChatMessage = {
@@ -1464,6 +2069,9 @@ export function App() {
         ? maestroPlan.parent_task_id
         : null;
     setMaestroBusy(true);
+    setMaestroRun(null);
+    if (!activePlanId) setMaestroPlan(null);
+    setMaestroStatus("Thinking through your message...");
     setChatMessages((messages) => [...messages, outgoingMessage]);
     setDraftMessage("");
     if (isApprovalMessage(outgoingMessage.content) && pendingToolApprovals.length > 0) {
@@ -1494,7 +2102,12 @@ export function App() {
           conversation_id: activeConversationId,
         }),
       });
-      setMaestroPlan(response.plan ?? response.active_plan);
+      if (response.kind === "pending") {
+        setMaestroStatus("Maestro is working in the background...");
+        return;
+      }
+      const responsePlan = response.plan ?? response.active_plan ?? null;
+      setMaestroPlan(shouldShowPlanPreview(responsePlan) ? responsePlan : null);
       setMaestroRun(null);
       if (response.conversation) setActiveConversationId(response.conversation.id);
       if (response.conversation?.messages?.length) {
@@ -1537,11 +2150,15 @@ export function App() {
   const runMaestroPlan = async () => {
     if (!maestroPlan) return;
     const isScheduledApproval = Boolean(planScheduleCandidate);
+    const submittedPlan = maestroPlan;
     setMaestroBusy(true);
-    setMaestroStatus(isScheduledApproval ? "Saving scheduled workflow..." : "Running workflow...");
+    setMaestroStatus(isScheduledApproval ? "Saving scheduled workflow..." : "Queueing workflow...");
+    setMaestroPlan(null);
+    setMaestroRun(null);
+    setExpandedWorkflowNodeId(null);
     try {
       const response = await apiJson<{ run: MaestroRun }>(
-        `/maestro/plans/${maestroPlan.parent_task_id}/run`,
+        `/maestro/plans/${submittedPlan.parent_task_id}/run`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1553,8 +2170,8 @@ export function App() {
           }),
         },
       );
-      setMaestroRun(response.run);
-      setMaestroPlan(response.run.plan);
+      setMaestroRun(shouldShowInlineRunPreview(response.run) ? response.run : null);
+      setMaestroPlan(null);
       setChatMessages((messages) => {
         const alreadyShown = messages.some((message) => message.content === response.run.chat_summary);
         if (alreadyShown) return messages;
@@ -1573,14 +2190,51 @@ export function App() {
       setMaestroStatus(
         response.run.status === "scheduled"
           ? "Scheduled workflow saved."
-          : response.run.status === "completed"
-            ? "Workflow completed."
-            : "Workflow finished.",
+          : response.run.status === "queued"
+            ? "Workflow queued in Active Workflows."
+            : `Workflow ${response.run.status}.`,
       );
       loadSessionHistory().catch(() => undefined);
       loadSchedulerDashboard().catch(() => undefined);
+      loadWorkflowOutputs().catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Maestro workflow failed.";
+      setMaestroPlan(shouldShowPlanPreview(submittedPlan) ? submittedPlan : null);
+      setChatMessages((messages) => [
+        ...messages,
+        { id: crypto.randomUUID(), sender: "maestro", content: message },
+      ]);
+      setMaestroStatus(message);
+    } finally {
+      setMaestroBusy(false);
+    }
+  };
+
+  const clearMaestroPlan = async () => {
+    if (!maestroPlan) return;
+    const planId = maestroPlan.parent_task_id;
+    setMaestroBusy(true);
+    setMaestroStatus("Clearing candidate workflow...");
+    try {
+      await apiJson<{ plan: MaestroPlan }>(`/maestro/plans/${planId}/archive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reason: "Candidate workflow cleared from the Maestro UI.",
+          conversation_id: activeConversationId,
+        }),
+      });
+      setMaestroPlan(null);
+      setMaestroRun(null);
+      setExpandedWorkflowNodeId(null);
+      await Promise.all([
+        pollActiveChannel().catch(() => undefined),
+        loadSchedulerDashboard().catch(() => undefined),
+        loadSessionHistory().catch(() => undefined),
+      ]);
+      setMaestroStatus("Candidate workflow cleared.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not clear candidate workflow.";
       setChatMessages((messages) => [
         ...messages,
         { id: crypto.randomUUID(), sender: "maestro", content: message },
@@ -1652,23 +2306,127 @@ export function App() {
         </div>
 
         <nav className="domain-nav" aria-label="Domains">
-          <button
-            className={activeDomain === "Maestro" ? "domain-button active" : "domain-button"}
-            onClick={() => {
-              setActiveDomain("Maestro");
-              setActiveSurface("dashboard");
-            }}
-          >
-            <Sparkles size={17} />
-            <span>Maestro</span>
-          </button>
-          <button
-            className={activeSurface === "memory" ? "domain-button active" : "domain-button"}
-            onClick={() => setActiveSurface("memory")}
-          >
-            <Database size={17} />
-            <span>Memory</span>
-          </button>
+          <div className="nav-group">
+            <button
+              className={
+                ["dashboard", "run-log", "workflows", "reports"].includes(activeSurface)
+                  ? "domain-button active"
+                  : "domain-button"
+              }
+              onClick={() => setMaestroNavOpen((open) => !open)}
+              type="button"
+            >
+              <Sparkles size={17} />
+              <span>Maestro</span>
+              {maestroNavOpen ? <ChevronDown className="nav-chevron" size={15} /> : <ChevronRight className="nav-chevron" size={15} />}
+            </button>
+            {maestroNavOpen && (
+              <div className="nav-submenu">
+                <button
+                  className={activeSurface === "dashboard" ? "domain-button active" : "domain-button"}
+                  onClick={() => {
+                    setActiveDomain("Maestro");
+                    setActiveSurface("dashboard");
+                  }}
+                  type="button"
+                >
+                  <MessageSquareText size={16} />
+                  <span>Chat</span>
+                </button>
+                <button
+                  className={activeSurface === "run-log" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("run-log")}
+                  type="button"
+                >
+                  <Clock3 size={16} />
+                  <span>Run Log</span>
+                </button>
+                <button
+                  className={activeSurface === "workflows" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("workflows")}
+                  type="button"
+                >
+                  <ListTodo size={16} />
+                  <span>Workflows</span>
+                </button>
+                <button
+                  className={activeSurface === "reports" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("reports")}
+                  type="button"
+                >
+                  <FileText size={16} />
+                  <span>Reports</span>
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="nav-group">
+            <button
+              className={
+                ["memory", "calendar", "contacts", "todos", "organizations", "ideas"].includes(activeSurface)
+                  ? "domain-button active"
+                  : "domain-button"
+              }
+              onClick={() => setMemoryNavOpen((open) => !open)}
+              type="button"
+            >
+              <Database size={17} />
+              <span>Memory</span>
+              {memoryNavOpen ? <ChevronDown className="nav-chevron" size={15} /> : <ChevronRight className="nav-chevron" size={15} />}
+            </button>
+            {memoryNavOpen && (
+              <div className="nav-submenu">
+                <button
+                  className={activeSurface === "memory" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("memory")}
+                  type="button"
+                >
+                  <HardDriveUpload size={16} />
+                  <span>Memory Manager</span>
+                </button>
+                <button
+                  className={activeSurface === "calendar" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("calendar")}
+                  type="button"
+                >
+                  <CalendarDays size={16} />
+                  <span>Calendar</span>
+                </button>
+                <button
+                  className={activeSurface === "contacts" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("contacts")}
+                  type="button"
+                >
+                  <Users size={16} />
+                  <span>Contacts</span>
+                </button>
+                <button
+                  className={activeSurface === "todos" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("todos")}
+                  type="button"
+                >
+                  <ListTodo size={16} />
+                  <span>To Do List</span>
+                </button>
+                <button
+                  className={activeSurface === "organizations" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("organizations")}
+                  type="button"
+                >
+                  <Building2 size={16} />
+                  <span>Organizations</span>
+                </button>
+                <button
+                  className={activeSurface === "ideas" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("ideas")}
+                  type="button"
+                >
+                  <Sparkles size={16} />
+                  <span>Think Tank</span>
+                </button>
+              </div>
+            )}
+          </div>
           <button
             className={activeSurface === "tools" ? "domain-button active" : "domain-button"}
             onClick={() => setActiveSurface("tools")}
@@ -1676,19 +2434,46 @@ export function App() {
             <Wrench size={17} />
             <span>Tools</span>
           </button>
-          {domains.map((domain) => (
+          <button
+            className={activeSurface === "skills" ? "domain-button active" : "domain-button"}
+            onClick={() => setActiveSurface("skills")}
+          >
+            <FileText size={17} />
+            <span>Skills</span>
+          </button>
+          <div className="nav-group">
             <button
-              key={domain}
-              className={activeDomain === domain ? "domain-button active" : "domain-button"}
-              onClick={() => {
-                setActiveDomain(domain);
-                setActiveSurface("domain");
-              }}
+              className={activeSurface === "domain" ? "domain-button active" : "domain-button"}
+              onClick={() => setDomainsNavOpen((open) => !open)}
+              type="button"
             >
-              <ChevronRight size={16} />
-              <span>{domain}</span>
+              <Bot size={17} />
+              <span>Domains</span>
+              {domainsNavOpen ? <ChevronDown className="nav-chevron" size={15} /> : <ChevronRight className="nav-chevron" size={15} />}
             </button>
-          ))}
+            {domainsNavOpen && (
+              <div className="nav-submenu">
+                {domains.map((domain) => (
+                  <button
+                    key={domain}
+                    className={
+                      activeSurface === "domain" && activeDomain === domain
+                        ? "domain-button active"
+                        : "domain-button"
+                    }
+                    onClick={() => {
+                      setActiveDomain(domain);
+                      setActiveSurface("domain");
+                    }}
+                    type="button"
+                  >
+                    <ChevronRight size={16} />
+                    <span>{domain}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </nav>
 
         <div className="sidebar-footer">
@@ -1705,33 +2490,54 @@ export function App() {
             <p className="eyebrow">Active surface</p>
             <h2>
               {activeSurface === "memory"
-                ? "Memory"
+                ? "Memory Manager"
+                : activeSurface === "run-log"
+                  ? "Run Log"
+                : activeSurface === "workflows"
+                  ? "Workflows"
+                : activeSurface === "reports"
+                  ? "Reports"
                 : activeSurface === "tools"
                   ? "Tools"
+                : activeSurface === "skills"
+                  ? "Skills"
+                  : activeSurface in routedSurfaceConfig
+                    ? routedSurfaceConfig[activeSurface as RoutedObjectSurface].title
                   : activeDomain}
             </h2>
           </div>
           <div className="status-strip" aria-label="Runtime status">
-            <span>
-              <ShieldCheck size={16} />
-              Local
-            </span>
             {activeSurface === "memory" ? (
               <span>
                 <Database size={16} />
                 Memory pipeline
+              </span>
+            ) : ["run-log", "workflows", "reports"].includes(activeSurface) ? (
+              <span>
+                <FileText size={16} />
+                Workflow outputs
+              </span>
+            ) : activeSurface in routedSurfaceConfig ? (
+              <span>
+                <Database size={16} />
+                Routed store
               </span>
             ) : activeSurface === "tools" ? (
               <span>
                 <Wrench size={16} />
                 Shared tool suite
               </span>
+            ) : activeSurface === "skills" ? (
+              <span>
+                <FileText size={16} />
+                Skill library
+              </span>
             ) : (
               <span>
                 <Clock3 size={16} />
-                {activeWorkflowSummary
-                  ? `${activeWorkflowSummary.schedulerStatus} scheduler`
-                  : "No active workflow"}
+                {activeWorkflowCount === 0
+                  ? "No active workflows"
+                  : `${activeWorkflowCount} active workflow${activeWorkflowCount === 1 ? "" : "s"}`}
               </span>
             )}
           </div>
@@ -1739,8 +2545,48 @@ export function App() {
 
         {activeSurface === "memory" ? (
           <MemoryWorkspace />
+        ) : activeSurface === "run-log" ? (
+          <RunLogWorkspace
+            entries={workflowRunLog}
+            statusMessage={workflowOutputsStatus}
+            onRefresh={loadWorkflowOutputs}
+            onOpenReport={openWorkflowReport}
+          />
+        ) : activeSurface === "reports" ? (
+          <ReportsWorkspace
+            reports={workflowReports}
+            selectedReport={selectedWorkflowReport}
+            statusMessage={workflowOutputsStatus}
+            onRefresh={loadWorkflowOutputs}
+            onOpenReport={openWorkflowReport}
+            onArchiveReport={archiveWorkflowReport}
+            onArchiveAllReports={archiveAllWorkflowReports}
+          />
+        ) : activeSurface === "workflows" ? (
+          <WorkflowsWorkspace
+            schedulerDashboard={schedulerDashboard}
+            schedulerWorkerStatus={schedulerWorkerStatus}
+            selectedSchedulerRun={selectedSchedulerRun}
+            selectedSchedulerDefinition={selectedSchedulerDefinition}
+            schedulerStatusMessage={schedulerStatusMessage}
+            busyToolCallId={busyToolCallId}
+            onRefresh={async () => {
+              await loadSchedulerDashboard();
+              await loadWorkflowOutputs();
+            }}
+            onSelectRun={selectSchedulerRun}
+            onArchiveRun={archiveSchedulerRun}
+            onReenterRun={reenterSchedulerRunSession}
+            onSelectDefinition={selectSchedulerDefinition}
+            onApproveToolCall={approveToolCall}
+            onRejectToolCall={rejectToolCall}
+          />
+        ) : activeSurface in routedSurfaceConfig ? (
+          <RoutedObjectsWorkspace surface={activeSurface as RoutedObjectSurface} />
         ) : activeSurface === "tools" ? (
           <ToolsWorkspace />
+        ) : activeSurface === "skills" ? (
+          <SkillsWorkspace />
         ) : activeSurface === "domain" ? (
           <DomainWorkspace domainLabel={activeDomain} />
         ) : (
@@ -1784,7 +2630,11 @@ export function App() {
                       key={message.id}
                     >
                       <span>{message.sender === "user" ? "You" : "Maestro"}</span>
-                      <p>{message.content}</p>
+                      {message.sender === "maestro" ? (
+                        <MarkdownMessage content={message.content} />
+                      ) : (
+                        <p className="plain-message">{message.content}</p>
+                      )}
                     </div>
                   ))
                 ) : (
@@ -1796,7 +2646,7 @@ export function App() {
                   <div className="message maestro-message working-message" aria-live="polite">
                     <span>Maestro</span>
                   <p>
-                      {busyToolCallId ? "Running approved tool" : "Conducting"}
+                      {conductingMessage}
                       <span className="working-dots" aria-hidden="true">
                         <span />
                         <span />
@@ -1891,15 +2741,11 @@ export function App() {
                   Let agents plan safe tools
                 </label>
                 <span>
-                  {maestroBusy
-                    ? busyToolCallId
-                      ? "Running approved tool. Long Codex tasks may take a few minutes."
-                      : "Conducting"
-                    : maestroPlan?.scheduler.current_step || maestroStatus}
+                  {conductingMessage}
                 </span>
               </div>
 
-              {maestroPlan && (
+              {showPlanPreview && maestroPlan && (
                 <section className="maestro-plan" aria-labelledby="maestro-plan-heading">
                   <div className="section-heading">
                     <div>
@@ -1914,11 +2760,19 @@ export function App() {
                       <Sparkles size={16} />
                       {planScheduleCandidate ? "Save schedule" : "Run plan"}
                     </button>
+                    <button
+                      className="danger-action"
+                      onClick={clearMaestroPlan}
+                      disabled={maestroBusy}
+                    >
+                      <Trash2 size={16} />
+                      Clear candidate
+                    </button>
                   </div>
                   <p>{maestroPlan.summary}</p>
                   {planScheduleCandidate && (
                     <p className="evaluation-note">
-                      This will save a scheduled workflow in Queue instead of executing the agents now.
+                      This will save a scheduled workflow under Workflows instead of executing the agents now.
                     </p>
                   )}
                   {maestroPlan.planner_notes && (
@@ -2040,12 +2894,21 @@ export function App() {
                         {selectedWorkflowItem.child_task_id && (
                           <span>Task {selectedWorkflowItem.child_task_id.slice(0, 8)}</span>
                         )}
+                        {selectedWorkflowSubtask?.model_tier && (
+                          <span>{selectedWorkflowSubtask.model_tier}</span>
+                        )}
+                        {selectedWorkflowSubtask?.model_profile && (
+                          <span>model {selectedWorkflowSubtask.model_profile}</span>
+                        )}
                       </div>
                       {selectedWorkflowItem.error_message && (
                         <p className="evaluation-note">{selectedWorkflowItem.error_message}</p>
                       )}
                       {selectedWorkflowSubtask?.rationale && (
                         <p className="evaluation-note">{selectedWorkflowSubtask.rationale}</p>
+                      )}
+                      {selectedWorkflowSubtask?.model_rationale && (
+                        <p className="evaluation-note">{selectedWorkflowSubtask.model_rationale}</p>
                       )}
                       <div className="workflow-detail-grid">
                         {selectedWorkflowWorkItems.map((item) => (
@@ -2062,6 +2925,8 @@ export function App() {
                             <div className="preview-meta">
                               <span>{item.needs_agent ? "agent" : "no agent"}</span>
                               <span>{item.can_log_directly ? "loggable" : "not loggable"}</span>
+                              {item.needs_agent && <span>{item.model_tier}</span>}
+                              {item.needs_agent && <span>model {item.model_profile}</span>}
                               <span>
                                 {item.blocks_execution
                                   ? "blocks run"
@@ -2078,7 +2943,7 @@ export function App() {
                 </section>
               )}
 
-              {maestroRun && (
+              {showInlineRunPreview && maestroRun && (
                 <section className="maestro-plan" aria-labelledby="maestro-run-heading">
                   <div className="section-heading">
                     <div>
@@ -2202,483 +3067,595 @@ export function App() {
               )}
             </section>
 
-            <section className="planner-panel" aria-labelledby="planner-heading">
+            <section className="planner-panel" aria-labelledby="review-heading">
               <div className="section-heading">
                 <div>
-                  <p className="eyebrow">Daily planner</p>
-                  <h3 id="planner-heading">Today</h3>
+                  <p className="eyebrow">Renderer</p>
+                  <h3 id="review-heading">Artifacts & reports</h3>
                 </div>
-                <button className="planner-action" disabled>
-                  <CalendarDays size={17} />
-                  Adjust
-                </button>
-              </div>
-
-              <div className="empty-planner-state">
-                <CalendarDays size={20} />
-                <p>
-                  Daily planner is ready for the morning standup workflow. Scheduled blocks will
-                  appear here once Maestro starts producing a real daily plan.
-                </p>
-              </div>
-            </section>
-
-            <section className="reports-panel" aria-labelledby="reports-heading">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Scheduler</p>
-                  <h3 id="reports-heading">Queue</h3>
-                </div>
-                <Clock3 size={18} />
-              </div>
-              <div className="scheduler-control-panel">
-                <div className="workflow-detail-heading">
-                  <div>
-                    <span>Control</span>
-                    <h4>Workflow triggers</h4>
-                  </div>
-                  <label className="worker-toggle">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(schedulerWorkerStatus?.enabled)}
-                      onChange={(event) =>
-                        updateSchedulerWorkerStatus({ enabled: event.target.checked })
-                      }
-                    />
-                    <span>{schedulerWorkerStatus?.enabled ? "Auto worker on" : "Auto worker off"}</span>
-                  </label>
-                  {!schedulerWorkerStatus?.enabled && (
-                    <>
-                      <button type="button" onClick={runSchedulerTick}>
-                        Run tick
-                      </button>
-                      <button type="button" onClick={runSchedulerWorker}>
-                        Run worker
-                      </button>
-                    </>
-                  )}
-                  {selectedSchedulerDefinition && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedSchedulerDefinition(null);
-                        setSchedulerStatusMessage("Creating a new workflow trigger.");
-                      }}
-                    >
-                      New trigger
-                    </button>
-                  )}
-                </div>
-                {!schedulerWorkerStatus?.enabled && (
-                  <p className="scheduler-help-text">
-                    Run tick only enqueues and claims ready items; Run worker enqueues, claims,
-                    and executes once.
-                  </p>
-                )}
-                <div className="scheduler-form-grid">
-                  <label>
-                    <span>Mode</span>
-                    <select
-                      value={schedulerDefinitionMode}
-                      onChange={(event) =>
-                        setSchedulerDefinitionMode(event.target.value as "recurring" | "event")
-                      }
-                    >
-                      <option value="recurring">Recurring</option>
-                      <option value="event">Event</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Name</span>
-                    <input
-                      value={schedulerDefinitionName}
-                      onChange={(event) => setSchedulerDefinitionName(event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Domain</span>
-                    <select
-                      value={schedulerDefinitionDomain}
-                      onChange={(event) => setSchedulerDefinitionDomain(event.target.value)}
-                    >
-                      {Object.entries(domainLabels)
-                        .filter(([key]) => key !== "global")
-                        .map(([key, label]) => (
-                          <option key={key} value={key}>
-                            {label}
-                          </option>
-                        ))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>{schedulerDefinitionMode === "event" ? "Event" : "Time"}</span>
-                    <input
-                      value={
-                        schedulerDefinitionMode === "event"
-                          ? schedulerDefinitionEvent
-                          : schedulerDefinitionTime
-                      }
-                      onChange={(event) =>
-                        schedulerDefinitionMode === "event"
-                          ? setSchedulerDefinitionEvent(event.target.value)
-                          : setSchedulerDefinitionTime(event.target.value)
-                      }
-                    />
-                  </label>
-                </div>
-                <label className="scheduler-wide-field">
-                  <span>Objective</span>
-                  <textarea
-                    value={schedulerDefinitionObjective}
-                    onChange={(event) => setSchedulerDefinitionObjective(event.target.value)}
-                    rows={3}
-                  />
-                </label>
-                <div className="scheduler-action-row">
-                  <button type="button" onClick={createSchedulerDefinition}>
-                    {selectedSchedulerDefinition ? "Update trigger" : "Save trigger"}
+                {selectedWorkflowReport || maestroRun ? (
+                  <button
+                    className="icon-button"
+                    onClick={() => {
+                      setSelectedWorkflowReport(null);
+                      setMaestroRun(null);
+                    }}
+                    title="Close renderer"
+                    type="button"
+                  >
+                    <X size={18} />
                   </button>
-                  {schedulerDefinitionMode === "event" && (
-                    <>
-                      <input
-                        value={schedulerEventId}
-                        onChange={(event) => setSchedulerEventId(event.target.value)}
-                        aria-label="Event id"
-                      />
-                      <button type="button" onClick={triggerSchedulerEvent}>
-                        Trigger event
-                      </button>
-                    </>
-                  )}
-                </div>
-                {schedulerStatusMessage && (
-                  <p className="evaluation-note">{schedulerStatusMessage}</p>
+                ) : (
+                  <FileText size={18} />
                 )}
               </div>
-              {activeWorkflowSummary ? (
-                <div className="scheduler-visualizer">
-                  <article className="workflow-summary-card">
-                    <span>{activeWorkflowSummary.schedulerStatus}</span>
-                    <h4>{activeWorkflowSummary.title}</h4>
-                    <div className="preview-meta">
-                      <span>{activeWorkflowSummary.status}</span>
-                      <span>{activeWorkflowSummary.queueItems.length} queue items</span>
-                      <span>{activeWorkflowSummary.stageCount} stages</span>
-                      <span>{activeWorkflowSummary.completed} complete</span>
-                      {activeWorkflowSummary.running > 0 && (
-                        <span>{activeWorkflowSummary.running} active/pending</span>
-                      )}
-                      {activeWorkflowSummary.blocked > 0 && (
-                        <span>{activeWorkflowSummary.blocked} blocked</span>
-                      )}
-                      {activeWorkflowSummary.failed > 0 && (
-                        <span>{activeWorkflowSummary.failed} failed</span>
-                      )}
-                    </div>
+
+              {selectedWorkflowReport ? (
+                <div className="artifact-review-pane">
+                  <div className="preview-meta">
+                    <span>{selectedWorkflowReport.source_type}</span>
+                    <span>
+                      {selectedWorkflowReport.domain_key
+                        ? domainLabels[selectedWorkflowReport.domain_key] ?? selectedWorkflowReport.domain_key
+                        : "Global"}
+                    </span>
+                    <span>{formatDateTime(selectedWorkflowReport.created_at)}</span>
+                  </div>
+                  <article className="artifact-review-card">
+                    <h4>{selectedWorkflowReport.title}</h4>
+                    <MarkdownMessage
+                      content={selectedWorkflowReport.body_markdown ?? selectedWorkflowReport.summary ?? ""}
+                    />
                   </article>
-                  {queueStages.length > 0 && (
-                    <div className="workflow-map compact-map" aria-label="Scheduler workflow map">
-                      <div className="workflow-map-scroll">
-                        {queueStages.map((stage, index) => (
-                          <div className="workflow-map-stage" key={`scheduler-stage-${stage.stageIndex}`}>
-                            <div className="workflow-map-heading">
-                              <span>Stage {stage.stageIndex}</span>
-                              <span>{stage.items.length > 1 ? "Parallel" : "Single"}</span>
-                            </div>
-                            <div className="workflow-map-items">
-                              {stage.items.map((item) => (
-                                <button
-                                  className={`workflow-node node-${item.status} ${
-                                    expandedWorkflowNodeId === item.id ? "node-selected" : ""
-                                  }`}
-                                  key={item.id}
-                                  type="button"
-                                  onClick={() =>
-                                    setExpandedWorkflowNodeId((selectedId) =>
-                                      selectedId === item.id ? null : item.id,
-                                    )
-                                  }
-                                >
-                                  <span>{item.status}</span>
-                                  <strong>{item.agent_name}</strong>
-                                  <small>{item.work_item_ids.join(", ")}</small>
-                                </button>
-                              ))}
-                            </div>
-                            {index < queueStages.length - 1 && (
-                              <ChevronRight className="workflow-arrow" size={18} />
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
+                </div>
+              ) : maestroRun ? (
+                <div className="artifact-review-pane">
+                  <div className="preview-meta">
+                    <span>{maestroRun.status}</span>
+                    <span>{maestroRun.child_runs.length} child runs</span>
+                    {maestroRun.synthesis_report_id && <span>report {maestroRun.synthesis_report_id.slice(0, 8)}</span>}
+                    {maestroRun.artifact_id && <span>artifact {maestroRun.artifact_id.slice(0, 8)}</span>}
+                  </div>
+                  {maestroRun.chat_summary && (
+                    <article className="artifact-review-card">
+                      <h4>Chat summary</h4>
+                      <p>{maestroRun.chat_summary}</p>
+                    </article>
                   )}
-                  {selectedWorkflowItem && (
-                    <div className="workflow-detail-panel">
-                      <div className="workflow-detail-heading">
-                        <div>
-                          <span>
-                            Stage {selectedWorkflowItem.stage_index} / {selectedWorkflowItem.status}
-                          </span>
-                          <h4>{selectedWorkflowItem.agent_name}</h4>
-                        </div>
-                        <button type="button" onClick={() => setExpandedWorkflowNodeId(null)}>
-                          Close
-                        </button>
-                      </div>
-                      <p>{selectedWorkflowItem.objective}</p>
-                      <div className="preview-meta">
-                        <span>{domainLabels[selectedWorkflowItem.domain_key] ?? selectedWorkflowItem.domain_key}</span>
-                        <span>{selectedWorkflowItem.priority}</span>
-                        <span>{selectedWorkflowItem.work_item_ids.join(", ") || "no work items"}</span>
-                        <span>{selectedWorkflowItem.retry_count ?? 0} retries</span>
-                        {selectedWorkflowItem.depends_on_work_item_ids.length > 0 && (
-                          <span>Waits for {selectedWorkflowItem.depends_on_work_item_ids.join(", ")}</span>
-                        )}
-                        {selectedWorkflowItem.child_task_id && (
-                          <span>Task {selectedWorkflowItem.child_task_id.slice(0, 8)}</span>
-                        )}
-                      </div>
-                      {selectedWorkflowItem.error_message && (
-                        <p className="evaluation-note">{selectedWorkflowItem.error_message}</p>
-                      )}
-                      {selectedWorkflowSubtask?.rationale && (
-                        <p className="evaluation-note">{selectedWorkflowSubtask.rationale}</p>
-                      )}
-                      <div className="workflow-detail-grid">
-                        {selectedWorkflowWorkItems.map((item) => (
-                          <article className="mini-row" key={`queue-${item.id}`}>
-                            <span>
-                              {item.id} / {item.type} / {item.priority} /{" "}
-                              {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
-                            </span>
-                            <p>{item.title}</p>
-                            <p>{item.description}</p>
-                            {item.dependencies.length > 0 && (
-                              <span>Depends on: {item.dependencies.join(", ")}</span>
-                            )}
-                          </article>
-                        ))}
-                      </div>
-                    </div>
+                  {maestroRun.staged_artifact_path && (
+                    <article className="artifact-review-card">
+                      <h4>Staged artifact</h4>
+                      <p>{maestroRun.staged_artifact_path}</p>
+                    </article>
                   )}
+                  <details className="artifact-review-card">
+                    <summary>Workflow synthesis</summary>
+                    <pre>{maestroRun.synthesis}</pre>
+                  </details>
                 </div>
               ) : (
-                <p className="empty-state">
-                  No active workflow selected. Proposed, queued, or running workflows can be
-                  inspected here when they need attention.
-                </p>
-              )}
-              {schedulerDashboard && schedulerDashboard.runs.length > 0 && (
-                <div className="scheduler-run-list" aria-label="Durable scheduler runs">
-                  <div className="workflow-detail-heading">
-                    <div>
-                      <span>Durable queue</span>
-                      <h4>Active workflow queue</h4>
-                    </div>
-                    <span>{schedulerDashboard.runnable_batches.length} runnable batch(es)</span>
-                  </div>
-                  {schedulerDashboard.runs.slice(0, 5).map((run) => {
-                    const completed = run.queue_items.filter((item) => item.status === "completed").length;
-                    const blocked = run.queue_items.filter((item) => item.status === "blocked").length;
-                    const unassigned = run.queue_items.filter((item) => !item.agent_key).length;
-                    const runnableBatch = schedulerDashboard.runnable_batches.find(
-                      (batch) => batch.workflow_run_id === run.id,
-                    );
-                    return (
-                      <article className="workflow-summary-card compact-run-card" key={run.id}>
-                        <button
-                          type="button"
-                          className="card-reset"
-                          onClick={() => selectSchedulerRun(run.id)}
-                        >
-                          <span>{run.status}</span>
-                          <h4>{run.summary || "Maestro workflow"}</h4>
-                        </button>
-                        <div className="preview-meta">
-                          <span>{run.priority}</span>
-                          <span>{run.fairness_group || "global"} fairness</span>
-                          <span>{run.queue_items.length} queued</span>
-                          <span>{completed} complete</span>
-                          {blocked > 0 && <span>{blocked} blocked</span>}
-                          {unassigned > 0 && <span className="warning-pill">{unassigned} need agent</span>}
-                          {runnableBatch && (
-                            <span>{runnableBatch.parallel_ready.length} parallel-ready</span>
-                          )}
-                        </div>
-                        <div className="scheduler-action-row compact-actions">
-                          <button type="button" onClick={() => selectSchedulerRun(run.id)}>
-                            Inspect
-                          </button>
-                          {run.conversation_id && (
-                            <button type="button" onClick={() => reenterSchedulerRunSession(run)}>
-                              Re-enter session
-                            </button>
-                          )}
-                          <button type="button" onClick={() => archiveSchedulerRun(run.id)}>
-                            Archive
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
+                <div className="empty-planner-state">
+                  <FileText size={20} />
+                  <p>
+                    Ask Maestro to show a report, inspect a completed run, or open an artifact and
+                    it will render here beside the conversation.
+                  </p>
                 </div>
               )}
-              {schedulerDashboard && schedulerDashboard.runs.length === 0 && (
-                <p className="empty-state">
-                  No active queued work. Completed runs are kept as history instead of staying in
-                  the queue.
-                </p>
-              )}
-              {selectedSchedulerRun && (
-                <div className="workflow-detail-panel scheduler-detail-panel">
-                  <div className="workflow-detail-heading">
-                    <div>
-                      <span>{selectedSchedulerRun.status}</span>
-                      <h4>{selectedSchedulerRun.summary || "Workflow run"}</h4>
-                    </div>
-                    <button type="button" onClick={() => setSelectedSchedulerRun(null)}>
-                      Close
-                    </button>
-                  </div>
-                  <div className="preview-meta">
-                    <span>{selectedSchedulerRun.source_type}</span>
-                    <span>{selectedSchedulerRun.priority}</span>
-                    <span>{selectedSchedulerRun.fairness_group || "global"} fairness</span>
-                    <span>{selectedSchedulerRun.queue_items.length} queue items</span>
-                    {selectedSchedulerRun.workflow_definition_id && <span>Recurring run</span>}
-                  </div>
-                  {selectedSchedulerRun.error_message && (
-                    <p className="evaluation-note">{selectedSchedulerRun.error_message}</p>
-                  )}
-                  <div className="workflow-detail-grid">
-                    {selectedSchedulerRun.queue_items.map((item) => (
-                      <article className="mini-row" key={item.id}>
-                        <span>
-                          Stage {item.stage_index} / {item.status} /{" "}
-                          {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
-                        </span>
-                        <p>{item.objective}</p>
-                        <div className="preview-meta">
-                          <span>{item.agent_name ?? item.agent_key ?? "Unassigned"}</span>
-                          {!item.agent_key && <span className="warning-pill">Needs agent assignment</span>}
-                          <span>{item.priority}</span>
-                          {item.dependency_keys.length > 0 && (
-                            <span>Waits for {item.dependency_keys.join(", ")}</span>
-                          )}
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                  {(selectedSchedulerRun.events ?? []).length > 0 && (
-                    <div className="scheduler-event-list">
-                      <h4>Run history</h4>
-                      {selectedSchedulerRun.events?.map((event) => (
-                        <article className="mini-row" key={event.id}>
-                          <span>{event.event_type}</span>
-                          <p>{event.message}</p>
-                        </article>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-              {scheduledWorkflowDefinitions.length > 0 && (
-                <div className="scheduler-run-list" aria-label="Scheduled workflow definitions">
-                  <div className="workflow-detail-heading">
-                    <div>
-                      <span>Schedules</span>
-                      <h4>Scheduled workflows</h4>
-                    </div>
-                    <span>{scheduledWorkflowDefinitions.length} configured</span>
-                  </div>
-                  {scheduledWorkflowDefinitions.slice(0, 5).map((definition) => {
-                    const unassigned = unassignedDefinitionItemCount(definition);
-                    return (
-                      <article className="workflow-summary-card compact-run-card" key={definition.id}>
-                        <button
-                          type="button"
-                          className="card-reset"
-                          onClick={() => selectSchedulerDefinition(definition)}
-                        >
-                          <span>{definition.trigger_type}</span>
-                          <h4>{definition.name}</h4>
-                        </button>
-                        <div className="preview-meta">
-                          <span>{definition.is_active ? "active" : "paused"}</span>
-                          <span>{triggerSummary(definition.trigger_type, definition.trigger_config)}</span>
-                          <span>{definition.priority}</span>
-                          <span>{definition.fairness_group || definition.domain_key || "global"} fairness</span>
-                          {unassigned > 0 && <span className="warning-pill">{unassigned} need agent</span>}
-                          {typeof definition.trigger_config.next_run_at === "string" && (
-                            <span>Next {definition.trigger_config.next_run_at}</span>
-                          )}
-                          {typeof definition.trigger_config.event_type === "string" && (
-                            <span>{definition.trigger_config.event_type}</span>
-                          )}
-                        </div>
-                        <div className="scheduler-action-row compact-actions">
-                          <button type="button" onClick={() => selectSchedulerDefinition(definition)}>
-                            Edit schedule
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              )}
-              {triggerWorkflowDefinitions.length > 0 && (
-                <div className="scheduler-run-list" aria-label="Trigger workflow definitions">
-                  <div className="workflow-detail-heading">
-                    <div>
-                      <span>Triggers</span>
-                      <h4>Trigger workflows</h4>
-                    </div>
-                    <span>{triggerWorkflowDefinitions.length} configured</span>
-                  </div>
-                  {triggerWorkflowDefinitions.slice(0, 5).map((definition) => {
-                    const unassigned = unassignedDefinitionItemCount(definition);
-                    return (
-                      <article className="workflow-summary-card compact-run-card" key={definition.id}>
-                        <button
-                          type="button"
-                          className="card-reset"
-                          onClick={() => selectSchedulerDefinition(definition)}
-                        >
-                          <span>{definition.trigger_type}</span>
-                          <h4>{definition.name}</h4>
-                        </button>
-                        <div className="preview-meta">
-                          <span>{definition.is_active ? "active" : "paused"}</span>
-                          <span>{triggerSummary(definition.trigger_type, definition.trigger_config)}</span>
-                          <span>{definition.priority}</span>
-                          <span>{definition.fairness_group || definition.domain_key || "global"} fairness</span>
-                          {unassigned > 0 && <span className="warning-pill">{unassigned} need agent</span>}
-                          {typeof definition.trigger_config.event_type === "string" && (
-                            <span>{definition.trigger_config.event_type}</span>
-                          )}
-                        </div>
-                        <div className="scheduler-action-row compact-actions">
-                          <button type="button" onClick={() => selectSchedulerDefinition(definition)}>
-                            Edit trigger
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              )}
+              <NeedsAttentionPanel
+                schedulerDashboard={schedulerDashboard}
+                pendingToolApprovals={pendingToolApprovals}
+                busyToolCallId={busyToolCallId}
+                onApproveToolCall={approveToolCall}
+                onRejectToolCall={rejectToolCall}
+                onSubmitAttentionResponse={submitAttentionResponse}
+                onArchiveRun={archiveSchedulerRun}
+              />
             </section>
-
-            <RoutedItemsBoard
-              title="Open routed work"
-              eyebrow="Maestro aggregate"
-              className="dashboard-wide"
-            />
           </div>
         )}
       </section>
     </main>
+  );
+}
+
+function RunLogWorkspace({
+  entries,
+  statusMessage,
+  onRefresh,
+  onOpenReport,
+}: {
+  entries: WorkflowRunLogEntry[];
+  statusMessage: string;
+  onRefresh: () => Promise<void>;
+  onOpenReport: (reportId: string) => Promise<void>;
+}) {
+  return (
+    <section className="surface-panel output-surface" aria-labelledby="run-log-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Workflow history</p>
+          <h3 id="run-log-heading">Run Log</h3>
+        </div>
+        <button className="icon-button" onClick={onRefresh} title="Refresh run log" type="button">
+          <RefreshCw size={18} />
+        </button>
+      </div>
+      <div className="output-card-grid">
+        {entries.map((entry) => (
+          <article className="workflow-summary-card" key={entry.id}>
+            <span>{entry.status}</span>
+            <h4>{entry.title}</h4>
+            <p>{entry.summary}</p>
+            <div className="preview-meta">
+              <span>{entry.domain_key ? domainLabels[entry.domain_key] ?? entry.domain_key : "Global"}</span>
+              <span>{entry.agent_work.length} agent item(s)</span>
+              <span>{entry.report_ids.length} report(s)</span>
+              <span>{entry.artifact_ids.length} artifact(s)</span>
+              {entry.run_completed_at && <span>{formatDateTime(entry.run_completed_at)}</span>}
+            </div>
+            {entry.report_ids.length > 0 && (
+              <div className="scheduler-action-row compact-actions">
+                {entry.report_ids.slice(0, 3).map((reportId) => (
+                  <button key={reportId} type="button" onClick={() => onOpenReport(reportId)}>
+                    Open report {reportId.slice(0, 8)}
+                  </button>
+                ))}
+              </div>
+            )}
+            <details>
+              <summary>Agent work</summary>
+              <div className="workflow-detail-grid">
+                {entry.agent_work.map((item, index) => (
+                  <article className="mini-row" key={`${entry.id}-agent-${index}`}>
+                    <span>
+                      {String(item.status ?? "unknown")} / {String(item.agent_name ?? item.agent_key ?? "agent")}
+                    </span>
+                    <p>{String(item.objective ?? "")}</p>
+                  </article>
+                ))}
+              </div>
+            </details>
+          </article>
+        ))}
+        {entries.length === 0 && (
+          <p className="empty-state">Completed workflow runs will appear here after the worker finishes them.</p>
+        )}
+      </div>
+      {statusMessage && <p className="memory-status">{statusMessage}</p>}
+    </section>
+  );
+}
+
+function ReportsWorkspace({
+  reports,
+  selectedReport,
+  statusMessage,
+  onRefresh,
+  onOpenReport,
+  onArchiveReport,
+  onArchiveAllReports,
+}: {
+  reports: WorkflowReport[];
+  selectedReport: WorkflowReport | null;
+  statusMessage: string;
+  onRefresh: () => Promise<void>;
+  onOpenReport: (reportId: string) => Promise<void>;
+  onArchiveReport: (reportId: string) => Promise<void>;
+  onArchiveAllReports: () => Promise<void>;
+}) {
+  return (
+    <section className="reports-workspace" aria-labelledby="reports-workspace-heading">
+      <aside className="reports-list-panel">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Report box</p>
+            <h3 id="reports-workspace-heading">Reports</h3>
+          </div>
+          <div className="inline-actions">
+            <button className="icon-button" onClick={onRefresh} title="Refresh reports" type="button">
+              <RefreshCw size={18} />
+            </button>
+            <button className="icon-button" onClick={onArchiveAllReports} title="Archive all reports" type="button">
+              <Archive size={18} />
+            </button>
+          </div>
+        </div>
+        {reports.map((report) => (
+          <article
+            className={`report-list-item ${selectedReport?.id === report.id ? "active" : ""}`}
+            key={report.id}
+          >
+            <button className="card-reset" onClick={() => onOpenReport(report.id)} type="button">
+              <span>{report.domain_key ? domainLabels[report.domain_key] ?? report.domain_key : "Global"}</span>
+              <strong>{report.title}</strong>
+              {report.summary && <small>{report.summary}</small>}
+            </button>
+            <button
+              className="session-archive-button"
+              onClick={() => onArchiveReport(report.id)}
+              type="button"
+            >
+              Archive
+            </button>
+          </article>
+        ))}
+        {reports.length === 0 && <p className="empty-state">No reports have been generated yet.</p>}
+        {statusMessage && <p className="memory-status">{statusMessage}</p>}
+      </aside>
+      <section className="report-renderer-panel" aria-label="Selected report">
+        {selectedReport ? (
+          <>
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">{selectedReport.source_type}</p>
+                <h3>{selectedReport.title}</h3>
+              </div>
+              <FileText size={18} />
+            </div>
+            <button
+              className="session-archive-button"
+              onClick={() => onArchiveReport(selectedReport.id)}
+              type="button"
+            >
+              Archive report
+            </button>
+            <div className="preview-meta">
+              <span>{selectedReport.domain_key ? domainLabels[selectedReport.domain_key] ?? selectedReport.domain_key : "Global"}</span>
+              <span>{formatDateTime(selectedReport.created_at)}</span>
+            </div>
+            <div className="report-markdown">
+              <MarkdownMessage content={selectedReport.body_markdown ?? selectedReport.summary ?? ""} />
+            </div>
+          </>
+        ) : (
+          <div className="empty-planner-state">
+            <FileText size={20} />
+            <p>Select a report to render it here.</p>
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function WorkflowsWorkspace({
+  schedulerDashboard,
+  schedulerWorkerStatus,
+  selectedSchedulerRun,
+  selectedSchedulerDefinition,
+  schedulerStatusMessage,
+  busyToolCallId,
+  onRefresh,
+  onSelectRun,
+  onArchiveRun,
+  onReenterRun,
+  onSelectDefinition,
+  onApproveToolCall,
+  onRejectToolCall,
+}: {
+  schedulerDashboard: SchedulerDashboard | null;
+  schedulerWorkerStatus: SchedulerWorkerStatus | null;
+  selectedSchedulerRun: SchedulerRun | null;
+  selectedSchedulerDefinition: SchedulerDefinition | null;
+  schedulerStatusMessage: string;
+  busyToolCallId: string | null;
+  onRefresh: () => Promise<void>;
+  onSelectRun: (runId: string) => Promise<void>;
+  onArchiveRun: (runId: string) => Promise<void>;
+  onReenterRun: (run: SchedulerRun) => Promise<void>;
+  onSelectDefinition: (definition: SchedulerDefinition) => void;
+  onApproveToolCall: (toolCallId: string) => Promise<void>;
+  onRejectToolCall: (toolCallId: string) => Promise<void>;
+}) {
+  const [selectedQueueItemId, setSelectedQueueItemId] = useState<string | null>(null);
+  const runs = schedulerDashboard?.runs ?? [];
+  const definitions = schedulerDashboard?.definitions ?? [];
+  const scheduledDefinitions = definitions.filter((definition) =>
+    ["scheduled", "recurring"].includes(definition.trigger_type),
+  );
+  const triggerDefinitions = definitions.filter((definition) => definition.trigger_type === "event");
+  const selectedToolActivity = Array.isArray(selectedSchedulerRun?.output_payload?.tool_activity)
+    ? selectedSchedulerRun.output_payload.tool_activity as MaestroRun["tool_activity"]
+    : [];
+  const selectedRunStages = useMemo(() => {
+    const groups = new Map<number, SchedulerQueueItem[]>();
+    for (const item of selectedSchedulerRun?.queue_items ?? []) {
+      const stage = item.stage_index ?? 0;
+      groups.set(stage, [...(groups.get(stage) ?? []), item]);
+    }
+    return Array.from(groups.entries())
+      .sort(([first], [second]) => first - second)
+      .map(([stageIndex, items]) => ({
+        stageIndex,
+        items: [...items].sort((first, second) => first.position - second.position),
+      }));
+  }, [selectedSchedulerRun]);
+  const selectedQueueItem =
+    selectedSchedulerRun?.queue_items.find((item) => item.id === selectedQueueItemId) ??
+    selectedSchedulerRun?.queue_items[0] ??
+    null;
+  const selectedAgentRun = selectedQueueItem ? queueItemAgentRun(selectedQueueItem) : null;
+  const selectedToolCalls = selectedQueueItem ? queueItemToolCalls(selectedQueueItem) : [];
+  return (
+    <section className="surface-panel output-surface" aria-labelledby="workflows-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Execution control</p>
+          <h3 id="workflows-heading">Workflows</h3>
+        </div>
+        <div className="scheduler-action-row compact-actions">
+          <span>{schedulerWorkerStatus?.enabled ? "Auto worker on" : "Auto worker off"}</span>
+          <button className="icon-button" onClick={onRefresh} title="Refresh workflows" type="button">
+            <RefreshCw size={18} />
+          </button>
+        </div>
+      </div>
+      <div className="output-card-grid">
+        <section>
+          <h4>Active</h4>
+          {runs.map((run) => {
+            const completed = run.queue_items.filter((item) => item.status === "completed").length;
+            const blocked = run.queue_items.filter((item) => item.status === "blocked").length;
+            return (
+              <article className="workflow-summary-card compact-run-card" key={run.id}>
+                <button type="button" className="card-reset" onClick={() => onSelectRun(run.id)}>
+                  <span>{run.status}</span>
+                  <h4>{run.summary || "Maestro workflow"}</h4>
+                </button>
+                <div className="preview-meta">
+                  <span>{run.priority}</span>
+                  <span>{run.queue_items.length} queue items</span>
+                  <span>{completed} complete</span>
+                  {blocked > 0 && <span>{blocked} blocked</span>}
+                </div>
+                <div className="scheduler-action-row compact-actions">
+                  <button type="button" onClick={() => onSelectRun(run.id)}>
+                    Inspect
+                  </button>
+                  {run.conversation_id && (
+                    <button type="button" onClick={() => onReenterRun(run)}>
+                      Re-enter chat
+                    </button>
+                  )}
+                  <button type="button" onClick={() => onArchiveRun(run.id)}>
+                    Kill workflow
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+          {runs.length === 0 && <p className="empty-state">No active workflow runs are queued.</p>}
+        </section>
+        <section>
+          <h4>Scheduled</h4>
+          {scheduledDefinitions.map((definition) => (
+            <article className="workflow-summary-card compact-run-card" key={definition.id}>
+              <button type="button" className="card-reset" onClick={() => onSelectDefinition(definition)}>
+                <span>{definition.trigger_type}</span>
+                <h4>{definition.name}</h4>
+              </button>
+              <div className="preview-meta">
+                <span>{definition.is_active ? "active" : "paused"}</span>
+                <span>{triggerSummary(definition.trigger_type, definition.trigger_config)}</span>
+                <span>{definition.fairness_group || definition.domain_key || "global"}</span>
+              </div>
+            </article>
+          ))}
+          {scheduledDefinitions.length === 0 && <p className="empty-state">No scheduled workflows yet.</p>}
+        </section>
+        <section>
+          <h4>Triggers</h4>
+          {triggerDefinitions.map((definition) => (
+            <article className="workflow-summary-card compact-run-card" key={definition.id}>
+              <button type="button" className="card-reset" onClick={() => onSelectDefinition(definition)}>
+                <span>{definition.trigger_type}</span>
+                <h4>{definition.name}</h4>
+              </button>
+              <div className="preview-meta">
+                <span>{definition.is_active ? "active" : "paused"}</span>
+                <span>{triggerSummary(definition.trigger_type, definition.trigger_config)}</span>
+                <span>{definition.fairness_group || definition.domain_key || "global"}</span>
+              </div>
+            </article>
+          ))}
+          {triggerDefinitions.length === 0 && <p className="empty-state">No trigger workflows yet.</p>}
+        </section>
+      </div>
+      {selectedSchedulerRun && (
+        <section className="workflow-detail-panel scheduler-detail-panel">
+          <div className="workflow-detail-heading">
+            <div>
+              <span>{selectedSchedulerRun.status}</span>
+              <h4>{selectedSchedulerRun.summary || "Workflow run"}</h4>
+            </div>
+            <div className="scheduler-action-row compact-actions">
+              {selectedSchedulerRun.conversation_id && (
+                <button type="button" onClick={() => onReenterRun(selectedSchedulerRun)}>
+                  Re-enter chat
+                </button>
+              )}
+              <button className="danger-action" type="button" onClick={() => onArchiveRun(selectedSchedulerRun.id)}>
+                Kill workflow
+              </button>
+            </div>
+          </div>
+          <div className="preview-meta">
+            <span>{selectedSchedulerRun.priority}</span>
+            <span>{selectedSchedulerRun.queue_items.length} queue items</span>
+            {selectedSchedulerRun.created_at && <span>{formatDateTime(selectedSchedulerRun.created_at)}</span>}
+            {selectedSchedulerRun.error_message && <span>{selectedSchedulerRun.error_message}</span>}
+          </div>
+          {selectedRunStages.length > 0 && (
+            <div className="workflow-map" aria-label="Selected workflow dependency map">
+              <h4>Workflow map</h4>
+              <div className="workflow-map-scroll">
+                {selectedRunStages.map((stage, index) => (
+                  <div className="workflow-map-stage" key={`selected-stage-${stage.stageIndex}`}>
+                    <div className="workflow-map-heading">
+                      <span>Stage {stage.stageIndex}</span>
+                      <span>{stage.items.length > 1 ? "Parallel" : "Single"}</span>
+                    </div>
+                    <div className="workflow-map-items">
+                      {stage.items.map((item) => (
+                        <button
+                          className={`workflow-node node-${item.status} ${
+                            selectedQueueItem?.id === item.id ? "node-selected" : ""
+                          }`}
+                          key={item.id}
+                          type="button"
+                          onClick={() => setSelectedQueueItemId(item.id)}
+                        >
+                          <span>{item.status}</span>
+                          <strong>{item.agent_name ?? item.agent_key ?? "Unassigned"}</strong>
+                          <small>{item.external_key}</small>
+                        </button>
+                      ))}
+                    </div>
+                    {index < selectedRunStages.length - 1 && (
+                      <ChevronRight className="workflow-arrow" size={18} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {selectedQueueItem && (
+            <div className="workflow-detail-panel nested-workflow-detail">
+              <div className="workflow-detail-heading">
+                <div>
+                  <span>
+                    Stage {selectedQueueItem.stage_index} / {selectedQueueItem.status} /{" "}
+                    {domainLabels[selectedQueueItem.domain_key ?? "global"] ??
+                      selectedQueueItem.domain_key ??
+                      "Global"}
+                  </span>
+                  <h4>{selectedQueueItem.agent_name ?? selectedQueueItem.agent_key ?? "Unassigned"}</h4>
+                </div>
+              </div>
+              <p>{selectedQueueItem.objective}</p>
+              <div className="preview-meta">
+                <span>{selectedQueueItem.priority}</span>
+                <span>{selectedQueueItem.external_key}</span>
+                {selectedQueueItem.dependency_keys.length > 0 && (
+                  <span>Waits for {selectedQueueItem.dependency_keys.join(", ")}</span>
+                )}
+                {selectedQueueItem.model_profile && <span>model {selectedQueueItem.model_profile}</span>}
+                {(selectedQueueItem.required_skills ?? []).length > 0 && (
+                  <span>skills {(selectedQueueItem.required_skills ?? []).join(", ")}</span>
+                )}
+                {selectedQueueItem.lease_owner && <span>lease {selectedQueueItem.lease_owner}</span>}
+                {selectedQueueItem.error_message && <span>{selectedQueueItem.error_message}</span>}
+              </div>
+              {selectedAgentRun && (
+                <div className="artifact-review-card">
+                  <h4>Agent run</h4>
+                  <div className="preview-meta">
+                    <span>{selectedAgentRun.status}</span>
+                    {selectedAgentRun.report_id && <span>report {selectedAgentRun.report_id.slice(0, 8)}</span>}
+                    {selectedAgentRun.artifact_id && <span>artifact {selectedAgentRun.artifact_id.slice(0, 8)}</span>}
+                    {selectedAgentRun.staged_artifact_path && <span>staged</span>}
+                  </div>
+                  {selectedAgentRun.execution_note && <p>{selectedAgentRun.execution_note}</p>}
+                  {selectedAgentRun.output_preview && (
+                    <details>
+                      <summary>Output preview</summary>
+                      <pre>{selectedAgentRun.output_preview}</pre>
+                    </details>
+                  )}
+                  {selectedAgentRun.error_message && (
+                    <p className="evaluation-note">{selectedAgentRun.error_message}</p>
+                  )}
+                </div>
+              )}
+              {selectedToolCalls.length > 0 && (
+                <div className="tool-activity-list">
+                  <h4>Agent tool calls</h4>
+                  {selectedToolCalls.map((call, index) => (
+                    <article
+                      className={`tool-activity-item tool-activity-${call.status}`}
+                      key={`${call.tool_name}-${call.id ?? index}`}
+                    >
+                      <strong>{call.tool_name}</strong>
+                      <span>{call.status}</span>
+                      {call.error_message && <p>{call.error_message}</p>}
+                      {call.output_payload && (
+                        <details>
+                          <summary>Tool output</summary>
+                          <pre>{JSON.stringify(call.output_payload, null, 2)}</pre>
+                        </details>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="workflow-detail-grid">
+            {selectedSchedulerRun.queue_items.map((item) => (
+              <article className="mini-row" key={item.id}>
+                <button className="card-reset" type="button" onClick={() => setSelectedQueueItemId(item.id)}>
+                  <span>
+                    Stage {item.stage_index} / {item.status} /{" "}
+                    {domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"}
+                  </span>
+                  <p>{item.objective}</p>
+                </button>
+                <div className="preview-meta">
+                  <span>{item.agent_name ?? item.agent_key ?? "Unassigned"}</span>
+                  {item.dependency_keys.length > 0 && <span>Waits for {item.dependency_keys.join(", ")}</span>}
+                </div>
+              </article>
+            ))}
+          </div>
+          {selectedToolActivity.length > 0 && (
+            <div className="tool-activity-list">
+              <h4>Tool activity</h4>
+              {selectedToolActivity.map((activity, index) => (
+                <article
+                  className={`tool-activity-item tool-activity-${activity.status}`}
+                  key={`${activity.agent_key}-${activity.tool_name}-${activity.tool_call_id ?? index}`}
+                >
+                  <strong>{activity.agent_name}</strong>
+                  <span>{activity.tool_name}</span>
+                  <p>
+                    {activity.status}
+                    {activity.details ? ` - ${activity.details}` : ""}
+                    {activity.error_message ? ` - ${activity.error_message}` : ""}
+                  </p>
+                  {activity.status === "approval_required" && activity.tool_call_id && (
+                    <div className="tool-approval-actions">
+                      <button
+                        className="planner-action"
+                        onClick={() => onApproveToolCall(activity.tool_call_id!)}
+                        disabled={busyToolCallId === activity.tool_call_id}
+                        type="button"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        className="danger-action"
+                        onClick={() => onRejectToolCall(activity.tool_call_id!)}
+                        disabled={busyToolCallId === activity.tool_call_id}
+                        type="button"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+      {selectedSchedulerDefinition && (
+        <p className="evaluation-note">
+          Editing selected workflow definition: {selectedSchedulerDefinition.name}
+        </p>
+      )}
+      {schedulerStatusMessage && <p className="memory-status">{schedulerStatusMessage}</p>}
+    </section>
   );
 }
 
@@ -2687,6 +3664,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
   const [domains, setDomains] = useState<DomainContext[]>([]);
   const [agents, setAgents] = useState<AgentSpec[]>([]);
   const [tools, setTools] = useState<ToolRegistryItem[]>([]);
+  const [skills, setSkills] = useState<SkillRegistryItem[]>([]);
   const [globalContext, setGlobalContext] = useState("");
   const [domainContext, setDomainContext] = useState("");
   const [selectedAgentKey, setSelectedAgentKey] = useState<string | null>(null);
@@ -2696,6 +3674,7 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
   const [rolePrompt, setRolePrompt] = useState("");
   const [currentAction, setCurrentAction] = useState("");
   const [toolPermissions, setToolPermissions] = useState<Record<string, string>>({});
+  const [skillPermissions, setSkillPermissions] = useState<Record<string, string>>({});
   const [promptTask, setPromptTask] = useState("Prepare a concise domain brief.");
   const [toolRequestJson, setToolRequestJson] = useState("[]");
   const [promptPreview, setPromptPreview] = useState<PromptPackage | null>(null);
@@ -2716,16 +3695,18 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     domainAgents.find((agent) => agent.key === selectedAgentKey) ?? domainAgents[0] ?? null;
 
   const refreshAgents = useCallback(async () => {
-    const [globalResponse, domainResponse, agentResponse, toolResponse] = await Promise.all([
+    const [globalResponse, domainResponse, agentResponse, toolResponse, skillResponse] = await Promise.all([
       apiJson<{ global_context: { context: string } }>("/agents/global-context"),
       apiJson<{ domains: DomainContext[] }>("/agents/domains"),
       apiJson<{ agents: AgentSpec[] }>("/agents"),
       apiJson<{ tools: ToolRegistryItem[] }>("/agents/tools"),
+      apiJson<{ skills: SkillRegistryItem[] }>("/agents/skills"),
     ]);
     setGlobalContext(globalResponse.global_context.context);
     setDomains(domainResponse.domains);
     setAgents(agentResponse.agents);
     setTools(toolResponse.tools);
+    setSkills(skillResponse.skills);
     const activeDomain = domainResponse.domains.find((domain) => domain.key === domainKey);
     setDomainContext(activeDomain?.context ?? "");
   }, [domainKey]);
@@ -2749,6 +3730,9 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     setCurrentAction(selectedAgent.current_action ?? "");
     setToolPermissions(
       Object.fromEntries(selectedAgent.allowed_tools.map((tool) => [tool.key, tool.permission])),
+    );
+    setSkillPermissions(
+      Object.fromEntries(selectedAgent.allowed_skills.map((skill) => [skill.key, "use"])),
     );
     refreshAgentTasks(selectedAgent.key).catch(() => setAgentTasks([]));
   }, [selectedAgent?.key]);
@@ -2804,6 +3788,15 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
               {
                 permission: "use",
                 description: tools.find((tool) => tool.key === key)?.description ?? "",
+              },
+            ]),
+          ),
+          skill_permissions: Object.fromEntries(
+            Object.keys(skillPermissions).map((key) => [
+              key,
+              {
+                permission: "use",
+                description: skills.find((skill) => skill.key === key)?.description ?? "",
               },
             ]),
           ),
@@ -2994,6 +3987,15 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
     });
   };
 
+  const toggleSkill = (skillKey: string, checked: boolean) => {
+    setSkillPermissions((current) => {
+      const next = { ...current };
+      if (checked) next[skillKey] = next[skillKey] ?? "use";
+      else delete next[skillKey];
+      return next;
+    });
+  };
+
   return (
     <div className="admin-grid">
       {domainKey === "maestro-development" && (
@@ -3036,13 +4038,6 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
         </button>
         <p className="memory-status">{statusMessage}</p>
       </section>
-
-      <RoutedItemsBoard
-        domainKey={domainKey}
-        title={`${domainLabel} routed work`}
-        eyebrow="Domain activity"
-        className="wide-panel"
-      />
 
       <section className="memory-panel admin-panel" aria-labelledby="domain-agent-heading">
         <div className="section-heading">
@@ -3140,6 +4135,29 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
                     <small>{tool.description}</small>
                   </div>
                 ))}
+              </div>
+            </label>
+            <label>
+              Skill access
+              <div className="tool-picker">
+                {skills
+                  .filter((skill) => !skill.domain_key || skill.domain_key === domainKey)
+                  .map((skill) => (
+                    <div className="tool-picker-row" key={skill.key}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={skill.key in skillPermissions}
+                          onChange={(event) => toggleSkill(skill.key, event.target.checked)}
+                        />
+                        <span>{skill.name}</span>
+                      </label>
+                      <small>{skill.description || skill.instruction}</small>
+                    </div>
+                  ))}
+                {skills.filter((skill) => !skill.domain_key || skill.domain_key === domainKey).length === 0 && (
+                  <p className="empty-state">Create reusable skills from the Skills tab.</p>
+                )}
               </div>
             </label>
             <button className="planner-action" onClick={saveAgent} disabled={busy}>
@@ -3324,7 +4342,7 @@ function ToolsWorkspace() {
   const [selectedToolKey, setSelectedToolKey] = useState("github");
   const [expandedToolFamilies, setExpandedToolFamilies] = useState<Record<string, boolean>>({
     github: true,
-    gmail: true,
+    google: true,
   });
   const [connectionDomain, setConnectionDomain] = useState("praxis");
   const [connectionName, setConnectionName] = useState("Praxis memory retrieval");
@@ -3337,25 +4355,35 @@ function ToolsWorkspace() {
     () => new Set(tools.filter((tool) => !tool.key.includes(".")).map((tool) => tool.key)),
     [tools],
   );
-  const selectedConnectionToolKey =
-    selectedTool?.key.includes(".") && providerToolKeys.has(selectedTool.key.split(".")[0])
-      ? selectedTool.key.split(".")[0]
-      : (selectedTool?.key ?? "memory.context_bundle");
+  const selectedConnectionToolKey = selectedTool
+    ? selectedTool.key.startsWith("gmail.")
+      ? "google"
+      : selectedTool.key.includes(".") && providerToolKeys.has(selectedTool.key.split(".")[0])
+        ? selectedTool.key.split(".")[0]
+        : selectedTool.key
+    : "memory.context_bundle";
   const toolFamilies = useMemo(() => {
     const providerKeys = new Set(
-      tools.filter((tool) => !tool.key.includes(".")).map((tool) => tool.key),
+      tools
+        .filter((tool) => !tool.key.includes(".") && tool.key !== "gmail")
+        .map((tool) => tool.key),
     );
     const families = tools
       .filter((tool) => providerKeys.has(tool.key))
       .map((provider) => ({
         provider,
-        children: tools.filter((tool) => tool.key.startsWith(`${provider.key}.`)),
+        children: tools.filter(
+          (tool) =>
+            tool.key.startsWith(`${provider.key}.`) ||
+            (provider.key === "google" && tool.key.startsWith("gmail.")),
+        ),
       }));
     const childKeys = new Set(
       families.flatMap((family) => family.children.map((tool) => tool.key)),
     );
     const standalone = tools.filter(
       (tool) =>
+        tool.key !== "gmail" &&
         !childKeys.has(tool.key) && !families.some((family) => family.provider.key === tool.key),
     );
     return { families, standalone };
@@ -3367,7 +4395,11 @@ function ToolsWorkspace() {
     if (!selectedTool) return [];
     if (providerToolKeys.has(selectedTool.key)) {
       const familyAgents = tools
-        .filter((tool) => tool.key.startsWith(`${selectedTool.key}.`))
+        .filter(
+          (tool) =>
+            tool.key.startsWith(`${selectedTool.key}.`) ||
+            (selectedTool.key === "google" && tool.key.startsWith("gmail.")),
+        )
         .flatMap((tool) => tool.authorized_agents);
       const unique = new Map<string, ToolRegistryItem["authorized_agents"][number]>();
       familyAgents.forEach((agent) => {
@@ -3413,13 +4445,13 @@ function ToolsWorkspace() {
       return;
     }
     const isGitHub = selectedConnectionToolKey === "github";
-    const isGmail = selectedConnectionToolKey === "gmail";
+    const isGoogle = selectedConnectionToolKey === "google";
     setConnectionName(
       `${domainLabels[connectionDomain] ?? connectionDomain} ${
-        isGitHub ? "GitHub" : isGmail ? "Gmail" : selectedTool.name
+        isGitHub ? "GitHub" : isGoogle ? "Google Workspace" : selectedTool.name
       }`,
     );
-    setConnectionAuthType(isGitHub ? "gh_cli" : isGmail ? "oauth" : "service");
+    setConnectionAuthType(isGitHub ? "gh_cli" : isGoogle ? "oauth" : "service");
     setConnectionConfig(
       isGitHub
         ? JSON.stringify(
@@ -3430,7 +4462,7 @@ function ToolsWorkspace() {
             null,
             2,
           )
-        : isGmail
+        : isGoogle
           ? JSON.stringify(
               {
                 user_id: "me",
@@ -3615,15 +4647,29 @@ function ToolsWorkspace() {
             )}
             {selectedTool.key === "gmail" && (
               <p className="memory-status">
-                Edit the shared Gmail OAuth config here. Every Gmail child tool in this domain
-                inherits it unless a more specific override is added later. Use refresh-token
-                OAuth env vars for durable scheduled workflows.
+                Gmail now uses the shared Google Workspace OAuth config. Select the Google family
+                to edit the domain connection used by Gmail, Drive, Docs, and Slides tools.
               </p>
             )}
             {selectedTool.key.startsWith("gmail.") && (
               <p className="memory-status">
-                Gmail tools share one domain connection named <strong>Gmail</strong>. Save user id
-                plus refresh-token OAuth env config once here, then every Gmail tool can inherit it.
+                Gmail tools inherit the domain <strong>Google Workspace</strong> connection. Save
+                user id plus refresh-token OAuth env config once on the Google family, then Gmail,
+                Drive, Docs, and Slides tools can use it.
+              </p>
+            )}
+            {selectedTool.key === "google" && (
+              <p className="memory-status">
+                Edit the shared Google Workspace OAuth config here. Drive, Docs, Slides, and related
+                child tools inherit this domain connection. Use refresh-token OAuth env vars for
+                durable scheduled workflows.
+              </p>
+            )}
+            {selectedTool.key.startsWith("google.") && (
+              <p className="memory-status">
+                Google Workspace tools share one domain connection named{" "}
+                <strong>Google Workspace</strong>. Save refresh-token OAuth env config once here,
+                then every Google child tool can inherit it.
               </p>
             )}
             <div className="connection-list">
@@ -3728,6 +4774,233 @@ function ToolsWorkspace() {
   );
 }
 
+function SkillsWorkspace() {
+  const [skills, setSkills] = useState<SkillRegistryItem[]>([]);
+  const [selectedSkill, setSelectedSkill] = useState<SkillRegistryItem | null>(null);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [form, setForm] = useState({
+    key: "",
+    name: "",
+    category: "general",
+    domain_key: "",
+    description: "",
+    instruction: "",
+  });
+
+  const loadSkills = useCallback(async () => {
+    const response = await apiJson<{ skills: SkillRegistryItem[] }>("/agents/skills");
+    setSkills(response.skills);
+    setStatusMessage("Skills refreshed.");
+  }, []);
+
+  useEffect(() => {
+    loadSkills().catch((error) =>
+      setStatusMessage(error instanceof Error ? error.message : "Unable to load skills."),
+    );
+  }, [loadSkills]);
+
+  const selectSkill = (skill: SkillRegistryItem) => {
+    setSelectedSkill(skill);
+    setForm({
+      key: skill.key,
+      name: skill.name,
+      category: skill.category,
+      domain_key: skill.domain_key ?? "",
+      description: skill.description ?? "",
+      instruction: skill.instruction,
+    });
+  };
+
+  const saveSkill = async () => {
+    const response = await apiJson<{ skill: SkillRegistryItem }>("/agents/skills", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: form.key,
+        name: form.name,
+        category: form.category,
+        domain_key: form.domain_key || null,
+        description: form.description || null,
+        instruction: form.instruction,
+      }),
+    });
+    setSelectedSkill(response.skill);
+    setStatusMessage("Skill saved.");
+    await loadSkills();
+  };
+
+  const applyPlaybookTemplate = () => {
+    const skillName = form.name.trim() || "Skill Name";
+    setForm((current) => ({
+      ...current,
+      instruction: skillPlaybookTemplate(skillName),
+    }));
+  };
+
+  return (
+    <section className="admin-grid" aria-labelledby="skills-heading">
+      <div className="admin-panel">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Reusable instruction library</p>
+            <h3 id="skills-heading">Skills</h3>
+          </div>
+          <button className="icon-button" onClick={loadSkills} title="Refresh skills" type="button">
+            <RefreshCw size={18} />
+          </button>
+        </div>
+        <div className="tool-registry-list">
+          {skills.map((skill) => (
+            <button
+              className={`tool-registry-row selectable ${selectedSkill?.id === skill.id ? "active" : ""}`}
+              key={skill.id}
+              onClick={() => selectSkill(skill)}
+              type="button"
+            >
+              <span>{skill.category}</span>
+              <strong>{skill.name}</strong>
+              <p>{skill.description || skill.instruction.slice(0, 160)}</p>
+              <div className="preview-meta">
+                <span>{skill.domain_key ? domainLabels[skill.domain_key] ?? skill.domain_key : "Global"}</span>
+                <span>{skill.authorized_agents.length} agent(s)</span>
+              </div>
+            </button>
+          ))}
+          {skills.length === 0 && <p className="empty-state">No skills have been created yet.</p>}
+        </div>
+      </div>
+      <div className="admin-panel">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Skill editor</p>
+            <h3>{selectedSkill ? selectedSkill.name : "New skill"}</h3>
+          </div>
+          <FileText size={18} />
+        </div>
+        <div className="admin-form">
+          <label>
+            <span>Key</span>
+            <input
+              value={form.key}
+              onChange={(event) => setForm((current) => ({ ...current, key: event.target.value }))}
+            />
+          </label>
+          <label>
+            <span>Name</span>
+            <input
+              value={form.name}
+              onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+            />
+          </label>
+          <label>
+            <span>Category</span>
+            <input
+              value={form.category}
+              onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))}
+            />
+          </label>
+          <label>
+            <span>Domain</span>
+            <select
+              value={form.domain_key}
+              onChange={(event) => setForm((current) => ({ ...current, domain_key: event.target.value }))}
+            >
+              <option value="">Global</option>
+              {Object.entries(domainLabels)
+                .filter(([key]) => key !== "global")
+                .map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            <span>Description</span>
+            <textarea
+              value={form.description}
+              onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))}
+              rows={3}
+            />
+          </label>
+          <label>
+            <span>Instruction</span>
+            <textarea
+              value={form.instruction}
+              onChange={(event) => setForm((current) => ({ ...current, instruction: event.target.value }))}
+              rows={16}
+            />
+          </label>
+          <div className="skill-template-panel">
+            <div>
+              <strong>Playbook scaffold</strong>
+              <p>
+                Skills work best as concise operating procedures with use cases, validation rules,
+                output contracts, and examples.
+              </p>
+            </div>
+            <button type="button" onClick={applyPlaybookTemplate}>
+              Apply template
+            </button>
+          </div>
+          <button type="button" onClick={saveSkill} disabled={!form.key.trim() || !form.name.trim() || !form.instruction.trim()}>
+            Save skill
+          </button>
+        </div>
+        {selectedSkill && selectedSkill.authorized_agents.length > 0 && (
+          <div className="prompt-preview">
+            <h4>Authorized agents</h4>
+            <div className="preview-meta">
+              {selectedSkill.authorized_agents.map((agent) => (
+                <span key={`${agent.domain_key}-${agent.agent_key}`}>
+                  {agent.agent_name} / {domainLabels[agent.domain_key] ?? agent.domain_key}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {statusMessage && <p className="memory-status">{statusMessage}</p>}
+      </div>
+    </section>
+  );
+}
+
+function skillPlaybookTemplate(skillName: string) {
+  return `## Purpose
+Describe what ${skillName} helps an agent or Maestro accomplish.
+
+## Use When
+- List the situations where this skill should be applied.
+- Name source types, domains, or work-item patterns that trigger it.
+
+## Do Not Use When
+- List confusing adjacent cases this skill should avoid.
+- State what should become workflow work, routed memory, or direct chat instead.
+
+## Required Inputs
+- Source content:
+- Domain:
+- Relevant tool results or memory:
+
+## Procedure
+1. Step one.
+2. Step two.
+3. Step three.
+
+## Output Contract
+State exactly what the agent should produce. Include tool calls, routed candidate types, report sections, or artifact expectations when relevant.
+
+## Validation Rules
+- Rule that prevents common bad output.
+- Rule that preserves provenance.
+- Rule for when to ask Chris for clarification.
+
+## Examples
+- Good:
+- Bad:
+`;
+}
+
 function MemoryWorkspace() {
   const [domains, setDomains] = useState<DropboxDomain[]>(dropboxDomainDefaults);
   const [selectedDomain, setSelectedDomain] = useState("ophi");
@@ -3736,6 +5009,7 @@ function MemoryWorkspace() {
   const [pending, setPending] = useState<PendingProposal[]>([]);
   const [items, setItems] = useState<MemoryItem[]>([]);
   const [sources, setSources] = useState<MemorySource[]>([]);
+  const [artifacts, setArtifacts] = useState<MemoryArtifact[]>([]);
   const [sourceTargetDomain, setSourceTargetDomain] = useState("personal");
   const [selectedPreviewFilename, setSelectedPreviewFilename] = useState<string | null>(null);
   const [retrievalDomain, setRetrievalDomain] = useState("praxis");
@@ -3751,14 +5025,24 @@ function MemoryWorkspace() {
   const [busy, setBusy] = useState(false);
 
   const refreshMemory = useCallback(async () => {
-    const [status, previewResponse, pendingResponse, itemResponse, sourceResponse] =
-      await Promise.all([
-      apiJson<{ domains: DropboxDomain[] }>("/memory/dropbox/status"),
-      apiJson<{ previews: MemoryPreview[] }>("/memory/dropbox/previews"),
-      apiJson<{ proposals: PendingProposal[] }>("/memory/proposals/pending"),
-      apiJson<{ items: MemoryItem[] }>("/memory/items?limit=8"),
-      apiJson<{ sources: MemorySource[] }>("/memory/sources?limit=8"),
+    const [statusResult, previewResult, pendingResult, itemResult, sourceResult, artifactResult] =
+      await Promise.allSettled([
+        apiJson<{ domains: DropboxDomain[] }>("/memory/dropbox/status"),
+        apiJson<{ previews: MemoryPreview[] }>("/memory/dropbox/previews"),
+        apiJson<{ proposals: PendingProposal[] }>("/memory/proposals/pending"),
+        apiJson<{ items: MemoryItem[] }>("/memory/items?limit=8"),
+        apiJson<{ sources: MemorySource[] }>("/memory/sources?limit=8"),
+        apiJson<{ artifacts: MemoryArtifact[] }>("/memory/artifacts?limit=12"),
       ]);
+    if (statusResult.status !== "fulfilled") {
+      throw statusResult.reason;
+    }
+    const status = statusResult.value;
+    const previewResponse = previewResult.status === "fulfilled" ? previewResult.value : { previews: [] };
+    const pendingResponse = pendingResult.status === "fulfilled" ? pendingResult.value : { proposals: [] };
+    const itemResponse = itemResult.status === "fulfilled" ? itemResult.value : { items: [] };
+    const sourceResponse = sourceResult.status === "fulfilled" ? sourceResult.value : { sources: [] };
+    const artifactResponse = artifactResult.status === "fulfilled" ? artifactResult.value : { artifacts: [] };
     setDomains(status.domains);
     const sortedPreviews = [...previewResponse.previews].sort(
       (first, second) => previewTime(second) - previewTime(first),
@@ -3767,6 +5051,10 @@ function MemoryWorkspace() {
     setPending(pendingResponse.proposals);
     setItems(itemResponse.items);
     setSources(sourceResponse.sources);
+    setArtifacts(artifactResponse.artifacts);
+    if (artifactResult.status === "rejected") {
+      setStatusMessage("Memory loaded. Restart the backend to enable run artifact audit.");
+    }
     if (!status.domains.some((domain) => domain.key === selectedDomain)) {
       setSelectedDomain(status.domains[0]?.key ?? "global");
     }
@@ -4270,6 +5558,45 @@ function MemoryWorkspace() {
             </article>
           ))}
           {sources.length === 0 && <p className="empty-state">No ingested sources yet.</p>}
+        </div>
+      </section>
+
+      <section className="memory-panel" aria-labelledby="memory-artifacts-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">System sources</p>
+            <h3 id="memory-artifacts-heading">Run artifacts</h3>
+          </div>
+          <FileText size={18} />
+        </div>
+        <div className="source-list">
+          {artifacts.map((artifact) => (
+            <article className="source-row" key={artifact.id}>
+              <div>
+                <span>
+                  {domainLabels[artifact.domain_key] ?? artifact.domain_key} / {artifact.artifact_type}
+                </span>
+                <h4>{artifact.name}</h4>
+                <p>
+                  {artifact.memory_count} memories / {artifact.proposal_count} proposals
+                </p>
+                <div className="preview-meta">
+                  {artifact.report_id && <span>report {artifact.report_id.slice(0, 8)}</span>}
+                  {artifact.task_id && <span>task {artifact.task_id.slice(0, 8)}</span>}
+                  {artifact.created_at && <span>{formatDateTime(artifact.created_at)}</span>}
+                </div>
+              </div>
+              <details>
+                <summary>Source path</summary>
+                <p>{artifact.uri}</p>
+              </details>
+            </article>
+          ))}
+          {artifacts.length === 0 && (
+            <p className="empty-state">
+              Canonical workflow and session artifacts will appear here after runs are staged.
+            </p>
+          )}
         </div>
       </section>
     </div>
