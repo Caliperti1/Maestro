@@ -24,6 +24,7 @@ from app.db.models import (
     Report,
     RoutedItem,
     Task,
+    ToolCall,
     Todo,
     WorkflowDefinition,
     WorkflowQueueItem,
@@ -37,6 +38,7 @@ from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestrat
 from app.maestro.intent_classifier import MaestroMessageUnderstandingResponse
 from app.maestro.planner import MaestroPlannerResponse
 from app.maestro.scheduler import SchedulerService
+from app.tools.runtime import ToolExecutionResult
 
 
 class FakeOrchestratorLLMClient:
@@ -2126,6 +2128,72 @@ def test_maestro_api_respond_plans_without_active_plan(
     assert "run it after you approve" in payload["message"]
     assert payload["plan"]["status"] == "proposed"
     assert payload["chat_plan"] is None
+
+
+def test_maestro_chat_approval_resumes_single_pending_tool_action(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _client(session, tmp_path)
+    conversation = maestro_api._get_or_create_maestro_conversation(session, None)
+    parent = Task(
+        conversation_id=conversation.id,
+        workflow_key="maestro.generic",
+        objective="Deliver the reviewed Maestro code change.",
+        input_payload={},
+    )
+    session.add(parent)
+    session.flush()
+    child = Task(
+        parent_task_id=parent.id,
+        workflow_key="scheduler.workflow_item",
+        objective="Merge the reviewed pull request and reload the dedicated runtime.",
+        input_payload={},
+    )
+    session.add(child)
+    session.flush()
+    pending = ToolCall(
+        task_id=child.id,
+        tool_name="local.app.deploy_pr",
+        input_payload={"payload": {"pr_number": 89}},
+        status="approval_required",
+    )
+    session.add(pending)
+    session.commit()
+    assert maestro_api._pending_tool_approvals_for_conversation(session, conversation) == [pending]
+    assert maestro_api._is_plain_approval_message("approved") is True
+
+    approved_ids: list[uuid.UUID] = []
+
+    def approve(self, tool_call_id, **kwargs):
+        approved_ids.append(uuid.UUID(str(tool_call_id)))
+        return (
+            ToolExecutionResult(
+                tool_key="local.app.deploy_pr",
+                status="complete",
+                output={"pr_number": 89, "reloaded": True},
+                error_message=None,
+                tool_call_id=str(tool_call_id),
+                connection_id=None,
+            ),
+            None,
+        )
+
+    monkeypatch.setattr(MaestroOrchestratorService, "approve_tool_call_and_resume", approve)
+
+    response = client.post(
+        "/maestro/respond",
+        json={"conversation_id": str(conversation.id), "message": "Approved"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "tool_approved", payload
+    assert payload["classification"] == "tool_approved"
+    assert payload["plan"] is None
+    assert approved_ids == [pending.id]
+    assert "successfully" in payload["message"].lower()
 
 
 def test_maestro_api_persists_active_session_history(
