@@ -524,6 +524,30 @@ h4 {
   background: var(--color-primary-deep);
 }
 
+.composer .composer-send-button {
+  background: #b4232f;
+}
+
+.composer .composer-send-button:hover:not(:disabled) {
+  background: #c52a36;
+}
+
+.composer .composer-send-button:focus-visible {
+  outline: 3px solid #f3a6ac;
+  outline-offset: 2px;
+}
+
+.composer .composer-send-button:active:not(:disabled) {
+  background: #8f1722;
+}
+
+.composer .composer-send-button:disabled {
+  color: var(--color-muted-strong);
+  background: var(--color-surface-subtle);
+  border-color: var(--color-border);
+  opacity: 1;
+}
+
 .planner-action:disabled {
   color: var(--color-muted);
   background: var(--color-surface-subtle);
