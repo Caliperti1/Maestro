@@ -1512,10 +1512,11 @@ export function App() {
   };
 
   const isApprovalMessage = (message: string) => {
-    const normalized = message.trim().toLowerCase();
-    return ["approved", "approve", "yes approved", "yes, approved", "go ahead", "run it"].includes(
-      normalized,
-    );
+    const normalized = message.trim().toLowerCase().replace(/[^a-z0-9 ]+/g, " ").trim();
+    if (["approved", "approve", "yes approved", "yes approve", "go ahead", "run it", "proceed"].includes(normalized)) {
+      return true;
+    }
+    return /^(?:yes )?approve(?:d)?\b/.test(normalized) && !/\b(?:why|what|how|explain)\b/.test(normalized);
   };
 
   const loadSessionHistory = useCallback(async () => {
