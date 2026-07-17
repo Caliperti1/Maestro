@@ -524,6 +524,15 @@ h4 {
   background: var(--color-primary-deep);
 }
 
+.composer .composer-send-button {
+  background: var(--color-danger-soft);
+  border-color: var(--color-danger);
+}
+
+.composer .composer-send-button:hover:not(:disabled) {
+  background: #9f3b44;
+}
+
 .planner-action:disabled {
   color: var(--color-muted);
   background: var(--color-surface-subtle);
