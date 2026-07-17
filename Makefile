@@ -5,7 +5,7 @@ EVEN_DIR := EvenG2/maestro-even-client
 TAILSCALE_IP ?= 100.66.109.2
 RUNTIME_DIR ?= $(HOME)/Maestro-runtime
 
-.PHONY: help even-install even-dev even-sim even-sim-auto even-up even-build backend-reload frontend-tailscale runtime-setup runtime-backend-reload runtime-frontend-tailscale
+.PHONY: help even-install even-dev even-sim even-sim-auto even-up even-build backend-reload frontend-tailscale runtime-setup runtime-sync runtime-backend-reload runtime-frontend-tailscale
 
 help:
 	@echo "Available targets:"
@@ -18,6 +18,7 @@ help:
 	@echo "  make backend-reload - Start Maestro backend with source autoreload"
 	@echo "  make frontend-tailscale - Start Maestro frontend for this Tailnet"
 	@echo "  make runtime-setup - Create/refresh the dedicated main runtime worktree"
+	@echo "  make runtime-sync - Fast-forward the dedicated runtime to origin/main"
 	@echo "  make runtime-backend-reload - Start backend from the dedicated runtime"
 	@echo "  make runtime-frontend-tailscale - Start frontend from the dedicated runtime"
 
@@ -54,8 +55,12 @@ runtime-setup:
 	@if [ ! -e "$(RUNTIME_DIR)/frontend/node_modules" ] && [ -d "$(CURDIR)/frontend/node_modules" ]; then ln -s "$(CURDIR)/frontend/node_modules" "$(RUNTIME_DIR)/frontend/node_modules"; fi
 	@echo "Dedicated runtime ready at $(RUNTIME_DIR)"
 
-runtime-backend-reload:
+runtime-sync: runtime-setup
+	@git -C "$(RUNTIME_DIR)" fetch origin main
+	@git -C "$(RUNTIME_DIR)" pull --ff-only origin main
+
+runtime-backend-reload: runtime-sync
 	cd "$(RUNTIME_DIR)" && ./.venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
 
-runtime-frontend-tailscale:
+runtime-frontend-tailscale: runtime-sync
 	cd "$(RUNTIME_DIR)/frontend" && VITE_API_BASE_URL=http://$(TAILSCALE_IP):8000 npm run dev -- --host 0.0.0.0
