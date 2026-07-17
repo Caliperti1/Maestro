@@ -241,6 +241,33 @@ def _respond_to_maestro_sync(
                 active_plan_id = active_plan_context.parent_task_id
         if active_plan_id is not None:
             active_plan = service.get_plan(active_plan_id)
+            active_task = db.get(Task, uuid.UUID(active_plan.parent_task_id))
+            if (
+                active_task is not None
+                and active_task.status in {"queued", "ready", "running", "blocked"}
+                and _is_deferred_approval_acknowledgement(body.message)
+            ):
+                response_message = (
+                    "Understood. The active workflow will keep running. I’ll present the actual "
+                    "pull request when it is ready and ask for your approval before merge and deployment."
+                )
+                _record_session_message(
+                    db,
+                    conversation,
+                    "maestro",
+                    response_message,
+                    metadata=message_metadata,
+                )
+                return {
+                    "kind": "chat_only",
+                    "classification": "active_workflow_acknowledgement",
+                    "message": response_message,
+                    "plan": None,
+                    "chat_plan": None,
+                    "active_plan": _plan_payload(active_plan),
+                    "channel_context": topic_context,
+                    "conversation": _conversation_payload(db, conversation),
+                }
             classification = _classify_active_session_message(body.message, active_plan)
             if classification == "new_workflow":
                 plan = service.create_plan(
@@ -2003,11 +2030,11 @@ def _is_workflow_delete_message(lowered_message: str) -> bool:
     ):
         return False
     destructive = any(
-        token in lowered_message
+        re.search(rf"\b{re.escape(token)}\b", lowered_message)
         for token in ("delete", "remove", "cancel", "archive", "discard", "clear out", "clear")
     )
     target = any(
-        token in lowered_message
+        re.search(rf"\b{re.escape(token)}\b", lowered_message)
         for token in (
             "workflow",
             "plan",
@@ -2021,6 +2048,19 @@ def _is_workflow_delete_message(lowered_message: str) -> bool:
         )
     )
     return destructive and target
+
+
+def _is_deferred_approval_acknowledgement(message: str) -> bool:
+    normalized = " ".join(message.lower().strip().split())
+    has_future_approval = bool(
+        re.search(r"\b(?:approve|approval)\b", normalized)
+        and re.search(r"\b(?:once|when|after)\b.*\bready\b", normalized)
+    )
+    asks_to_continue = any(
+        phrase in normalized
+        for phrase in ("proceed", "continue", "keep going", "keep working", "go ahead", "run it")
+    )
+    return has_future_approval and asks_to_continue
 
 
 def _classified_refinement_message(message: str, classification: str, active_plan: MaestroPlan) -> str:

@@ -70,6 +70,9 @@ Rules:
 - Use dependencies to reference other work item IDs that must complete first.
 - Set blocks_execution true for RFIs or missing inputs that should pause the workflow until you
   answer. Set it false when useful work can proceed while waiting.
+- A future approval checkpoint is not an RFI. If Chris says to create a PR and ask for approval
+  before merge/deployment, plan the implementation work now and let the tool safety layer request
+  approval only after the real PR exists. Never ask Chris to approve an unseen PR during intake.
 - Workflow work items should be role-sized. Do not create one broad workflow_task that requires
   every agent in a domain. If product demo planning, CRM context, technical feasibility, and meeting
   capture are all needed, create separate work items with dependencies.

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 import uuid
 
@@ -8,6 +9,7 @@ from app.api.main import create_app
 from app.core.config import get_settings
 from app.db.models import (
     Artifact,
+    Conversation,
     Domain,
     Message,
     Report,
@@ -19,6 +21,7 @@ from app.db.models import (
 )
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
+from app.maestro.scheduler_worker import SchedulerWorkerService
 
 
 def _client(session: Session, tmp_path: Path) -> TestClient:
@@ -437,6 +440,144 @@ def test_scheduler_worker_run_executes_assigned_agent_item(
     notifications = client.get("/workflow-outputs/notifications?status=delivered")
     assert notifications.status_code == 200
     assert notifications.json()["notifications"][0]["workflow_run_id"] == str(run.id)
+
+
+def test_approved_delivery_finalizes_run_with_archived_superseded_items(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    get_settings.cache_clear()
+    get_settings().memory_dropbox_root = str(tmp_path)
+    domain = session.query(Domain).filter(Domain.key == "maestro-development").one()
+    conversation = Conversation(
+        domain_id=domain.id,
+        title="Coding workflow regression",
+        metadata_={"channel": "maestro_primary"},
+    )
+    session.add(conversation)
+    session.flush()
+    parent = Task(
+        conversation_id=conversation.id,
+        domain_id=domain.id,
+        status="running",
+        priority="normal",
+        source_type="maestro",
+        workflow_key="maestro.generic",
+        objective="Implement a UI change and deploy it after approval.",
+        input_payload={"plan_summary": "Implement, review, merge, and reload."},
+    )
+    session.add(parent)
+    session.flush()
+    child = Task(
+        parent_task_id=parent.id,
+        conversation_id=conversation.id,
+        domain_id=domain.id,
+        status="blocked",
+        priority="normal",
+        source_type="scheduler",
+        workflow_key="agent.execute",
+        objective="Implement the UI change and open a pull request.",
+        input_payload={},
+        error_message="Waiting for Chris to review PR #95 and approve delivery.",
+    )
+    session.add(child)
+    session.flush()
+    run = WorkflowRun(
+        parent_task_id=parent.id,
+        conversation_id=conversation.id,
+        domain_id=domain.id,
+        source_type="manual",
+        status="blocked",
+        priority="normal",
+        input_payload={"summary": "Implement a UI change and deploy it after approval."},
+        started_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.flush()
+    active_item = WorkflowQueueItem(
+        workflow_run_id=run.id,
+        parent_task_id=parent.id,
+        child_task_id=child.id,
+        domain_id=domain.id,
+        external_key="implement_change",
+        status="blocked",
+        priority="normal",
+        stage_index=1,
+        position=1,
+        objective=child.objective,
+        dependency_keys=[],
+        resource_locks=[],
+        input_payload={},
+        output_payload={
+            "agent_run": {
+                "task_id": str(child.id),
+                "agent_key": "maestro-chief-engineer",
+                "agent_name": "Maestro Chief Engineer",
+                "status": "blocked",
+                "output_preview": "PR #95 is ready for review.",
+                "tool_calls": [],
+            }
+        },
+        error_message="Waiting for delivery approval.",
+    )
+    superseded_item = WorkflowQueueItem(
+        workflow_run_id=run.id,
+        parent_task_id=parent.id,
+        domain_id=domain.id,
+        external_key="superseded_plan_item",
+        status="archived",
+        priority="normal",
+        stage_index=1,
+        position=2,
+        objective="A superseded planning item.",
+        dependency_keys=[],
+        resource_locks=[],
+        input_payload={},
+        output_payload={"status": "archived"},
+    )
+    session.add_all([active_item, superseded_item])
+    session.commit()
+
+    completed_run = SchedulerWorkerService(session).complete_approved_delivery(
+        task_id=child.id,
+        delivery_result={
+            "tool_name": "local.app.deploy_pr",
+            "status": "complete",
+            "output_payload": {
+                "summary": {"pr_number": 95, "merged": True, "reloaded": True},
+                "write_status": "merged_and_reloaded",
+            },
+        },
+    )
+
+    assert completed_run is not None
+    session.refresh(completed_run)
+    session.refresh(parent)
+    session.refresh(child)
+    session.refresh(active_item)
+    assert completed_run.status == "completed"
+    assert parent.status == "completed"
+    assert child.status == "completed"
+    assert child.error_message is None
+    assert active_item.status == "completed"
+    assert active_item.error_message is None
+    assert superseded_item.status == "archived"
+    assert completed_run.output_payload["staged_artifact_path"]
+    assert session.query(WorkflowRunLogEntry).filter_by(workflow_run_id=run.id).count() == 1
+    notification = session.query(WorkflowNotification).filter_by(workflow_run_id=run.id).one()
+    assert notification.status == "delivered"
+    assert "merged PR #95" in notification.message
+    assert "reloaded successfully" in notification.message
+    completion = (
+        session.query(Message)
+        .filter(Message.metadata_["event_type"].as_string() == "workflow_completed")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    assert completion is not None
+    assert completion.metadata_["event_type"] == "workflow_completed"
+    assert "merged PR #95" in completion.content
 
 
 def test_scheduler_worker_blocks_unassigned_item(

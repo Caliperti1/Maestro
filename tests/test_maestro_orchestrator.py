@@ -34,7 +34,11 @@ from app.db.models import (
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.llm.client import LLMClientError
-from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
+from app.maestro.orchestrator import (
+    MaestroOrchestratorError,
+    MaestroOrchestratorService,
+    MaestroWorkItem,
+)
 from app.maestro.intent_classifier import MaestroMessageUnderstandingResponse
 from app.maestro.planner import MaestroPlannerResponse
 from app.maestro.scheduler import SchedulerService
@@ -2743,6 +2747,103 @@ def test_maestro_api_respond_clears_current_workflow_without_creating_new_workfl
     task = session.get(Task, uuid.UUID(first_plan["parent_task_id"]))
     assert task is not None
     assert task.status == "archived"
+
+
+def test_workflow_delete_intent_requires_complete_words() -> None:
+    coding_request = (
+        "Create a workflow to make the send button clearly visible in red, open a pull request, "
+        "and ask for approval before deployment."
+    )
+
+    assert maestro_api._is_workflow_delete_message(coding_request.lower()) is False
+    assert maestro_api._is_workflow_delete_message("Clear the current workflow.".lower()) is True
+
+
+def test_deferred_pr_approval_is_not_an_intake_rfi(session: Session) -> None:
+    service = MaestroOrchestratorService(session)
+    coding_item = MaestroWorkItem(
+        id="implement_change",
+        type="workflow_task",
+        title="Implement the approved UI change",
+        description="Use Codex to implement the change and open a pull request.",
+        domain_key="maestro-development",
+        priority="normal",
+        required_capabilities=["software development"],
+        required_tools=["codex.task.run"],
+        required_skills=[],
+        model_profile=None,
+        model_tier="sol",
+        model_rationale="Coding work needs strong reasoning.",
+        dependencies=[],
+        needs_agent=True,
+        needs_user_input=False,
+        blocks_execution=False,
+        can_log_directly=False,
+        suggested_agent_keys=["maestro-chief-engineer"],
+        expected_output="A pull request ready for review.",
+        rationale="The requested change requires repository work.",
+    )
+    premature_approval = MaestroWorkItem(
+        id="approve_future_pr",
+        type="rfi",
+        title="Approve the PR once it is ready",
+        description="After the pull request is created, Chris must approve merge and deployment.",
+        domain_key="maestro-development",
+        priority="normal",
+        required_capabilities=[],
+        required_tools=[],
+        required_skills=[],
+        model_profile=None,
+        model_tier="luna",
+        model_rationale="No model work is required.",
+        dependencies=["implement_change"],
+        needs_agent=False,
+        needs_user_input=True,
+        blocks_execution=True,
+        can_log_directly=False,
+        suggested_agent_keys=[],
+        expected_output="Approve or reject the PR when the PR is ready.",
+        rationale="Deployment requires explicit approval.",
+    )
+
+    hardened = service._harden_work_items([coding_item, premature_approval])
+
+    assert [item.id for item in hardened] == ["implement_change"]
+
+
+def test_running_workflow_future_approval_acknowledgement_does_not_refine(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first_response = client.post(
+        "/maestro/respond",
+        json={"message": "Create a workflow to implement a small Maestro code change."},
+    )
+    plan = first_response.json()["plan"]
+    task = session.get(Task, uuid.UUID(plan["parent_task_id"]))
+    assert task is not None
+    task.status = "running"
+    session.commit()
+    task_count = session.query(Task).count()
+
+    response = client.post(
+        "/maestro/respond",
+        json={
+            "active_plan_id": plan["parent_task_id"],
+            "message": "I will approve once it is ready; proceed with the workflow.",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "chat_only"
+    assert payload["classification"] == "active_workflow_acknowledgement"
+    assert payload["plan"] is None
+    assert payload["active_plan"]["parent_task_id"] == plan["parent_task_id"]
+    assert session.query(Task).count() == task_count
+    session.refresh(task)
+    assert task.status == "running"
     assert session.query(Task).filter(Task.workflow_key == "maestro.generic").count() == 1
 
 

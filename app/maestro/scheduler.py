@@ -437,6 +437,7 @@ class SchedulerService:
         item = self._require_queue_item(queue_item_id)
         item.status = "completed"
         item.output_payload = {**(item.output_payload or {}), **(output_payload or {})}
+        item.error_message = None
         item.completed_at = datetime.now(UTC)
         self.release_locks(item, commit=False)
         run = self.session.get(WorkflowRun, item.workflow_run_id)
@@ -965,7 +966,11 @@ class SchedulerService:
         items = self._queue_items_for_run(run.id)
         if not items:
             return
-        statuses = {item.status for item in items}
+        active_items = [item for item in items if item.status != "archived"]
+        if not active_items:
+            run.status = "archived"
+            return
+        statuses = {item.status for item in active_items}
         if statuses <= {"completed"}:
             run.status = "completed"
             run.completed_at = datetime.now(UTC)

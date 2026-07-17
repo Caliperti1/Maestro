@@ -1597,6 +1597,11 @@ class MaestroOrchestratorService:
         user_input: str = "",
     ) -> list[MaestroWorkItem]:
         work_items = [
+            item
+            for item in work_items
+            if not self._is_deferred_tool_approval_rfi(item)
+        ]
+        work_items = [
             replace(
                 item,
                 type="think_tank",
@@ -1696,6 +1701,33 @@ class MaestroOrchestratorService:
             else:
                 hardened.append(item)
         return hardened
+
+    def _is_deferred_tool_approval_rfi(
+        self,
+        item: MaestroWorkItem,
+    ) -> bool:
+        if item.type != "rfi" or not item.needs_user_input:
+            return False
+        item_text = f"{item.title} {item.description} {item.expected_output}".lower()
+        approval_context = any(
+            token in item_text
+            for token in ("approve", "approval", "review the pr", "review pull request")
+        ) and any(token in item_text for token in ("pull request", " pr", "merge", "deploy"))
+        future_checkpoint = any(
+            token in item_text
+            for token in (
+                "after the pull request",
+                "once the pull request",
+                "when the pull request",
+                "after the pr",
+                "once the pr",
+                "when the pr",
+                "pr is ready",
+                "pull request is ready",
+                "unseen pr",
+            )
+        )
+        return approval_context and future_checkpoint
 
     def _skills_for_work_item_payload(self, payload: dict[str, Any]) -> list[str]:
         text = " ".join(

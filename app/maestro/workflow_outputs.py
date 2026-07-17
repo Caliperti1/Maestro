@@ -30,7 +30,10 @@ class WorkflowOutputService:
     def record_run_log(self, run: WorkflowRun) -> WorkflowRunLogEntry:
         queue_items = self.session.scalars(
             select(WorkflowQueueItem)
-            .where(WorkflowQueueItem.workflow_run_id == run.id)
+            .where(
+                WorkflowQueueItem.workflow_run_id == run.id,
+                WorkflowQueueItem.status != "archived",
+            )
             .order_by(WorkflowQueueItem.stage_index, WorkflowQueueItem.position)
         ).all()
         report_ids: list[str] = []

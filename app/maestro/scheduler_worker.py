@@ -400,6 +400,11 @@ class SchedulerWorkerService:
             agent_run = (item.output_payload or {}).get("agent_run")
             if not isinstance(agent_run, dict) or str(agent_run.get("task_id")) != str(task_id):
                 continue
+            task = self.session.get(Task, task_id)
+            if task is not None:
+                task.status = "completed"
+                task.error_message = None
+                task.completed_at = datetime.now(UTC)
             completed = self.scheduler.complete_queue_item(
                 item.id,
                 output_payload={"delivery": delivery_result},
@@ -489,7 +494,11 @@ class SchedulerWorkerService:
             domain = self.session.get(Domain, run.domain_id)
             if domain is not None:
                 domain_key = domain.key
-        queue_items = self.scheduler._queue_items_for_run(run.id)
+        queue_items = [
+            item
+            for item in self.scheduler._queue_items_for_run(run.id)
+            if item.status != "archived"
+        ]
         generated_artifacts: list[dict[str, Any]] = []
         tool_calls: list[dict[str, Any]] = []
         output_sections: list[str] = []
@@ -595,7 +604,13 @@ class SchedulerWorkerService:
         output_payload = run.output_payload or {}
         message = str(output_payload.get("completion_channel_message") or "")
         if not message:
-            queue_items = self.scheduler._queue_items_for_run(run.id)
+            queue_items = [
+                item
+                for item in self.scheduler._queue_items_for_run(run.id)
+                if item.status != "archived"
+            ]
+            message = self._delivery_completion_message(run, queue_items)
+        if not message:
             summaries: list[str] = []
             for item in queue_items[:4]:
                 item_output = item.output_payload or {}
@@ -655,6 +670,40 @@ class SchedulerWorkerService:
             }
             self.session.commit()
         return message
+
+    def _delivery_completion_message(
+        self,
+        run: WorkflowRun,
+        queue_items: list[WorkflowQueueItem],
+    ) -> str:
+        for item in queue_items:
+            delivery = (item.output_payload or {}).get("delivery")
+            if not isinstance(delivery, dict):
+                continue
+            output = delivery.get("output_payload")
+            if not isinstance(output, dict):
+                output = delivery
+            summary = output.get("summary")
+            if not isinstance(summary, dict):
+                summary = {}
+            pr_number = summary.get("pr_number") or output.get("pr_number")
+            merged = bool(summary.get("merged") or output.get("merged"))
+            reloaded = bool(summary.get("reloaded") or output.get("reloaded"))
+            if not (merged or reloaded):
+                continue
+            pr_text = f" PR #{pr_number}" if pr_number else " the approved pull request"
+            if merged and reloaded:
+                return (
+                    f"Done. I merged{pr_text}, updated the dedicated Maestro runtime, and the "
+                    f"running app reloaded successfully. The workflow `{self._run_title(run)}` is complete."
+                )
+            if merged:
+                return f"Done. I merged{pr_text}. The workflow `{self._run_title(run)}` is complete."
+            return (
+                f"Done. I updated the dedicated Maestro runtime and reloaded the running app. "
+                f"The workflow `{self._run_title(run)}` is complete."
+            )
+        return ""
 
     def _post_channel_update(
         self,
