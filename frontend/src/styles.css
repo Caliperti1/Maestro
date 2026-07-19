@@ -525,12 +525,35 @@ h4 {
 }
 
 .composer .composer-send-button {
-  background: var(--color-danger-soft);
-  border-color: var(--color-danger);
+  color: #ffffff;
+  background: #166534;
+  border-color: #4ade80;
 }
 
 .composer .composer-send-button:hover:not(:disabled) {
-  background: #9f3b44;
+  background: #15803d;
+  border-color: #86efac;
+}
+
+.composer .composer-send-button:focus-visible {
+  outline: 3px solid #86efac;
+  outline-offset: 2px;
+}
+
+.composer .composer-send-button:active:not(:disabled) {
+  background: #14532d;
+  border-color: #4ade80;
+}
+
+.composer .composer-send-button:disabled {
+  color: var(--color-muted-strong);
+  background: var(--color-success-soft);
+  border-color: #37695c;
+  opacity: 1;
+}
+
+.composer .composer-send-button[aria-busy="true"] {
+  cursor: wait;
 }
 
 .planner-action:disabled {
