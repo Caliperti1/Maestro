@@ -21,6 +21,34 @@ ExtractedRouteType = Literal[
     "ignore",
 ]
 ExtractedPriority = Literal["low", "normal", "high", "urgent"]
+ExtractedStructuredKey = Literal[
+    "start_at",
+    "end_at",
+    "date",
+    "time",
+    "location",
+    "attendees",
+    "supporting_refs",
+    "due_at",
+    "owner",
+    "assignee",
+    "blocking",
+    "related_contact",
+    "name",
+    "email",
+    "phone",
+    "linkedin",
+    "organization",
+    "role",
+    "origination",
+    "last_contact_at",
+    "website",
+    "organization_type",
+    "aliases",
+    "decision_maker",
+    "decided_at",
+    "supersedes",
+]
 
 MEMORY_EXTRACTION_INSTRUCTIONS = load_prompt("memory_extraction.md")
 
@@ -67,6 +95,13 @@ class ExtractedMemoryCandidate(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class ExtractedStructuredField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: ExtractedStructuredKey
+    value: str | bool | float | list[str] | None
+
+
 class ExtractedRoutedItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -77,7 +112,7 @@ class ExtractedRoutedItem(BaseModel):
     priority: ExtractedPriority
     confidence: float = Field(ge=0.0, le=1.0)
     status: str
-    structured_data: dict[str, Any]
+    structured_data: list[ExtractedStructuredField]
 
 
 class ExtractedMemoryResponse(BaseModel):

@@ -1160,6 +1160,56 @@ def test_email_tool_plan_removes_placeholders_and_sequences_real_ids() -> None:
     }
 
 
+def test_email_tool_plan_reads_discovered_link_before_routing() -> None:
+    message_result = {
+        "tool_name": "gmail.message.get",
+        "status": "complete",
+        "output_payload": {
+            "message_id": "msg-real-1",
+            "thread_id": "thread-real-1",
+            "body_text": "Review the linked notes before deciding what to route.",
+            "google_workspace_links": [
+                {
+                    "kind": "document",
+                    "file_id": "doc-real-1",
+                    "url": "https://docs.google.com/document/d/doc-real-1/edit",
+                }
+            ],
+        },
+    }
+
+    hardened = _harden_email_tool_plan(
+        [
+            {
+                "tool_key": "routed.item.create",
+                "payload": {"route_type": "contact", "title": "Premature candidate"},
+                "rationale": "Route a candidate.",
+            }
+        ],
+        [
+            {
+                "tool_name": "gmail.message.list_recent",
+                "status": "complete",
+                "output_payload": {"messages": [{"message_id": "msg-real-1"}]},
+            },
+            message_result,
+        ],
+        task_instruction="Inspect any linked Google document before completing email triage.",
+        allowed_tool_keys={"google.docs.get", "routed.item.create"},
+    )
+
+    assert hardened == [
+        {
+            "tool_key": "google.docs.get",
+            "payload": {
+                "file_id": "doc-real-1",
+                "url": "https://docs.google.com/document/d/doc-real-1/edit",
+            },
+            "rationale": "Read the linked Google Workspace artifact before email routing.",
+        }
+    ]
+
+
 def test_deterministic_google_slides_plan_does_not_fall_back_to_email(
     session: Session,
 ) -> None:
@@ -3905,6 +3955,46 @@ def test_tool_results_are_compacted_before_prompt_reuse() -> None:
     assert compact[0]["raw_output_chars"] > 10000
     assert len(json.dumps(compact, default=str)) < 2200
     assert compact[0]["full_output"] == "stored_in_tool_call_output_payload"
+
+
+def test_compacted_tool_results_preserve_email_and_google_document_text() -> None:
+    email_marker = "ACTION: Chris must confirm the partner meeting by Tuesday."
+    doc_marker = "DECISION: Pilot scope remains limited to the current unit."
+    compact = _compact_tool_results_for_prompt(
+        [
+            {
+                "id": "gmail-call",
+                "tool_name": "gmail.message.get",
+                "status": "complete",
+                "output_payload": {
+                    "summary": {"type": "gmail_message", "message_id": "msg-1"},
+                    "body_text": f"Email introduction. {email_marker}",
+                    "google_workspace_links": [
+                        {
+                            "kind": "document",
+                            "file_id": "doc-1",
+                            "url": "https://docs.google.com/document/d/doc-1/edit",
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "docs-call",
+                "tool_name": "google.docs.get",
+                "status": "complete",
+                "output_payload": {
+                    "summary": {"type": "google_doc", "document_id": "doc-1"},
+                    "content_text": f"Meeting notes. {doc_marker}",
+                },
+            },
+        ]
+    )
+
+    rendered = json.dumps(compact)
+    assert email_marker in rendered
+    assert doc_marker in rendered
+    assert "body_text" in compact[0]["evidence"]
+    assert "content_text" in compact[1]["evidence"]
 
 
 def test_run_agent_once_can_auto_execute_internal_llm_gateway_tool(

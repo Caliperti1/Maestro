@@ -39,6 +39,22 @@ def _curator(session: Session, payload: dict) -> LLMMemoryCurator:
     return LLMMemoryCurator(session, _extractor(payload))
 
 
+def test_memory_extraction_schema_forbids_additional_properties_recursively() -> None:
+    schema = ExtractedMemoryResponse.model_json_schema()
+
+    def assert_strict_objects(value) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                assert value.get("additionalProperties") is False
+            for nested in value.values():
+                assert_strict_objects(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_strict_objects(nested)
+
+    assert_strict_objects(schema)
+
+
 def test_dropbox_processor_creates_domain_folders(session: Session, tmp_path: Path) -> None:
     processor = MemoryDropboxProcessor(session, root=tmp_path)
 
@@ -171,7 +187,7 @@ def test_dropbox_processor_writes_routed_items_separate_from_memory(
                 "priority": "high",
                 "confidence": 0.86,
                 "status": "open",
-                "structured_data": {},
+                "structured_data": [],
             },
             {
                 "route_type": "task",
@@ -181,7 +197,10 @@ def test_dropbox_processor_writes_routed_items_separate_from_memory(
                 "priority": "normal",
                 "confidence": 0.82,
                 "status": "open",
-                "structured_data": {"due_at": "2026-07-10T17:00:00Z", "owner": "Praxis"},
+                "structured_data": [
+                    {"key": "due_at", "value": "2026-07-10T17:00:00Z"},
+                    {"key": "owner", "value": "Praxis"},
+                ],
             },
         ],
     }

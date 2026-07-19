@@ -39,7 +39,8 @@ Route policy:
 - ignore: duplicates, transient chatter, or low-value content that should not be written.
 
 Routed structured_data guidance:
-- Include structured_data whenever the source explicitly provides fields.
+- Return structured_data as a list of `{ "key": ..., "value": ... }` entries. Include entries only
+  when the source explicitly provides or directly supports the field; use an empty list otherwise.
 - event keys may include start_at, end_at, date, time, location, attendees, and supporting_refs.
 - task and human_input keys may include due_at, owner, assignee, blocking, and related_contact.
 - contact keys may include name, email, phone, linkedin, organization, role, origination, and last_contact_at.
