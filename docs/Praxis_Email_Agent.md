@@ -27,8 +27,11 @@ Maestro stores and preserves source provenance.
 
 ## Model Routing
 
-The seeded agent uses `model_profile = "ollama:qwen3:8b"` so high-volume background triage can run
-locally. Maestro can also attach `model_profile` to an individual work item. Runtime precedence is:
+The seeded agent uses `model_profile = "openrouter:openai/gpt-5.6-luna"`. Full email triage needs
+reliable multi-step tool planning, ownership and temporal reasoning, routed-item extraction, and
+notification judgment; Luna is the cost-efficient cloud default for that workload. Narrow,
+well-bounded email operations may still be explicitly assigned to local Qwen. Maestro can also
+attach `model_profile` to an individual work item. Runtime precedence is:
 
 1. work-item `model_profile`
 2. workflow definition `model_profile`

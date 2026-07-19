@@ -1776,6 +1776,11 @@ class MaestroOrchestratorService:
                 " ".join(str(value) for value in payload.get("required_tools") or []),
             ]
         ).lower()
+        is_full_email_triage = "triage" in text and any(
+            token in text for token in ("email", "gmail", "inbox")
+        )
+        if is_full_email_triage and requested_tier in {"auto", "qwen"}:
+            requested_tier = "luna"
         if requested_tier not in {"qwen", "luna", "terra", "sol"}:
             if any(
                 token in text
@@ -1792,9 +1797,10 @@ class MaestroOrchestratorService:
                 )
             ):
                 requested_tier = "sol"
+            elif any(token in text for token in ("email", "gmail", "inbox")):
+                requested_tier = "luna"
             elif payload.get("can_log_directly") or any(
-                token in text
-                for token in ("email", "gmail", "inbox", "extract", "route", "contact", "calendar", "todo")
+                token in text for token in ("extract", "route", "contact", "calendar", "todo")
             ):
                 requested_tier = "qwen"
             else:
@@ -1814,6 +1820,11 @@ class MaestroOrchestratorService:
             "sol": "This task needs the strongest reasoning tier for ambiguity, synthesis, research, design, or strategy.",
         }
         planner_rationale = str(payload.get("model_rationale") or "").strip()
+        if is_full_email_triage and requested_tier == "luna":
+            planner_rationale = (
+                "Full email triage uses Luna for reliable tool planning, ownership and temporal "
+                "reasoning, routed-item extraction, and notification judgment."
+            )
         return {
             "model_tier": requested_tier,
             "model_profile": profile_by_tier[requested_tier].strip() or "default",
