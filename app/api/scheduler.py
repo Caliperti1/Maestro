@@ -73,7 +73,7 @@ class SchedulerWorkerRunBody(BaseModel):
     lease_seconds: int = Field(default=900, ge=30, le=86400)
     execute_llm: bool = True
     auto_tool_loop: bool = True
-    max_tool_iterations: int = Field(default=2, ge=1, le=4)
+    max_tool_iterations: int = Field(default=4, ge=1, le=4)
 
 
 class SchedulerWorkerSettingsBody(BaseModel):

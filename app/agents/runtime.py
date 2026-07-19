@@ -1389,6 +1389,11 @@ class PromptAggregationService:
                     schema=_TOOL_PLAN_SCHEMA,
                 )
                 requested = _normalize_tool_plan(plan)
+                requested = _harden_email_tool_plan(
+                    requested,
+                    prior_results,
+                    task_instruction=package.task_instruction,
+                )
                 fallback_reason = ""
                 if not requested and _should_try_deterministic_tool_fallback(package, prior_results):
                     requested = _deterministic_tool_plan(
@@ -1789,6 +1794,127 @@ def _normalize_tool_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return normalized[:5]
+
+
+def _harden_email_tool_plan(
+    requested_tools: list[dict[str, Any]],
+    prior_results: list[dict[str, Any]],
+    *,
+    task_instruction: str,
+) -> list[dict[str, Any]]:
+    email_tool_names = {"gmail.message.list_recent", "gmail.message.get", "gmail.thread.get"}
+    is_email_flow = "email" in task_instruction.lower() or any(
+        str(item.get("tool_key") or "") in email_tool_names for item in requested_tools
+    ) or any(
+        isinstance(result, dict) and str(result.get("tool_name") or "") in email_tool_names
+        for result in prior_results
+    )
+    if not is_email_flow:
+        return requested_tools
+
+    requested_count = _requested_email_count(task_instruction.lower())
+    has_list = _has_tool_result(prior_results, "gmail.message.list_recent")
+    has_message = _has_tool_result(prior_results, "gmail.message.get")
+    safe_context_tools = {"memory.context_bundle", "reports.search", "reports.get"}
+
+    if not has_list:
+        hardened: list[dict[str, Any]] = []
+        list_request = next(
+            (
+                item
+                for item in requested_tools
+                if item.get("tool_key") == "gmail.message.list_recent"
+            ),
+            None,
+        )
+        if list_request is not None:
+            payload = dict(list_request.get("payload") or {})
+            payload["limit"] = requested_count
+            payload.pop("count", None)
+            payload.pop("max_results", None)
+            hardened.append({**list_request, "payload": payload})
+        hardened.extend(
+            item for item in requested_tools if item.get("tool_key") in safe_context_tools
+        )
+        return hardened[:5]
+
+    if not has_message:
+        message_ids = _gmail_message_ids_missing_body(prior_results)[:requested_count]
+        context_requests = [
+            item for item in requested_tools if item.get("tool_key") in safe_context_tools
+        ]
+        fetch_requests = [
+            {
+                "tool_key": "gmail.message.get",
+                "payload": {"message_id": message_id, "max_body_chars": 6000},
+                "rationale": "Read the selected Gmail message body before triage actions.",
+            }
+            for message_id in message_ids
+        ]
+        return [*fetch_requests, *context_requests][:5]
+
+    google_links = _google_workspace_links_from_gmail_results(prior_results)
+    hardened = []
+    for item in requested_tools:
+        tool_key = str(item.get("tool_key") or "")
+        if tool_key in email_tool_names:
+            continue
+        if tool_key.startswith("google."):
+            hydrated = _hydrate_google_tool_from_email(item, google_links)
+            if hydrated is None:
+                continue
+            item = hydrated
+        hardened.append(item)
+    return hardened[:5]
+
+
+def _google_workspace_links_from_gmail_results(
+    prior_results: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    for result in reversed(prior_results):
+        if not isinstance(result, dict) or result.get("tool_name") != "gmail.message.get":
+            continue
+        output = result.get("output_payload")
+        if not isinstance(output, dict):
+            continue
+        for raw_link in output.get("google_workspace_links") or []:
+            if not isinstance(raw_link, dict):
+                continue
+            url = str(raw_link.get("url") or "").strip()
+            file_id = str(raw_link.get("file_id") or "").strip()
+            kind = str(raw_link.get("kind") or "").strip()
+            if url and (url, file_id) not in {(item["url"], item["file_id"]) for item in links}:
+                links.append({"url": url, "file_id": file_id, "kind": kind})
+    return links
+
+
+def _hydrate_google_tool_from_email(
+    requested: dict[str, Any],
+    links: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    tool_key = str(requested.get("tool_key") or "")
+    expected_kind = {
+        "google.docs.get": "document",
+        "google.slides.get": "presentation",
+        "google.sheets.get": "spreadsheet",
+        "google.sheets.values.get": "spreadsheet",
+    }.get(tool_key)
+    candidates = [link for link in links if not expected_kind or link.get("kind") == expected_kind]
+    payload = dict(requested.get("payload") or {})
+    requested_id = str(payload.get("file_id") or payload.get("document_id") or "").strip()
+    requested_url = str(payload.get("url") or "").strip()
+    has_placeholder = any(
+        value.startswith("<") or "latest_" in value or "linked_" in value
+        for value in (requested_id.lower(), requested_url.lower())
+        if value
+    )
+    if candidates and (has_placeholder or not requested_id):
+        payload["file_id"] = candidates[0]["file_id"]
+        payload["url"] = candidates[0]["url"]
+    elif has_placeholder or (not requested_id and not requested_url):
+        return None
+    return {**requested, "payload": payload}
 
 
 def _deterministic_tool_plan(
@@ -2894,6 +3020,12 @@ Classify incoming domain email and decide what should be ignored, surfaced to Ch
 5. Extract routed candidates only for durable objects: contacts, events, organizations, and Chris-owned todos.
 6. Never create todos for your own agent steps such as "record contact" or "triage email".
 7. Preserve Gmail provenance in every candidate: message_id, thread_id, subject, sender, and date.
+8. Only claim an item was routed when `routed.item.create` completed successfully. If a tool call
+   was unavailable or failed, report that limitation instead of presenting proposed JSON as saved.
+9. Treat `IMPORTANT` and `UNREAD` as weak inbox signals. Do not infer a Chris-owned todo,
+   notification, deadline, or future event from those labels alone, and never invent a due date.
+10. Past meeting notes are context; create an event only when the source clearly schedules a future
+    or still-actionable calendar event.
 
 ## Output Contract
 - Email classification and confidence.

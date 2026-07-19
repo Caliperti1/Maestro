@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     llm_max_output_tokens: Annotated[int, Field(ge=256, le=32768)] = 8192
     ollama_llm_timeout_seconds: float = 300.0
     memory_dropbox_root: str = "maestro_dropbox"
+    memory_dropbox_autorun: bool = True
+    memory_dropbox_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 30
     home_timezone: str = "America/New_York"
     embedding_provider: str = "ollama"
     embedding_model: str = "nomic-embed-text"

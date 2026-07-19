@@ -127,3 +127,23 @@ sequenceDiagram
 Append one dated entry per attempt with the Gmail message ID, workflow/run ID, classification,
 routed canonical IDs, notification ID or reason for silence, report ID, artifact ID, observed
 failures, and follow-up patch.
+
+### 2026-07-19 - Attempt 1
+
+- Workflow run: `3d0f541b-64f7-4c5f-8431-8b314b404f17`
+- Selected message: `19f7b3e9bf208655`, thread `19f7120f92d15684`
+- Report: `080880c3-0b65-41b8-afb4-976d337d2809`
+- Result: failed behavioral contract despite terminal workflow status `completed`.
+- The run started before PR #98 was merged, so the agent did not have
+  `workflow.notification.create`. Silence was nevertheless defensible because the explicit email
+  due-outs belonged to Chris Flournoy, William, or the group rather than clearly to Chris Aliperti.
+- The tool planner passed `count: 1`, which the Gmail adapter ignored, and attempted placeholder IDs
+  `<latest_message_id>` and `<linked_doc_id>`. It eventually fetched the correct full message but
+  exhausted its two tool iterations before routing or linked-Doc retrieval.
+- The final report invented a Chris-owned July 20 todo and treated a past July 17 meeting as a new
+  event. It described candidates in prose without executing `routed.item.create`.
+- Two artifacts were staged but not curated because no background dropbox worker was running. The
+  canonical workflow artifact also defaulted to Maestro Development instead of the queue item's
+  Praxis domain.
+- Follow-up: dependency-aware email tool sequencing, four scheduler tool iterations, automatic
+  memory-dropbox processing, stricter no-invention instructions, and queue-domain artifact routing.
