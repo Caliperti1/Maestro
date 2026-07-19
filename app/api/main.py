@@ -22,6 +22,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
+from app.memory.dropbox import MemoryDropboxProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -30,17 +31,22 @@ def create_app() -> FastAPI:
     configure_logging()
     settings = get_settings()
 
-    worker_task: asyncio.Task | None = None
+    worker_tasks: list[asyncio.Task] = []
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal worker_task
-        worker_task = asyncio.create_task(_scheduler_worker_loop())
+        worker_tasks.extend(
+            [
+                asyncio.create_task(_scheduler_worker_loop()),
+                asyncio.create_task(_memory_dropbox_worker_loop()),
+            ]
+        )
         try:
             yield
         finally:
-            if worker_task is not None:
+            for worker_task in worker_tasks:
                 worker_task.cancel()
+            for worker_task in worker_tasks:
                 with contextlib.suppress(asyncio.CancelledError):
                     await worker_task
 
@@ -83,6 +89,28 @@ async def _scheduler_worker_loop() -> None:
         except Exception:
             logger.exception("Scheduler worker heartbeat failed.")
         await asyncio.sleep(max(5, interval_seconds))
+
+
+async def _memory_dropbox_worker_loop() -> None:
+    while True:
+        settings = get_settings()
+        try:
+            if settings.memory_dropbox_autorun:
+                await asyncio.to_thread(_process_memory_dropbox_once)
+        except Exception:
+            logger.exception("Memory dropbox worker heartbeat failed.")
+        await asyncio.sleep(max(5, settings.memory_dropbox_interval_seconds))
+
+
+def _process_memory_dropbox_once() -> None:
+    with SessionLocal() as session:
+        results = MemoryDropboxProcessor(session).process_once()
+        if results:
+            logger.info(
+                "Memory dropbox worker processed %s artifact(s): %s",
+                len(results),
+                ", ".join(result.status for result in results),
+            )
 
 
 app = create_app()

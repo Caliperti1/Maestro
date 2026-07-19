@@ -165,7 +165,7 @@ class SchedulerWorkerService:
         lease_seconds: int = 900,
         execute_llm: bool = True,
         auto_tool_loop: bool = True,
-        max_tool_iterations: int = 2,
+        max_tool_iterations: int = 4,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         enqueued = self.scheduler.enqueue_due_workflows(now=now)
@@ -196,7 +196,7 @@ class SchedulerWorkerService:
         *,
         execute_llm: bool = True,
         auto_tool_loop: bool = True,
-        max_tool_iterations: int = 2,
+        max_tool_iterations: int = 4,
     ) -> dict[str, Any]:
         item = self.session.get(WorkflowQueueItem, queue_item_id)
         if item is None:
@@ -489,16 +489,21 @@ class SchedulerWorkerService:
         output_payload = run.output_payload or {}
         if output_payload.get("staged_artifact_path"):
             return
-        domain_key = "maestro-development"
-        if run.domain_id:
-            domain = self.session.get(Domain, run.domain_id)
-            if domain is not None:
-                domain_key = domain.key
         queue_items = [
             item
             for item in self.scheduler._queue_items_for_run(run.id)
             if item.status != "archived"
         ]
+        domain_key = "maestro-development"
+        domain_id = run.domain_id
+        if domain_id is None:
+            queue_domain_ids = {item.domain_id for item in queue_items if item.domain_id is not None}
+            if len(queue_domain_ids) == 1:
+                domain_id = next(iter(queue_domain_ids))
+        if domain_id is not None:
+            domain = self.session.get(Domain, domain_id)
+            if domain is not None:
+                domain_key = domain.key
         generated_artifacts: list[dict[str, Any]] = []
         tool_calls: list[dict[str, Any]] = []
         output_sections: list[str] = []

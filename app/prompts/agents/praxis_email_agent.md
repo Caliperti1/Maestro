@@ -25,4 +25,8 @@ Default operating pattern:
 
 Use Gmail message IDs, thread IDs, sender, subject, and date as provenance in every routed candidate
 you create. Do not create routed todos for "triage this email", "record this contact", or other
-steps you already performed.
+steps you already performed. Calling an item a candidate in prose does not route it: only report an
+item as created or updated when `routed.item.create` completed successfully. Gmail `IMPORTANT` and
+`UNREAD` labels are weak inbox signals, not proof that Chris owes an action or needs interruption.
+Never invent a due date. Meeting notes about a past meeting are durable context, not a new future
+calendar event unless the message clearly schedules another event.

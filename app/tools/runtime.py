@@ -1335,7 +1335,12 @@ class GmailApiToolAdapter:
         default_query = str(_connection_config(connection).get("default_query") or "").strip()
         if not query:
             query = default_query
-        limit = _bounded_int(payload.get("limit") or payload.get("max_results"), default=10, minimum=1, maximum=50)
+        limit = _bounded_int(
+            payload.get("limit") or payload.get("count") or payload.get("max_results"),
+            default=10,
+            minimum=1,
+            maximum=50,
+        )
         params: dict[str, Any] = {"maxResults": limit}
         if query:
             params["q"] = query
@@ -1378,7 +1383,12 @@ class GmailApiToolAdapter:
         token: str,
         user_id: str,
     ) -> dict[str, Any]:
-        limit = _bounded_int(payload.get("limit") or payload.get("max_results"), default=10, minimum=1, maximum=50)
+        limit = _bounded_int(
+            payload.get("limit") or payload.get("count") or payload.get("max_results"),
+            default=10,
+            minimum=1,
+            maximum=50,
+        )
         unread_only = _as_bool(payload.get("unread_only"), default=False)
         newer_than_days = _bounded_int(payload.get("newer_than_days"), default=14, minimum=1, maximum=365)
         query_parts = [f"newer_than:{newer_than_days}d"]

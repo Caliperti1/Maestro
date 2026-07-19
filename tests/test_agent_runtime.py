@@ -15,6 +15,7 @@ from app.agents.runtime import (
     PromptPackageRequest,
     _compact_tool_results_for_prompt,
     _deterministic_tool_plan,
+    _harden_email_tool_plan,
     _llm_client_for_model_profile,
 )
 from app.core.config import get_settings
@@ -1037,6 +1038,106 @@ def test_deterministic_email_tool_plan_honors_latest_five_emails(
         "msg-4",
         "msg-5",
     ]
+
+
+def test_email_tool_plan_removes_placeholders_and_sequences_real_ids() -> None:
+    first_step = _harden_email_tool_plan(
+        [
+            {
+                "tool_key": "gmail.message.list_recent",
+                "payload": {"count": 1},
+                "rationale": "Find the latest message.",
+            },
+            {
+                "tool_key": "gmail.message.get",
+                "payload": {"message_id": "<latest_message_id>"},
+                "rationale": "Read it.",
+            },
+            {
+                "tool_key": "google.docs.get",
+                "payload": {"file_id": "<linked_doc_id>"},
+                "rationale": "Read linked notes.",
+            },
+            {
+                "tool_key": "memory.context_bundle",
+                "payload": {"query_text": "Praxis email context"},
+                "rationale": "Ground the triage.",
+            },
+        ],
+        [],
+        task_instruction="Triage exactly the latest Praxis email.",
+    )
+
+    assert [item["tool_key"] for item in first_step] == [
+        "gmail.message.list_recent",
+        "memory.context_bundle",
+    ]
+    assert first_step[0]["payload"] == {"limit": 1}
+
+    list_result = {
+        "tool_name": "gmail.message.list_recent",
+        "status": "complete",
+        "output_payload": {
+            "messages": [
+                {
+                    "message_id": "msg-real-1",
+                    "thread_id": "thread-real-1",
+                    "subject": "Partner notes",
+                }
+            ]
+        },
+    }
+    second_step = _harden_email_tool_plan(
+        [
+            {
+                "tool_key": "gmail.message.get",
+                "payload": {"message_id": "<latest_message_id>"},
+                "rationale": "Read it.",
+            }
+        ],
+        [list_result],
+        task_instruction="Triage exactly the latest Praxis email.",
+    )
+
+    assert second_step == [
+        {
+            "tool_key": "gmail.message.get",
+            "payload": {"message_id": "msg-real-1", "max_body_chars": 6000},
+            "rationale": "Read the selected Gmail message body before triage actions.",
+        }
+    ]
+
+    message_result = {
+        "tool_name": "gmail.message.get",
+        "status": "complete",
+        "output_payload": {
+            "message_id": "msg-real-1",
+            "body_text": "Meeting notes are linked below.",
+            "google_workspace_links": [
+                {
+                    "kind": "document",
+                    "file_id": "doc-real-1",
+                    "url": "https://docs.google.com/document/d/doc-real-1/edit",
+                }
+            ],
+        },
+    }
+    third_step = _harden_email_tool_plan(
+        [
+            {
+                "tool_key": "google.docs.get",
+                "payload": {"file_id": "<linked_doc_id>"},
+                "rationale": "Read linked notes.",
+            }
+        ],
+        [list_result, message_result],
+        task_instruction="Triage exactly the latest Praxis email.",
+    )
+
+    assert third_step[0]["payload"] == {
+        "file_id": "doc-real-1",
+        "url": "https://docs.google.com/document/d/doc-real-1/edit",
+    }
 
 
 def test_deterministic_google_slides_plan_does_not_fall_back_to_email(
