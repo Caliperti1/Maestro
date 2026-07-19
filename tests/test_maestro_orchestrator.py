@@ -1080,12 +1080,34 @@ def test_orchestrator_assigns_required_skills_and_model_to_email_work(session: S
     assert "contact_manager" in skill_keys
     assert "calendar_manager" in skill_keys
     assert "to_do_manager" in skill_keys
-    assert "ollama:qwen3:8b" in model_profiles
+    assert "openrouter:openai/gpt-5.6-luna" in model_profiles
     assert all(
-        item.model_tier == "qwen"
+        item.model_tier == "luna"
         for item in plan.work_items
         if item.needs_agent and "email" in f"{item.title} {item.description}".lower()
     )
+
+
+def test_orchestrator_promotes_full_email_triage_from_qwen_to_luna(session: Session) -> None:
+    selection = MaestroOrchestratorService(session)._model_selection_for_work_item_payload(
+        {
+            "type": "workflow_task",
+            "title": "Triage the latest Praxis email",
+            "description": "Classify the inbox message and route contacts, events, and todos.",
+            "required_tools": ["gmail.message.get", "routed.item.create"],
+            "model_tier": "qwen",
+            "model_rationale": "This looks like routine local extraction.",
+        }
+    )
+
+    assert selection == {
+        "model_tier": "luna",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "model_rationale": (
+            "Full email triage uses Luna for reliable tool planning, ownership and temporal "
+            "reasoning, routed-item extraction, and notification judgment."
+        ),
+    }
 
 
 def test_orchestrator_routes_complex_design_work_to_advanced_model_tier(session: Session) -> None:

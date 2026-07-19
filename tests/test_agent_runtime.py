@@ -880,7 +880,7 @@ def test_seed_agent_merge_adds_gmail_read_permissions_to_existing_praxis_agent(
     assert "gmail.thread.get" in allowed
 
 
-def test_seeded_praxis_email_agent_has_email_triage_tools_skills_and_local_model(
+def test_seeded_praxis_email_agent_has_email_triage_tools_skills_and_luna_model(
     session: Session,
 ) -> None:
     spec = AgentRegistryService(session).get_spec("praxis-email-agent")
@@ -889,7 +889,7 @@ def test_seeded_praxis_email_agent_has_email_triage_tools_skills_and_local_model
     allowed_skills = [skill.key for skill in spec.allowed_skills]
 
     assert spec.domain_key == "praxis"
-    assert spec.model_profile == "ollama:qwen3:8b"
+    assert spec.model_profile == "openrouter:openai/gpt-5.6-luna"
     assert "gmail.message.list_recent" in allowed_tools
     assert "gmail.message.get" in allowed_tools
     assert "gmail.thread.get" in allowed_tools
@@ -908,8 +908,28 @@ def test_seeded_praxis_email_agent_has_email_triage_tools_skills_and_local_model
     assert "contact_manager" in allowed_skills
     assert "to_do_manager" in allowed_skills
     client = _llm_client_for_model_profile(spec.model_profile)
-    assert client.provider == "ollama"
-    assert client.timeout_seconds >= 90
+    assert client.provider == "openrouter"
+    assert client.model == "openai/gpt-5.6-luna"
+
+
+def test_seed_refresh_migrates_praxis_email_agent_from_legacy_qwen_default(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.ensure_seed_agents()
+    agent = AgentRepository(session).get_by_key("praxis-email-agent")
+    assert agent is not None
+    agent.capabilities = {
+        **(agent.capabilities or {}),
+        "model_profile": "ollama:qwen3:8b",
+    }
+    session.commit()
+
+    registry.ensure_seed_agents()
+
+    assert registry.get_spec("praxis-email-agent").model_profile == (
+        "openrouter:openai/gpt-5.6-luna"
+    )
 
 
 def test_prompt_package_can_scope_required_skills(

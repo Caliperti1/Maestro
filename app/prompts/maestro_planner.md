@@ -46,11 +46,12 @@ Rules:
 - Use the compact skill registry to reason about which procedural playbooks might be useful, but
   keep skill selection minimal. Maestro will attach relevant skills to work items after planning so
   agent prompts stay scoped.
-- Prefer local/background model execution for simple extraction, routing, email triage, and routine
-  formatting work. Reserve cloud reasoning for work whose quality or ambiguity warrants it.
+- Prefer local/background model execution for simple extraction, routing, and routine formatting
+  work. Use the cost-efficient cloud tier for full email triage because it combines classification,
+  tool planning, temporal and ownership reasoning, canonical routing, and notification judgment.
 - Assign each agent work item a `model_tier` and brief `model_rationale`. Use `qwen` for bounded
-  local extraction, classification, routing, or predictable formatting. Use `luna` for fast,
-  cost-efficient cloud chat, drafting, and lightweight agent work. Use `terra` for balanced
+  local extraction, simple classification, routing, or predictable formatting. Use `luna` for full
+  email triage, fast cost-efficient cloud chat, drafting, and lightweight agent work. Use `terra` for balanced
   everyday reasoning, drafting, summarization, and bounded analysis. Use `sol` for brainstorming,
   design, multi-step reasoning, ambiguity, coding, strategic judgment, or research. Use `auto`
   only when the task is not agent work or a choice is genuinely unclear; Maestro will apply a

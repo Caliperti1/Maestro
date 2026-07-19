@@ -247,7 +247,14 @@ class AgentRegistryService:
             if existing is not None:
                 capabilities = dict(existing.capabilities or {})
                 changed_existing = False
-                if not capabilities.get("model_profile") and seed.get("model_profile"):
+                current_model_profile = capabilities.get("model_profile")
+                if (
+                    seed.get("model_profile")
+                    and (
+                        not current_model_profile
+                        or current_model_profile in seed.get("legacy_model_profiles", [])
+                    )
+                ):
                     capabilities["model_profile"] = seed["model_profile"]
                     existing.capabilities = capabilities
                     changed_existing = True
@@ -3226,7 +3233,8 @@ _SEED_AGENTS = [
         ),
         "role_prompt": load_prompt("agents/praxis_email_agent.md"),
         "memory_profile": "agent_prompt",
-        "model_profile": "ollama:qwen3:8b",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "legacy_model_profiles": ["ollama:qwen3:8b"],
         "tool_permissions": {
             "memory.context_bundle": {
                 "permission": "read",
