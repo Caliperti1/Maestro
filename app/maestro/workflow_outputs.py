@@ -173,9 +173,25 @@ class WorkflowOutputService:
             "report_id": report_id,
             "report_title": report_title,
             "artifact_id": agent_run.get("artifact_id") if isinstance(agent_run, dict) else None,
-            "routed_item_ids": self._string_list(agent_run.get("routed_item_ids") if isinstance(agent_run, dict) else None),
+            "routed_item_ids": self._routed_item_ids(agent_run),
             "output_preview": agent_run.get("output_preview") if isinstance(agent_run, dict) else None,
         }
+
+    def _routed_item_ids(self, agent_run: Any) -> list[str]:
+        if not isinstance(agent_run, dict):
+            return []
+        routed_ids = self._string_list(agent_run.get("routed_item_ids"))
+        for call in agent_run.get("tool_calls") or []:
+            if not isinstance(call, dict) or call.get("tool_name") != "routed.item.create":
+                continue
+            output = call.get("output_payload")
+            if not isinstance(output, dict):
+                continue
+            for item in output.get("items") or []:
+                routed_id = str(item.get("id") or "") if isinstance(item, dict) else ""
+                if routed_id and routed_id not in routed_ids:
+                    routed_ids.append(routed_id)
+        return routed_ids
 
     def _run_title(self, run: WorkflowRun) -> str:
         payload = run.input_payload or {}

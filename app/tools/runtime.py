@@ -28,9 +28,21 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Agent, Domain, Report, RoutedItem, Task, ToolCall, ToolConnection
+from app.db.models import (
+    Agent,
+    Domain,
+    Report,
+    RoutedItem,
+    Task,
+    ToolCall,
+    ToolConnection,
+    WorkflowNotification,
+    WorkflowRun,
+)
 from app.db.repositories import AgentRepository, DomainRepository
 from app.llm.client import OpenAILLMClient
+from app.maestro.channel import record_channel_message
+from app.maestro.workflow_outputs import WorkflowOutputService
 from app.memory.retrieval import (
     MemoryContextBundle,
     MemoryContextBundleRequest,
@@ -1855,6 +1867,138 @@ class RoutedItemCreateToolAdapter:
         }
 
 
+class WorkflowNotificationCreateToolAdapter:
+    key = "workflow.notification.create"
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if context.dry_run:
+            return {"dry_run": True, "tool": self.key, "payload": payload}
+        title = str(payload.get("title") or "Email needs your attention").strip()
+        message = str(payload.get("message") or payload.get("summary") or "").strip()
+        if not message:
+            raise ToolExecutionError("workflow.notification.create requires message or summary.")
+        severity = str(payload.get("severity") or "warning").strip().lower()
+        if severity not in {"info", "warning", "urgent"}:
+            raise ToolExecutionError("Notification severity must be info, warning, or urgent.")
+        source_key = str(payload.get("message_id") or payload.get("thread_id") or "").strip()
+        run = self._workflow_run(context)
+        existing = self._existing_notification(
+            context,
+            run=run,
+            title=title,
+            message=message,
+            source_key=source_key,
+        )
+        if existing is not None:
+            return self._result(existing, duplicate=True)
+
+        metadata = {
+            "source": self.key,
+            "agent_key": context.agent.key,
+            "domain_key": context.domain.key,
+            "task_id": str(context.task.id),
+            "source_message_id": str(payload.get("message_id") or "").strip() or None,
+            "source_thread_id": str(payload.get("thread_id") or "").strip() or None,
+            "subject": str(payload.get("subject") or "").strip() or None,
+            "sender": str(payload.get("from") or payload.get("sender") or "").strip() or None,
+            "reason": str(payload.get("reason") or "").strip() or None,
+        }
+        notification = WorkflowOutputService(context.session).create_notification(
+            run,
+            title=title,
+            message=message,
+            severity=severity,
+            notification_type="email_attention",
+            status="delivered",
+            delivered_at=datetime.now(UTC),
+            metadata=metadata,
+        )
+        if run is None:
+            notification.conversation_id = context.task.conversation_id
+            notification.domain_id = context.domain.id
+            context.session.commit()
+            context.session.refresh(notification)
+        record_channel_message(
+            context.session,
+            sender="maestro",
+            content=f"{notification.title}\n\n{notification.message}",
+            metadata={
+                "source": self.key,
+                "event_type": "email_attention",
+                "notification_id": str(notification.id),
+                "workflow_run_id": str(run.id) if run is not None else None,
+                "task_id": str(context.task.id),
+            },
+        )
+        return self._result(notification, duplicate=False)
+
+    def _workflow_run(self, context: ToolExecutionContext) -> WorkflowRun | None:
+        parent_task_ids = [context.task.id]
+        if context.task.parent_task_id is not None:
+            parent_task_ids.insert(0, context.task.parent_task_id)
+        return context.session.scalar(
+            select(WorkflowRun)
+            .where(WorkflowRun.parent_task_id.in_(parent_task_ids))
+            .order_by(WorkflowRun.created_at.desc())
+        )
+
+    def _existing_notification(
+        self,
+        context: ToolExecutionContext,
+        *,
+        run: WorkflowRun | None,
+        title: str,
+        message: str,
+        source_key: str,
+    ) -> WorkflowNotification | None:
+        query = select(WorkflowNotification).where(
+            WorkflowNotification.notification_type == "email_attention"
+        )
+        if run is not None:
+            query = query.where(WorkflowNotification.workflow_run_id == run.id)
+        else:
+            query = query.where(WorkflowNotification.domain_id == context.domain.id)
+        for notification in context.session.scalars(
+            query.order_by(WorkflowNotification.created_at.desc()).limit(20)
+        ).all():
+            metadata = notification.metadata_ or {}
+            if source_key and source_key in {
+                str(metadata.get("source_message_id") or ""),
+                str(metadata.get("source_thread_id") or ""),
+            }:
+                return notification
+            compact_title = " ".join(title.split())[:240]
+            compact_message = " ".join(message.split())[:240]
+            if notification.title == compact_title and notification.message == compact_message:
+                return notification
+        return None
+
+    def _result(
+        self,
+        notification: WorkflowNotification,
+        *,
+        duplicate: bool,
+    ) -> dict[str, Any]:
+        return {
+            "notification_id": str(notification.id),
+            "duplicate": duplicate,
+            "title": notification.title,
+            "message": notification.message,
+            "severity": notification.severity,
+            "status": notification.status,
+            "summary": {
+                "type": "workflow_notification",
+                "notification_id": str(notification.id),
+                "notification_type": notification.notification_type,
+                "duplicate": duplicate,
+            },
+        }
+
+
 class CodexCliToolAdapter:
     def __init__(self, key: str):
         self.key = key
@@ -2687,6 +2831,7 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
     adapters["web.search"] = WebSearchToolAdapter("web.search")
     adapters["memory.context_bundle"] = MemoryContextBundleToolAdapter()
     adapters["routed.item.create"] = RoutedItemCreateToolAdapter()
+    adapters["workflow.notification.create"] = WorkflowNotificationCreateToolAdapter()
     adapters["reports.search"] = ReportRetrievalToolAdapter("reports.search")
     adapters["reports.get"] = ReportRetrievalToolAdapter("reports.get")
     adapters["artifact.stage_interaction"] = StageInteractionArtifactToolAdapter()
