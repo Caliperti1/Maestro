@@ -1192,6 +1192,7 @@ class PromptAggregationService:
                     tool_call.output_payload = {
                         "output_chars": len(output_text),
                         "output_preview": output_text[:500],
+                        **_llm_call_metadata(llm_client),
                     }
                     tool_call.completed_at = datetime.now(UTC)
                     report = Report(
@@ -1436,6 +1437,7 @@ class PromptAggregationService:
                     "requires_final_answer": bool(plan.get("requires_final_answer", True)),
                     "planner_source": planner_source,
                     "fallback_reason": fallback_reason or None,
+                    **_llm_call_metadata(llm_client),
                 }
                 planner_call.completed_at = datetime.now(UTC)
                 self.session.commit()
@@ -2905,6 +2907,17 @@ def _compact_tool_safety(tool_key: str) -> dict[str, Any]:
         "level": policy.get("level"),
         "auto_executable": bool(policy.get("auto_executable")),
     }
+
+
+def _llm_call_metadata(llm_client: LLMClient) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    response_id = str(getattr(llm_client, "last_response_id", "") or "").strip()
+    usage = getattr(llm_client, "last_usage", None)
+    if response_id:
+        metadata["response_id"] = response_id
+    if isinstance(usage, dict) and usage:
+        metadata["usage"] = usage
+    return metadata
 
 
 def _compact_tool_results_for_prompt(

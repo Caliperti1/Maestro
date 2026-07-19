@@ -18,6 +18,8 @@ def test_openrouter_client_uses_openrouter_config() -> None:
     assert client.base_url == "https://openrouter.ai/api/v1"
     assert client.default_headers["X-OpenRouter-Title"] == "Maestro"
     assert client.max_output_tokens == 8192
+    assert client.last_response_id is None
+    assert client.last_usage is None
     assert callable(client.structured_response)
     assert callable(client.text_response)
     assert callable(client.web_search_response)
