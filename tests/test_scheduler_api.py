@@ -22,6 +22,7 @@ from app.db.models import (
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.maestro.scheduler_worker import SchedulerWorkerService
+from app.maestro.workflow_outputs import WorkflowOutputService
 
 
 def _client(session: Session, tmp_path: Path) -> TestClient:
@@ -129,6 +130,27 @@ def test_workflow_outputs_api_archives_reports(session: Session, tmp_path: Path)
     included = client.get("/workflow-outputs/reports?include_archived=true")
     assert included.status_code == 200
     assert included.json()["reports"][0]["archived"] is True
+
+
+def test_run_log_extracts_routed_ids_from_agent_tool_results(session: Session) -> None:
+    routed_ids = WorkflowOutputService(session)._routed_item_ids(
+        {
+            "tool_calls": [
+                {
+                    "tool_name": "routed.item.create",
+                    "status": "complete",
+                    "output_payload": {
+                        "items": [
+                            {"id": "routed-contact-1", "route_type": "contact"},
+                            {"id": "routed-event-1", "route_type": "event"},
+                        ]
+                    },
+                }
+            ]
+        }
+    )
+
+    assert routed_ids == ["routed-contact-1", "routed-event-1"]
 
 
 def test_scheduler_api_tick_claims_due_recurring_work(

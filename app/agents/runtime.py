@@ -2120,6 +2120,11 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": True,
         "reason": "Creates internal routed-memory candidates with provenance inside Maestro.",
     },
+    "workflow.notification.create": {
+        "level": "internal_notification",
+        "auto_executable": True,
+        "reason": "Surfaces an internal, provenance-linked notification to Chris in Maestro.",
+    },
     "reports.search": {
         "level": "safe_read",
         "auto_executable": True,
@@ -2374,6 +2379,13 @@ _TOOL_DESCRIPTIONS = {
         "description": (
             "Create internal routed candidates for contacts, todos, events, organizations, "
             "ideas, decisions, or RFIs and promote them into routed stores."
+        ),
+    },
+    "workflow.notification.create": {
+        "name": "Create Workflow Notification",
+        "description": (
+            "Notify Chris when an email or workflow requires his response, decision, deadline "
+            "awareness, or attention to a material risk. Include source provenance."
         ),
     },
     "reports.search": {
@@ -2876,17 +2888,22 @@ Classify incoming domain email and decide what should be ignored, surfaced to Ch
 1. Read message metadata first: sender, recipients, subject, date, message_id, thread_id, labels.
 2. Fetch full message or thread only when needed.
 3. Classify as `spam_noise`, `response_needed`, `useful_info`, or `action_required`.
-4. If Chris needs to respond or decide, include a notification/open question in the report.
+4. If Chris needs to respond or decide, a material deadline is approaching, or the message exposes
+   meaningful risk, call `workflow.notification.create`. Useful information alone does not warrant
+   a notification.
 5. Extract routed candidates only for durable objects: contacts, events, organizations, and Chris-owned todos.
 6. Never create todos for your own agent steps such as "record contact" or "triage email".
 7. Preserve Gmail provenance in every candidate: message_id, thread_id, subject, sender, and date.
 
 ## Output Contract
 - Email classification and confidence.
-- Whether Chris needs to be notified.
+- Whether Chris was notified and the concrete reason, or why no notification was warranted.
 - Routed candidates created, grouped by type.
 - Any approval requests such as marking read or creating a draft.
 - Brief evidence for each decision.
+
+For a warranted notification, call `workflow.notification.create` with `title`, `message`,
+`severity`, `reason`, and Gmail provenance fields `message_id`, `thread_id`, `subject`, and `from`.
 
 ## Validation
 - If it is spam/noise, explain why before requesting any Gmail modification.
@@ -3122,6 +3139,10 @@ _SEED_AGENTS = [
             "routed.item.create": {
                 "permission": "write",
                 "description": "Create routed candidates for contacts, todos, events, organizations, and ideas.",
+            },
+            "workflow.notification.create": {
+                "permission": "write",
+                "description": "Surface Praxis email that needs Chris' attention in Maestro chat.",
             },
             "google.drive.file.get": {
                 "permission": "read",

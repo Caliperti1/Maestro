@@ -15,7 +15,9 @@ workflow when a new message arrives.
    - events via `calendar_manager`
    - organizations via `organization_manager`
 5. Promote routed candidates immediately into Maestro routed stores.
-6. Generate an agent report and stage the interaction artifact for memory curation.
+6. Notify Chris only when a response, decision, material deadline, or meaningful risk requires his
+   attention.
+7. Generate an agent report and stage the interaction artifact for memory curation.
 
 ## Safety
 
@@ -57,6 +59,10 @@ The Praxis Email Agent currently uses:
 - `to_do_manager`
 - `calendar_manager`
 - `organization_manager`
+
+The agent also has `workflow.notification.create`. This is an internal, auto-executable Maestro
+tool, not an external side effect. It writes a provenance-linked notification and posts it to the
+main Maestro channel. Informational email should remain quiet.
 
 ## Human Test
 
