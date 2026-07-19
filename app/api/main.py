@@ -76,19 +76,24 @@ async def _scheduler_worker_loop() -> None:
     while True:
         interval_seconds = get_settings().scheduler_worker_interval_seconds
         try:
-            with SessionLocal() as session:
-                worker_settings = scheduler_worker_settings(session)
-                interval_seconds = int(worker_settings["interval_seconds"])
-                if worker_settings["enabled"]:
-                    SchedulerWorkerService(session).run_once(
-                        owner="maestro-background-worker",
-                        claim_limit=int(worker_settings["claim_limit"]),
-                        execute_llm=bool(worker_settings["execute_llm"]),
-                        auto_tool_loop=bool(worker_settings["auto_tool_loop"]),
-                    )
+            interval_seconds = await asyncio.to_thread(_process_scheduler_work_once)
         except Exception:
             logger.exception("Scheduler worker heartbeat failed.")
         await asyncio.sleep(max(5, interval_seconds))
+
+
+def _process_scheduler_work_once() -> int:
+    """Run one blocking scheduler heartbeat without occupying FastAPI's event loop."""
+    with SessionLocal() as session:
+        worker_settings = scheduler_worker_settings(session)
+        if worker_settings["enabled"]:
+            SchedulerWorkerService(session).run_once(
+                owner="maestro-background-worker",
+                claim_limit=int(worker_settings["claim_limit"]),
+                execute_llm=bool(worker_settings["execute_llm"]),
+                auto_tool_loop=bool(worker_settings["auto_tool_loop"]),
+            )
+        return int(worker_settings["interval_seconds"])
 
 
 async def _memory_dropbox_worker_loop() -> None:

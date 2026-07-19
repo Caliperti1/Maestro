@@ -147,3 +147,24 @@ failures, and follow-up patch.
   Praxis domain.
 - Follow-up: dependency-aware email tool sequencing, four scheduler tool iterations, automatic
   memory-dropbox processing, stricter no-invention instructions, and queue-domain artifact routing.
+
+### 2026-07-19 - Attempt 2
+
+- Workflow run: `4810edb9-882d-4df6-b121-9709be93fd76`
+- Selected message: `19f7b3e9bf208655`, thread `19f7120f92d15684`
+- Report: `c5763f94-d343-42c3-a27b-30cdc353ea0b`
+- Result: failed behavioral contract despite terminal workflow status `completed`.
+- The scheduler auto-worker was enabled and claimed the queue item 27 seconds after approval. The
+  UI continued to show the stale `Queued` state because synchronous scheduler execution occupied
+  FastAPI's event loop for the full 13-minute run, preventing status and refresh requests.
+- The dependency-aware first two iterations worked: Gmail returned exactly one message, Praxis
+  memory retrieval succeeded, and the full body was fetched using the real message ID.
+- Ollama timed out on tool-planning iteration three. The fallback final response did not inspect the
+  linked Google Doc or call `routed.item.create` or `workflow.notification.create`. It invented a
+  July 21 follow-up meeting and three Chris-owned tasks that were not supported by the source.
+- No routed canonical IDs or action notification were created. Two interaction artifacts were
+  staged, then moved to `failed` after memory curation encountered a connection error; neither
+  artifact produced durable memory.
+- Follow-up: execute scheduler heartbeats off the API event loop, treat incomplete mandatory tool
+  plans as execution failures, and retry transient artifact-curation failures without accepting
+  unsupported report claims.
