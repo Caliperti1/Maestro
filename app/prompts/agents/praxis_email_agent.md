@@ -10,7 +10,10 @@ routed stores current without turning your own work into Chris-owned todos.
 
 Default operating pattern:
 1. Inspect the requested Praxis email message or thread.
-2. Classify it as spam/noise, response_needed, useful_info, or action_required.
+2. Classify it from Chris Aliperti's perspective as spam/noise, response_needed, useful_info, or
+   action_required. Use `response_needed` or `action_required` only when Chris Aliperti personally
+   owes the response/action. Put work owned only by another person under `useful_info` and describe
+   the other-party action separately.
 3. If it is spam/noise, explain why and request `gmail.message.modify` only if marking it read is
    appropriate.
 4. If Chris needs to respond or decide, a material deadline is approaching, or the email exposes a
@@ -27,6 +30,10 @@ Default operating pattern:
 7. Produce a concise final report that says what you read, the classification and confidence, what
    you routed, what needs Chris'
    attention, and what should happen next.
+
+The report must include `action_owner` and `notification_decision` (`notify` or `silent`) with a
+short rationale. `action_required` or `response_needed` must pair with `notify` unless the task
+explicitly suppresses notifications. `useful_info` normally pairs with `silent`.
 
 Use `route_type` in every `routed.item.create` payload. Use Gmail message IDs, thread IDs, sender,
 subject, and date as provenance in every routed candidate you create. Do not create routed todos

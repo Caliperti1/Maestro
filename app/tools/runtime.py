@@ -1958,6 +1958,7 @@ class WorkflowNotificationCreateToolAdapter:
             metadata={
                 "source": self.key,
                 "event_type": "email_attention",
+                "channel_visibility": "global",
                 "notification_id": str(notification.id),
                 "workflow_run_id": str(run.id) if run is not None else None,
                 "task_id": str(context.task.id),

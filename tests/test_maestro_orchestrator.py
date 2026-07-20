@@ -40,6 +40,7 @@ from app.maestro.orchestrator import (
     MaestroWorkItem,
 )
 from app.maestro.intent_classifier import MaestroMessageUnderstandingResponse
+from app.maestro.channel import record_channel_message
 from app.maestro.planner import MaestroPlannerResponse
 from app.maestro.scheduler import SchedulerService
 from app.tools.runtime import ToolExecutionResult
@@ -2643,6 +2644,45 @@ def test_maestro_channel_websocket_sends_active_conversation(
     assert payload["type"] == "conversation"
     assert payload["conversation"]["id"] == conversation_id
     assert payload["conversation"]["messages"][0]["content"] == "Prepare a Praxis partner call workflow."
+
+
+def test_active_topic_includes_global_notifications_but_not_routine_progress(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    response = client.post(
+        "/maestro/respond",
+        json={"message": "Brainstorm a new Praxis partner feature."},
+    )
+    assert response.status_code == 200
+
+    record_channel_message(
+        session,
+        sender="maestro",
+        content="This email needs your response by Tuesday.",
+        metadata={
+            "source": "workflow.notification.create",
+            "event_type": "email_attention",
+            "channel_visibility": "global",
+        },
+    )
+    record_channel_message(
+        session,
+        sender="maestro",
+        content="Routine queue item completed.",
+        metadata={
+            "source": "scheduler_worker",
+            "status": "completed",
+            "channel_visibility": "topic",
+        },
+    )
+
+    active = client.get("/maestro/sessions/active")
+    assert active.status_code == 200
+    contents = [message["content"] for message in active.json()["conversation"]["messages"]]
+    assert "This email needs your response by Tuesday." in contents
+    assert "Routine queue item completed." not in contents
 
 
 def test_maestro_api_respond_refines_active_plan(

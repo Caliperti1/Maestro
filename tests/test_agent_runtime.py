@@ -1513,6 +1513,7 @@ def test_email_attention_notification_is_delivered_once_with_provenance(
     ]
     assert len(channel_messages) == 1
     assert "Confirm Atlas" in channel_messages[0].content
+    assert channel_messages[0].metadata_["channel_visibility"] == "global"
 
 
 def test_research_agents_are_granted_web_search_permission(session: Session) -> None:

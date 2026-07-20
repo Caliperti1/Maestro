@@ -3029,7 +3029,10 @@ def _user_identity_context() -> str:
     return (
         f"The Maestro user is {settings.user_full_name} ({settings.user_email}). "
         f"Address him as {settings.user_display_name}. Keep him distinct from other people "
-        "with the same first name, and preserve full identities when assigning ownership."
+        "with the same first name, and preserve full identities when assigning ownership. "
+        "Classify response-needed and action-required states from this user's perspective; "
+        "actions owned only by another person are informational to him unless they create a "
+        "material risk or explicitly require his awareness."
     )
 
 

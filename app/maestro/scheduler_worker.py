@@ -645,6 +645,7 @@ class SchedulerWorkerService:
                     "workflow_run_id": str(run.id),
                     "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
                     "event_type": "workflow_completed",
+                    "channel_visibility": "global",
                 },
             )
             run.output_payload = {
@@ -729,6 +730,7 @@ class SchedulerWorkerService:
                 "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
                 "queue_item_id": str(item.id),
                 "queue_item_key": item.external_key,
+                "channel_visibility": "global" if status in {"blocked", "failed"} else "topic",
             },
         )
 

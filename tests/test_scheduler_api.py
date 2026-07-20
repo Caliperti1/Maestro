@@ -422,6 +422,7 @@ def test_scheduler_worker_run_executes_assigned_agent_item(
     assert "What came back:" in message.content
     assert message.metadata_["source"] == "scheduler_worker"
     assert message.metadata_["event_type"] == "workflow_completed"
+    assert message.metadata_["channel_visibility"] == "global"
     run = session.query(WorkflowRun).one()
     assert run.status == "completed"
     if run.parent_task_id is not None:

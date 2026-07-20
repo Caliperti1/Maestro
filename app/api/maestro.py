@@ -16,7 +16,11 @@ from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal, get_db
 from app.llm.client import LLMClientError, OpenAILLMClient
-from app.maestro.channel import MAESTRO_CHANNEL_KEY, get_or_create_maestro_channel
+from app.maestro.channel import (
+    MAESTRO_CHANNEL_KEY,
+    get_or_create_maestro_channel,
+    is_global_channel_message,
+)
 from app.maestro.context_assembler import MaestroContextAssembler, maestro_context_payload
 from app.maestro.intent_classifier import (
     classify_active_message_with_local_llm,
@@ -1242,6 +1246,7 @@ def _conversation_payload(
             message
             for message in all_messages
             if (message.metadata_ or {}).get("topic_id") == active_topic_id
+            or is_global_channel_message(message)
         ]
     message_count = len(messages) if include_messages else len(all_messages)
     active_topic = _active_topic(conversation)
