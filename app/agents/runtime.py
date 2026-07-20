@@ -1117,6 +1117,15 @@ class PromptAggregationService:
                 )
                 tool_call_payloads.extend(loop_results["tool_calls"])
                 tool_loop_trace = loop_results["trace"]
+                finalization = self._run_email_operational_finalization(
+                    package=package,
+                    task=task,
+                    llm_client=llm_client,
+                    prior_results=tool_call_payloads,
+                )
+                if finalization is not None:
+                    tool_call_payloads.extend(finalization["tool_calls"])
+                    tool_loop_trace["iterations"].append(finalization["trace"])
             if any(call.get("status") == "approval_required" for call in tool_call_payloads):
                 user_display_name = get_settings().user_display_name
                 task.status = "blocked"
@@ -1577,6 +1586,119 @@ class PromptAggregationService:
                 break
         trace["max_iterations"] = bounded_iterations
         return {"tool_calls": executed_calls, "trace": trace}
+
+    def _run_email_operational_finalization(
+        self,
+        *,
+        package: PromptPackage,
+        task: Task,
+        llm_client: LLMClient,
+        prior_results: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not _should_finalize_email_triage(package, prior_results):
+            return None
+
+        allowed_keys = {tool.key for tool in package.tool_manifest}
+        operational_keys = allowed_keys & {
+            "routed.item.create",
+            "workflow.notification.create",
+        }
+        if not operational_keys:
+            return None
+
+        planner_call = ToolCall(
+            task_id=task.id,
+            agent_id=package.agent.id,
+            tool_name="llm.email_triage_finalizer",
+            input_payload={
+                "model": getattr(llm_client, "model", package.agent.model_profile),
+                "provider": getattr(llm_client, "provider", "configured"),
+                "allowed_tools": sorted(operational_keys),
+            },
+            status="running",
+            started_at=datetime.now(UTC),
+        )
+        self.session.add(planner_call)
+        self.session.commit()
+        self.session.refresh(planner_call)
+
+        evidence = _email_finalization_evidence(prior_results)
+        planner_input = "\n\n".join(
+            [
+                f"## Agent Task\n{_compact_task_instruction_for_prompt(package.task_instruction)}",
+                f"## Allowed Operational Tools\n{json.dumps(sorted(operational_keys))}",
+                "## Email Evidence And Existing Writes\n"
+                + json.dumps(_compact_tool_results_for_prompt(evidence, max_total_chars=14000), indent=2),
+            ]
+        )
+        planner_call.input_payload = {
+            **planner_call.input_payload,
+            "prompt_chars": len(planner_input),
+            "evidence_result_count": len(evidence),
+        }
+        self.session.commit()
+
+        executed_calls: list[dict[str, Any]] = []
+        iteration_trace: dict[str, Any] = {
+            "phase": "email_operational_finalization",
+            "plan_summary": "Finalize routed items and Chris-facing notification after evidence gathering.",
+            "planner_source": "llm_email_finalizer",
+            "requested_tools": [],
+            "executed": [],
+            "blocked": [],
+        }
+        try:
+            plan = llm_client.structured_response(
+                instructions=_EMAIL_TRIAGE_FINALIZER_INSTRUCTIONS,
+                input_text=planner_input,
+                schema_name="email_triage_operational_plan",
+                schema=_TOOL_PLAN_SCHEMA,
+            )
+            requested = [
+                item
+                for item in _normalize_tool_plan(plan)
+                if item["tool_key"] in operational_keys
+            ]
+            requested = _normalize_email_action_requests(requested, prior_results)
+            requested = _drop_completed_operational_duplicates(requested, prior_results)
+            planner_call.status = "complete"
+            planner_call.output_payload = {
+                "plan_summary": plan.get("plan_summary"),
+                "tool_call_count": len(requested),
+                "planner_source": "llm_email_finalizer",
+                **_llm_call_metadata(llm_client),
+            }
+            planner_call.completed_at = datetime.now(UTC)
+            self.session.commit()
+            self.session.refresh(planner_call)
+            planner_payload = _persisted_tool_call_payload(planner_call)
+            executed_calls.append(planner_payload)
+            iteration_trace.update(
+                {
+                    "plan_summary": plan.get("plan_summary"),
+                    "requested_tools": requested,
+                }
+            )
+            tool_service = ToolExecutionService(self.session, adapters=self.tool_adapters)
+            self._execute_auto_tool_requests(
+                tool_service=tool_service,
+                package=package,
+                task=task,
+                requested=requested,
+                iteration_trace=iteration_trace,
+                executed_calls=executed_calls,
+                prior_results=prior_results,
+            )
+        except Exception as exc:
+            planner_call.status = "failed"
+            planner_call.error_message = str(exc)
+            planner_call.completed_at = datetime.now(UTC)
+            self.session.commit()
+            self.session.refresh(planner_call)
+            executed_calls.append(_persisted_tool_call_payload(planner_call))
+            iteration_trace["error_message"] = str(exc)
+
+        return {"tool_calls": executed_calls, "trace": iteration_trace}
 
     def _execute_auto_tool_requests(
         self,
@@ -2258,7 +2380,11 @@ def _has_tool_result(prior_results: list[dict[str, Any]], tool_name: str) -> boo
 def _required_operational_tool_failures(
     tool_calls: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    required_writes = {"routed.item.create", "workflow.notification.create"}
+    required_writes = {
+        "llm.email_triage_finalizer",
+        "routed.item.create",
+        "workflow.notification.create",
+    }
     return [
         call
         for call in tool_calls
@@ -2266,6 +2392,77 @@ def _required_operational_tool_failures(
         and str(call.get("tool_name") or "") in required_writes
         and str(call.get("status") or "") == "failed"
     ]
+
+
+def _should_finalize_email_triage(
+    package: PromptPackage,
+    prior_results: list[dict[str, Any]],
+) -> bool:
+    skill_keys = {skill.key for skill in package.skill_manifest}
+    has_email_evidence = _has_tool_result(prior_results, "gmail.message.get")
+    return (
+        package.agent.key.endswith("email-agent")
+        and "email_triage" in skill_keys
+        and has_email_evidence
+    )
+
+
+def _email_finalization_evidence(
+    prior_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence_tools = {
+        "gmail.message.list_recent",
+        "gmail.message.get",
+        "gmail.thread.get",
+        "google.docs.get",
+        "google.drive.file.export",
+        "google.drive.file.get",
+        "google.slides.get",
+        "google.sheets.get",
+        "google.sheets.values.get",
+        "routed.item.create",
+        "workflow.notification.create",
+    }
+    return [
+        result
+        for result in prior_results
+        if isinstance(result, dict) and result.get("tool_name") in evidence_tools
+    ]
+
+
+def _drop_completed_operational_duplicates(
+    requested: list[dict[str, Any]],
+    prior_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    completed_notification = _has_tool_result(prior_results, "workflow.notification.create")
+    completed_route_payloads = {
+        json.dumps(result.get("input_payload") or {}, sort_keys=True, default=str)
+        for result in prior_results
+        if isinstance(result, dict)
+        and result.get("tool_name") == "routed.item.create"
+        and result.get("status") == "complete"
+    }
+    deduped: list[dict[str, Any]] = []
+    for item in requested:
+        if item["tool_key"] == "workflow.notification.create" and completed_notification:
+            continue
+        if item["tool_key"] == "routed.item.create":
+            payload_key = json.dumps(item.get("payload") or {}, sort_keys=True, default=str)
+            if payload_key in completed_route_payloads:
+                continue
+        deduped.append(item)
+    return deduped
+
+
+def _persisted_tool_call_payload(tool_call: ToolCall) -> dict[str, Any]:
+    return {
+        "id": str(tool_call.id),
+        "tool_name": tool_call.tool_name,
+        "status": tool_call.status,
+        "error_message": tool_call.error_message,
+        "input_payload": tool_call.input_payload,
+        "output_payload": tool_call.output_payload,
+    }
 
 
 def _requested_email_count(prompt: str) -> int:
@@ -2660,6 +2857,7 @@ _AUTO_TOOL_SAFE_TOOL_KEYS = {
 }
 
 _TOOL_PLANNER_INSTRUCTIONS = load_prompt("agent_tool_planner.md")
+_EMAIL_TRIAGE_FINALIZER_INSTRUCTIONS = load_prompt("email_triage_finalizer.md")
 
 _TOOL_PLAN_SCHEMA = {
     "type": "object",

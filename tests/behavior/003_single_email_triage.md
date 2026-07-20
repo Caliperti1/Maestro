@@ -213,3 +213,21 @@ failures, and follow-up patch.
 - Follow-up: normalize model payload aliases at the routed boundary, preserve nested Gmail
   provenance and top-level contact fields, guard explicit owner identity, fail/retry runs whose
   required operational writes fail, and expose attachment filenames/types for honest reporting.
+
+### 2026-07-20 - Attempt 5
+
+- Workflow run: `20d3f9bf-ed62-4057-940c-14b51606400d`
+- Selected message: `19f803d5df928bb2`, thread `19f719bc7d5d9c0b`
+- Report: `5336efa3-bcf7-4c37-b0c9-c1740fab81e2`
+- Model delegation was correct. The queue selected `luna`, and OpenRouter's generation records
+  confirmed all five agent calls used `openai/gpt-5.6-luna-20260709`, totaling approximately
+  `$0.0505`. Sol usage came from Maestro's separate system-level planning turn.
+- The agent correctly found a direct request for Chris Aliperti to confirm an 0800 meeting and
+  classified the email as `response_needed`. It spent all four tool-planning iterations gathering
+  Gmail, memory, thread, and linked-Drive evidence. The Drive folder was unavailable to the
+  configured account and returned 404.
+- The run then finalized without calling `workflow.notification.create` or `routed.item.create`, so
+  the report said Chris needed to act but the main channel received no action notification.
+- Follow-up: reserve a compact operational-finalization pass after evidence gathering. This pass is
+  limited to routed writes and Chris-facing notifications, and is regression-tested against an
+  optional linked-file failure consuming the normal evidence budget.
