@@ -458,6 +458,127 @@ class FakeSingleEmailGmailAdapter:
         }
 
 
+class FakeEmailTriageFinalizationLLMClient:
+    provider = "test"
+    model = "test-email-finalization-model"
+
+    def __init__(self) -> None:
+        self.structured_calls = 0
+
+    def structured_response(self, *, instructions: str, input_text: str, **kwargs):
+        self.structured_calls += 1
+        if self.structured_calls == 1:
+            return {
+                "plan_summary": "Select the latest Praxis email.",
+                "requires_final_answer": True,
+                "tool_calls": [{
+                    "tool_key": "gmail.message.list_recent",
+                    "payload_json": '{"limit":1,"unread_only":false}',
+                    "rationale": "Select one message.",
+                }],
+            }
+        if self.structured_calls == 2:
+            return {
+                "plan_summary": "Read the selected email.",
+                "requires_final_answer": True,
+                "tool_calls": [{
+                    "tool_key": "gmail.message.get",
+                    "payload_json": '{"message_id":"msg-atlas-1","max_body_chars":6000}',
+                    "rationale": "Read the full message.",
+                }],
+            }
+        if self.structured_calls == 3:
+            return {
+                "plan_summary": "Read thread context.",
+                "requires_final_answer": True,
+                "tool_calls": [{
+                    "tool_key": "gmail.thread.get",
+                    "payload_json": '{"thread_id":"thread-atlas-1"}',
+                    "rationale": "Resolve ownership from thread context.",
+                }],
+            }
+        if self.structured_calls == 4:
+            return {
+                "plan_summary": "Inspect the linked Drive folder.",
+                "requires_final_answer": True,
+                "tool_calls": [{
+                    "tool_key": "google.drive.file.get",
+                    "payload_json": '{"file_id":"folder-atlas-1"}',
+                    "rationale": "Inspect supporting files when accessible.",
+                }],
+            }
+        assert "operational finalizer" in instructions
+        assert "Jordan Lee" in input_text
+        return {
+            "plan_summary": "Route the contact and notify Chris despite the optional Drive failure.",
+            "requires_final_answer": True,
+            "tool_calls": [
+                {
+                    "tool_key": "routed.item.create",
+                    "payload_json": json.dumps({
+                        "route_type": "contact",
+                        "title": "Jordan Lee",
+                        "content": "Jordan Lee is the partnerships director at Atlas Systems.",
+                        "metadata": {
+                            "name": "Jordan Lee",
+                            "email": "jordan@example.com",
+                            "organization": "Atlas Systems",
+                        },
+                        "message_id": "msg-atlas-1",
+                        "thread_id": "thread-atlas-1",
+                        "subject": "Atlas response requested",
+                        "from": "Jordan Lee <jordan@example.com>",
+                    }),
+                    "rationale": "Preserve the durable contact.",
+                },
+                {
+                    "tool_key": "workflow.notification.create",
+                    "payload_json": json.dumps({
+                        "title": "Atlas email needs your response",
+                        "message": "Jordan asked you to confirm availability by July 21.",
+                        "severity": "warning",
+                        "reason": "Chris Aliperti personally owes a response.",
+                        "message_id": "msg-atlas-1",
+                        "thread_id": "thread-atlas-1",
+                        "subject": "Atlas response requested",
+                        "from": "Jordan Lee <jordan@example.com>",
+                    }),
+                    "rationale": "Surface the required response to Chris.",
+                },
+            ],
+        }
+
+    def text_response(self, *, instructions: str, input_text: str) -> str:
+        assert "workflow.notification.create" in input_text
+        return "conversation: I saved Jordan and notified you about the July 21 response."
+
+
+class FakeEmailTriageEvidenceAdapter:
+    def __init__(self, key: str):
+        self.key = key
+
+    def execute(self, context: ToolExecutionContext, payload: dict[str, object]) -> dict[str, object]:
+        if self.key == "gmail.message.list_recent":
+            return {"messages": [{"message_id": "msg-atlas-1"}]}
+        if self.key == "gmail.message.get":
+            return {
+                "message_id": "msg-atlas-1",
+                "thread_id": "thread-atlas-1",
+                "subject": "Atlas response requested",
+                "from": "Jordan Lee <jordan@example.com>",
+                "to": "Chris Aliperti <chris.aliperti@praxis-defense.com>",
+                "body_text": "Jordan Lee at Atlas Systems asked Chris to confirm by July 21.",
+                "google_workspace_links": [{
+                    "kind": "folder",
+                    "file_id": "folder-atlas-1",
+                    "url": "https://drive.google.com/drive/folders/folder-atlas-1",
+                }],
+            }
+        if self.key == "gmail.thread.get":
+            return {"thread_id": "thread-atlas-1", "text": "Chris Aliperti owns the response."}
+        raise ToolExecutionError("Supporting Drive folder is not shared with this account.")
+
+
 class FakeAutoMergeMissingPrNumberLLMClient:
     provider = "test"
     model = "test-agent-model"
@@ -3713,6 +3834,61 @@ def test_single_email_triage_routes_notifies_reports_and_stages_memory_artifact(
     staged_artifact = session.get(Artifact, uuid.UUID(result.artifact_id))
     assert staged_artifact is not None
     assert staged_artifact.uri == result.staged_artifact_path
+
+
+def test_email_triage_reserves_operational_finalization_after_evidence_budget(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    get_settings().memory_dropbox_root = str(tmp_path)
+    _seed_memory(session)
+    llm_client = FakeEmailTriageFinalizationLLMClient()
+    result = PromptAggregationService(
+        session,
+        llm_client=llm_client,
+        tool_adapters={
+            key: FakeEmailTriageEvidenceAdapter(key)
+            for key in (
+                "gmail.message.list_recent",
+                "gmail.message.get",
+                "gmail.thread.get",
+                "google.drive.file.get",
+            )
+        }
+        | {
+            "routed.item.create": RoutedItemCreateToolAdapter(),
+            "workflow.notification.create": WorkflowNotificationCreateToolAdapter(),
+        },
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction=(
+                "Run a one-time triage over exactly the latest Praxis inbox email, inspect linked "
+                "Google Workspace context, route durable objects, and notify Chris if he must act."
+            ),
+            required_skills=["email_triage", "contact_manager"],
+            use_semantic=False,
+        ),
+        stage_interaction=True,
+        execute_llm=True,
+        auto_tool_loop=True,
+        max_tool_iterations=4,
+    )
+
+    assert result.status == "completed"
+    assert llm_client.structured_calls == 5
+    assert result.tool_loop["iterations"][-1]["phase"] == "email_operational_finalization"
+    tool_names = [call["tool_name"] for call in result.tool_calls]
+    assert "google.drive.file.get" in tool_names
+    assert "llm.email_triage_finalizer" in tool_names
+    assert "routed.item.create" in tool_names
+    assert "workflow.notification.create" in tool_names
+    assert session.query(Contact).filter_by(email="jordan@example.com").one().name == "Jordan Lee"
+    notification = session.query(WorkflowNotification).one()
+    assert notification.title == "Atlas email needs your response"
+    assert notification.status == "delivered"
+    assert result.artifact_id is not None
 
 
 def test_run_agent_once_executes_llm_and_records_task_report_and_tool_call(
