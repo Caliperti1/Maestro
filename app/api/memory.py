@@ -15,6 +15,7 @@ from app.db.models import (
     Artifact,
     CalendarEvent,
     Contact,
+    ContactAlias,
     DecisionRecord,
     Entity,
     Idea,
@@ -43,7 +44,11 @@ from app.memory.retrieval import (
 )
 from app.memory.service import MemoryAccessError, MemoryService
 from app.memory.routed_hygiene import RoutedHygieneService
-from app.memory.routed_retrieval import RoutedEditService, RoutedRetrievalService
+from app.memory.routed_retrieval import (
+    ContactAliasConflictError,
+    RoutedEditService,
+    RoutedRetrievalService,
+)
 from app.memory.routed_service import RoutedMemoryService
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -342,7 +347,7 @@ def update_todo(
 def list_contacts(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
     RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     contacts = db.scalars(select(Contact).order_by(Contact.updated_at.desc()).limit(limit)).all()
-    return {"contacts": [_contact_payload(contact) for contact in contacts]}
+    return {"contacts": [_contact_payload(db, contact) for contact in contacts]}
 
 
 @router.patch("/routed-objects/contacts/{contact_id}")
@@ -353,9 +358,13 @@ def update_contact(
 ) -> dict[str, Any]:
     try:
         contact = RoutedEditService(db).update_contact(contact_id, body.updates)
+    except ContactAliasConflictError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"contact": _contact_payload(contact)}
+    return {"contact": _contact_payload(db, contact)}
 
 
 @router.patch("/routed-objects/{object_type}/{object_id}/archive")
@@ -835,7 +844,15 @@ def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
     }
 
 
-def _contact_payload(contact: Contact) -> dict[str, Any]:
+def _contact_payload(db: Session, contact: Contact) -> dict[str, Any]:
+    aliases = db.scalars(
+        select(ContactAlias.alias)
+        .where(
+            ContactAlias.contact_id == contact.id,
+            ContactAlias.source == "manual",
+        )
+        .order_by(ContactAlias.normalized_alias)
+    ).all()
     return {
         "id": str(contact.id),
         "name": contact.name,
@@ -851,6 +868,7 @@ def _contact_payload(contact: Contact) -> dict[str, Any]:
         "provenance": contact.provenance,
         "status": contact.status,
         "metadata": contact.metadata_,
+        "aliases": aliases,
         "created_at": contact.created_at.isoformat() if contact.created_at else None,
     }
 

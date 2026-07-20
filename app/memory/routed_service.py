@@ -19,6 +19,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.identity import is_maestro_user_reference, maestro_user_identity
 from app.core.time import home_timezone
 from app.db.models import (
     CalendarEvent,
@@ -75,13 +76,15 @@ class RoutedMemoryService:
 
     def promote_items(self, items: list[RoutedItem] | tuple[RoutedItem, ...]) -> list[RoutedPromotionResult]:
         results: list[RoutedPromotionResult] = []
+        processed = False
         for item in items:
             if self._has_link(item):
                 continue
+            processed = True
             result = self.promote_item(item)
             if result is not None:
                 results.append(result)
-        if results:
+        if processed:
             self.session.commit()
         return results
 
@@ -236,7 +239,7 @@ class RoutedMemoryService:
             statement = statement.where(CalendarEvent.summary == item.content)
         return self.session.scalar(statement.limit(1))
 
-    def _promote_contact(self, item: RoutedItem) -> RoutedPromotionResult:
+    def _promote_contact(self, item: RoutedItem) -> RoutedPromotionResult | None:
         email = _email_from_text(item.content) or _string_from_metadata(item.metadata_, "email")
         name = (
             _string_from_metadata(item.metadata_, "name")
@@ -244,6 +247,17 @@ class RoutedMemoryService:
             or _name_from_content(item.content)
             or _name_from_title(item.title)
         )
+        if is_maestro_user_reference(name=name, email=email):
+            item.status = "ignored"
+            item.metadata_ = {
+                **(item.metadata_ or {}),
+                "identity_resolution": {
+                    "identity": "maestro_user",
+                    "action": "suppressed_self_contact",
+                    "full_name": maestro_user_identity().full_name,
+                },
+            }
+            return None
         normalized_name = _normalize_key(name)
         decision = self.resolver.resolve_contact(item, name=name, email=email)
         self._attach_resolution(item, decision)
@@ -453,6 +467,13 @@ class RoutedMemoryService:
         for attendee in attendees:
             name = str(attendee.get("name") or attendee.get("value") or attendee.get("email") or "").strip()
             if not name:
+                continue
+            attendee_email = str(attendee.get("email") or "").strip()
+            if is_maestro_user_reference(name=name, email=attendee_email):
+                if "maestro_user" in seen:
+                    continue
+                seen.add("maestro_user")
+                linked.append({**attendee, **maestro_user_identity().attendee_payload()})
                 continue
             contact = self._contact_for_attendee(name, item)
             normalized = _normalize_key(contact.name)

@@ -20,3 +20,5 @@ Keep Chris Aliperti (`chris.aliperti@praxis-defense.com`) distinct from Chris Fl
 other person named Chris. `routed.item.create` requires `route_type`, a human-facing `title`, useful
 `content`, `metadata`, and provenance. `workflow.notification.create` requires a concise `title`,
 `message`, severity, reason, and source-message provenance.
+Never create Chris Aliperti as a contact candidate; he is the Maestro system owner, not a CRM
+contact. He may still be represented as the user in event attendees and todo ownership.

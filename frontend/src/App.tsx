@@ -564,6 +564,7 @@ function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string>
       email: item.email ?? "",
       phone: item.phone ?? "",
       linkedin: item.linkedin ?? "",
+      aliases: item.aliases.join(", "),
       summary: item.summary ?? "",
       origination: item.origination ?? "",
       status: item.status ?? "active",
@@ -671,7 +672,12 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           updates: Object.fromEntries(
-            Object.entries(draft).map(([key, value]) => [key, value.trim() || null]),
+            Object.entries(draft).map(([key, value]) => [
+              key,
+              key === "aliases"
+                ? value.split(",").map((alias) => alias.trim()).filter(Boolean)
+                : value.trim() || null,
+            ]),
           ),
         }),
       });
@@ -1001,6 +1007,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 <label>
                   LinkedIn
                   <input value={draft.linkedin ?? ""} onChange={(event) => updateDraft("linkedin", event.target.value)} />
+                </label>
+                <label>
+                  Aliases
+                  <input
+                    value={draft.aliases ?? ""}
+                    onChange={(event) => updateDraft("aliases", event.target.value)}
+                    placeholder="Chris F, C. Flournoy"
+                  />
                 </label>
                 <label>
                   Summary

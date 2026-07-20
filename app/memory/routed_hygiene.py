@@ -79,6 +79,19 @@ class RoutedHygieneService:
             self.session.commit()
         return merged
 
+    def merge_contacts(
+        self,
+        survivor: Contact,
+        duplicate: Contact,
+        *,
+        commit: bool = True,
+    ) -> None:
+        if survivor.id == duplicate.id:
+            return
+        self._merge_contact(survivor, duplicate)
+        if commit:
+            self.session.commit()
+
     def canonicalize_display_fields(self) -> int:
         from app.memory.routed_service import (
             _event_title_from_text,
@@ -217,6 +230,27 @@ class RoutedHygieneService:
         survivor.scheduled_event_ids = sorted(
             {*(survivor.scheduled_event_ids or []), *(duplicate.scheduled_event_ids or [])}
         )
+        for event in self.session.scalars(select(CalendarEvent)).all():
+            updated_attendees: list[dict[str, Any]] = []
+            seen_contact_ids: set[str] = set()
+            changed = False
+            for attendee in event.attendees or []:
+                if not isinstance(attendee, dict):
+                    continue
+                next_attendee = dict(attendee)
+                if str(next_attendee.get("contact_id") or "") == str(duplicate.id):
+                    next_attendee["contact_id"] = str(survivor.id)
+                    next_attendee["name"] = survivor.name
+                    changed = True
+                contact_id = str(next_attendee.get("contact_id") or "")
+                if contact_id and contact_id in seen_contact_ids:
+                    changed = True
+                    continue
+                if contact_id:
+                    seen_contact_ids.add(contact_id)
+                updated_attendees.append(next_attendee)
+            if changed:
+                event.attendees = updated_attendees
         for alias in self.session.scalars(select(ContactAlias).where(ContactAlias.contact_id == duplicate.id)):
             existing = self.session.scalar(
                 select(ContactAlias).where(ContactAlias.normalized_alias == alias.normalized_alias)

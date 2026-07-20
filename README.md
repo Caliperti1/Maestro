@@ -245,7 +245,14 @@ ROUTED_RESOLVER_LLM_PROVIDER=ollama
 MAESTRO_INTENT_CLASSIFIER_PROVIDER=ollama
 SCHEDULER_WORKER_AUTORUN=false
 USER_DISPLAY_NAME=Chris
+USER_FULL_NAME=Chris Aliperti
+USER_EMAIL=chris.aliperti@praxis-defense.com
 ```
+
+The user identity is a system principal, not a CRM contact. Routed contact and event processing
+uses these settings to recognize the user, suppress self-contact records, and retain the user as a
+distinct attendee or owner. Contact aliases are managed from the Contacts UI and participate in
+future routed-object resolution and deduplication.
 
 Domain-specific tool credentials are stored as tool connections in the database. Connection config
 can reference environment variable names for secrets, so secrets do not need to be stored directly
