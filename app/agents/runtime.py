@@ -987,6 +987,7 @@ class PromptAggregationService:
     ) -> str:
         sections = [
             ("Global Maestro Context", global_context),
+            ("Maestro User Identity", _user_identity_context()),
             ("Domain Context", domain_context),
             ("Agent Role", role_prompt),
             ("Task", task_instruction),
@@ -1213,20 +1214,44 @@ class PromptAggregationService:
                     )
                     self.session.add(report)
                     self.session.flush()
-                    task.status = "completed"
+                    operational_failures = _required_operational_tool_failures(tool_call_payloads)
+                    if operational_failures:
+                        failed_names = ", ".join(
+                            sorted(
+                                {
+                                    str(item.get("tool_name") or "unknown")
+                                    for item in operational_failures
+                                }
+                            )
+                        )
+                        error_message = f"Required operational tool calls failed: {failed_names}."
+                        task.status = "failed"
+                        task.error_message = error_message
+                        execution_note = (
+                            "Agent run produced a report but failed required operational writes."
+                        )
+                        status = "failed"
+                    else:
+                        task.status = "completed"
+                        task.error_message = None
+                        execution_note = "Manual run completed through the LLM gateway."
+                        status = "completed"
                     task.output_payload = {
                         "run_id": run_id,
                         "report_id": str(report.id),
                         "output_preview": output_text[:500],
+                        "operational_failures": operational_failures,
                     }
                     task.completed_at = datetime.now(UTC)
                     self._set_agent_current_action(
                         package.agent.key,
-                        f"Completed: {request.task_instruction[:160]}",
+                        (
+                            f"Completed: {request.task_instruction[:160]}"
+                            if status == "completed"
+                            else f"Failed: {request.task_instruction[:160]}"
+                        ),
                         commit=False,
                     )
-                    execution_note = "Manual run completed through the LLM gateway."
-                    status = "completed"
                     self.session.commit()
                     self.session.refresh(report)
                     self.session.refresh(tool_call)
@@ -1911,6 +1936,7 @@ def _harden_email_tool_plan(
     if dependency_requests:
         return dependency_requests[:5]
 
+    requested_tools = _normalize_email_action_requests(requested_tools, prior_results)
     hardened = []
     for item in requested_tools:
         tool_key = str(item.get("tool_key") or "")
@@ -1923,6 +1949,96 @@ def _harden_email_tool_plan(
             item = hydrated
         hardened.append(item)
     return hardened[:5]
+
+
+def _normalize_email_action_requests(
+    requested_tools: list[dict[str, Any]],
+    prior_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    settings = get_settings()
+    recipient_context = _latest_email_recipient_context(prior_results)
+    competing_chris = bool(recipient_context["competing_chris"])
+    normalized: list[dict[str, Any]] = []
+    for item in requested_tools:
+        tool_key = str(item.get("tool_key") or "")
+        payload = dict(item.get("payload") or {})
+        if tool_key == "routed.item.create":
+            route_type = _normalize_routed_route_type(
+                str(
+                    payload.get("route_type")
+                    or payload.get("item_type")
+                    or payload.get("type")
+                    or ""
+                )
+            )
+            if route_type:
+                payload["route_type"] = route_type
+                payload.pop("item_type", None)
+            if route_type == "task" and not _email_task_owner_is_current_user(
+                payload.get("owner"),
+                competing_chris=competing_chris,
+            ):
+                continue
+            item = {**item, "payload": payload}
+        elif tool_key == "workflow.notification.create" and competing_chris:
+            identity_text = " ".join(
+                str(payload.get(key) or "") for key in ("title", "message", "reason")
+            ).lower()
+            if not any(
+                token and token.lower() in identity_text
+                for token in (settings.user_full_name, settings.user_email)
+            ):
+                continue
+        normalized.append(item)
+    return normalized
+
+
+def _latest_email_recipient_context(prior_results: list[dict[str, Any]]) -> dict[str, bool]:
+    settings = get_settings()
+    user_email = settings.user_email.strip().lower()
+    for result in reversed(prior_results):
+        if not isinstance(result, dict) or result.get("tool_name") != "gmail.message.get":
+            continue
+        output = result.get("output_payload")
+        if not isinstance(output, dict):
+            continue
+        to_text = str(output.get("to") or "").lower()
+        cc_text = str(output.get("cc") or "").lower()
+        return {
+            "user_direct": bool(user_email and user_email in to_text),
+            "user_copied": bool(user_email and user_email in cc_text),
+            "competing_chris": bool("chris" in to_text and user_email not in to_text),
+        }
+    return {"user_direct": False, "user_copied": False, "competing_chris": False}
+
+
+def _email_task_owner_is_current_user(owner: Any, *, competing_chris: bool) -> bool:
+    settings = get_settings()
+    normalized = " ".join(str(owner or "").lower().split())
+    if not normalized:
+        return not competing_chris
+    explicit_user_tokens = {
+        "me",
+        "user",
+        settings.user_full_name.strip().lower(),
+        settings.user_email.strip().lower(),
+    }
+    if normalized in explicit_user_tokens:
+        return True
+    return not competing_chris and normalized == settings.user_display_name.strip().lower()
+
+
+def _normalize_routed_route_type(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return {
+        "todo": "task",
+        "to_do": "task",
+        "organization": "entity",
+        "org": "entity",
+        "idea": "think_tank",
+        "decision": "decision_log",
+        "rfi": "human_input",
+    }.get(normalized, normalized)
 
 
 def _gmail_thread_id_from_results(prior_results: list[dict[str, Any]]) -> str | None:
@@ -2137,6 +2253,19 @@ def _has_tool_result(prior_results: list[dict[str, Any]], tool_name: str) -> boo
         and result.get("status") in {"complete", "approval_required"}
         for result in prior_results
     )
+
+
+def _required_operational_tool_failures(
+    tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    required_writes = {"routed.item.create", "workflow.notification.create"}
+    return [
+        call
+        for call in tool_calls
+        if isinstance(call, dict)
+        and str(call.get("tool_name") or "") in required_writes
+        and str(call.get("status") or "") == "failed"
+    ]
 
 
 def _requested_email_count(prompt: str) -> int:
@@ -2886,12 +3015,22 @@ def _tool_planning_prompt_brief(package: PromptPackage) -> str:
     tools = ", ".join(tool.key for tool in package.tool_manifest) or "none"
     sections = [
         ("Agent", f"{package.agent.name} ({package.agent.key}) in {package.agent.domain_key}"),
+        ("Maestro User Identity", _user_identity_context()),
         ("Role", _truncate_text(package.role_prompt or package.agent.role_summary, 700)),
         ("Task", _compact_task_instruction_for_prompt(package.task_instruction)),
         ("Memory Summary", _truncate_text(package.memory_context.rendered_text, 1200)),
         ("Allowed Tool Keys", _truncate_text(tools, 1200)),
     ]
     return "\n\n".join(f"## {title}\n{body}".strip() for title, body in sections if body)
+
+
+def _user_identity_context() -> str:
+    settings = get_settings()
+    return (
+        f"The Maestro user is {settings.user_full_name} ({settings.user_email}). "
+        f"Address him as {settings.user_display_name}. Keep him distinct from other people "
+        "with the same first name, and preserve full identities when assigning ownership."
+    )
 
 
 def _compact_tool_safety(tool_key: str) -> dict[str, Any]:
@@ -3021,7 +3160,16 @@ def _evidence_text(output: Any) -> str:
         value = output.get(key)
         if isinstance(value, str) and value.strip():
             parts.append(f"{key}:\n{value.strip()}")
-    for key in ("annotations", "citations", "results", "issues", "pull_requests", "files", "items"):
+    for key in (
+        "annotations",
+        "attachments",
+        "citations",
+        "results",
+        "issues",
+        "pull_requests",
+        "files",
+        "items",
+    ):
         value = output.get(key)
         if value:
             parts.append(f"{key}:\n{json.dumps(_truncate_nested(value), default=str)}")
