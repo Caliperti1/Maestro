@@ -294,6 +294,7 @@ export type RoutedContact = {
   provenance: Record<string, unknown>;
   status: string;
   metadata: Record<string, unknown>;
+  aliases: string[];
   created_at: string | null;
 };
 

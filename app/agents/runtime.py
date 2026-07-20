@@ -3506,6 +3506,8 @@ Create high-quality contact candidates for real people so the routed resolver ca
 3. Keep content as a short human-readable summary of why this contact matters.
 4. Include source_refs with the source message/report/artifact.
 5. Do not dedupe manually. If it might match an existing person, include aliases and provenance; the routed resolver adjudicates merge/update.
+6. Never create Chris Aliperti as a contact. He is the Maestro system owner; represent him as the
+   user in recipient, attendee, and ownership fields.
 
 ## Output Contract
 Call `routed.item.create` with route_type `contact`, title as the person name, content summary, metadata fields, and source_refs.

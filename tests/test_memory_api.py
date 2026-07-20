@@ -428,8 +428,180 @@ def test_routed_memory_service_resolves_contact_aliases(session: Session, tmp_pa
     assert contact.name == "Chris Flournoy"
     assert "short updates" in contact.summary
     assert "chris f" in contact.metadata_["aliases"]
-    assert session.query(ContactAlias).filter_by(normalized_alias="chris f").one().contact_id == contact.id
+    alias = session.query(ContactAlias).filter_by(normalized_alias="chris f").one()
+    assert alias.contact_id == contact.id
     assert second.metadata_["resolution"]["strategy"] in {"initial_alias", "alias"}
+
+
+def test_routed_memory_service_suppresses_maestro_user_contact(session: Session) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="contact",
+        title="Chris Aliperti",
+        content="Chris Aliperti can be reached at chris.aliperti@praxis-defense.com.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "gmail_message", "id": "self-contact"}],
+        metadata_={"email": "chris.aliperti@praxis-defense.com"},
+    )
+    session.add(routed_item)
+    session.commit()
+
+    results = RoutedMemoryService(session).promote_items([routed_item])
+
+    assert results == []
+    assert session.query(Contact).count() == 0
+    assert routed_item.status == "ignored"
+    assert routed_item.metadata_["identity_resolution"]["identity"] == "maestro_user"
+
+
+def test_event_attendees_keep_user_identity_out_of_contacts(session: Session) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Praxis planning call",
+        content="Chris Aliperti and Chris Flournoy will attend the Praxis planning call.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "gmail_message", "id": "attendees"}],
+        metadata_={
+            "attendees": [
+                {"name": "Chris Aliperti", "email": "chris.aliperti@praxis-defense.com"},
+                {"name": "Chris Flournoy"},
+            ]
+        },
+    )
+    session.add(routed_item)
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([routed_item])
+
+    event = session.query(CalendarEvent).one()
+    contacts = session.query(Contact).all()
+    assert [contact.name for contact in contacts] == ["Chris Flournoy"]
+    assert event.attendees[0] == {
+        "name": "Chris Aliperti",
+        "email": "chris.aliperti@praxis-defense.com",
+        "is_user": True,
+        "identity": "maestro_user",
+    }
+    assert event.attendees[1] == {
+        "name": "Chris Flournoy",
+        "contact_id": str(contacts[0].id),
+    }
+
+
+def test_contact_alias_edit_merges_empty_placeholder_and_relinks_events(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    target = Contact(
+        name="Chris Flournoy",
+        normalized_name="chris flournoy",
+        email="flournoy@example.com",
+        summary="Praxis contact.",
+        scheduled_event_ids=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    placeholder = Contact(
+        name="Chris F",
+        normalized_name="chris f",
+        summary="Created from an event attendee.",
+        scheduled_event_ids=[],
+        source_refs=[],
+        provenance={},
+        metadata_={"created_from_attendee": True},
+    )
+    session.add_all([target, placeholder])
+    session.flush()
+    session.add(
+        ContactAlias(
+            contact_id=placeholder.id,
+            alias="Chris F",
+            normalized_alias="chris f",
+            source="attendee",
+            source_refs=[],
+            metadata_={},
+        )
+    )
+    event = CalendarEvent(
+        title="Praxis sync",
+        attendees=[{"name": "Chris F", "contact_id": str(placeholder.id)}],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(event)
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.patch(
+        f"/memory/routed-objects/contacts/{target.id}",
+        json={"updates": {"aliases": ["Chris F"]}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["contact"]["aliases"] == ["Chris F"]
+    assert placeholder.status == "archived"
+    alias = session.query(ContactAlias).filter_by(normalized_alias="chris f").one()
+    assert alias.contact_id == target.id
+    assert event.attendees == [{"name": "Chris Flournoy", "contact_id": str(target.id)}]
+
+
+def test_contact_alias_edit_rejects_substantive_contact_collision(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    target = Contact(
+        name="Chris Flournoy",
+        normalized_name="chris flournoy",
+        email="flournoy@example.com",
+        scheduled_event_ids=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    other = Contact(
+        name="Chris F",
+        normalized_name="chris f",
+        email="another.chris@example.com",
+        scheduled_event_ids=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([target, other])
+    session.flush()
+    session.add(
+        ContactAlias(
+            contact_id=other.id,
+            alias="Chris F",
+            normalized_alias="chris f",
+            source="manual",
+            source_refs=[],
+            metadata_={},
+        )
+    )
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.patch(
+        f"/memory/routed-objects/contacts/{target.id}",
+        json={"updates": {"aliases": ["Chris F"]}},
+    )
+
+    assert response.status_code == 409
+    assert "already belongs to Chris F" in response.json()["detail"]
+    assert other.status == "active"
 
 
 def test_routed_memory_service_canonicalizes_capture_contact_title(

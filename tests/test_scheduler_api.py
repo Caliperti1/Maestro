@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
+import json
 from pathlib import Path
+from types import SimpleNamespace
 import uuid
 
 from fastapi.testclient import TestClient
@@ -36,6 +38,63 @@ def _client(session: Session, tmp_path: Path) -> TestClient:
 
     app.dependency_overrides[get_db] = override_get_db
     return TestClient(app)
+
+
+def test_scheduler_completion_uses_agent_conversation_field(session: Session) -> None:
+    service = SchedulerWorkerService(session)
+    output_text = json.dumps(
+        {
+            "format": "structured_report",
+            "conversation": (
+                "Chris, I triaged the latest Praxis email. It was an informational receipt, "
+                "so I filed the organization and did not create a task or notification."
+            ),
+            "summary": {"classification": "useful_info"},
+        }
+    )
+    agent_run = SimpleNamespace(
+        run_id="run-1",
+        status="completed",
+        agent=SimpleNamespace(key="praxis-email-agent", name="Praxis Email Agent"),
+        task_id="task-1",
+        report_id="report-1",
+        execution_note="Completed.",
+        output_text=output_text,
+        tool_calls=[],
+        staged_artifact_path=None,
+        artifact_id=None,
+        error_message=None,
+    )
+    payload = service._agent_run_payload(agent_run)
+    queue_item = SimpleNamespace(output_payload=payload, external_key="email-triage")
+    run = SimpleNamespace(input_payload={"summary": "Triage the latest Praxis email."})
+
+    message = service._delivery_completion_message(run, [queue_item])
+
+    assert payload["conversation"].startswith("Chris, I triaged")
+    assert message == payload["conversation"]
+    assert "structured_report" not in message
+
+
+def test_scheduler_completion_recovers_conversation_from_legacy_preview(
+    session: Session,
+) -> None:
+    service = SchedulerWorkerService(session)
+    queue_item = SimpleNamespace(
+        external_key="email-triage",
+        output_payload={
+            "agent_name": "Praxis Email Agent",
+            "output_preview": (
+                '{"format":"structured_report","conversation":"I reviewed the email and '
+                'nothing needs your attention.","summary":{"classification":"useful_info"'
+            ),
+        },
+    )
+    run = SimpleNamespace(input_payload={"summary": "Triage the latest Praxis email."})
+
+    message = service._delivery_completion_message(run, [queue_item])
+
+    assert message == "I reviewed the email and nothing needs your attention."
 
 
 def test_scheduler_api_creates_definition_and_enqueues_event_trigger(

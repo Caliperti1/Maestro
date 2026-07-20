@@ -8,6 +8,7 @@ unit of queue adjudication and agent execution.
 
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -54,6 +55,40 @@ def _coding_pr_number(tool_calls: list[dict[str, Any]]) -> int | None:
             return int(number)
         except (TypeError, ValueError):
             continue
+    return None
+
+
+def _conversation_from_agent_output(output_text: str | None) -> str | None:
+    """Extract the agent's chat-ready summary before its structured report is compacted."""
+    if not output_text:
+        return None
+    stripped = output_text.strip()
+    if stripped.startswith("```json"):
+        stripped = stripped[7:]
+    elif stripped.startswith("```"):
+        stripped = stripped[3:]
+    if stripped.endswith("```"):
+        stripped = stripped[:-3]
+    stripped = stripped.strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        for key in ("conversation", "conversational_summary", "chat_summary"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    # Older queue payloads may contain only a truncated, no-longer-valid JSON preview.
+    match = re.search(r'"conversation"\s*:\s*"((?:\\.|[^"\\])*)"', stripped)
+    if match:
+        try:
+            value = json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            value = match.group(1)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
 
 
@@ -477,6 +512,7 @@ class SchedulerWorkerService:
             "task_id": agent_run.task_id,
             "report_id": agent_run.report_id,
             "execution_note": agent_run.execution_note,
+            "conversation": _conversation_from_agent_output(agent_run.output_text),
             "output_preview": (agent_run.output_text or "")[:500],
             "tool_calls": agent_run.tool_calls,
             "staged_artifact_path": agent_run.staged_artifact_path,
@@ -709,6 +745,34 @@ class SchedulerWorkerService:
                 f"Done. I updated the dedicated Maestro runtime and reloaded the running app. "
                 f"The workflow `{self._run_title(run)}` is complete."
             )
+
+        conversations: list[tuple[str, str]] = []
+        for item in queue_items:
+            item_output = item.output_payload or {}
+            agent_run = (
+                item_output.get("agent_run")
+                if isinstance(item_output.get("agent_run"), dict)
+                else item_output
+            )
+            conversation = str(agent_run.get("conversation") or "").strip()
+            if not conversation:
+                conversation = _conversation_from_agent_output(
+                    str(agent_run.get("output_preview") or "")
+                ) or ""
+            if not conversation:
+                continue
+            agent_name = str(agent_run.get("agent_name") or item.external_key)
+            if conversation not in {existing for _, existing in conversations}:
+                conversations.append((agent_name, conversation))
+
+        if len(conversations) == 1:
+            return conversations[0][1]
+        if conversations:
+            summaries = "\n".join(
+                f"- **{agent_name}:** {conversation}"
+                for agent_name, conversation in conversations[:4]
+            )
+            return f"I finished the workflow. Here’s what matters:\n\n{summaries}"
         return ""
 
     def _post_channel_update(
