@@ -83,6 +83,7 @@ Run these only after the primary email passes:
 | Obvious spam/noise | No routed objects or durable business memory. Mark-read remains approval-gated if requested. |
 | Existing contact and organization | Resolver updates the canonical records and interaction history instead of creating duplicates. |
 | Ambiguous date, person, or organization | Agent creates an actionable RFI or reports uncertainty instead of inventing fields. |
+| Another person named Chris is the direct recipient and Chris Aliperti is copied | Preserve both full identities. Do not create a Chris Aliperti todo or notification unless the message explicitly assigns him work. |
 
 ## Pass Criteria
 
@@ -188,3 +189,22 @@ failures, and follow-up patch.
 - Follow-up: preserve `body_text` and Google `content_text` in compact evidence, force explicitly
   requested linked artifacts ahead of routing, and represent routed structured fields with a
   strict-schema-compatible key/value list.
+
+### 2026-07-20 - Attempt 4
+
+- Workflow run: `8f77e9df-6e89-463e-83ca-def192cd30f5`
+- Selected message: `19f7d113a43d4f81`, thread `19f7d0176adea7c4`
+- Report: `d35a0c93-48e6-4cdc-b247-142be87bf8a3`
+- Luna routing and accounting worked. Five OpenRouter calls completed in about 32 seconds for an
+  observed total cost of approximately `$0.0506`.
+- The agent read exactly one latest message, its complete body, the full thread, and Praxis memory.
+  It identified Caleb and Jonathan as contacts, but all three routed writes failed because the model
+  emitted `item_type` while the tool adapter required `route_type`. The run nevertheless reported
+  terminal status `completed`, leaving no routed canonical IDs.
+- The thread was addressed to Chris Flournoy with Chris Aliperti copied. The model preserved
+  `owner: Chris Flournoy` on its proposed todo, then contradicted that evidence by notifying Chris
+  Aliperti and describing the work as his. The message also referenced three attachments, but Gmail
+  output exposed neither attachment metadata nor a content-read tool.
+- Follow-up: normalize model payload aliases at the routed boundary, preserve nested Gmail
+  provenance and top-level contact fields, guard explicit owner identity, fail/retry runs whose
+  required operational writes fail, and expose attachment filenames/types for honest reporting.

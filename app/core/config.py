@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     app_name: str = "Maestro"
     user_display_name: str = "Chris"
+    user_full_name: str = "Chris Aliperti"
+    user_email: str = "chris.aliperti@praxis-defense.com"
     app_host: str = "0.0.0.0"
     app_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     frontend_origin: str = "http://localhost:5174"

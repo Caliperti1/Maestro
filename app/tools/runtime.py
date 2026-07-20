@@ -1812,16 +1812,29 @@ class RoutedItemCreateToolAdapter:
         for raw_item in items[:20]:
             if not isinstance(raw_item, dict):
                 continue
-            route_type = _normalize_route_type(str(raw_item.get("route_type") or raw_item.get("type") or ""))
+            route_type = _normalize_route_type(
+                str(
+                    raw_item.get("route_type")
+                    or raw_item.get("item_type")
+                    or raw_item.get("type")
+                    or ""
+                )
+            )
             if not route_type:
                 raise ToolExecutionError("routed.item.create requires route_type.")
             title = str(raw_item.get("title") or raw_item.get("name") or "").strip()
-            content = str(raw_item.get("content") or raw_item.get("description") or raw_item.get("summary") or "").strip()
+            content = str(
+                raw_item.get("content")
+                or raw_item.get("description")
+                or raw_item.get("summary")
+                or raw_item.get("notes")
+                or ""
+            ).strip()
             if not title:
                 raise ToolExecutionError("routed.item.create requires title.")
             if not content:
                 content = title
-            metadata = raw_item.get("metadata") if isinstance(raw_item.get("metadata"), dict) else {}
+            metadata = _routed_item_metadata_from_payload(raw_item)
             source_refs = _source_refs_from_payload(raw_item)
             item = RoutedItem(
                 domain_id=context.domain.id,
@@ -1894,7 +1907,10 @@ class WorkflowNotificationCreateToolAdapter:
         severity = str(payload.get("severity") or "warning").strip().lower()
         if severity not in {"info", "warning", "urgent"}:
             raise ToolExecutionError("Notification severity must be info, warning, or urgent.")
-        source_key = str(payload.get("message_id") or payload.get("thread_id") or "").strip()
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        message_id = str(payload.get("message_id") or source.get("message_id") or "").strip()
+        thread_id = str(payload.get("thread_id") or source.get("thread_id") or "").strip()
+        source_key = message_id or thread_id
         run = self._workflow_run(context)
         existing = self._existing_notification(
             context,
@@ -1911,10 +1927,13 @@ class WorkflowNotificationCreateToolAdapter:
             "agent_key": context.agent.key,
             "domain_key": context.domain.key,
             "task_id": str(context.task.id),
-            "source_message_id": str(payload.get("message_id") or "").strip() or None,
-            "source_thread_id": str(payload.get("thread_id") or "").strip() or None,
-            "subject": str(payload.get("subject") or "").strip() or None,
-            "sender": str(payload.get("from") or payload.get("sender") or "").strip() or None,
+            "source_message_id": message_id or None,
+            "source_thread_id": thread_id or None,
+            "subject": str(payload.get("subject") or source.get("subject") or "").strip() or None,
+            "sender": str(
+                payload.get("from") or payload.get("sender") or source.get("from") or ""
+            ).strip()
+            or None,
             "reason": str(payload.get("reason") or "").strip() or None,
         }
         notification = WorkflowOutputService(context.session).create_notification(
@@ -3521,14 +3540,15 @@ def _source_refs_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
         cleaned = [item for item in source_refs if isinstance(item, dict)]
         if cleaned:
             return cleaned
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
     refs: list[dict[str, Any]] = []
     gmail_ref = {
-        key: payload.get(key)
+        key: payload.get(key) or source.get(key)
         for key in ("message_id", "thread_id", "subject", "from", "date")
-        if payload.get(key)
+        if payload.get(key) or source.get(key)
     }
     if gmail_ref:
-        refs.append({"type": "gmail_message", **gmail_ref})
+        refs.append({"type": str(source.get("type") or "gmail_message"), **gmail_ref})
     report_id = str(payload.get("report_id") or "").strip()
     if report_id:
         refs.append({"type": "report", "report_id": report_id})
@@ -3536,6 +3556,35 @@ def _source_refs_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if artifact_id:
         refs.append({"type": "artifact", "artifact_id": artifact_id})
     return refs
+
+
+def _routed_item_metadata_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+    for key in (
+        "name",
+        "contact_name",
+        "email",
+        "phone",
+        "linkedin",
+        "organization",
+        "organization_name",
+        "website",
+        "aliases",
+        "owner",
+        "owner_type",
+        "owner_ref",
+        "due_at",
+        "start_at",
+        "end_at",
+        "location",
+        "attendees",
+        "origination",
+        "last_contact_at",
+    ):
+        value = payload.get(key)
+        if value not in (None, "", []):
+            metadata.setdefault(key, value)
+    return metadata
 
 
 def _memory_context_bundle_payload(
@@ -4016,6 +4065,7 @@ def _gmail_message_payload(message: dict[str, Any], *, max_body_chars: int) -> d
     headers = _gmail_headers(payload)
     body = _gmail_body_text(payload) if max_body_chars > 0 else ""
     google_links = _google_workspace_links(body)
+    attachments = _gmail_attachments(payload)
     return {
         "message_id": message.get("id"),
         "id": message.get("id"),
@@ -4035,6 +4085,7 @@ def _gmail_message_payload(message: dict[str, Any], *, max_body_chars: int) -> d
         "meeting_notes": [
             link for link in google_links if _looks_like_meeting_notes_link(link)
         ],
+        "attachments": attachments,
         "headers": headers,
     }
 
@@ -4077,6 +4128,30 @@ def _gmail_body_text(payload: dict[str, Any]) -> str:
     if plain_parts:
         return "\n\n".join(plain_parts)
     return "\n\n".join(html_parts)
+
+
+def _gmail_attachments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+
+    def visit(part: dict[str, Any]) -> None:
+        filename = str(part.get("filename") or "").strip()
+        body = part.get("body") if isinstance(part.get("body"), dict) else {}
+        attachment_id = str(body.get("attachmentId") or "").strip()
+        if filename or attachment_id:
+            attachments.append(
+                {
+                    "filename": filename or "unnamed attachment",
+                    "mime_type": str(part.get("mimeType") or "application/octet-stream"),
+                    "attachment_id": attachment_id or None,
+                    "size": body.get("size"),
+                }
+            )
+        for child in part.get("parts") or []:
+            if isinstance(child, dict):
+                visit(child)
+
+    visit(payload)
+    return attachments[:20]
 
 
 def _base64url(value: bytes) -> str:

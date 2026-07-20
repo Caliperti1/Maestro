@@ -1260,6 +1260,63 @@ def test_deterministic_google_slides_plan_does_not_fall_back_to_email(
     assert second_step == []
 
 
+def test_email_tool_plan_normalizes_routes_and_rejects_another_chris_owner() -> None:
+    prior_results = [
+        {
+            "tool_name": "gmail.message.list_recent",
+            "status": "complete",
+            "output_payload": {"messages": [{"message_id": "msg-1"}]},
+        },
+        {
+            "tool_name": "gmail.message.get",
+            "status": "complete",
+            "output_payload": {
+                "message_id": "msg-1",
+                "to": "Chris Flournoy <chris.flournoy@praxis-defense.com>",
+                "cc": "Chris Aliperti <chris.aliperti@praxis-defense.com>",
+                "body_text": "Chris, please review the attached draft.",
+            },
+        },
+    ]
+
+    hardened = _harden_email_tool_plan(
+        [
+            {
+                "tool_key": "routed.item.create",
+                "payload": {"item_type": "contact", "name": "Caleb Holt"},
+                "rationale": "Record the sender.",
+            },
+            {
+                "tool_key": "routed.item.create",
+                "payload": {
+                    "item_type": "todo",
+                    "owner": "Chris Flournoy",
+                    "title": "Review draft",
+                },
+                "rationale": "Record the requested review.",
+            },
+            {
+                "tool_key": "workflow.notification.create",
+                "payload": {
+                    "title": "Review requested",
+                    "message": "Chris should review the draft.",
+                },
+                "rationale": "Notify Chris.",
+            },
+        ],
+        prior_results,
+        task_instruction="Triage exactly the latest Praxis email.",
+    )
+
+    assert hardened == [
+        {
+            "tool_key": "routed.item.create",
+            "payload": {"name": "Caleb Holt", "route_type": "contact"},
+            "rationale": "Record the sender.",
+        }
+    ]
+
+
 def test_routed_item_create_tool_promotes_contact_candidate(
     session: Session,
 ) -> None:
@@ -1314,6 +1371,64 @@ def test_routed_item_create_tool_promotes_contact_candidate(
     contact = session.query(Contact).filter_by(email="jane@example.com").one()
     assert contact.name == "Jane Smith"
     assert contact.source_refs[0]["message_id"] == "msg-1"
+
+
+def test_routed_item_create_accepts_model_aliases_and_nested_source(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("praxis-email-agent")
+    agent = AgentRepository(session).get_by_key("praxis-email-agent")
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.routed_item_alias",
+        objective="Route a contact from email.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+
+    result = ToolExecutionService(
+        session,
+        adapters={"routed.item.create": RoutedItemCreateToolAdapter()},
+    ).execute_for_task(
+        ToolExecutionRequest(
+            agent_key="praxis-email-agent",
+            tool_key="routed.item.create",
+            payload={
+                "item_type": "contact",
+                "name": "Caleb Smotherman",
+                "email": "caleb@example.com",
+                "phone": "813-555-0100",
+                "notes": "Sent the Praxis radio-trainer draft for review.",
+                "source": {
+                    "type": "gmail_message",
+                    "message_id": "msg-caleb-1",
+                    "thread_id": "thread-caleb-1",
+                },
+            },
+        ),
+        task=task,
+    )
+
+    assert result.status == "complete"
+    contact = session.query(Contact).filter_by(email="caleb@example.com").one()
+    assert contact.name == "Caleb Smotherman"
+    assert contact.phone == "813-555-0100"
+    assert contact.source_refs == [
+        {
+            "type": "gmail_message",
+            "message_id": "msg-caleb-1",
+            "thread_id": "thread-caleb-1",
+        }
+    ]
 
 
 def test_email_attention_notification_is_delivered_once_with_provenance(
@@ -1742,8 +1857,16 @@ def test_gmail_adapter_gets_full_message_body(
             "id": "msg-2",
             "threadId": "thread-2",
             "payload": {
-                "mimeType": "text/plain",
-                "body": {"data": encoded_body},
+                "mimeType": "multipart/mixed",
+                "body": {},
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": encoded_body}},
+                    {
+                        "mimeType": "application/vnd.ms-powerpoint",
+                        "filename": "radio-trainer.ppt",
+                        "body": {"attachmentId": "attachment-1", "size": 2048},
+                    },
+                ],
                 "headers": [
                     {"name": "Subject", "value": "Full update"},
                     {"name": "From", "value": "partner@example.com"},
@@ -1766,6 +1889,14 @@ def test_gmail_adapter_gets_full_message_body(
 
     assert output["message_id"] == "msg-2"
     assert output["body_text"] == "Full body text for Maestro."
+    assert output["attachments"] == [
+        {
+            "filename": "radio-trainer.ppt",
+            "mime_type": "application/vnd.ms-powerpoint",
+            "attachment_id": "attachment-1",
+            "size": 2048,
+        }
+    ]
     assert output["summary"]["subject"] == "Full update"
 
 
@@ -3976,6 +4107,12 @@ def test_compacted_tool_results_preserve_email_and_google_document_text() -> Non
                             "url": "https://docs.google.com/document/d/doc-1/edit",
                         }
                     ],
+                    "attachments": [
+                        {
+                            "filename": "radio-trainer.pptx",
+                            "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        }
+                    ],
                 },
             },
             {
@@ -3994,6 +4131,7 @@ def test_compacted_tool_results_preserve_email_and_google_document_text() -> Non
     assert email_marker in rendered
     assert doc_marker in rendered
     assert "body_text" in compact[0]["evidence"]
+    assert "radio-trainer.pptx" in compact[0]["evidence"]
     assert "content_text" in compact[1]["evidence"]
 
 
@@ -4216,6 +4354,33 @@ def test_run_agent_once_records_failed_llm_call(session: Session) -> None:
     assert result.status == "failed"
     assert result.error_message == "provider rejected the request"
     assert result.tool_calls[0]["status"] == "failed"
+
+
+def test_run_agent_once_fails_when_required_routed_write_failed(session: Session) -> None:
+    _seed_memory(session)
+
+    result = PromptAggregationService(session, llm_client=FakeAgentLLMClient()).run_agent_once(
+        PromptPackageRequest(
+            agent_key="praxis-planning-agent",
+            task_instruction="Prepare a Praxis partner run.",
+            use_semantic=False,
+        ),
+        initial_tool_results=[
+            {
+                "id": "failed-route-1",
+                "tool_name": "routed.item.create",
+                "status": "failed",
+                "error_message": "Invalid routed payload.",
+                "input_payload": {},
+                "output_payload": None,
+            }
+        ],
+        execute_llm=True,
+    )
+
+    assert result.status == "failed"
+    assert result.report_id is not None
+    assert result.error_message == "Required operational tool calls failed: routed.item.create."
 
 
 def test_interaction_artifact_packager_stages_package_for_curation(
