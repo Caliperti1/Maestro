@@ -28,6 +28,9 @@ import {
   X,
 } from "lucide-react";
 import { Calendar, dateFnsLocalizer, View, Views } from "react-big-calendar";
+import withDragAndDrop, {
+  type EventInteractionArgs,
+} from "react-big-calendar/lib/addons/dragAndDrop";
 import { format, getDay, parse, startOfWeek } from "date-fns";
 import { enUS } from "date-fns/locale/en-US";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -102,6 +105,16 @@ const calendarLocalizer = dateFnsLocalizer({
   getDay,
   locales: { "en-US": enUS },
 });
+
+type CalendarSurfaceEvent = {
+  id: string;
+  title: string;
+  start: Date;
+  end: Date;
+  resource: RoutedEvent;
+};
+
+const DragAndDropCalendar = withDragAndDrop<CalendarSurfaceEvent>(Calendar);
 
 const staleWorkflowProgressLabels = new Set(["Not started.", "Not Started", "not_started"]);
 
@@ -643,7 +656,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
 
   useEffect(() => {
     setDraft(routedDraftFor(selectedItem));
-  }, [selectedItem?.id]);
+  }, [selectedItem]);
 
   const updateDraft = (key: string, value: string) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -666,6 +679,52 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       await refreshItems();
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Save failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateCalendarTiming = async ({
+    event,
+    start,
+    end,
+  }: EventInteractionArgs<CalendarSurfaceEvent>) => {
+    const nextStart = start instanceof Date ? start : new Date(start);
+    const nextEnd = end instanceof Date ? end : new Date(end);
+    if (Number.isNaN(nextStart.getTime()) || Number.isNaN(nextEnd.getTime())) {
+      setStatusMessage("Calendar update failed: invalid date or time.");
+      return;
+    }
+
+    setSelectedId(event.id);
+    setBusy(true);
+    setItems((current) =>
+      current.map((item) =>
+        item.id === event.id && "start_at" in item
+          ? {
+              ...item,
+              start_at: nextStart.toISOString(),
+              end_at: nextEnd.toISOString(),
+            }
+          : item,
+      ),
+    );
+    try {
+      await apiJson(`${config.endpoint}/${event.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          updates: {
+            start_at: nextStart.toISOString(),
+            end_at: nextEnd.toISOString(),
+          },
+        }),
+      });
+      setStatusMessage("Event time updated.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Calendar update failed.");
+      await refreshItems().catch(() => undefined);
     } finally {
       setBusy(false);
     }
@@ -767,7 +826,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
 
         {surface === "calendar" && (
           <div className="calendar-shell">
-            <Calendar
+            <DragAndDropCalendar
               localizer={calendarLocalizer}
               events={calendarItems}
               startAccessor="start"
@@ -778,6 +837,11 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               onView={(view) => setCalendarView(view)}
               onNavigate={(date) => setCalendarDate(date)}
               onSelectEvent={(event) => setSelectedId(event.id)}
+              onEventDrop={updateCalendarTiming}
+              onEventResize={updateCalendarTiming}
+              draggableAccessor={() => !busy}
+              resizableAccessor={() => !busy}
+              resizable
               eventPropGetter={(event) => ({
                 className:
                   event.resource.status === "done"

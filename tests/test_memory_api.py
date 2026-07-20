@@ -25,8 +25,50 @@ from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.memory.routed_hygiene import RoutedHygieneService
+from app.memory.routed_resolver import RoutedObjectResolver
 from app.memory.routed_retrieval import RoutedRetrievalService
 from app.memory.routed_service import RoutedMemoryService
+
+
+def test_todo_resolver_matches_retry_from_same_source_with_rephrased_title(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    existing = Todo(
+        domain_id=praxis.id,
+        title="Update Praxis business card design with textured option",
+        description="Ask Chris's brother about adding texture and share reference pictures.",
+        todo_type="task",
+        owner_type="user",
+        priority="normal",
+        status="open",
+        source_refs=[{"system": "gmail", "message_id": "msg-daily-sync-1"}],
+        provenance={},
+        metadata_={"source_message_id": "msg-daily-sync-1"},
+    )
+    candidate = RoutedItem(
+        domain_id=praxis.id,
+        route_type="task",
+        title="Update business card design with brother",
+        content="Ask Chris's brother to add texture to the business card and send reference pictures.",
+        priority="normal",
+        status="open",
+        source_refs=[{"id": "msg-daily-sync-1", "type": "gmail_message"}],
+        metadata_={"source_message_id": "msg-daily-sync-1"},
+    )
+    session.add_all([existing, candidate])
+    session.commit()
+
+    decision = RoutedObjectResolver(session, enable_llm=False).resolve_todo(
+        candidate,
+        due_at=None,
+    )
+
+    assert decision.action == "update_existing"
+    assert decision.object_id == existing.id
+    assert decision.strategy == "source_context"
 
 
 def _client(session: Session, tmp_path: Path) -> TestClient:

@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.time import home_timezone
 from app.db.models import CalendarEvent, Contact, Entity, Idea, DecisionRecord, Todo
 from app.memory.routed_service import RoutedMemoryService
 
@@ -174,7 +175,8 @@ def _parse_optional_datetime(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
     if isinstance(value, datetime):
-        return value
+        return value if value.tzinfo else value.replace(tzinfo=home_timezone())
     if isinstance(value, str):
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=home_timezone())
     raise ValueError("Expected an ISO datetime string.")
