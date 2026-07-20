@@ -231,3 +231,20 @@ failures, and follow-up patch.
 - Follow-up: reserve a compact operational-finalization pass after evidence gathering. This pass is
   limited to routed writes and Chris-facing notifications, and is regression-tested against an
   optional linked-file failure consuming the normal evidence budget.
+
+### 2026-07-20 - Attempt 6
+
+- Workflow run: `d23f4798-3329-4724-9049-f3204156645c`
+- Selected message: `19f80ac7cd312a45`, thread `19f807ec556e9434`
+- The agent successfully read the forwarded email and linked Google Doc, routed the July 28-30
+  North Carolina event, and created the two Chris-owned follow-ups supported by the notes.
+- The internal notification did not require approval. It auto-executed twice but failed first on
+  the model alias `content` instead of `message`, then on `severity: normal`. The failed workflow
+  was surfaced in Needs Attention, which made the failure resemble an approval gate.
+- The scheduler retried the entire agent after the notification failure and created rephrased
+  duplicates of both todos. Those duplicate pairs were consolidated with provenance preserved.
+- A prior timezone-less 08:00 event had been interpreted as UTC instead of Eastern Time.
+- Follow-up: normalize notification aliases at the tool boundary, keep internal notifications
+  approval-free, resolve retry candidates by shared source plus task context, default timezone-less
+  event values to `America/New_York`, backfill matching legacy events, and support persisted calendar
+  drag/resizing in the UI.

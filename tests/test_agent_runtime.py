@@ -1602,13 +1602,15 @@ def test_email_attention_notification_is_delivered_once_with_provenance(
         tool_key="workflow.notification.create",
         payload={
             "title": "Praxis email needs your response",
-            "message": "Confirm Atlas partner-call availability by July 21.",
-            "severity": "warning",
+            "content": "Confirm Atlas partner-call availability by July 21.",
+            "priority": "normal",
             "reason": "The sender requested a decision by a specific deadline.",
-            "message_id": "msg-atlas-1",
-            "thread_id": "thread-atlas-1",
-            "subject": "Maestro triage test - Atlas partner sync",
-            "from": "Jordan Lee <jordan@example.com>",
+            "metadata": {
+                "source_message_id": "msg-atlas-1",
+                "source_thread_id": "thread-atlas-1",
+                "subject": "Maestro triage test - Atlas partner sync",
+                "sender": "Jordan Lee <jordan@example.com>",
+            },
         },
     )
 
@@ -1626,6 +1628,7 @@ def test_email_attention_notification_is_delivered_once_with_provenance(
     assert notification.domain_id == domain.id
     assert notification.notification_type == "email_attention"
     assert notification.status == "delivered"
+    assert notification.severity == "info"
     assert notification.metadata_["source_message_id"] == "msg-atlas-1"
     channel_messages = [
         message

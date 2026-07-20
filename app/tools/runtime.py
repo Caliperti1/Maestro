@@ -1901,15 +1901,40 @@ class WorkflowNotificationCreateToolAdapter:
         if context.dry_run:
             return {"dry_run": True, "tool": self.key, "payload": payload}
         title = str(payload.get("title") or "Email needs your attention").strip()
-        message = str(payload.get("message") or payload.get("summary") or "").strip()
+        message = str(
+            payload.get("message") or payload.get("summary") or payload.get("content") or ""
+        ).strip()
         if not message:
-            raise ToolExecutionError("workflow.notification.create requires message or summary.")
-        severity = str(payload.get("severity") or "warning").strip().lower()
+            raise ToolExecutionError(
+                "workflow.notification.create requires message, summary, or content."
+            )
+        raw_severity = str(
+            payload.get("severity") or payload.get("priority") or "warning"
+        ).strip().lower()
+        severity = {
+            "low": "info",
+            "normal": "info",
+            "medium": "warning",
+            "high": "warning",
+            "critical": "urgent",
+        }.get(raw_severity, raw_severity)
         if severity not in {"info", "warning", "urgent"}:
             raise ToolExecutionError("Notification severity must be info, warning, or urgent.")
         source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
-        message_id = str(payload.get("message_id") or source.get("message_id") or "").strip()
-        thread_id = str(payload.get("thread_id") or source.get("thread_id") or "").strip()
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        source = {**metadata, **source}
+        message_id = str(
+            payload.get("message_id")
+            or source.get("message_id")
+            or source.get("source_message_id")
+            or ""
+        ).strip()
+        thread_id = str(
+            payload.get("thread_id")
+            or source.get("thread_id")
+            or source.get("source_thread_id")
+            or ""
+        ).strip()
         source_key = message_id or thread_id
         run = self._workflow_run(context)
         existing = self._existing_notification(
@@ -1931,7 +1956,11 @@ class WorkflowNotificationCreateToolAdapter:
             "source_thread_id": thread_id or None,
             "subject": str(payload.get("subject") or source.get("subject") or "").strip() or None,
             "sender": str(
-                payload.get("from") or payload.get("sender") or source.get("from") or ""
+                payload.get("from")
+                or payload.get("sender")
+                or source.get("from")
+                or source.get("sender")
+                or ""
             ).strip()
             or None,
             "reason": str(payload.get("reason") or "").strip() or None,

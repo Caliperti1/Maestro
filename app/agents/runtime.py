@@ -3569,7 +3569,10 @@ Create event candidates for meetings, calls, deadlines with time windows, travel
 2. Metadata should include `event_title`, `start_at`, `end_at`, `duration_minutes`, `location`, `attendees`, and `summary` when known.
 3. If attendees are mentioned and contacts do not exist, still include attendee names; the routed resolver can create/link contacts.
 4. Infer a reasonable duration only when the source implies a typical meeting and uncertainty is low.
-5. Include source_refs.
+5. When the source gives a date and time without a timezone, use Chris's home timezone,
+   America/New_York (Eastern Time, including daylight-saving transitions). Preserve an explicit
+   source timezone when one is provided.
+6. Include source_refs.
 
 ## Output Contract
 Call `routed.item.create` with route_type `event`, title, content summary, metadata, and source_refs.

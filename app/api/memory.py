@@ -10,6 +10,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.time import home_isoformat
 from app.db.models import (
     Artifact,
     CalendarEvent,
@@ -802,8 +803,8 @@ def _calendar_event_payload(db: Session, event: CalendarEvent) -> dict[str, Any]
         "domain_key": _domain_key_for_id(db, event.domain_id),
         "title": event.title,
         "summary": event.summary,
-        "start_at": event.start_at.isoformat() if event.start_at else None,
-        "end_at": event.end_at.isoformat() if event.end_at else None,
+        "start_at": home_isoformat(event.start_at),
+        "end_at": home_isoformat(event.end_at),
         "location": event.location,
         "attendees": event.attendees,
         "supporting_refs": event.supporting_refs,

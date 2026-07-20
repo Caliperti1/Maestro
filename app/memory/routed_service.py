@@ -19,6 +19,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.time import home_timezone
 from app.db.models import (
     CalendarEvent,
     Contact,
@@ -1079,7 +1080,7 @@ def _datetime_from_metadata(metadata: dict[str, Any], key: str) -> datetime | No
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=home_timezone())
 
 
 def _datetime_from_text(text: str) -> datetime | None:

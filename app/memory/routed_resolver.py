@@ -260,6 +260,12 @@ class RoutedObjectResolver:
     def _score_todo(self, item: RoutedItem, todo: Todo, due_at: datetime | None) -> tuple[float, str, str]:
         title_similarity = _token_similarity(item.title, todo.title)
         content_similarity = _token_similarity(item.content, f"{todo.title} {todo.description}")
+        source_overlap = _source_identity_tokens(
+            item.source_refs,
+            item.metadata_ or {},
+        ) & _source_identity_tokens(todo.source_refs, todo.metadata_ or {})
+        if source_overlap and max(title_similarity, content_similarity) >= 0.5:
+            return 0.92, "source_context", "Same source artifact and overlapping todo context."
         if due_at and todo.due_at and abs(_aware(todo.due_at) - _aware(due_at)) <= timedelta(hours=2):
             if title_similarity >= 0.65:
                 return 0.9, "due_time_title", "Same due time and similar todo title."
@@ -542,6 +548,35 @@ def _string_from_metadata(metadata: dict[str, Any], key: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _source_identity_tokens(
+    source_refs: list[dict[str, Any]] | None,
+    metadata: dict[str, Any],
+) -> set[str]:
+    tokens: set[str] = set()
+    identity_keys = {
+        "id",
+        "message_id",
+        "thread_id",
+        "document_id",
+        "artifact_id",
+        "source_message_id",
+        "source_thread_id",
+        "source_document_id",
+    }
+    for source in source_refs or []:
+        if not isinstance(source, dict):
+            continue
+        for key in identity_keys:
+            value = str(source.get(key) or "").strip().lower()
+            if value:
+                tokens.add(value)
+    for key in identity_keys:
+        value = str(metadata.get(key) or "").strip().lower()
+        if value:
+            tokens.add(value)
+    return tokens
 
 
 def _aware(value: datetime) -> datetime:
