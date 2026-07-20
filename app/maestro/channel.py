@@ -68,3 +68,8 @@ def record_channel_message(
     session.refresh(message)
     session.refresh(conversation)
     return message
+
+
+def is_global_channel_message(message: Message) -> bool:
+    metadata = message.metadata_ or {}
+    return metadata.get("channel_visibility") == "global"

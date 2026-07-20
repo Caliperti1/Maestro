@@ -25,6 +25,11 @@ For exactly one email, the Praxis Email Agent must:
 Agent execution steps such as "triage the email" or "record the contact" must never become
 Chris-owned todos.
 
+Classification is always relative to Chris Aliperti. `action_required` and `response_needed` mean
+he personally owes action and must produce a global Maestro-chat notification. An action owned only
+by another person is `useful_info` for Chris unless it creates a material risk or explicitly needs
+his awareness. Notifications persist in the primary channel across topic changes and reconnects.
+
 ## Controlled Email
 
 Send this message to the Praxis inbox from an account that is not already represented by a contact.
