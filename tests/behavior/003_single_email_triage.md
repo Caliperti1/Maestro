@@ -168,3 +168,23 @@ failures, and follow-up patch.
 - Follow-up: execute scheduler heartbeats off the API event loop, treat incomplete mandatory tool
   plans as execution failures, and retry transient artifact-curation failures without accepting
   unsupported report claims.
+
+### 2026-07-19 - Attempt 3
+
+- Workflow run: `5fa24448-e4ef-411d-8099-3054b7841cfe`
+- Selected message: `19f7b3e9bf208655`, thread `19f7120f92d15684`
+- Report: `1857a8f4-a2ac-47f9-8c6f-04844b16bd9e`
+- Model routing succeeded: the queue item and all four LLM calls used
+  `openrouter:openai/gpt-5.6-luna`. The run completed in about 20 seconds.
+- Gmail listing, full-message retrieval, and Praxis memory retrieval succeeded. No routed items or
+  email-attention notification were created because compact prompt evidence omitted the production
+  Gmail `body_text` field. Luna correctly reported that it lacked enough evidence instead of
+  inventing candidates.
+- The planner requested thread context on iteration three, but email-plan hardening removed that
+  request after a full-message result existed. The linked Google Doc was not read and the loop
+  stopped before semantic routing.
+- Both staged artifacts failed curation because OpenRouter rejected the memory extraction schema:
+  the free-form `structured_data` object was incompatible with Luna's strict JSON-schema endpoint.
+- Follow-up: preserve `body_text` and Google `content_text` in compact evidence, force explicitly
+  requested linked artifacts ahead of routing, and represent routed structured fields with a
+  strict-schema-compatible key/value list.

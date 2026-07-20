@@ -1192,6 +1192,7 @@ class PromptAggregationService:
                     tool_call.output_payload = {
                         "output_chars": len(output_text),
                         "output_preview": output_text[:500],
+                        **_llm_call_metadata(llm_client),
                     }
                     tool_call.completed_at = datetime.now(UTC)
                     report = Report(
@@ -1400,6 +1401,7 @@ class PromptAggregationService:
                     requested,
                     prior_results,
                     task_instruction=package.task_instruction,
+                    allowed_tool_keys={tool.key for tool in package.tool_manifest},
                 )
                 fallback_reason = ""
                 if not requested and _should_try_deterministic_tool_fallback(package, prior_results):
@@ -1435,6 +1437,7 @@ class PromptAggregationService:
                     "requires_final_answer": bool(plan.get("requires_final_answer", True)),
                     "planner_source": planner_source,
                     "fallback_reason": fallback_reason or None,
+                    **_llm_call_metadata(llm_client),
                 }
                 planner_call.completed_at = datetime.now(UTC)
                 self.session.commit()
@@ -1808,6 +1811,7 @@ def _harden_email_tool_plan(
     prior_results: list[dict[str, Any]],
     *,
     task_instruction: str,
+    allowed_tool_keys: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     email_tool_names = {"gmail.message.list_recent", "gmail.message.get", "gmail.thread.get"}
     is_email_flow = "email" in task_instruction.lower() or any(
@@ -1861,6 +1865,52 @@ def _harden_email_tool_plan(
         return [*fetch_requests, *context_requests][:5]
 
     google_links = _google_workspace_links_from_gmail_results(prior_results)
+    allowed = allowed_tool_keys or {
+        str(item.get("tool_key") or "") for item in requested_tools
+    }
+    dependency_requests: list[dict[str, Any]] = []
+    should_inspect_links = any(
+        token in task_instruction.lower()
+        for token in ("linked document", "linked-document", "google doc", "google workspace")
+    )
+    if should_inspect_links:
+        tool_by_kind = {
+            "document": "google.docs.get",
+            "presentation": "google.slides.get",
+            "spreadsheet": "google.sheets.get",
+        }
+        for link in google_links:
+            tool_key = tool_by_kind.get(link.get("kind") or "")
+            if not tool_key or tool_key not in allowed or _has_tool_result(prior_results, tool_key):
+                continue
+            dependency_requests.append(
+                {
+                    "tool_key": tool_key,
+                    "payload": {"file_id": link["file_id"], "url": link["url"]},
+                    "rationale": "Read the linked Google Workspace artifact before email routing.",
+                }
+            )
+            break
+
+    requested_thread = next(
+        (item for item in requested_tools if item.get("tool_key") == "gmail.thread.get"),
+        None,
+    )
+    if requested_thread is not None and not _has_tool_result(prior_results, "gmail.thread.get"):
+        thread_id = _gmail_thread_id_from_results(prior_results)
+        if thread_id:
+            dependency_requests.append(
+                {
+                    **requested_thread,
+                    "payload": {
+                        **(requested_thread.get("payload") or {}),
+                        "thread_id": thread_id,
+                    },
+                }
+            )
+    if dependency_requests:
+        return dependency_requests[:5]
+
     hardened = []
     for item in requested_tools:
         tool_key = str(item.get("tool_key") or "")
@@ -1873,6 +1923,19 @@ def _harden_email_tool_plan(
             item = hydrated
         hardened.append(item)
     return hardened[:5]
+
+
+def _gmail_thread_id_from_results(prior_results: list[dict[str, Any]]) -> str | None:
+    for result in reversed(prior_results):
+        if not isinstance(result, dict) or result.get("tool_name") != "gmail.message.get":
+            continue
+        output = result.get("output_payload")
+        if not isinstance(output, dict):
+            continue
+        thread_id = str(output.get("thread_id") or "").strip()
+        if thread_id:
+            return thread_id
+    return None
 
 
 def _google_workspace_links_from_gmail_results(
@@ -2846,10 +2909,21 @@ def _compact_tool_safety(tool_key: str) -> dict[str, Any]:
     }
 
 
+def _llm_call_metadata(llm_client: LLMClient) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    response_id = str(getattr(llm_client, "last_response_id", "") or "").strip()
+    usage = getattr(llm_client, "last_usage", None)
+    if response_id:
+        metadata["response_id"] = response_id
+    if isinstance(usage, dict) and usage:
+        metadata["usage"] = usage
+    return metadata
+
+
 def _compact_tool_results_for_prompt(
     tool_results: list[dict[str, Any]],
     *,
-    max_total_chars: int = 7000,
+    max_total_chars: int = 12000,
 ) -> list[dict[str, Any]]:
     compact: list[dict[str, Any]] = []
     remaining = max_total_chars
@@ -2864,7 +2938,16 @@ def _compact_tool_results_for_prompt(
                 }
             )
             continue
-        item = _compact_single_tool_result(result, max_chars=min(remaining, 2200))
+        content_tool = result.get("tool_name") in {
+            "gmail.message.get",
+            "gmail.thread.get",
+            "google.docs.get",
+            "google.drive.file.export",
+            "google.slides.get",
+            "google.sheets.values.get",
+        }
+        per_tool_limit = 5000 if content_tool else 2200
+        item = _compact_single_tool_result(result, max_chars=min(remaining, per_tool_limit))
         item_chars = len(json.dumps(item, default=str))
         if item_chars > remaining:
             item["evidence"] = _truncate_text(str(item.get("evidence") or ""), max(120, remaining - 400))
@@ -2927,7 +3010,9 @@ def _evidence_text(output: Any) -> str:
         "rendered_text",
         "output_text",
         "body",
+        "body_text",
         "content",
+        "content_text",
         "text",
         "markdown",
         "diff",

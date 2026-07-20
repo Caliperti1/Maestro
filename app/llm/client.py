@@ -47,6 +47,8 @@ class OpenAILLMClient:
         self.max_output_tokens = settings.llm_max_output_tokens
         self.base_url = base_url
         self.default_headers: dict[str, str] = {}
+        self.last_response_id: str | None = None
+        self.last_usage: dict[str, Any] | None = None
 
         if self.provider == "openrouter":
             self.api_key = api_key or settings.openrouter_api_key
@@ -105,6 +107,7 @@ class OpenAILLMClient:
                 }
             },
         )
+        self._capture_response_metadata(response)
         try:
             return json.loads(response.output_text)
         except json.JSONDecodeError as exc:
@@ -135,6 +138,7 @@ class OpenAILLMClient:
                 ],
                 max_tokens=self.max_output_tokens,
             )
+            self._capture_response_metadata(response)
             content = response.choices[0].message.content
             if not content:
                 raise LLMClientError("LLM returned an empty response.")
@@ -146,6 +150,7 @@ class OpenAILLMClient:
             input=input_text,
             max_output_tokens=self.max_output_tokens,
         )
+        self._capture_response_metadata(response)
         if not response.output_text:
             raise LLMClientError("LLM returned an empty response.")
         return response.output_text
@@ -181,6 +186,7 @@ class OpenAILLMClient:
             max_tokens=self.max_output_tokens,
             tools=[tool],
         )
+        self._capture_response_metadata(response)
         message = response.choices[0].message
         content = message.content or ""
         if not content:
@@ -221,6 +227,7 @@ class OpenAILLMClient:
                 },
             },
         )
+        self._capture_response_metadata(response)
         content = response.choices[0].message.content
         if not content:
             raise LLMClientError("LLM returned an empty response.")
@@ -228,6 +235,11 @@ class OpenAILLMClient:
             return json.loads(content)
         except json.JSONDecodeError as exc:
             raise LLMClientError("LLM returned non-JSON output.") from exc
+
+    def _capture_response_metadata(self, response: Any) -> None:
+        response_id = str(getattr(response, "id", "") or "").strip()
+        self.last_response_id = response_id or None
+        self.last_usage = _usage_to_dict(getattr(response, "usage", None))
 
 
 class OllamaLLMClient:
