@@ -1016,6 +1016,7 @@ def test_seeded_praxis_email_agent_has_email_triage_tools_skills_and_luna_model(
     assert "gmail.thread.get" in allowed_tools
     assert "gmail.message.modify" in allowed_tools
     assert "google.drive.file.get" in allowed_tools
+    assert "google.drive.folder.list" in allowed_tools
     assert "google.drive.file.export" in allowed_tools
     assert "google.docs.get" in allowed_tools
     assert "google.slides.get" in allowed_tools
@@ -1331,6 +1332,48 @@ def test_email_tool_plan_reads_discovered_link_before_routing() -> None:
     ]
 
 
+def test_email_tool_plan_lists_discovered_drive_folder_before_routing() -> None:
+    message_result = {
+        "tool_name": "gmail.message.get",
+        "status": "complete",
+        "output_payload": {
+            "message_id": "msg-folder-1",
+            "body_text": "Review the linked pitch resources.",
+            "google_workspace_links": [
+                {
+                    "kind": "folder",
+                    "file_id": "folder-123",
+                    "url": "https://drive.google.com/drive/folders/folder-123?usp=sharing",
+                }
+            ],
+        },
+    }
+
+    hardened = _harden_email_tool_plan(
+        [
+            {
+                "tool_key": "routed.item.create",
+                "payload": {"route_type": "event", "title": "Premature event"},
+                "rationale": "Route a candidate.",
+            }
+        ],
+        [message_result],
+        task_instruction="Inspect linked Google Workspace context before completing email triage.",
+        allowed_tool_keys={"google.drive.folder.list", "routed.item.create"},
+    )
+
+    assert hardened == [
+        {
+            "tool_key": "google.drive.folder.list",
+            "payload": {
+                "file_id": "folder-123",
+                "url": "https://drive.google.com/drive/folders/folder-123?usp=sharing",
+            },
+            "rationale": "Read the linked Google Workspace artifact before email routing.",
+        }
+    ]
+
+
 def test_deterministic_google_slides_plan_does_not_fall_back_to_email(
     session: Session,
 ) -> None:
@@ -1379,6 +1422,31 @@ def test_deterministic_google_slides_plan_does_not_fall_back_to_email(
     )
 
     assert second_step == []
+
+
+def test_deterministic_google_folder_plan_lists_children(session: Session) -> None:
+    folder_url = "https://drive.google.com/drive/folders/folder-123?usp=sharing"
+    package = PromptAggregationService(session).build_prompt_package(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction=f"Inspect the supporting files in this Drive folder: {folder_url}",
+            required_skills=["email_triage"],
+        )
+    )
+
+    first_step = _deterministic_tool_plan(
+        package=package,
+        prior_results=[],
+        iteration=1,
+    )
+
+    assert first_step == [
+        {
+            "tool_key": "google.drive.folder.list",
+            "payload": {"url": folder_url, "file_id": "folder-123"},
+            "rationale": "List the linked Google Drive folder before selecting relevant files.",
+        }
+    ]
 
 
 def test_email_tool_plan_normalizes_routes_and_rejects_another_chris_owner() -> None:
@@ -2056,7 +2124,11 @@ def test_gmail_adapter_preserves_google_doc_meeting_notes_links(
     session.commit()
     connection = session.query(ToolConnection).filter_by(tool_key="gmail").one()
     doc_url = "https://docs.google.com/document/d/doc-123/edit"
-    html_body = f'<p>Here are the <a href="{doc_url}">Meeting notes</a> from today.</p>'
+    folder_url = "https://drive.google.com/drive/folders/folder-123?usp=sharing"
+    html_body = (
+        f'<p>Here are the <a href="{doc_url}">Meeting notes</a> and '
+        f'<a href="{folder_url}">supporting files</a> from today.</p>'
+    )
     encoded_body = base64.urlsafe_b64encode(html_body.encode("utf-8")).decode("ascii").rstrip("=")
 
     def fake_gmail_api(method, path, *, token, params=None, body=None, timeout=60):
@@ -2088,6 +2160,8 @@ def test_gmail_adapter_preserves_google_doc_meeting_notes_links(
 
     assert doc_url in output["body_text"]
     assert output["google_workspace_links"][0]["file_id"] == "doc-123"
+    assert output["google_workspace_links"][1]["file_id"] == "folder-123"
+    assert output["google_workspace_links"][1]["kind"] == "folder"
     assert output["meeting_notes"][0]["url"] == doc_url
 
 
@@ -2189,7 +2263,21 @@ def test_google_workspace_tools_read_drive_and_docs(
 
     def fake_google_json(method, base_url, path, *, token, params=None, body=None, timeout=60):
         assert token == "google-token"
+        if path == "/drive/v3/files":
+            assert params["supportsAllDrives"] is True
+            assert params["includeItemsFromAllDrives"] is True
+            assert "folder-123" in params["q"]
+            return {
+                "files": [
+                    {
+                        "id": "deck-123",
+                        "name": "Pitch Deck",
+                        "mimeType": "application/vnd.google-apps.presentation",
+                    }
+                ]
+            }
         if path.startswith("/drive/v3/files/"):
+            assert params["supportsAllDrives"] is True
             return {
                 "id": "doc-123",
                 "name": "Meeting Notes",
@@ -2281,6 +2369,10 @@ def test_google_workspace_tools_read_drive_and_docs(
         context,
         {"url": "https://docs.google.com/document/d/doc-123/edit"},
     )
+    folder = GoogleWorkspaceToolAdapter("google.drive.folder.list").execute(
+        context,
+        {"url": "https://drive.google.com/drive/folders/folder-123"},
+    )
     exported = GoogleWorkspaceToolAdapter("google.drive.file.export").execute(
         context,
         {"file_id": "doc-123"},
@@ -2311,6 +2403,8 @@ def test_google_workspace_tools_read_drive_and_docs(
     )
 
     assert drive["summary"]["file_id"] == "doc-123"
+    assert folder["summary"]["file_count"] == 1
+    assert folder["files"][0]["id"] == "deck-123"
     assert exported["content_text"] == "Meeting notes export text."
     assert doc["title"] == "Meeting Notes"
     assert "Decision: move forward." in doc["content_text"]
@@ -2320,6 +2414,18 @@ def test_google_workspace_tools_read_drive_and_docs(
     assert sheet_values["values"][1] == ["Praxis", "Active"]
     assert meet_records["summary"]["record_count"] == 1
     assert meet_record["summary"]["name"] == "conferenceRecords/meet-123"
+
+    def missing_drive_item(*args, **kwargs):
+        raise ToolExecutionError(
+            'Google API request failed (404): {"error":{"message":"File not found: folder-123."}}'
+        )
+
+    monkeypatch.setattr("app.tools.runtime._google_api_json", missing_drive_item)
+    with pytest.raises(ToolExecutionError, match=r"drive\.file.*arbitrary"):
+        GoogleWorkspaceToolAdapter("google.drive.folder.list").execute(
+            context,
+            {"file_id": "folder-123"},
+        )
 
 
 def test_gmail_draft_create_builds_encoded_rfc822_message(
@@ -4134,6 +4240,7 @@ def test_default_tools_include_safe_aggregate_github_read() -> None:
     assert "github.read" in adapters
     assert adapters["github.read"].key == "github.read"
     assert "workflow.notification.create" in adapters
+    assert "google.drive.folder.list" in adapters
 
 
 def test_report_retrieval_tools_search_and_get_domain_reports(session: Session) -> None:

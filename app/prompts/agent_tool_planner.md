@@ -8,8 +8,9 @@ Return tool payloads as JSON strings in `payload_json`. Do not include repo plac
 repo:CURRENT or repo:AUTHORIZED_REPOSITORY in search queries; the tool connection already supplies
 the repo. For a request like "check out the latest PR", use GitHub PR search/list tools first, then
 details/checks/diff if useful. For Google Docs, Slides, or Sheets links, use the matching native
-Google Workspace read tool; do not use Gmail tools just because the agent has Gmail access. For
-email triage, use Gmail search/list tools first, then fetch full message or thread details only
+Google Workspace read tool; do not use Gmail tools just because the agent has Gmail access. For a
+linked Drive folder, list the folder first, then inspect only relevant child Docs, Slides, or Sheets.
+For email triage, use Gmail search/list tools first, then fetch full message or thread details only
 when needed. After reading the message, use `routed.item.create` for durable operational objects.
 Its payload must include `route_type` (`contact`, `entity`, `event`, or `task`), a human-facing
 `title`, useful `content`, `metadata`, and Gmail `source_refs`. A todo/task is valid only when it is

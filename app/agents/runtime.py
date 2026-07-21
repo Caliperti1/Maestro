@@ -1975,7 +1975,9 @@ def _harden_email_tool_plan(
     has_message = _has_tool_result(prior_results, "gmail.message.get")
     safe_context_tools = {"memory.context_bundle", "reports.search", "reports.get"}
 
-    if not has_list:
+    # Triggered email workflows may receive an exact message directly without a
+    # preceding inbox-list call. Treat that body as sufficient selection context.
+    if not has_list and not has_message:
         hardened: list[dict[str, Any]] = []
         list_request = next(
             (
@@ -2025,6 +2027,7 @@ def _harden_email_tool_plan(
             "document": "google.docs.get",
             "presentation": "google.slides.get",
             "spreadsheet": "google.sheets.get",
+            "folder": "google.drive.folder.list",
         }
         for link in google_links:
             tool_key = tool_by_kind.get(link.get("kind") or "")
@@ -2207,6 +2210,7 @@ def _hydrate_google_tool_from_email(
         "google.slides.get": "presentation",
         "google.sheets.get": "spreadsheet",
         "google.sheets.values.get": "spreadsheet",
+        "google.drive.folder.list": "folder",
     }.get(tool_key)
     candidates = [link for link in links if not expected_kind or link.get("kind") == expected_kind]
     payload = dict(requested.get("payload") or {})
@@ -2334,6 +2338,17 @@ def _deterministic_google_workspace_file_plan(
                 "rationale": "Read Google Sheets metadata for the linked spreadsheet.",
             }
         ]
+    if "/drive/folders/" in url and "google.drive.folder.list" in allowed and not _has_tool_result(
+        prior_results,
+        "google.drive.folder.list",
+    ):
+        return [
+            {
+                "tool_key": "google.drive.folder.list",
+                "payload": payload,
+                "rationale": "List the linked Google Drive folder before selecting relevant files.",
+            }
+        ]
     if any(marker in url for marker in ("/presentation/", "/document/", "/spreadsheets/")):
         return []
     if "google.drive.file.get" in allowed and not _has_tool_result(prior_results, "google.drive.file.get"):
@@ -2359,6 +2374,7 @@ def _google_file_id_from_url_text(url: str) -> str | None:
         r"/document/d/([^/?#]+)",
         r"/spreadsheets/d/([^/?#]+)",
         r"/presentation/d/([^/?#]+)",
+        r"/drive/folders/([^/?#]+)",
         r"/file/d/([^/?#]+)",
         r"[?&]id=([^&#]+)",
     ):
@@ -2417,6 +2433,7 @@ def _email_finalization_evidence(
         "google.docs.get",
         "google.drive.file.export",
         "google.drive.file.get",
+        "google.drive.folder.list",
         "google.slides.get",
         "google.sheets.get",
         "google.sheets.values.get",
@@ -2787,6 +2804,11 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": True,
         "reason": "Read-only Google Drive file metadata retrieval.",
     },
+    "google.drive.folder.list": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Drive folder listing.",
+    },
     "google.drive.file.export": {
         "level": "safe_read",
         "auto_executable": True,
@@ -3044,6 +3066,13 @@ _TOOL_DESCRIPTIONS = {
         "name": "Google Drive File Metadata",
         "description": "Read Google Drive file metadata and links through the authorized domain account.",
     },
+    "google.drive.folder.list": {
+        "name": "Google Drive Folder List",
+        "description": (
+            "List files inside a Google Drive folder so an agent can select relevant Docs, "
+            "Slides, Sheets, or other artifacts for inspection."
+        ),
+    },
     "google.drive.file.export": {
         "name": "Google Drive File Export",
         "description": "Export readable Google Workspace file content, such as Docs to text/plain.",
@@ -3283,6 +3312,7 @@ def _compact_tool_results_for_prompt(
             "gmail.thread.get",
             "google.docs.get",
             "google.drive.file.export",
+            "google.drive.folder.list",
             "google.slides.get",
             "google.sheets.values.get",
         }
@@ -3726,6 +3756,10 @@ _SEED_AGENTS = [
             "google.drive.file.get": {
                 "permission": "read",
                 "description": "Read metadata for linked Google Workspace files in Praxis emails.",
+            },
+            "google.drive.folder.list": {
+                "permission": "read",
+                "description": "List linked Google Drive folders and discover relevant files.",
             },
             "google.drive.file.export": {
                 "permission": "read",

@@ -1111,7 +1111,7 @@ def test_orchestrator_promotes_full_email_triage_from_qwen_to_luna(session: Sess
     }
 
 
-def test_orchestrator_routes_complex_design_work_to_advanced_model_tier(session: Session) -> None:
+def test_orchestrator_routes_complex_design_work_to_terra_by_default(session: Session) -> None:
     plan = MaestroOrchestratorService(
         session,
         planner_llm_client=FailingPlannerLLMClient(),
@@ -1122,8 +1122,8 @@ def test_orchestrator_routes_complex_design_work_to_advanced_model_tier(session:
     agent_items = [item for item in plan.work_items if item.needs_agent]
 
     assert agent_items
-    assert all(item.model_tier == "sol" for item in agent_items)
-    assert all(item.model_profile == "openrouter:openai/gpt-5.6-sol" for item in agent_items)
+    assert all(item.model_tier == "terra" for item in agent_items)
+    assert all(item.model_profile == "openrouter:openai/gpt-5.6-terra" for item in agent_items)
     assert all(item.model_rationale for item in agent_items)
 
 
@@ -1137,7 +1137,39 @@ def test_orchestrator_recognizes_maestro_ui_change_as_coding_work(session: Sessi
 
     assert len(coding_items) == 1
     assert coding_items[0].domain_key == "maestro-development"
-    assert coding_items[0].model_tier == "sol"
+    assert coding_items[0].model_tier == "terra"
+
+
+def test_orchestrator_preserves_explicit_sol_model_request(session: Session) -> None:
+    selection = MaestroOrchestratorService(session)._model_selection_for_work_item_payload(
+        {
+            "type": "workflow_task",
+            "title": "Use Sol to evaluate the architecture",
+            "description": "Chris explicitly requested Sol for this task.",
+            "required_tools": ["web.search"],
+            "model_tier": "sol",
+        },
+        user_input="Use Sol to evaluate this architecture.",
+    )
+
+    assert selection["model_tier"] == "sol"
+    assert selection["model_profile"] == "openrouter:openai/gpt-5.6-sol"
+
+
+def test_orchestrator_demotes_unrequested_sol_to_terra(session: Session) -> None:
+    selection = MaestroOrchestratorService(session)._model_selection_for_work_item_payload(
+        {
+            "type": "workflow_task",
+            "title": "Evaluate the architecture",
+            "description": "Use careful reasoning to compare the options.",
+            "required_tools": ["web.search"],
+            "model_tier": "sol",
+        },
+        user_input="Evaluate this architecture and recommend an approach.",
+    )
+
+    assert selection["model_tier"] == "terra"
+    assert selection["model_profile"] == "openrouter:openai/gpt-5.6-terra"
 
 
 def test_orchestrator_generates_role_specific_subtasks(session: Session) -> None:

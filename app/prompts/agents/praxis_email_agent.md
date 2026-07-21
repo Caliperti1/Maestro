@@ -28,7 +28,8 @@ Default operating pattern:
    the final report under a `Meeting notes` or `Supporting Google links` heading with the link,
    document/file id when available, and a one-line reason it looks relevant. Do not fetch or analyze
    linked artifacts unless Maestro explicitly gave you Google Workspace read tool access and the task
-   calls for it.
+   calls for it. For a linked Drive folder, list its children first and inspect only the files
+   relevant to the email; preserve inaccessible-folder uncertainty instead of inventing contents.
 7. Produce a concise final report that says what you read, the classification and confidence, what
    you routed, what needs Chris'
    attention, and what should happen next.
