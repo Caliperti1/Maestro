@@ -8,16 +8,18 @@ workflow when a new message arrives.
 
 1. Read recent Praxis Gmail through the domain Gmail connection.
 2. Fetch the selected message or thread.
-3. Classify the email as spam/noise, response needed, useful information, or action required.
-4. Create internal routed candidates for useful extracted objects:
+3. Inspect relevant linked Google artifacts. Drive folder links are listed first, then only the
+   relevant child Docs, Slides, or Sheets are read.
+4. Classify the email as spam/noise, response needed, useful information, or action required.
+5. Create internal routed candidates for useful extracted objects:
    - contacts via `contact_manager`
    - Chris-owned todos/reminders via `to_do_manager`
    - events via `calendar_manager`
    - organizations via `organization_manager`
-5. Promote routed candidates immediately into Maestro routed stores.
-6. Notify Chris only when a response, decision, material deadline, or meaningful risk requires his
+6. Promote routed candidates immediately into Maestro routed stores.
+7. Notify Chris only when a response, decision, material deadline, or meaningful risk requires his
    attention.
-7. Generate an agent report and stage the interaction artifact for memory curation.
+8. Generate an agent report and stage the interaction artifact for memory curation.
 
 ## Safety
 
@@ -40,8 +42,8 @@ attach `model_profile` to an individual work item. Runtime precedence is:
 
 Maestro now sets the work-item override from an explicit routing tier and stores the decision on the
 queue item: `luna`, `terra`, or `sol`. Routine email triage defaults to `luna`; a request that
-needs ambiguous reasoning, drafting, or external research can
-be promoted to a cloud tier for that one work item.
+needs broader reasoning, drafting, or external research defaults to `terra`. `sol` is reserved for
+work where Chris explicitly requests the strongest model.
 
 - `default`: configured global provider/model
 - `ollama:<model>`: local Ollama chat model
@@ -82,3 +84,26 @@ Expected behavior:
 - A report is created for the run.
 - An interaction artifact is staged for memory curation.
 - If the agent wants to mark the email read or create a draft, Maestro asks for approval first.
+
+## Durable Trigger Readiness
+
+The one-time workflow is the behavior kernel for the durable version. Before enabling it for every
+new Praxis message, add these trigger and operations guarantees:
+
+1. Poll Gmail History from a persisted per-domain cursor and emit `gmail.message.received` events.
+   Start from the current cursor so first enablement does not unexpectedly process the old inbox.
+2. Freeze the Gmail message ID into each workflow input. A queued run must never reinterpret
+   "latest email" after another message arrives.
+3. Deduplicate trigger deliveries by domain, workflow definition, and Gmail message ID so polling,
+   retries, and restarts cannot process one email twice.
+4. Filter for eligible inbox messages and exclude drafts/sent mail before enqueueing work.
+5. Retry transient Gmail, Google Workspace, LLM, and routing failures with bounded backoff; surface
+   terminal failures to Needs Attention and support manual replay.
+6. Expose trigger health, cursor freshness, last detected message, and recent runs in the workflow
+   UI. Keep independent messages parallel subject to scheduler resource limits.
+7. Add end-to-end tests for restart recovery, duplicate history pages, multiple new messages,
+   exact-message execution, retry/replay, quiet messages, and Chris-action notifications.
+
+Gmail History polling is the recommended local-runtime MVP. Gmail push notifications can replace
+the producer later, but require Google Cloud Pub/Sub plus periodic watch renewal; the workflow event
+contract and idempotency rules should remain the same.

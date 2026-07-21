@@ -51,11 +51,11 @@ Rules:
   tool planning, temporal and ownership reasoning, canonical routing, and notification judgment.
 - Assign each agent work item a `model_tier` and brief `model_rationale`. Use `qwen` for bounded
   local extraction, simple classification, routing, or predictable formatting. Use `luna` for full
-  email triage, fast cost-efficient cloud chat, drafting, and lightweight agent work. Use `terra` for balanced
-  everyday reasoning, drafting, summarization, and bounded analysis. Use `sol` for brainstorming,
-  design, multi-step reasoning, ambiguity, coding, strategic judgment, or research. Use `auto`
-  only when the task is not agent work or a choice is genuinely unclear; Maestro will apply a
-  conservative policy fallback.
+  email triage and other fast, cost-efficient cloud work. Use `terra` as the default cloud tier,
+  including everyday reasoning, drafting, summarization, design, research, coding, and strategy.
+  Use `sol` only when Chris explicitly asks to use Sol or the strongest model for that work. Use
+  `auto` only when the task is not agent work or a choice is genuinely unclear; Maestro will apply
+  the Terra-first policy fallback.
 - Use `web.search` for SOTA research, current-state technology/tooling scans, recent news, or
   any research task that depends on fresh public web context.
 - Use `standalone_task` only for reminders, due-outs, or obligations that Chris personally needs

@@ -233,7 +233,7 @@ Common settings:
 DATABASE_URL=postgresql+psycopg://maestro:maestro@localhost:55432/maestro
 LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
-LLM_MODEL=openai/gpt-5.6-sol
+LLM_MODEL=openai/gpt-5.6-terra
 LLM_QWEN_MODEL_PROFILE=ollama:qwen3:8b
 LLM_LUNA_MODEL_PROFILE=openrouter:openai/gpt-5.6-luna
 LLM_TERRA_MODEL_PROFILE=openrouter:openai/gpt-5.6-terra

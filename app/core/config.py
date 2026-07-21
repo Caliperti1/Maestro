@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_http_referer: str = "http://localhost:5173"
     openrouter_app_title: str = "Maestro"
-    llm_model: str = "openai/gpt-5.6-sol"
+    llm_model: str = "openai/gpt-5.6-terra"
     llm_qwen_model_profile: str = "ollama:qwen3:8b"
     llm_luna_model_profile: str = "openrouter:openai/gpt-5.6-luna"
     llm_terra_model_profile: str = "openrouter:openai/gpt-5.6-terra"

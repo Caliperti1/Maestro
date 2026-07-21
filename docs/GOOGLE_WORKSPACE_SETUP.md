@@ -32,7 +32,7 @@ without re-running OAuth. Maestro should still require approval before external 
 https://www.googleapis.com/auth/gmail.readonly
 https://www.googleapis.com/auth/gmail.modify
 https://www.googleapis.com/auth/gmail.compose
-https://www.googleapis.com/auth/drive.file
+https://www.googleapis.com/auth/drive
 https://www.googleapis.com/auth/drive.meet.readonly
 https://www.googleapis.com/auth/documents
 https://www.googleapis.com/auth/presentations
@@ -45,7 +45,9 @@ Scope intent:
 - `gmail.readonly`: read messages and threads.
 - `gmail.modify`: mark messages read, apply labels, and perform future approved mailbox updates.
 - `gmail.compose`: create future approved drafts/sends without broader Gmail mailbox write scope.
-- `drive.file`: create, open, and modify files Maestro creates or files opened with the app.
+- `drive`: read and manage files visible to the connected domain account, including arbitrary
+  linked folders and files shared with that account. Maestro still gates external writes through
+  tool policy even though the OAuth token is write-capable.
 - `drive.meet.readonly`: read Meet-created Drive artifacts such as transcripts, notes, recordings,
   and meeting notes.
 - `documents`: create and edit Google Docs.
@@ -90,6 +92,7 @@ Current tools are read-first except approved Gmail mutations:
 - `gmail.draft.create`
 - `gmail.message.modify`
 - `google.drive.file.get`
+- `google.drive.folder.list`
 - `google.drive.file.export`
 - `google.docs.get`
 - `google.slides.get`
@@ -97,6 +100,12 @@ Current tools are read-first except approved Gmail mutations:
 - `google.sheets.values.get`
 - `google.meet.conference_records.list`
 - `google.meet.conference_records.get`
+
+`drive.file` alone is not sufficient for email triage over arbitrary shared links. Google limits
+that scope to files Maestro created or files explicitly opened through the OAuth application. If a
+linked file opens in a browser but Drive API calls return `404 File not found`, regenerate the
+refresh token with the `drive` scope above and confirm the browser and Maestro OAuth identities are
+the same account.
 
 ## Future Write Tools
 

@@ -1567,6 +1567,8 @@ class GoogleWorkspaceToolAdapter:
         token = _gmail_access_token(context.connection)
         if self.key == "google.drive.file.get":
             return self._drive_file_get(payload, token=token)
+        if self.key == "google.drive.folder.list":
+            return self._drive_folder_list(payload, token=token)
         if self.key == "google.drive.file.export":
             return self._drive_file_export(payload, token=token)
         if self.key == "google.docs.get":
@@ -1589,13 +1591,17 @@ class GoogleWorkspaceToolAdapter:
             payload.get("fields")
             or "id,name,mimeType,webViewLink,webContentLink,modifiedTime,createdTime,owners(emailAddress,displayName),description,size"
         )
-        file_metadata = _google_api_json(
-            "GET",
-            "https://www.googleapis.com",
-            f"/drive/v3/files/{quote(file_id, safe='')}",
-            token=token,
-            params={"fields": fields},
-        )
+        try:
+            file_metadata = _google_api_json(
+                "GET",
+                "https://www.googleapis.com",
+                f"/drive/v3/files/{quote(file_id, safe='')}",
+                token=token,
+                params={"fields": fields, "supportsAllDrives": True},
+            )
+        except ToolExecutionError as exc:
+            _raise_drive_visibility_error(exc, file_id)
+            raise
         return {
             "file": file_metadata,
             "summary": {
@@ -1604,6 +1610,56 @@ class GoogleWorkspaceToolAdapter:
                 "name": file_metadata.get("name"),
                 "mime_type": file_metadata.get("mimeType"),
                 "web_view_link": file_metadata.get("webViewLink"),
+            },
+        }
+
+    def _drive_folder_list(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        folder_id = _google_file_id(payload)
+        page_size = _bounded_int(
+            payload.get("page_size"),
+            default=50,
+            minimum=1,
+            maximum=100,
+        )
+        escaped_folder_id = folder_id.replace("'", "\\'")
+        params: dict[str, Any] = {
+            "q": f"'{escaped_folder_id}' in parents and trashed = false",
+            "pageSize": page_size,
+            "orderBy": "folder,name_natural",
+            "spaces": "drive",
+            "supportsAllDrives": True,
+            "includeItemsFromAllDrives": True,
+            "fields": (
+                "nextPageToken,files("
+                "id,name,mimeType,webViewLink,webContentLink,modifiedTime,createdTime,size"
+                ")"
+            ),
+        }
+        page_token = str(payload.get("page_token") or "").strip()
+        if page_token:
+            params["pageToken"] = page_token
+        try:
+            response = _google_api_json(
+                "GET",
+                "https://www.googleapis.com",
+                "/drive/v3/files",
+                token=token,
+                params=params,
+            )
+        except ToolExecutionError as exc:
+            _raise_drive_visibility_error(exc, folder_id)
+            raise
+        files = response.get("files") if isinstance(response.get("files"), list) else []
+        next_page_token = str(response.get("nextPageToken") or "").strip() or None
+        return {
+            "folder_id": folder_id,
+            "files": files,
+            "next_page_token": next_page_token,
+            "summary": {
+                "type": "google_drive_folder",
+                "folder_id": folder_id,
+                "file_count": len(files),
+                "has_more": next_page_token is not None,
             },
         }
 
@@ -2875,6 +2931,7 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
             key: GoogleWorkspaceToolAdapter(key)
             for key in (
                 "google.drive.file.get",
+                "google.drive.folder.list",
                 "google.drive.file.export",
                 "google.docs.get",
                 "google.slides.get",
@@ -4035,11 +4092,24 @@ def _google_file_id(payload: dict[str, Any]) -> str:
     return file_id
 
 
+def _raise_drive_visibility_error(exc: ToolExecutionError, file_id: str) -> None:
+    detail = str(exc)
+    if "404" not in detail or "File not found" not in detail:
+        return
+    raise ToolExecutionError(
+        f"Google Drive item {file_id} is not visible to the connected OAuth token. Confirm the "
+        "same Google account can open the link and regenerate the refresh token with the "
+        "`https://www.googleapis.com/auth/drive` scope; `drive.file` cannot read arbitrary "
+        "email-linked files or folders."
+    ) from exc
+
+
 def _google_file_id_from_url(value: str) -> str | None:
     patterns = [
         r"/document/d/([^/?#]+)",
         r"/spreadsheets/d/([^/?#]+)",
         r"/presentation/d/([^/?#]+)",
+        r"/drive/folders/([^/?#]+)",
         r"/file/d/([^/?#]+)",
         r"[?&]id=([^&#]+)",
     ]
@@ -4243,6 +4313,8 @@ def _google_link_kind(url: str) -> str:
         return "spreadsheet"
     if "/presentation/" in url:
         return "presentation"
+    if "/drive/folders/" in url:
+        return "folder"
     if "drive.google.com" in url:
         return "drive_file"
     return "google_workspace"

@@ -267,7 +267,10 @@ class MaestroOrchestratorService:
             work_items=decomposition.work_items,
         )
         work_items = self._harden_work_items(
-            [self._work_item_from_planner(item) for item in decomposition.work_items],
+            [
+                self._work_item_from_planner(item, user_input=visible_input)
+                for item in decomposition.work_items
+            ],
             user_input=visible_input,
         )
         is_routing_only = self._is_routing_only(work_items)
@@ -1580,13 +1583,21 @@ class MaestroOrchestratorService:
             capabilities.append("research")
         return capabilities
 
-    def _work_item_from_planner(self, item: PlannerWorkItem) -> MaestroWorkItem:
+    def _work_item_from_planner(
+        self,
+        item: PlannerWorkItem,
+        *,
+        user_input: str | None = None,
+    ) -> MaestroWorkItem:
         payload = item.model_dump()
         for key in ("title", "description", "rationale", "expected_output"):
             if isinstance(payload.get(key), str):
                 payload[key] = _strip_hidden_context(payload[key])
         payload["required_skills"] = self._skills_for_work_item_payload(payload)
-        model_selection = self._model_selection_for_work_item_payload(payload)
+        model_selection = self._model_selection_for_work_item_payload(
+            payload,
+            user_input=user_input,
+        )
         payload.update(model_selection)
         return MaestroWorkItem(**payload)
 
@@ -1761,7 +1772,12 @@ class MaestroOrchestratorService:
             skills.append("organization_manager")
         return list(dict.fromkeys(skills))
 
-    def _model_selection_for_work_item_payload(self, payload: dict[str, Any]) -> dict[str, str]:
+    def _model_selection_for_work_item_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        user_input: str | None = None,
+    ) -> dict[str, str]:
         requested_tier = str(payload.get("model_tier") or "auto").strip().lower()
         requested_tier = {
             "local_routine": "qwen",
@@ -1779,25 +1795,19 @@ class MaestroOrchestratorService:
         is_full_email_triage = "triage" in text and any(
             token in text for token in ("email", "gmail", "inbox")
         )
+        explicit_sol_request = user_input is None or bool(
+            re.search(
+                r"\b(?:use|choose|select|run|with|on)\s+(?:the\s+)?(?:gpt[- ]?5(?:\.6)?\s+)?sol\b"
+                r"|\bstrongest\s+(?:available\s+)?(?:model|tier)\b",
+                user_input.lower(),
+            )
+        )
+        if requested_tier == "sol" and not explicit_sol_request:
+            requested_tier = "terra"
         if is_full_email_triage and requested_tier in {"auto", "qwen"}:
             requested_tier = "luna"
         if requested_tier not in {"qwen", "luna", "terra", "sol"}:
-            if any(
-                token in text
-                for token in (
-                    "codex.task.run",
-                    "web.search",
-                    "sota",
-                    "research",
-                    "architecture",
-                    "strategy",
-                    "brainstorm",
-                    "design",
-                    "complex",
-                )
-            ):
-                requested_tier = "sol"
-            elif any(token in text for token in ("email", "gmail", "inbox")):
+            if any(token in text for token in ("email", "gmail", "inbox")):
                 requested_tier = "luna"
             elif payload.get("can_log_directly") or any(
                 token in text for token in ("extract", "route", "contact", "calendar", "todo")
@@ -1817,7 +1827,7 @@ class MaestroOrchestratorService:
             "qwen": "Routine, bounded extraction or routing work is suitable for the local Qwen tier.",
             "luna": "This straightforward task benefits from the fast, cost-efficient cloud tier.",
             "terra": "This task benefits from balanced cloud reasoning and drafting without needing the flagship tier.",
-            "sol": "This task needs the strongest reasoning tier for ambiguity, synthesis, research, design, or strategy.",
+            "sol": "Chris explicitly requested the strongest Sol reasoning tier for this work.",
         }
         planner_rationale = str(payload.get("model_rationale") or "").strip()
         if is_full_email_triage and requested_tier == "luna":
