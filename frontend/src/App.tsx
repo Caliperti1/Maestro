@@ -52,6 +52,7 @@ import type {
   ChatMessage,
   DomainContext,
   DropboxDomain,
+  GmailTriggerStatus,
   MaestroPlan,
   MaestroRespond,
   MaestroRun,
@@ -1411,6 +1412,7 @@ export function App() {
   }, [chatMessages, maestroBusy]);
   const [schedulerWorkerStatus, setSchedulerWorkerStatus] =
     useState<SchedulerWorkerStatus | null>(null);
+  const [gmailTriggerStatus, setGmailTriggerStatus] = useState<GmailTriggerStatus | null>(null);
 
   const maestroPlanStages = useMemo(() => {
     if (!maestroPlan) return [];
@@ -1675,6 +1677,49 @@ export function App() {
     setSchedulerWorkerStatus(response.worker);
   }, []);
 
+  const loadGmailTriggerStatus = useCallback(async () => {
+    const response = await apiJson<GmailTriggerStatus>("/scheduler/triggers/gmail/status");
+    setGmailTriggerStatus(response);
+  }, []);
+
+  const updateGmailTriggerStatus = async (enabled: boolean) => {
+    const response = await apiJson<{ worker: GmailTriggerStatus["worker"]; status: GmailTriggerStatus }>(
+      "/scheduler/triggers/gmail/status",
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      },
+    );
+    setGmailTriggerStatus(response.status);
+    setSchedulerStatusMessage(
+      response.worker.enabled
+        ? "Gmail trigger monitoring is on. New eligible messages will emit workflow events."
+        : "Gmail trigger monitoring is paused.",
+    );
+  };
+
+  const pollGmailTriggers = async () => {
+    await apiJson("/scheduler/triggers/gmail/poll", { method: "POST" });
+    await Promise.all([loadGmailTriggerStatus(), loadSchedulerDashboard()]);
+    setSchedulerStatusMessage("Gmail trigger poll completed.");
+  };
+
+  const resetGmailTriggerDomain = async (domainKey: string) => {
+    await apiJson(`/scheduler/triggers/gmail/domains/${domainKey}/reset`, { method: "POST" });
+    await loadGmailTriggerStatus();
+    setSchedulerStatusMessage(`Reset ${domainKey} Gmail monitoring at the current inbox cursor.`);
+  };
+
+  const replaySchedulerRun = async (runId: string) => {
+    const response = await apiJson<{ run: SchedulerRun }>(`/scheduler/runs/${runId}/replay`, {
+      method: "POST",
+    });
+    setSelectedSchedulerRun(response.run);
+    setSchedulerStatusMessage("Workflow replay was queued with its original trigger payload.");
+    await loadSchedulerDashboard();
+  };
+
   const updateSchedulerWorkerStatus = async (updates: Partial<SchedulerWorkerStatus>) => {
     const response = await apiJson<{ worker: SchedulerWorkerStatus }>("/scheduler/worker/status", {
       method: "PATCH",
@@ -1877,11 +1922,13 @@ export function App() {
     loadSessionHistory().catch(() => undefined);
     loadSchedulerDashboard().catch(() => undefined);
     loadSchedulerWorkerStatus().catch(() => undefined);
+    loadGmailTriggerStatus().catch(() => undefined);
     loadWorkflowOutputs().catch(() => undefined);
   }, [
     loadActiveSession,
     loadSchedulerDashboard,
     loadSchedulerWorkerStatus,
+    loadGmailTriggerStatus,
     loadSessionHistory,
     loadWorkflowOutputs,
   ]);
@@ -1890,10 +1937,11 @@ export function App() {
     const interval = window.setInterval(() => {
       loadSchedulerDashboard().catch(() => undefined);
       loadSchedulerWorkerStatus().catch(() => undefined);
+      loadGmailTriggerStatus().catch(() => undefined);
       loadWorkflowOutputs().catch(() => undefined);
     }, 3000);
     return () => window.clearInterval(interval);
-  }, [loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
+  }, [loadGmailTriggerStatus, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
 
   useEffect(() => {
     let closed = false;
@@ -2645,20 +2693,27 @@ export function App() {
           <WorkflowsWorkspace
             schedulerDashboard={schedulerDashboard}
             schedulerWorkerStatus={schedulerWorkerStatus}
+            gmailTriggerStatus={gmailTriggerStatus}
             selectedSchedulerRun={selectedSchedulerRun}
             selectedSchedulerDefinition={selectedSchedulerDefinition}
             schedulerStatusMessage={schedulerStatusMessage}
             busyToolCallId={busyToolCallId}
             onRefresh={async () => {
               await loadSchedulerDashboard();
+              await loadGmailTriggerStatus();
               await loadWorkflowOutputs();
             }}
             onSelectRun={selectSchedulerRun}
             onArchiveRun={archiveSchedulerRun}
+            onReplayRun={replaySchedulerRun}
             onReenterRun={reenterSchedulerRunSession}
             onSelectDefinition={selectSchedulerDefinition}
             onApproveToolCall={approveToolCall}
             onRejectToolCall={rejectToolCall}
+            onToggleGmailTrigger={updateGmailTriggerStatus}
+            onToggleSchedulerWorker={(enabled) => updateSchedulerWorkerStatus({ enabled })}
+            onPollGmailTriggers={pollGmailTriggers}
+            onResetGmailDomain={resetGmailTriggerDomain}
           />
         ) : activeSurface in routedSurfaceConfig ? (
           <RoutedObjectsWorkspace surface={activeSurface as RoutedObjectSurface} />
@@ -3406,6 +3461,7 @@ function ReportsWorkspace({
 function WorkflowsWorkspace({
   schedulerDashboard,
   schedulerWorkerStatus,
+  gmailTriggerStatus,
   selectedSchedulerRun,
   selectedSchedulerDefinition,
   schedulerStatusMessage,
@@ -3413,13 +3469,19 @@ function WorkflowsWorkspace({
   onRefresh,
   onSelectRun,
   onArchiveRun,
+  onReplayRun,
   onReenterRun,
   onSelectDefinition,
   onApproveToolCall,
   onRejectToolCall,
+  onToggleGmailTrigger,
+  onToggleSchedulerWorker,
+  onPollGmailTriggers,
+  onResetGmailDomain,
 }: {
   schedulerDashboard: SchedulerDashboard | null;
   schedulerWorkerStatus: SchedulerWorkerStatus | null;
+  gmailTriggerStatus: GmailTriggerStatus | null;
   selectedSchedulerRun: SchedulerRun | null;
   selectedSchedulerDefinition: SchedulerDefinition | null;
   schedulerStatusMessage: string;
@@ -3427,10 +3489,15 @@ function WorkflowsWorkspace({
   onRefresh: () => Promise<void>;
   onSelectRun: (runId: string) => Promise<void>;
   onArchiveRun: (runId: string) => Promise<void>;
+  onReplayRun: (runId: string) => Promise<void>;
   onReenterRun: (run: SchedulerRun) => Promise<void>;
   onSelectDefinition: (definition: SchedulerDefinition) => void;
   onApproveToolCall: (toolCallId: string) => Promise<void>;
   onRejectToolCall: (toolCallId: string) => Promise<void>;
+  onToggleGmailTrigger: (enabled: boolean) => Promise<void>;
+  onToggleSchedulerWorker: (enabled: boolean) => Promise<void>;
+  onPollGmailTriggers: () => Promise<void>;
+  onResetGmailDomain: (domainKey: string) => Promise<void>;
 }) {
   const [selectedQueueItemId, setSelectedQueueItemId] = useState<string | null>(null);
   const runs = schedulerDashboard?.runs ?? [];
@@ -3469,7 +3536,25 @@ function WorkflowsWorkspace({
           <h3 id="workflows-heading">Workflows</h3>
         </div>
         <div className="scheduler-action-row compact-actions">
-          <span>{schedulerWorkerStatus?.enabled ? "Auto worker on" : "Auto worker off"}</span>
+          <label className="worker-toggle">
+            Auto worker
+            <input
+              type="checkbox"
+              checked={schedulerWorkerStatus?.enabled ?? false}
+              onChange={(event) => onToggleSchedulerWorker(event.target.checked)}
+            />
+          </label>
+          <label className="worker-toggle">
+            Gmail watch
+            <input
+              type="checkbox"
+              checked={gmailTriggerStatus?.worker.enabled ?? false}
+              onChange={(event) => onToggleGmailTrigger(event.target.checked)}
+            />
+          </label>
+          <button className="icon-button" onClick={onPollGmailTriggers} title="Poll Gmail now" type="button">
+            <Inbox size={18} />
+          </button>
           <button className="icon-button" onClick={onRefresh} title="Refresh workflows" type="button">
             <RefreshCw size={18} />
           </button>
@@ -3505,6 +3590,11 @@ function WorkflowsWorkspace({
                   <button type="button" onClick={() => onArchiveRun(run.id)}>
                     Kill workflow
                   </button>
+                  {run.workflow_definition_id && (
+                    <button type="button" onClick={() => onReplayRun(run.id)}>
+                      Replay
+                    </button>
+                  )}
                 </div>
               </article>
             );
@@ -3544,6 +3634,22 @@ function WorkflowsWorkspace({
             </article>
           ))}
           {triggerDefinitions.length === 0 && <p className="empty-state">No trigger workflows yet.</p>}
+          {gmailTriggerStatus?.domains.map((domain) => (
+            <article className="workflow-summary-card compact-run-card" key={`gmail-${domain.domain_key}`}>
+              <span>{domain.status}</span>
+              <h4>{domain.domain_key} Gmail monitor</h4>
+              <div className="preview-meta">
+                {domain.last_polled_at && <span>polled {formatDateTime(domain.last_polled_at)}</span>}
+                {domain.last_message_id && <span>message {domain.last_message_id}</span>}
+                {domain.last_error && <span>{domain.last_error}</span>}
+              </div>
+              <div className="scheduler-action-row compact-actions">
+                <button type="button" onClick={() => onResetGmailDomain(domain.domain_key)}>
+                  Reset cursor
+                </button>
+              </div>
+            </article>
+          ))}
         </section>
       </div>
       {selectedSchedulerRun && (

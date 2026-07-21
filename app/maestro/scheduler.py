@@ -266,6 +266,31 @@ class SchedulerService:
         self.session.refresh(run)
         return run
 
+    def replay_run(self, run_id: uuid.UUID) -> WorkflowRun:
+        original = self.session.get(WorkflowRun, run_id)
+        if original is None:
+            raise ValueError("Unknown workflow run.")
+        if original.workflow_definition_id is None:
+            raise ValueError("Only workflow-definition runs can be replayed.")
+        definition = self.session.get(WorkflowDefinition, original.workflow_definition_id)
+        if definition is None:
+            raise ValueError("The workflow definition for this run no longer exists.")
+        event_payload = (original.input_payload or {}).get("event")
+        replay = self.enqueue_definition_run(
+            definition,
+            scheduled_for=datetime.now(UTC),
+            source_type="replay",
+            idempotency_suffix=f"replay:{original.id}:{uuid.uuid4()}",
+            event_payload=event_payload if isinstance(event_payload, dict) else None,
+        )
+        self.record_event(
+            original,
+            event_type="workflow_replayed",
+            message=f"Workflow run was replayed as {replay.id}.",
+            payload={"replay_run_id": str(replay.id)},
+        )
+        return replay
+
     def tick(
         self,
         *,

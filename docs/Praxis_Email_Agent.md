@@ -85,10 +85,9 @@ Expected behavior:
 - An interaction artifact is staged for memory curation.
 - If the agent wants to mark the email read or create a draft, Maestro asks for approval first.
 
-## Durable Trigger Readiness
+## Durable Trigger Foundation
 
-The one-time workflow is the behavior kernel for the durable version. Before enabling it for every
-new Praxis message, add these trigger and operations guarantees:
+The one-time workflow is the behavior kernel for the durable version. The scheduler now provides:
 
 1. Poll Gmail History from a persisted per-domain cursor and emit `gmail.message.received` events.
    Start from the current cursor so first enablement does not unexpectedly process the old inbox.
@@ -101,9 +100,13 @@ new Praxis message, add these trigger and operations guarantees:
    terminal failures to Needs Attention and support manual replay.
 6. Expose trigger health, cursor freshness, last detected message, and recent runs in the workflow
    UI. Keep independent messages parallel subject to scheduler resource limits.
-7. Add end-to-end tests for restart recovery, duplicate history pages, multiple new messages,
-   exact-message execution, retry/replay, quiet messages, and Chris-action notifications.
+7. Unit and API coverage for cursor bootstrap/reset, duplicate history pages, exact-message event
+   payloads, filtering, worker toggles, and replay with the original message payload.
 
 Gmail History polling is the recommended local-runtime MVP. Gmail push notifications can replace
 the producer later, but require Google Cloud Pub/Sub plus periodic watch renewal; the workflow event
 contract and idempotency rules should remain the same.
+
+The producer remains disabled until the Praxis durable workflow definition is created and reviewed.
+That next behavior slice must test multiple real messages, quiet completion, routed objects,
+Chris-action notifications, workflow retry, and restart recovery before unattended activation.

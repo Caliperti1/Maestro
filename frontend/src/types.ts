@@ -125,6 +125,30 @@ export type SchedulerWorkerStatus = {
   source: string;
 };
 
+export type GmailTriggerDomainStatus = {
+  domain_key: string;
+  status: string;
+  history_id?: string | null;
+  account_email?: string | null;
+  last_polled_at?: string | null;
+  last_emitted_at?: string | null;
+  last_message_id?: string | null;
+  last_emitted_count?: number;
+  last_skipped_count?: number;
+  last_error?: string | null;
+};
+
+export type GmailTriggerStatus = {
+  worker: {
+    enabled: boolean;
+    interval_seconds: number;
+    page_size: number;
+    source: string;
+  };
+  event_type: string;
+  domains: GmailTriggerDomainStatus[];
+};
+
 export type DropboxDomain = {
   key: string;
   inbox: number;

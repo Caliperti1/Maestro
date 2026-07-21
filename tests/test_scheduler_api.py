@@ -147,6 +147,78 @@ def test_scheduler_api_creates_definition_and_enqueues_event_trigger(
     assert runs[0]["queue_items"][0]["external_key"] == "triage"
 
 
+def test_scheduler_api_controls_gmail_trigger_worker(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+
+    initial = client.get("/scheduler/triggers/gmail/status")
+    updated = client.patch(
+        "/scheduler/triggers/gmail/status",
+        json={"enabled": True, "interval_seconds": 45, "page_size": 125},
+    )
+
+    assert initial.status_code == 200
+    assert initial.json()["worker"]["enabled"] is False
+    assert updated.status_code == 200
+    assert updated.json()["worker"] == {
+        "enabled": True,
+        "interval_seconds": 45,
+        "page_size": 125,
+        "source": "runtime",
+    }
+
+
+def test_scheduler_api_replays_event_run_with_original_message_payload(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+    created = client.post(
+        "/scheduler/definitions",
+        json={
+            "key": "praxis-email-replay-test",
+            "name": "Praxis Email Replay Test",
+            "domain_key": "praxis",
+            "trigger_type": "event",
+            "trigger_config": {
+                "event_type": "gmail.message.received",
+                "filters": {"domain_key": "praxis"},
+            },
+            "workflow_spec": {
+                "queue_items": [
+                    {
+                        "id": "triage",
+                        "objective": "Triage the exact trigger message.",
+                        "domain_key": "praxis",
+                    }
+                ]
+            },
+        },
+    )
+    assert created.status_code == 200
+    event = client.post(
+        "/scheduler/triggers/event",
+        json={
+            "event_type": "gmail.message.received",
+            "event_id": "praxis:msg-replay",
+            "event_payload": {"domain_key": "praxis", "message_id": "msg-replay"},
+        },
+    )
+    original = event.json()["runs"][0]
+
+    replay = client.post(f"/scheduler/runs/{original['id']}/replay")
+
+    assert replay.status_code == 200
+    payload = replay.json()["run"]
+    assert payload["source_type"] == "replay"
+    assert payload["id"] != original["id"]
+    assert payload["input_payload"]["event"]["payload"]["message_id"] == "msg-replay"
+
+
 def test_workflow_outputs_api_archives_reports(session: Session, tmp_path: Path) -> None:
     seed_default_domains(session)
     client = _client(session, tmp_path)
