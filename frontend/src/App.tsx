@@ -78,6 +78,7 @@ import type {
   SchedulerRun,
   SchedulerWorkerAgentRun,
   SchedulerWorkerStatus,
+  WorkflowTemplate,
   SkillRegistryItem,
   ToolConnection,
   ToolRegistryItem,
@@ -1413,6 +1414,7 @@ export function App() {
   const [schedulerWorkerStatus, setSchedulerWorkerStatus] =
     useState<SchedulerWorkerStatus | null>(null);
   const [gmailTriggerStatus, setGmailTriggerStatus] = useState<GmailTriggerStatus | null>(null);
+  const [workflowTemplates, setWorkflowTemplates] = useState<WorkflowTemplate[]>([]);
 
   const maestroPlanStages = useMemo(() => {
     if (!maestroPlan) return [];
@@ -1628,13 +1630,42 @@ export function App() {
   }, [applyConversation]);
 
   const loadSchedulerDashboard = useCallback(async () => {
-    const response = await apiJson<SchedulerDashboard>("/scheduler/dashboard");
+    const [response, templateResponse] = await Promise.all([
+      apiJson<SchedulerDashboard>("/scheduler/dashboard"),
+      apiJson<{ templates: WorkflowTemplate[] }>("/scheduler/templates"),
+    ]);
     setSchedulerDashboard(response);
+    setWorkflowTemplates(templateResponse.templates);
     setSelectedSchedulerRun((selected) => {
       if (!selected) return selected;
       return response.runs.find((run) => run.id === selected.id) ?? null;
     });
   }, []);
+
+  const installWorkflowTemplate = async (templateKey: string) => {
+    await apiJson(`/scheduler/templates/${templateKey}/install`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_active: false }),
+    });
+    setSchedulerStatusMessage("Praxis Email Triage was installed paused for review.");
+    await loadSchedulerDashboard();
+  };
+
+  const updateWorkflowDefinitionActivation = async (
+    definitionId: string,
+    isActive: boolean,
+  ) => {
+    await apiJson(`/scheduler/definitions/${definitionId}/activation`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_active: isActive }),
+    });
+    setSchedulerStatusMessage(
+      isActive ? "Workflow definition activated." : "Workflow definition paused.",
+    );
+    await loadSchedulerDashboard();
+  };
 
   const loadWorkflowOutputs = useCallback(async () => {
     const [runLogResponse, reportsResponse] = await Promise.all([
@@ -2694,6 +2725,7 @@ export function App() {
             schedulerDashboard={schedulerDashboard}
             schedulerWorkerStatus={schedulerWorkerStatus}
             gmailTriggerStatus={gmailTriggerStatus}
+            workflowTemplates={workflowTemplates}
             selectedSchedulerRun={selectedSchedulerRun}
             selectedSchedulerDefinition={selectedSchedulerDefinition}
             schedulerStatusMessage={schedulerStatusMessage}
@@ -2714,6 +2746,8 @@ export function App() {
             onToggleSchedulerWorker={(enabled) => updateSchedulerWorkerStatus({ enabled })}
             onPollGmailTriggers={pollGmailTriggers}
             onResetGmailDomain={resetGmailTriggerDomain}
+            onInstallTemplate={installWorkflowTemplate}
+            onToggleDefinition={updateWorkflowDefinitionActivation}
           />
         ) : activeSurface in routedSurfaceConfig ? (
           <RoutedObjectsWorkspace surface={activeSurface as RoutedObjectSurface} />
@@ -3462,6 +3496,7 @@ function WorkflowsWorkspace({
   schedulerDashboard,
   schedulerWorkerStatus,
   gmailTriggerStatus,
+  workflowTemplates,
   selectedSchedulerRun,
   selectedSchedulerDefinition,
   schedulerStatusMessage,
@@ -3478,10 +3513,13 @@ function WorkflowsWorkspace({
   onToggleSchedulerWorker,
   onPollGmailTriggers,
   onResetGmailDomain,
+  onInstallTemplate,
+  onToggleDefinition,
 }: {
   schedulerDashboard: SchedulerDashboard | null;
   schedulerWorkerStatus: SchedulerWorkerStatus | null;
   gmailTriggerStatus: GmailTriggerStatus | null;
+  workflowTemplates: WorkflowTemplate[];
   selectedSchedulerRun: SchedulerRun | null;
   selectedSchedulerDefinition: SchedulerDefinition | null;
   schedulerStatusMessage: string;
@@ -3498,6 +3536,8 @@ function WorkflowsWorkspace({
   onToggleSchedulerWorker: (enabled: boolean) => Promise<void>;
   onPollGmailTriggers: () => Promise<void>;
   onResetGmailDomain: (domainKey: string) => Promise<void>;
+  onInstallTemplate: (templateKey: string) => Promise<void>;
+  onToggleDefinition: (definitionId: string, isActive: boolean) => Promise<void>;
 }) {
   const [selectedQueueItemId, setSelectedQueueItemId] = useState<string | null>(null);
   const runs = schedulerDashboard?.runs ?? [];
@@ -3620,19 +3660,54 @@ function WorkflowsWorkspace({
         </section>
         <section>
           <h4>Triggers</h4>
-          {triggerDefinitions.map((definition) => (
-            <article className="workflow-summary-card compact-run-card" key={definition.id}>
-              <button type="button" className="card-reset" onClick={() => onSelectDefinition(definition)}>
-                <span>{definition.trigger_type}</span>
-                <h4>{definition.name}</h4>
-              </button>
+          {workflowTemplates.filter((template) => !template.installed).map((template) => (
+            <article className="workflow-summary-card compact-run-card" key={template.key}>
+              <span>available template</span>
+              <h4>{template.name}</h4>
+              <p>{template.description}</p>
               <div className="preview-meta">
-                <span>{definition.is_active ? "active" : "paused"}</span>
-                <span>{triggerSummary(definition.trigger_type, definition.trigger_config)}</span>
-                <span>{definition.fairness_group || definition.domain_key || "global"}</span>
+                <span>{template.readiness.ready ? "ready to install" : "setup needed"}</span>
+                {!template.readiness.ready && (
+                  <span>{template.readiness.missing.join("; ")}</span>
+                )}
+              </div>
+              <div className="scheduler-action-row compact-actions">
+                <button type="button" onClick={() => onInstallTemplate(template.key)}>
+                  Install paused
+                </button>
               </div>
             </article>
           ))}
+          {triggerDefinitions.map((definition) => {
+            const template = workflowTemplates.find(
+              (item) => item.definition_id === definition.id,
+            );
+            return (
+              <article className="workflow-summary-card compact-run-card" key={definition.id}>
+                <button type="button" className="card-reset" onClick={() => onSelectDefinition(definition)}>
+                  <span>{definition.trigger_type}</span>
+                  <h4>{definition.name}</h4>
+                </button>
+                <div className="preview-meta">
+                  <span>{definition.is_active ? "active" : "paused"}</span>
+                  <span>{triggerSummary(definition.trigger_type, definition.trigger_config)}</span>
+                  <span>{definition.fairness_group || definition.domain_key || "global"}</span>
+                  {template && (
+                    <span>{template.readiness.ready ? "prerequisites ready" : template.readiness.missing.join("; ")}</span>
+                  )}
+                </div>
+                <label className="worker-toggle">
+                  Active
+                  <input
+                    type="checkbox"
+                    checked={definition.is_active}
+                    disabled={!definition.is_active && template?.readiness.ready === false}
+                    onChange={(event) => onToggleDefinition(definition.id, event.target.checked)}
+                  />
+                </label>
+              </article>
+            );
+          })}
           {triggerDefinitions.length === 0 && <p className="empty-state">No trigger workflows yet.</p>}
           {gmailTriggerStatus?.domains.map((domain) => (
             <article className="workflow-summary-card compact-run-card" key={`gmail-${domain.domain_key}`}>

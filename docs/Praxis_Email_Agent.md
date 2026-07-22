@@ -107,6 +107,13 @@ Gmail History polling is the recommended local-runtime MVP. Gmail push notificat
 the producer later, but require Google Cloud Pub/Sub plus periodic watch renewal; the workflow event
 contract and idempotency rules should remain the same.
 
-The producer remains disabled until the Praxis durable workflow definition is created and reviewed.
-That next behavior slice must test multiple real messages, quiet completion, routed objects,
-Chris-action notifications, workflow retry, and restart recovery before unattended activation.
+The Workflows screen now exposes a canonical Praxis Email Triage template. Installation always
+starts paused. Maestro validates the active Praxis domain, Praxis Email Agent, required tools and
+skills, and the Praxis Google connection before activation. Gmail watch remains a separate switch:
+enable it only after reviewing and activating the definition so the first poll can bootstrap at the
+current mailbox cursor without processing old mail.
+
+Every durable run receives the immutable `gmail.message.received` event in scheduler context. The
+agent runtime treats its `payload.message_id` as authoritative and reads that exact message instead
+of listing or resolving the latest inbox message. The definition uses Luna, permits three attempts,
+and preserves the original event on replay.

@@ -97,6 +97,51 @@ def _seed_memory(session: Session) -> None:
     session.commit()
 
 
+def test_triggered_email_plan_reads_frozen_message_without_listing_latest() -> None:
+    user_context = (
+        "This task is being executed by Maestro's scheduler worker.\n\n"
+        + json.dumps(
+            {
+                "source_type": "event",
+                "event": {
+                    "event_type": "gmail.message.received",
+                    "event_id": "praxis:msg-exact",
+                    "payload": {"domain_key": "praxis", "message_id": "msg-exact"},
+                },
+            }
+        )
+    )
+    requested = [
+        {
+            "tool_key": "gmail.message.list_recent",
+            "payload": {"limit": 5},
+            "rationale": "Find recent mail.",
+        },
+        {
+            "tool_key": "memory.context_bundle",
+            "payload": {"query_text": "Praxis email context"},
+            "rationale": "Ground the triage.",
+        },
+    ]
+
+    hardened = _harden_email_tool_plan(
+        requested,
+        [],
+        task_instruction="Triage the triggered Praxis email.",
+        user_context=user_context,
+        allowed_tool_keys={"gmail.message.get", "gmail.message.list_recent", "memory.context_bundle"},
+    )
+
+    assert [item["tool_key"] for item in hardened] == [
+        "gmail.message.get",
+        "memory.context_bundle",
+    ]
+    assert hardened[0]["payload"] == {
+        "message_id": "msg-exact",
+        "max_body_chars": 6000,
+    }
+
+
 class FakeAgentLLMClient:
     provider = "test"
     model = "test-agent-model"
@@ -467,7 +512,8 @@ class FakeEmailTriageFinalizationLLMClient:
 
     def structured_response(self, *, instructions: str, input_text: str, **kwargs):
         self.structured_calls += 1
-        if self.structured_calls == 1:
+        is_finalizer = "operational finalizer" in instructions
+        if self.structured_calls == 1 and not is_finalizer:
             return {
                 "plan_summary": "Select the latest Praxis email.",
                 "requires_final_answer": True,
@@ -477,7 +523,7 @@ class FakeEmailTriageFinalizationLLMClient:
                     "rationale": "Select one message.",
                 }],
             }
-        if self.structured_calls == 2:
+        if self.structured_calls == 2 and not is_finalizer:
             return {
                 "plan_summary": "Read the selected email.",
                 "requires_final_answer": True,
@@ -487,7 +533,7 @@ class FakeEmailTriageFinalizationLLMClient:
                     "rationale": "Read the full message.",
                 }],
             }
-        if self.structured_calls == 3:
+        if self.structured_calls == 3 and not is_finalizer:
             return {
                 "plan_summary": "Read thread context.",
                 "requires_final_answer": True,
@@ -497,7 +543,7 @@ class FakeEmailTriageFinalizationLLMClient:
                     "rationale": "Resolve ownership from thread context.",
                 }],
             }
-        if self.structured_calls == 4:
+        if self.structured_calls == 4 and not is_finalizer:
             return {
                 "plan_summary": "Inspect the linked Drive folder.",
                 "requires_final_answer": True,
@@ -507,7 +553,7 @@ class FakeEmailTriageFinalizationLLMClient:
                     "rationale": "Inspect supporting files when accessible.",
                 }],
             }
-        assert "operational finalizer" in instructions
+        assert is_finalizer
         assert "Jordan Lee" in input_text
         return {
             "plan_summary": "Route the contact and notify Chris despite the optional Drive failure.",
@@ -3986,10 +4032,9 @@ def test_email_triage_reserves_operational_finalization_after_evidence_budget(
     )
 
     assert result.status == "completed"
-    assert llm_client.structured_calls == 5
+    assert llm_client.structured_calls == 4
     assert result.tool_loop["iterations"][-1]["phase"] == "email_operational_finalization"
     tool_names = [call["tool_name"] for call in result.tool_calls]
-    assert "google.drive.file.get" in tool_names
     assert "llm.email_triage_finalizer" in tool_names
     assert "routed.item.create" in tool_names
     assert "workflow.notification.create" in tool_names

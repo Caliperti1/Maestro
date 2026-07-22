@@ -10,7 +10,7 @@ work.
 
 - Behavior Test 003 passes for one manually selected email.
 - The Praxis Google OAuth refresh token includes Gmail read/modify scopes and the Drive scope.
-- The durable `praxis-email-triage` workflow definition is active.
+- The canonical `praxis-email-triage` template has been installed paused, reviewed, then activated.
 - Gmail watch and the scheduler auto worker are enabled in Workflows.
 - The Praxis Gmail monitor shows `healthy` after its initial cursor bootstrap.
 
@@ -18,6 +18,7 @@ work.
 
 | ID | Action | Expected behavior | Evidence | Status |
 | --- | --- | --- | --- | --- |
+| 4.0 | Install the canonical template paused, inspect its readiness, then activate it. | Installation creates one inactive Luna workflow with the Praxis Email Agent, five manager skills, exact-message objective, and three attempts. Activation is unavailable until prerequisites pass. | Workflows template and trigger cards. | Automated; human activation not run |
 | 4.1 | Enable Gmail watch for the first time. | Maestro stores the current Gmail cursor and does not process old inbox messages. | Praxis Gmail monitor says `initialized`; zero new runs. | Not run |
 | 4.2 | Send one controlled action-required email to Praxis. | One event and one queued run are created with that exact Gmail message ID. | Workflow event payload and run input. | Not run |
 | 4.3 | Leave Maestro chat open while triage runs. | Chat remains usable; the workflow runs in the background. | A separate chat response can complete during triage. | Not run |
