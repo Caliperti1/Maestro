@@ -21,6 +21,7 @@ from app.api.workflow_outputs import router as workflow_outputs_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
+from app.maestro.gmail_trigger import GmailTriggerService, gmail_trigger_worker_settings
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
 from app.memory.dropbox import MemoryDropboxProcessor
 
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
         worker_tasks.extend(
             [
                 asyncio.create_task(_scheduler_worker_loop()),
+                asyncio.create_task(_gmail_trigger_worker_loop()),
                 asyncio.create_task(_memory_dropbox_worker_loop()),
             ]
         )
@@ -93,6 +95,32 @@ def _process_scheduler_work_once() -> int:
                 execute_llm=bool(worker_settings["execute_llm"]),
                 auto_tool_loop=bool(worker_settings["auto_tool_loop"]),
             )
+        return int(worker_settings["interval_seconds"])
+
+
+async def _gmail_trigger_worker_loop() -> None:
+    while True:
+        interval_seconds = get_settings().gmail_trigger_interval_seconds
+        try:
+            interval_seconds = await asyncio.to_thread(_process_gmail_triggers_once)
+        except Exception:
+            logger.exception("Gmail trigger worker heartbeat failed.")
+        await asyncio.sleep(max(10, interval_seconds))
+
+
+def _process_gmail_triggers_once() -> int:
+    """Poll Gmail History once when the durable trigger producer is enabled."""
+    with SessionLocal() as session:
+        worker_settings = gmail_trigger_worker_settings(session)
+        if worker_settings["enabled"]:
+            result = GmailTriggerService(session).poll_once(
+                page_size=int(worker_settings["page_size"]),
+            )
+            if result["emitted_count"]:
+                logger.info(
+                    "Gmail trigger worker emitted %s message event(s).",
+                    result["emitted_count"],
+                )
         return int(worker_settings["interval_seconds"])
 
 

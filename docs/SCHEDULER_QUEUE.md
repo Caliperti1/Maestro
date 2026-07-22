@@ -84,6 +84,11 @@ The foundation includes the service/API primitives the worker process will use:
 
 - `POST /scheduler/triggers/enqueue-due`: enqueue due scheduled/recurring definitions.
 - `POST /scheduler/triggers/event`: enqueue event-triggered definitions, such as a new email event.
+- `GET/PATCH /scheduler/triggers/gmail/status`: inspect or toggle Gmail History monitoring.
+- `POST /scheduler/triggers/gmail/poll`: run one Gmail trigger poll for debugging.
+- `POST /scheduler/triggers/gmail/domains/{domain_key}/reset`: bootstrap a domain at Gmail's
+  current cursor without processing historical messages.
+- `POST /scheduler/runs/{run_id}/replay`: queue a fresh run with the original trigger payload.
 - `POST /scheduler/tick`: enqueue due definitions and claim runnable work in one scheduler cycle.
 - `POST /scheduler/worker/claim`: claim currently runnable queue items, acquire locks, and set leases.
 - `POST /scheduler/queue-items/{id}/complete`: mark work complete and unblock dependents.
@@ -132,3 +137,24 @@ Event-based workflow:
   }
 }
 ```
+
+## Gmail History Producer
+
+The backend contains a disabled-by-default Gmail History heartbeat. It watches only domains that
+have an active event definition for `gmail.message.received`. On first activation it records the
+account's current Gmail `historyId` and emits no events, preventing accidental historical inbox
+processing. Later polls:
+
+1. Request `messageAdded` history after the persisted cursor.
+2. Deduplicate message ids across all returned pages.
+3. Fetch current metadata and accept only messages labeled `INBOX` and not `DRAFT`, `SENT`, `SPAM`,
+   or `TRASH`.
+4. Emit an event whose id is `{domain_key}:{message_id}` and whose payload freezes the exact Gmail
+   message and thread ids.
+5. Advance the cursor only after all eligible events have been handed to the scheduler.
+
+Scheduler run idempotency prevents restarts or repeated history pages from creating duplicate runs.
+If Gmail has expired an old cursor, Maestro resets to the current cursor, records the warning in
+trigger health, and does not guess at the missing interval. Trigger health and manual cursor reset
+are visible in the Workflows UI. Keep the Gmail trigger worker off until the intended durable email
+workflow definition has been reviewed and activated.

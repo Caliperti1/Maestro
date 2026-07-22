@@ -424,8 +424,8 @@ Each domain brief should return:
 
 ### 9.4.1 Email trigger hardening
 
-- Add a Gmail history/watch or polling trigger that enqueues domain email workflows when new mail
-  arrives.
+- Completed: add a persisted Gmail History poller that emits idempotent exact-message events,
+  exposes health/reset controls, and supports replay with the original event payload.
 - Add per-domain email workflow templates so Praxis, Ophi, Maestro Development, and Personal can
   reuse the same triage pattern with different credentials, skills, and notification policies.
 - Add domain policy controls for safe autonomous email writes such as marking obvious spam read.

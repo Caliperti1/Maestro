@@ -4,6 +4,8 @@
 
 - [001 Code Feature Design Discussion](001_code_feature_design_discussion.md)
 - [002 Maestro Self-Improving Coding Loop](002_maestro_self_improving_coding_loop.md)
+- [003 Single Praxis Email Triage](003_single_email_triage.md)
+- [004 Durable Praxis Email Triage](004_durable_praxis_email_triage.md)
 
 This directory tracks end-to-end behavioral tests that are not fully automated yet. Use these
 matrices while manually testing Maestro through the UI and backend logs.

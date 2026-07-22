@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     scheduler_worker_claim_limit: int = 4
     scheduler_worker_execute_llm: bool = True
     scheduler_worker_auto_tool_loop: bool = True
+    gmail_trigger_autorun: bool = False
+    gmail_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
+    gmail_trigger_page_size: Annotated[int, Field(ge=1, le=500)] = 100
 
     @property
     def cors_origins(self) -> list[str]:

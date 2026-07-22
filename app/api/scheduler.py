@@ -8,6 +8,11 @@ from sqlalchemy.orm import Session
 from app.db.models import WorkflowDefinition, WorkflowQueueItem, WorkflowRun
 from app.db.repositories import DomainRepository
 from app.db.session import get_db
+from app.maestro.gmail_trigger import (
+    GmailTriggerError,
+    GmailTriggerService,
+    update_gmail_trigger_worker_settings,
+)
 from app.maestro.scheduler import SchedulerService
 from app.maestro.scheduler_worker import (
     SchedulerWorkerService,
@@ -82,6 +87,12 @@ class SchedulerWorkerSettingsBody(BaseModel):
     claim_limit: int | None = Field(default=None, ge=1, le=20)
     execute_llm: bool | None = None
     auto_tool_loop: bool | None = None
+
+
+class GmailTriggerWorkerSettingsBody(BaseModel):
+    enabled: bool | None = None
+    interval_seconds: int | None = Field(default=None, ge=10, le=3600)
+    page_size: int | None = Field(default=None, ge=1, le=500)
 
 
 @router.get("/definitions")
@@ -167,11 +178,55 @@ def get_scheduler_dashboard(db: Session = Depends(get_db)) -> dict[str, Any]:
     return SchedulerService(db).dashboard()
 
 
+@router.get("/triggers/gmail/status")
+def get_gmail_trigger_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return GmailTriggerService(db).status()
+
+
+@router.patch("/triggers/gmail/status")
+def update_gmail_trigger_status(
+    body: GmailTriggerWorkerSettingsBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    worker = update_gmail_trigger_worker_settings(
+        db,
+        enabled=body.enabled,
+        interval_seconds=body.interval_seconds,
+        page_size=body.page_size,
+    )
+    return {"worker": worker, "status": GmailTriggerService(db).status()}
+
+
+@router.post("/triggers/gmail/poll")
+def poll_gmail_triggers(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return GmailTriggerService(db).poll_once()
+
+
+@router.post("/triggers/gmail/domains/{domain_key}/reset")
+def reset_gmail_trigger_domain(
+    domain_key: str,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return {"domain": GmailTriggerService(db).reset_domain(domain_key)}
+    except GmailTriggerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/runs/{run_id}")
 def get_workflow_run(run_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     run = db.get(WorkflowRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Unknown workflow run.")
+    return {"run": SchedulerService(db).workflow_run_payload(run, include_events=True)}
+
+
+@router.post("/runs/{run_id}/replay")
+def replay_workflow_run(run_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        run = SchedulerService(db).replay_run(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"run": SchedulerService(db).workflow_run_payload(run, include_events=True)}
 
 
