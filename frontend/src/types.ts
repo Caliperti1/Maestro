@@ -89,6 +89,30 @@ export type SchedulerDefinition = {
   is_active: boolean;
 };
 
+export type WorkflowTemplate = {
+  key: string;
+  name: string;
+  domain_key: string;
+  description: string;
+  trigger_type: string;
+  trigger_config: Record<string, unknown>;
+  workflow_spec: Record<string, unknown>;
+  priority: string;
+  fairness_group: string;
+  installed: boolean;
+  definition_id: string | null;
+  is_active: boolean;
+  readiness: {
+    ready: boolean;
+    missing: string[];
+    domain_ready: boolean;
+    agent_ready: boolean;
+    connection_ready: boolean;
+    missing_tools: string[];
+    missing_skills: string[];
+  };
+};
+
 export type SchedulerDashboard = {
   definitions: SchedulerDefinition[];
   runs: SchedulerRun[];

@@ -19,6 +19,7 @@ from app.maestro.scheduler_worker import (
     scheduler_worker_settings,
     update_scheduler_worker_settings,
 )
+from app.maestro.workflow_templates import WorkflowTemplateService
 
 router = APIRouter(prefix="/scheduler", tags=["scheduler"])
 
@@ -93,6 +94,39 @@ class GmailTriggerWorkerSettingsBody(BaseModel):
     enabled: bool | None = None
     interval_seconds: int | None = Field(default=None, ge=10, le=3600)
     page_size: int | None = Field(default=None, ge=1, le=500)
+
+
+class WorkflowTemplateInstallBody(BaseModel):
+    is_active: bool = False
+
+
+class WorkflowDefinitionActivationBody(BaseModel):
+    is_active: bool
+
+
+@router.get("/templates")
+def list_workflow_templates(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return {"templates": WorkflowTemplateService(db).list_templates()}
+
+
+@router.post("/templates/{template_key}/install")
+def install_workflow_template(
+    template_key: str,
+    body: WorkflowTemplateInstallBody | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    service = WorkflowTemplateService(db)
+    try:
+        definition = service.install(
+            template_key,
+            is_active=(body or WorkflowTemplateInstallBody()).is_active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "template": service.template_payload(template_key),
+        "definition": SchedulerService(db).workflow_definition_payload(definition),
+    }
 
 
 @router.get("/definitions")
@@ -171,6 +205,30 @@ def update_workflow_definition(
         is_active=body.is_active,
     )
     return {"definition": service.workflow_definition_payload(definition)}
+
+
+@router.patch("/definitions/{definition_id}/activation")
+def activate_workflow_definition(
+    definition_id: uuid.UUID,
+    body: WorkflowDefinitionActivationBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    definition = db.get(WorkflowDefinition, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow definition.")
+    template_service = WorkflowTemplateService(db)
+    try:
+        definition = template_service.set_active(definition, is_active=body.is_active)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "definition": SchedulerService(db).workflow_definition_payload(definition),
+        "template": (
+            template_service.template_payload(definition.key)
+            if definition.key == "praxis-email-triage"
+            else None
+        ),
+    }
 
 
 @router.get("/dashboard")

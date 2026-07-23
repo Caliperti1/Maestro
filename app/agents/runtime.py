@@ -1435,6 +1435,7 @@ class PromptAggregationService:
                     requested,
                     prior_results,
                     task_instruction=package.task_instruction,
+                    user_context=package.user_context,
                     allowed_tool_keys={tool.key for tool in package.tool_manifest},
                 )
                 fallback_reason = ""
@@ -1958,6 +1959,7 @@ def _harden_email_tool_plan(
     prior_results: list[dict[str, Any]],
     *,
     task_instruction: str,
+    user_context: str | None = None,
     allowed_tool_keys: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     email_tool_names = {"gmail.message.list_recent", "gmail.message.get", "gmail.thread.get"}
@@ -1974,6 +1976,22 @@ def _harden_email_tool_plan(
     has_list = _has_tool_result(prior_results, "gmail.message.list_recent")
     has_message = _has_tool_result(prior_results, "gmail.message.get")
     safe_context_tools = {"memory.context_bundle", "reports.search", "reports.get"}
+    trigger_message_id = _triggered_gmail_message_id(user_context)
+
+    # A scheduler-triggered message ID is immutable. It always wins over an
+    # LLM request to list or infer the latest message.
+    if trigger_message_id and not has_message:
+        context_requests = [
+            item for item in requested_tools if item.get("tool_key") in safe_context_tools
+        ]
+        return [
+            {
+                "tool_key": "gmail.message.get",
+                "payload": {"message_id": trigger_message_id, "max_body_chars": 6000},
+                "rationale": "Read the exact Gmail message frozen into the scheduler trigger.",
+            },
+            *context_requests,
+        ][:5]
 
     # Triggered email workflows may receive an exact message directly without a
     # preceding inbox-list call. Treat that body as sufficient selection context.
@@ -2074,6 +2092,26 @@ def _harden_email_tool_plan(
             item = hydrated
         hardened.append(item)
     return hardened[:5]
+
+
+def _triggered_gmail_message_id(user_context: str | None) -> str | None:
+    if not user_context or "gmail.message.received" not in user_context:
+        return None
+    json_start = user_context.find("{")
+    if json_start < 0:
+        return None
+    try:
+        context = json.loads(user_context[json_start:])
+    except json.JSONDecodeError:
+        return None
+    event = context.get("event") if isinstance(context, dict) else None
+    if not isinstance(event, dict) or event.get("event_type") != "gmail.message.received":
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    message_id = str(payload.get("message_id") or "").strip()
+    return message_id or None
 
 
 def _normalize_email_action_requests(
