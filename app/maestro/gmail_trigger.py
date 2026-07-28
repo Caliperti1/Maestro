@@ -189,6 +189,22 @@ def update_gmail_trigger_worker_settings(
     return gmail_trigger_worker_settings(session)
 
 
+def sync_gmail_trigger_worker_settings(session: Session) -> dict[str, Any]:
+    """Keep the shared poller on only while a workflow-specific Gmail watch is active."""
+    definitions = session.scalars(
+        select(WorkflowDefinition).where(
+            WorkflowDefinition.is_active.is_(True),
+            WorkflowDefinition.trigger_type == "event",
+        )
+    ).all()
+    enabled = any(
+        (definition.trigger_config or {}).get("event_type") == GMAIL_TRIGGER_EVENT_TYPE
+        and (definition.trigger_config or {}).get("gmail_watch_enabled", True) is not False
+        for definition in definitions
+    )
+    return update_gmail_trigger_worker_settings(session, enabled=enabled)
+
+
 class GmailTriggerService:
     def __init__(
         self,
@@ -437,6 +453,8 @@ class GmailTriggerService:
         for definition in definitions:
             config = definition.trigger_config or {}
             if config.get("event_type") != GMAIL_TRIGGER_EVENT_TYPE:
+                continue
+            if config.get("gmail_watch_enabled", True) is False:
                 continue
             if definition.domain_id:
                 domain_ids.add(definition.domain_id)

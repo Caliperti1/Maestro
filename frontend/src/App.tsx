@@ -1713,9 +1713,9 @@ export function App() {
     setGmailTriggerStatus(response);
   }, []);
 
-  const updateGmailTriggerStatus = async (enabled: boolean) => {
+  const updateDefinitionGmailWatch = async (definitionId: string, enabled: boolean) => {
     const response = await apiJson<{ worker: GmailTriggerStatus["worker"]; status: GmailTriggerStatus }>(
-      "/scheduler/triggers/gmail/status",
+      `/scheduler/definitions/${definitionId}/gmail-watch`,
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1725,9 +1725,10 @@ export function App() {
     setGmailTriggerStatus(response.status);
     setSchedulerStatusMessage(
       response.worker.enabled
-        ? "Gmail trigger monitoring is on. New eligible messages will emit workflow events."
-        : "Gmail trigger monitoring is paused.",
+        ? "This workflow is watching Gmail for new eligible messages."
+        : "This workflow's Gmail watch is off.",
     );
+    await loadSchedulerDashboard();
   };
 
   const pollGmailTriggers = async () => {
@@ -2742,7 +2743,7 @@ export function App() {
             onSelectDefinition={selectSchedulerDefinition}
             onApproveToolCall={approveToolCall}
             onRejectToolCall={rejectToolCall}
-            onToggleGmailTrigger={updateGmailTriggerStatus}
+            onToggleDefinitionGmailWatch={updateDefinitionGmailWatch}
             onToggleSchedulerWorker={(enabled) => updateSchedulerWorkerStatus({ enabled })}
             onPollGmailTriggers={pollGmailTriggers}
             onResetGmailDomain={resetGmailTriggerDomain}
@@ -3509,7 +3510,7 @@ function WorkflowsWorkspace({
   onSelectDefinition,
   onApproveToolCall,
   onRejectToolCall,
-  onToggleGmailTrigger,
+  onToggleDefinitionGmailWatch,
   onToggleSchedulerWorker,
   onPollGmailTriggers,
   onResetGmailDomain,
@@ -3532,7 +3533,7 @@ function WorkflowsWorkspace({
   onSelectDefinition: (definition: SchedulerDefinition) => void;
   onApproveToolCall: (toolCallId: string) => Promise<void>;
   onRejectToolCall: (toolCallId: string) => Promise<void>;
-  onToggleGmailTrigger: (enabled: boolean) => Promise<void>;
+  onToggleDefinitionGmailWatch: (definitionId: string, enabled: boolean) => Promise<void>;
   onToggleSchedulerWorker: (enabled: boolean) => Promise<void>;
   onPollGmailTriggers: () => Promise<void>;
   onResetGmailDomain: (domainKey: string) => Promise<void>;
@@ -3584,17 +3585,6 @@ function WorkflowsWorkspace({
               onChange={(event) => onToggleSchedulerWorker(event.target.checked)}
             />
           </label>
-          <label className="worker-toggle">
-            Gmail watch
-            <input
-              type="checkbox"
-              checked={gmailTriggerStatus?.worker.enabled ?? false}
-              onChange={(event) => onToggleGmailTrigger(event.target.checked)}
-            />
-          </label>
-          <button className="icon-button" onClick={onPollGmailTriggers} title="Poll Gmail now" type="button">
-            <Inbox size={18} />
-          </button>
           <button className="icon-button" onClick={onRefresh} title="Refresh workflows" type="button">
             <RefreshCw size={18} />
           </button>
@@ -3682,6 +3672,15 @@ function WorkflowsWorkspace({
             const template = workflowTemplates.find(
               (item) => item.definition_id === definition.id,
             );
+            const isGmailTrigger =
+              definition.trigger_config.event_type === "gmail.message.received";
+            const configuredWatch = definition.trigger_config.gmail_watch_enabled;
+            const gmailWatchEnabled =
+              configuredWatch === true
+              || (configuredWatch === undefined && definition.key !== "praxis-email-triage");
+            const gmailDomainStatus = gmailTriggerStatus?.domains.find(
+              (domain) => domain.domain_key === definition.domain_key,
+            );
             return (
               <article className="workflow-summary-card compact-run-card" key={definition.id}>
                 <button type="button" className="card-reset" onClick={() => onSelectDefinition(definition)}>
@@ -3695,36 +3694,58 @@ function WorkflowsWorkspace({
                   {template && (
                     <span>{template.readiness.ready ? "prerequisites ready" : template.readiness.missing.join("; ")}</span>
                   )}
+                  {gmailDomainStatus?.last_polled_at && (
+                    <span>polled {formatDateTime(gmailDomainStatus.last_polled_at)}</span>
+                  )}
+                  {gmailDomainStatus?.last_error && <span>{gmailDomainStatus.last_error}</span>}
                 </div>
-                <label className="worker-toggle">
-                  Active
-                  <input
-                    type="checkbox"
-                    checked={definition.is_active}
-                    disabled={!definition.is_active && template?.readiness.ready === false}
-                    onChange={(event) => onToggleDefinition(definition.id, event.target.checked)}
-                  />
-                </label>
+                <div className="scheduler-action-row compact-actions">
+                  <label className="worker-toggle">
+                    Workflow active
+                    <input
+                      type="checkbox"
+                      checked={definition.is_active}
+                      disabled={!definition.is_active && template?.readiness.ready === false}
+                      onChange={(event) => onToggleDefinition(definition.id, event.target.checked)}
+                    />
+                  </label>
+                  {isGmailTrigger && (
+                    <label className="worker-toggle">
+                      Gmail watch
+                      <input
+                        type="checkbox"
+                        checked={gmailWatchEnabled}
+                        disabled={!definition.is_active}
+                        onChange={(event) => onToggleDefinitionGmailWatch(
+                          definition.id,
+                          event.target.checked,
+                        )}
+                      />
+                    </label>
+                  )}
+                  {isGmailTrigger && gmailWatchEnabled && (
+                    <button
+                      className="icon-button"
+                      onClick={onPollGmailTriggers}
+                      title="Poll this Gmail account now"
+                      type="button"
+                    >
+                      <Inbox size={18} />
+                    </button>
+                  )}
+                  {isGmailTrigger && gmailDomainStatus && (
+                    <button type="button" onClick={() => onResetGmailDomain(gmailDomainStatus.domain_key)}>
+                      Reset account cursor
+                    </button>
+                  )}
+                </div>
               </article>
             );
           })}
-          {triggerDefinitions.length === 0 && <p className="empty-state">No trigger workflows yet.</p>}
-          {gmailTriggerStatus?.domains.map((domain) => (
-            <article className="workflow-summary-card compact-run-card" key={`gmail-${domain.domain_key}`}>
-              <span>{domain.status}</span>
-              <h4>{domain.domain_key} Gmail monitor</h4>
-              <div className="preview-meta">
-                {domain.last_polled_at && <span>polled {formatDateTime(domain.last_polled_at)}</span>}
-                {domain.last_message_id && <span>message {domain.last_message_id}</span>}
-                {domain.last_error && <span>{domain.last_error}</span>}
-              </div>
-              <div className="scheduler-action-row compact-actions">
-                <button type="button" onClick={() => onResetGmailDomain(domain.domain_key)}>
-                  Reset cursor
-                </button>
-              </div>
-            </article>
-          ))}
+          {triggerDefinitions.length === 0
+            && workflowTemplates.every((template) => template.installed) && (
+              <p className="empty-state">No trigger workflows yet.</p>
+            )}
         </section>
       </div>
       {selectedSchedulerRun && (
