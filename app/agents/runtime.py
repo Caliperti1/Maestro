@@ -1715,7 +1715,7 @@ class PromptAggregationService:
         for requested_tool in requested:
             tool_key = requested_tool["tool_key"]
             payload = requested_tool.get("payload") or {}
-            if tool_key not in _AUTO_TOOL_SAFE_TOOL_KEYS:
+            if not _tool_request_is_auto_executable(tool_key, payload):
                 policy = _TOOL_SAFETY_POLICIES.get(
                     tool_key,
                     {
@@ -2835,7 +2835,10 @@ _TOOL_SAFETY_POLICIES = {
     "gmail.message.modify": {
         "level": "external_write",
         "auto_executable": False,
-        "reason": "Modifies Gmail labels/read state and requires Chris approval.",
+        "reason": (
+            "Gmail label changes require Chris approval except for removing only the "
+            "UNREAD label after triage."
+        ),
     },
     "google.drive.file.get": {
         "level": "safe_read",
@@ -2915,6 +2918,31 @@ _TOOL_SAFETY_POLICIES = {
 _AUTO_TOOL_SAFE_TOOL_KEYS = {
     key for key, policy in _TOOL_SAFETY_POLICIES.items() if policy["auto_executable"]
 }
+
+
+def _tool_request_is_auto_executable(tool_key: str, payload: dict[str, Any]) -> bool:
+    if tool_key in _AUTO_TOOL_SAFE_TOOL_KEYS:
+        return True
+    if tool_key != "gmail.message.modify":
+        return False
+
+    raw_added = payload.get("add_label_ids") or payload.get("add_labels") or []
+    raw_removed = payload.get("remove_label_ids") or payload.get("remove_labels") or []
+    if isinstance(raw_added, str):
+        raw_added = [raw_added]
+    if isinstance(raw_removed, str):
+        raw_removed = [raw_removed]
+    added = {
+        str(value).strip().upper()
+        for value in raw_added
+        if str(value).strip()
+    }
+    removed = {
+        str(value).strip().upper()
+        for value in raw_removed
+        if str(value).strip()
+    }
+    return not added and removed == {"UNREAD"}
 
 _TOOL_PLANNER_INSTRUCTIONS = load_prompt("agent_tool_planner.md")
 _EMAIL_TRIAGE_FINALIZER_INSTRUCTIONS = load_prompt("email_triage_finalizer.md")

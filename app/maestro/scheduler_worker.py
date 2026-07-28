@@ -92,6 +92,36 @@ def _conversation_from_agent_output(output_text: str | None) -> str | None:
     return None
 
 
+def _tool_call_blocker_message(call: dict[str, Any]) -> str:
+    output = call.get("output_payload")
+    output = output if isinstance(output, dict) else {}
+    preview = output.get("approval_preview")
+    preview = preview if isinstance(preview, dict) else {}
+    summary = str(preview.get("summary") or output.get("preview_summary") or "").strip()
+    rationale = str(preview.get("rationale") or output.get("rationale") or "").strip()
+    if summary and rationale and rationale not in summary:
+        return f"{summary} Reason: {rationale}"
+    return summary or rationale or str(call.get("error_message") or "").strip()
+
+
+def _agent_run_blocker_message(agent_run) -> str:
+    for call in agent_run.tool_calls:
+        if call.get("status") != "approval_required":
+            continue
+        message = _tool_call_blocker_message(call)
+        if message:
+            return message
+    return agent_run.error_message or "Agent run is blocked and needs Chris's input."
+
+
+def _approved_tool_results(item: WorkflowQueueItem) -> list[dict[str, Any]]:
+    output = item.output_payload or {}
+    results = output.get("approved_tool_results")
+    if not isinstance(results, list):
+        return []
+    return [result for result in results if isinstance(result, dict)]
+
+
 def _queue_item_model_profile(
     run: WorkflowRun,
     item: WorkflowQueueItem,
@@ -274,6 +304,7 @@ class SchedulerWorkerService:
                 ),
                 stage_interaction=True,
                 execute_llm=execute_llm,
+                initial_tool_results=_approved_tool_results(item),
                 auto_tool_loop=auto_tool_loop,
                 max_tool_iterations=max_tool_iterations,
                 parent_task_id=item.parent_task_id,
@@ -349,7 +380,7 @@ class SchedulerWorkerService:
         if agent_run.status == "blocked":
             blocked = self.scheduler.block_queue_item(
                 item.id,
-                error_message=agent_run.error_message or "Agent run is blocked.",
+                error_message=_agent_run_blocker_message(agent_run),
                 output_payload=self._agent_run_payload(agent_run),
             )
             self._post_channel_update(
@@ -447,6 +478,76 @@ class SchedulerWorkerService:
             run = self.session.get(WorkflowRun, completed.workflow_run_id)
             if run is not None and run.status == "completed":
                 self._finalize_completed_workflow_run(run)
+            return run
+        return None
+
+    def resume_approved_tool_action(
+        self,
+        *,
+        task_id: uuid.UUID,
+        tool_result: dict[str, Any],
+    ) -> WorkflowRun | None:
+        """Attach an approved result and requeue the same durable lane for finalization."""
+        for item in self.session.scalars(select(WorkflowQueueItem)).all():
+            item_output = item.output_payload or {}
+            agent_run = item_output.get("agent_run")
+            if not isinstance(agent_run, dict) or str(agent_run.get("task_id")) != str(task_id):
+                continue
+
+            approved_id = str(tool_result.get("id") or "")
+            calls = agent_run.get("tool_calls") if isinstance(agent_run.get("tool_calls"), list) else []
+            updated_calls = [
+                tool_result if str(call.get("id") or "") == approved_id else call
+                for call in calls
+            ]
+            agent_run = {**agent_run, "tool_calls": updated_calls}
+            remaining = [
+                call for call in updated_calls if call.get("status") == "approval_required"
+            ]
+            if remaining:
+                blocked = self.scheduler.block_queue_item(
+                    item.id,
+                    error_message=_tool_call_blocker_message(remaining[0]),
+                    output_payload={"agent_run": agent_run},
+                )
+                return self.session.get(WorkflowRun, blocked.workflow_run_id)
+
+            task = self.session.get(Task, task_id)
+            if task is not None:
+                task.status = "completed"
+                task.error_message = None
+                task.completed_at = datetime.now(UTC)
+            prior_results = _approved_tool_results(item)
+            item.status = "queued"
+            item.error_message = None
+            item.completed_at = None
+            item.started_at = None
+            item.lease_owner = None
+            item.lease_expires_at = None
+            item.output_payload = {
+                **item_output,
+                "agent_run": agent_run,
+                "approved_tool_results": [*prior_results, tool_result],
+            }
+            run = self.session.get(WorkflowRun, item.workflow_run_id)
+            if run is not None:
+                run.status = "queued"
+                run.error_message = None
+                run.completed_at = None
+            self.scheduler.record_event(
+                run,
+                queue_item=item,
+                event_type="queue_item_approval_resolved",
+                message=(
+                    f"Approved `{tool_result.get('tool_name') or 'tool action'}`; "
+                    f"requeued `{item.external_key}` for finalization."
+                ),
+                payload=tool_result,
+                commit=False,
+            )
+            self.session.commit()
+            if run is not None:
+                self.session.refresh(run)
             return run
         return None
 

@@ -23,9 +23,10 @@ workflow when a new message arrives.
 
 ## Safety
 
-Gmail read tools are auto-executable. Gmail writes, including marking a message read, still require
-Chris approval. Internal routed candidate creation is auto-executable because it writes only to
-Maestro stores and preserves source provenance.
+Gmail read tools are auto-executable. Removing only the `UNREAD` label after triage is also
+auto-executable. Every broader Gmail mutation, including archiving, starring, moving, deleting, or
+creating a draft, still requires Chris approval. Internal routed candidate creation is
+auto-executable because it writes only to Maestro stores and preserves source provenance.
 
 ## Model Routing
 
@@ -83,7 +84,10 @@ Expected behavior:
 - New routed objects appear in Memory dropdown views.
 - A report is created for the run.
 - An interaction artifact is staged for memory curation.
-- If the agent wants to mark the email read or create a draft, Maestro asks for approval first.
+- Marking the processed email read completes without approval; drafts and other Gmail mutations
+  still produce a specific approval card.
+- When a workflow does block, the main channel explains the concrete pending action and rationale
+  rather than reporting only that the agent is blocked.
 
 ## Durable Trigger Foundation
 
