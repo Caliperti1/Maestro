@@ -55,6 +55,7 @@ def test_praxis_email_template_installs_paused_with_canonical_contract(
     assert definition.trigger_config == {
         "event_type": "gmail.message.received",
         "filters": {"domain_key": "praxis"},
+        "gmail_watch_enabled": False,
     }
     item = definition.workflow_spec["queue_items"][0]
     assert item["agent_key"] == PRAXIS_EMAIL_AGENT_KEY
@@ -77,6 +78,10 @@ def test_praxis_email_template_requires_google_connection_before_activation(
     assert installed.status_code == 200
     definition_id = installed.json()["definition"]["id"]
     assert installed.json()["template"]["readiness"]["connection_ready"] is False
+    dashboard = client.get("/scheduler/dashboard")
+    assert dashboard.status_code == 200
+    assert dashboard.json()["definitions"][0]["id"] == definition_id
+    assert dashboard.json()["definitions"][0]["is_active"] is False
 
     rejected = client.patch(
         f"/scheduler/definitions/{definition_id}/activation",
@@ -93,6 +98,7 @@ def test_praxis_email_template_requires_google_connection_before_activation(
     assert activated.status_code == 200
     assert activated.json()["definition"]["is_active"] is True
     assert activated.json()["template"]["readiness"]["ready"] is True
+    assert activated.json()["definition"]["trigger_config"]["gmail_watch_enabled"] is False
 
 
 def test_installed_template_enqueues_exact_trigger_message_once(
@@ -110,6 +116,13 @@ def test_installed_template_enqueues_exact_trigger_message_once(
         f"/scheduler/definitions/{definition_id}/activation",
         json={"is_active": True},
     )
+    watch = client.patch(
+        f"/scheduler/definitions/{definition_id}/gmail-watch",
+        json={"enabled": True},
+    )
+    assert watch.status_code == 200
+    assert watch.json()["definition"]["trigger_config"]["gmail_watch_enabled"] is True
+    assert watch.json()["worker"]["enabled"] is True
     event = {
         "event_type": "gmail.message.received",
         "event_id": "praxis:msg-004",
@@ -131,3 +144,50 @@ def test_installed_template_enqueues_exact_trigger_message_once(
     assert run["queue_items"][0]["max_attempts"] == 3
     assert run["queue_items"][0]["model_profile"] == "openrouter:openai/gpt-5.6-luna"
     assert session.query(WorkflowDefinition).count() == 1
+
+
+def test_praxis_email_watch_is_scoped_to_active_definition(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    installed = client.post(
+        "/scheduler/templates/praxis-email-triage/install",
+        json={"is_active": False},
+    )
+    definition_id = installed.json()["definition"]["id"]
+
+    rejected = client.patch(
+        f"/scheduler/definitions/{definition_id}/gmail-watch",
+        json={"enabled": True},
+    )
+
+    assert rejected.status_code == 409
+    assert "Activate the workflow" in rejected.json()["detail"]
+
+    _add_google_connection(session)
+    client.patch(
+        f"/scheduler/definitions/{definition_id}/activation",
+        json={"is_active": True},
+    )
+    ignored = client.post(
+        "/scheduler/triggers/event",
+        json={
+            "event_type": "gmail.message.received",
+            "event_id": "praxis:watch-off",
+            "event_payload": {"domain_key": "praxis", "message_id": "watch-off"},
+        },
+    )
+    assert ignored.status_code == 200
+    assert ignored.json()["runs"] == []
+
+    enabled = client.patch(
+        f"/scheduler/definitions/{definition_id}/gmail-watch",
+        json={"enabled": True},
+    )
+    disabled = client.patch(
+        f"/scheduler/definitions/{definition_id}/gmail-watch",
+        json={"enabled": False},
+    )
+    assert enabled.json()["worker"]["enabled"] is True
+    assert disabled.json()["worker"]["enabled"] is False

@@ -193,6 +193,11 @@ class SchedulerService:
             trigger_config = definition.trigger_config or {}
             if trigger_config.get("event_type") != event_type:
                 continue
+            if (
+                event_type == "gmail.message.received"
+                and trigger_config.get("gmail_watch_enabled") is False
+            ):
+                continue
             if not self._event_matches_filters(event_payload, trigger_config.get("filters") or {}):
                 continue
             suffix = event_id or str(event_payload.get("id") or uuid.uuid4())
@@ -565,10 +570,15 @@ class SchedulerService:
             .order_by(WorkflowRun.created_at.desc())
             .limit(20)
         ).all()
+        definitions = [
+            definition
+            for definition in self.list_definitions()
+            if not (definition.trigger_config or {}).get("archived_at")
+        ]
         return {
             "definitions": [
                 self.workflow_definition_payload(definition)
-                for definition in self.list_definitions(active_only=True)
+                for definition in definitions
             ],
             "runs": [self.workflow_run_payload(run) for run in runs],
             "runnable_batches": self.runnable_batches(),

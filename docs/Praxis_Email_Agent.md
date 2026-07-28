@@ -110,8 +110,10 @@ contract and idempotency rules should remain the same.
 The Workflows screen now exposes a canonical Praxis Email Triage template. Installation always
 starts paused. Maestro validates the active Praxis domain, Praxis Email Agent, required tools and
 skills, and the Praxis Google connection before activation. Gmail watch remains a separate switch:
-enable it only after reviewing and activating the definition so the first poll can bootstrap at the
-current mailbox cursor without processing old mail.
+enable it on the installed workflow card only after reviewing and activating the definition so the
+first poll can bootstrap at the current mailbox cursor without processing old mail. The Gmail watch
+is stored on that workflow definition; the shared polling heartbeat is an internal resource and
+runs whenever at least one active Gmail-triggered workflow has its watch enabled.
 
 Every durable run receives the immutable `gmail.message.received` event in scheduler context. The
 agent runtime treats its `payload.message_id` as authoritative and reads that exact message instead
