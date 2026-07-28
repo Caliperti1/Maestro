@@ -51,6 +51,7 @@ _PRAXIS_EMAIL_TRIAGE_TEMPLATE: dict[str, Any] = {
     "trigger_config": {
         "event_type": "gmail.message.received",
         "filters": {"domain_key": "praxis"},
+        "gmail_watch_enabled": False,
     },
     "workflow_spec": {
         "model_profile": "openrouter:openai/gpt-5.6-luna",
@@ -138,8 +139,19 @@ class WorkflowTemplateService:
             if not readiness["ready"]:
                 raise ValueError(self._readiness_error(readiness))
         definition.is_active = is_active
+        if (
+            definition.key == PRAXIS_EMAIL_TRIAGE_KEY
+            and "gmail_watch_enabled" not in (definition.trigger_config or {})
+        ):
+            definition.trigger_config = {
+                **(definition.trigger_config or {}),
+                "gmail_watch_enabled": False,
+            }
         self.session.commit()
         self.session.refresh(definition)
+        from app.maestro.gmail_trigger import sync_gmail_trigger_worker_settings
+
+        sync_gmail_trigger_worker_settings(self.session)
         return definition
 
     def readiness(self, key: str) -> dict[str, Any]:

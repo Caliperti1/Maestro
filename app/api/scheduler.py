@@ -11,6 +11,7 @@ from app.db.session import get_db
 from app.maestro.gmail_trigger import (
     GmailTriggerError,
     GmailTriggerService,
+    sync_gmail_trigger_worker_settings,
     update_gmail_trigger_worker_settings,
 )
 from app.maestro.scheduler import SchedulerService
@@ -102,6 +103,10 @@ class WorkflowTemplateInstallBody(BaseModel):
 
 class WorkflowDefinitionActivationBody(BaseModel):
     is_active: bool
+
+
+class WorkflowDefinitionGmailWatchBody(BaseModel):
+    enabled: bool
 
 
 @router.get("/templates")
@@ -228,6 +233,38 @@ def activate_workflow_definition(
             if definition.key == "praxis-email-triage"
             else None
         ),
+    }
+
+
+@router.patch("/definitions/{definition_id}/gmail-watch")
+def update_workflow_definition_gmail_watch(
+    definition_id: uuid.UUID,
+    body: WorkflowDefinitionGmailWatchBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    definition = db.get(WorkflowDefinition, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow definition.")
+    trigger_config = dict(definition.trigger_config or {})
+    if (
+        definition.trigger_type != "event"
+        or trigger_config.get("event_type") != "gmail.message.received"
+    ):
+        raise HTTPException(status_code=400, detail="Workflow is not triggered by Gmail.")
+    if body.enabled and not definition.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Activate the workflow before enabling its Gmail watch.",
+        )
+    trigger_config["gmail_watch_enabled"] = body.enabled
+    definition.trigger_config = trigger_config
+    db.commit()
+    db.refresh(definition)
+    worker = sync_gmail_trigger_worker_settings(db)
+    return {
+        "definition": SchedulerService(db).workflow_definition_payload(definition),
+        "worker": worker,
+        "status": GmailTriggerService(db).status(),
     }
 
 
