@@ -2994,6 +2994,30 @@ def _approval_preview(
             rationale=rationale,
             tool_call_id=tool_call_id,
         )
+    if tool_key == "gmail.message.modify":
+        added = _string_list(payload.get("add_label_ids") or payload.get("add_labels"))
+        removed = _string_list(payload.get("remove_label_ids") or payload.get("remove_labels"))
+        message_id = str(payload.get("message_id") or "").strip()
+        if not added and {value.upper() for value in removed} == {"UNREAD"}:
+            summary = f"Mark Gmail message `{message_id or 'unknown'}` as read."
+        else:
+            changes = []
+            if added:
+                changes.append(f"add labels {', '.join(added)}")
+            if removed:
+                changes.append(f"remove labels {', '.join(removed)}")
+            detail = "; ".join(changes) or "change its labels"
+            summary = f"Update Gmail message `{message_id or 'unknown'}`: {detail}."
+        return {
+            "tool_key": tool_key,
+            "tool_call_id": tool_call_id,
+            "domain_key": domain.key,
+            "summary": summary,
+            "safety_level": safety_level,
+            "reason": reason,
+            "rationale": rationale,
+            "notable_uncertainty": [],
+        }
     return {
         "tool_key": tool_key,
         "tool_call_id": tool_call_id,

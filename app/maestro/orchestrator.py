@@ -1001,20 +1001,29 @@ class MaestroOrchestratorService:
         if tool_call is None or tool_call.task_id is None:
             return result, None
         child_task = self.session.get(Task, tool_call.task_id)
-        if child_task is None or child_task.parent_task_id is None:
+        if child_task is None:
+            return result, None
+        if result.status == "complete" and child_task.workflow_key == "scheduler.workflow_item":
+            from app.maestro.scheduler_worker import SchedulerWorkerService
+
+            worker = SchedulerWorkerService(self.session)
+            if result.tool_key == "local.app.deploy_pr":
+                worker.complete_approved_delivery(
+                    task_id=child_task.id,
+                    delivery_result=tool_result_payload(result),
+                )
+            else:
+                worker.resume_approved_tool_action(
+                    task_id=child_task.id,
+                    tool_result=tool_result_payload(result),
+                )
+            return result, None
+        if child_task.parent_task_id is None:
             return result, None
         parent_task = self.session.get(Task, child_task.parent_task_id)
         if parent_task is None or parent_task.workflow_key != "maestro.generic":
             return result, None
         if result.status != "complete":
-            return result, None
-        if child_task.workflow_key == "scheduler.workflow_item" and result.tool_key == "local.app.deploy_pr":
-            from app.maestro.scheduler_worker import SchedulerWorkerService
-
-            SchedulerWorkerService(self.session).complete_approved_delivery(
-                task_id=child_task.id,
-                delivery_result=tool_result_payload(result),
-            )
             return result, None
         run = self.run_plan(
             parent_task.id,

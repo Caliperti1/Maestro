@@ -17,6 +17,7 @@ from app.agents.runtime import (
     _deterministic_tool_plan,
     _harden_email_tool_plan,
     _llm_client_for_model_profile,
+    _tool_request_is_auto_executable,
 )
 from app.core.config import get_settings
 from app.db.models import (
@@ -1078,6 +1079,25 @@ def test_seeded_praxis_email_agent_has_email_triage_tools_skills_and_luna_model(
     client = _llm_client_for_model_profile(spec.model_profile)
     assert client.provider == "openrouter"
     assert client.model == "openai/gpt-5.6-luna"
+
+
+def test_gmail_mark_read_is_the_only_autonomous_message_modify_action() -> None:
+    assert _tool_request_is_auto_executable(
+        "gmail.message.modify",
+        {"message_id": "msg-1", "remove_label_ids": ["UNREAD"]},
+    )
+    assert not _tool_request_is_auto_executable(
+        "gmail.message.modify",
+        {"message_id": "msg-1", "add_label_ids": ["STARRED"]},
+    )
+    assert not _tool_request_is_auto_executable(
+        "gmail.message.modify",
+        {"message_id": "msg-1", "remove_label_ids": ["UNREAD", "INBOX"]},
+    )
+    assert not _tool_request_is_auto_executable(
+        "gmail.message.modify",
+        {"message_id": "msg-1", "remove_label_ids": ["INBOX"]},
+    )
 
 
 def test_seed_refresh_migrates_praxis_email_agent_from_legacy_qwen_default(

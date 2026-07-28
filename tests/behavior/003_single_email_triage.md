@@ -85,7 +85,7 @@ Run these only after the primary email passes:
 | Email class | Expected behavior |
 | --- | --- |
 | Useful newsletter or informational update | Report and memory may be created; no Chris todo and no email-attention notification. |
-| Obvious spam/noise | No routed objects or durable business memory. Mark-read remains approval-gated if requested. |
+| Obvious spam/noise | No routed objects or durable business memory. A mark-read-only action executes without approval. |
 | Existing contact and organization | Resolver updates the canonical records and interaction history instead of creating duplicates. |
 | Ambiguous date, person, or organization | Agent creates an actionable RFI or reports uncertainty instead of inventing fields. |
 | Another person named Chris is the direct recipient and Chris Aliperti is copied | Preserve both full identities. Do not create a Chris Aliperti todo or notification unless the message explicitly assigns him work. |

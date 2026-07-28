@@ -7,10 +7,12 @@ import uuid
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.agents.runtime import AgentRegistryService
 from app.api.main import create_app
 from app.core.config import get_settings
 from app.db.models import (
     Artifact,
+    Agent,
     Conversation,
     Domain,
     Message,
@@ -23,7 +25,11 @@ from app.db.models import (
 )
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
-from app.maestro.scheduler_worker import SchedulerWorkerService
+from app.maestro.scheduler_worker import (
+    SchedulerWorkerService,
+    _approved_tool_results,
+    _agent_run_blocker_message,
+)
 from app.maestro.workflow_outputs import WorkflowOutputService
 
 
@@ -74,6 +80,27 @@ def test_scheduler_completion_uses_agent_conversation_field(session: Session) ->
     assert payload["conversation"].startswith("Chris, I triaged")
     assert message == payload["conversation"]
     assert "structured_report" not in message
+
+
+def test_scheduler_blocker_message_explains_the_pending_tool_action() -> None:
+    agent_run = SimpleNamespace(
+        error_message="Agent run is blocked.",
+        tool_calls=[
+            {
+                "status": "approval_required",
+                "output_payload": {
+                    "approval_preview": {
+                        "summary": "Archive Gmail message `msg-1`.",
+                        "rationale": "The email was classified as noise.",
+                    }
+                },
+            }
+        ],
+    )
+
+    assert _agent_run_blocker_message(agent_run) == (
+        "Archive Gmail message `msg-1`. Reason: The email was classified as noise."
+    )
 
 
 def test_scheduler_completion_recovers_conversation_from_legacy_preview(
@@ -773,6 +800,156 @@ def test_scheduler_worker_blocks_unassigned_item(
     assert executed["status"] == "blocked"
     assert executed["queue_item"]["status"] == "blocked"
     assert "No agent" in executed["queue_item"]["error_message"]
+
+
+def test_approved_tool_action_requeues_its_blocked_durable_workflow(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    get_settings.cache_clear()
+    get_settings().memory_dropbox_root = str(tmp_path)
+    domain = session.query(Domain).filter(Domain.key == "praxis").one()
+    conversation = Conversation(
+        domain_id=domain.id,
+        title="Durable Gmail approval",
+        metadata_={"channel": "maestro_primary"},
+    )
+    session.add(conversation)
+    session.flush()
+    parent = Task(
+        conversation_id=conversation.id,
+        domain_id=domain.id,
+        status="blocked",
+        priority="normal",
+        source_type="scheduler",
+        workflow_key="scheduler.durable",
+        objective="Triage new Praxis email.",
+        input_payload={},
+    )
+    session.add(parent)
+    session.flush()
+    child = Task(
+        parent_task_id=parent.id,
+        conversation_id=conversation.id,
+        domain_id=domain.id,
+        status="blocked",
+        priority="normal",
+        source_type="scheduler_worker",
+        workflow_key="scheduler.workflow_item",
+        objective="Triage Gmail message msg-1.",
+        input_payload={},
+        error_message="Waiting for Gmail approval.",
+    )
+    session.add(child)
+    session.flush()
+    run = WorkflowRun(
+        parent_task_id=parent.id,
+        conversation_id=conversation.id,
+        domain_id=domain.id,
+        source_type="trigger",
+        status="blocked",
+        priority="normal",
+        input_payload={"summary": "Triage Gmail message msg-1."},
+        started_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.flush()
+    tool_call_id = str(uuid.uuid4())
+    item = WorkflowQueueItem(
+        workflow_run_id=run.id,
+        parent_task_id=parent.id,
+        domain_id=domain.id,
+        external_key="triage_email",
+        status="blocked",
+        priority="normal",
+        stage_index=1,
+        position=1,
+        objective=child.objective,
+        dependency_keys=[],
+        resource_locks=[],
+        input_payload={},
+        output_payload={
+            "agent_run": {
+                "task_id": str(child.id),
+                "agent_key": "praxis-email-agent",
+                "agent_name": "Praxis Email Agent",
+                "status": "blocked",
+                "output_preview": "The message was noise.",
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "tool_name": "gmail.message.modify",
+                        "status": "approval_required",
+                        "output_payload": {},
+                    }
+                ],
+            }
+        },
+        error_message="Waiting for Gmail approval.",
+    )
+    session.add(item)
+    session.commit()
+
+    resumed_run = SchedulerWorkerService(session).resume_approved_tool_action(
+        task_id=child.id,
+        tool_result={
+            "id": tool_call_id,
+            "tool_name": "gmail.message.modify",
+            "status": "complete",
+            "output_payload": {"message_id": "msg-1", "label_ids": []},
+        },
+    )
+
+    assert resumed_run is not None
+    session.refresh(resumed_run)
+    session.refresh(child)
+    session.refresh(item)
+    assert resumed_run.id == run.id
+    assert resumed_run.status == "queued"
+    assert child.status == "completed"
+    assert item.status == "queued"
+    approved = _approved_tool_results(item)
+    assert approved[0]["tool_name"] == "gmail.message.modify"
+    assert approved[0]["status"] == "complete"
+    assert item.output_payload["agent_run"]["tool_calls"][0]["status"] == "complete"
+    assert session.query(WorkflowRunLogEntry).filter_by(workflow_run_id=run.id).count() == 0
+
+    AgentRegistryService(session).ensure_seed_agents()
+    agent = session.query(Agent).filter(Agent.key == "praxis-email-agent").one()
+    item.agent_id = agent.id
+    session.commit()
+
+    class ResumedRuntime:
+        def run_agent_once(self, request, **kwargs):
+            initial = kwargs["initial_tool_results"]
+            assert initial[0]["tool_name"] == "gmail.message.modify"
+            return SimpleNamespace(
+                run_id="resumed-run",
+                status="completed",
+                agent=SimpleNamespace(key=agent.key, name=agent.name),
+                task_id="resumed-task",
+                report_id=None,
+                execution_note="Finished after the approved Gmail action.",
+                output_text="I finished processing the approved Gmail action.",
+                tool_calls=initial,
+                staged_artifact_path=None,
+                artifact_id=None,
+                error_message=None,
+            )
+
+    executed = SchedulerWorkerService(session, runtime=ResumedRuntime()).execute_queue_item(
+        item.id,
+        execute_llm=True,
+        auto_tool_loop=True,
+    )
+
+    assert executed["status"] == "completed"
+    session.refresh(resumed_run)
+    session.refresh(item)
+    assert resumed_run.status == "completed"
+    assert item.status == "completed"
+    assert session.query(WorkflowRunLogEntry).filter_by(workflow_run_id=run.id).count() == 1
 
 
 def test_scheduler_worker_status_can_be_toggled_at_runtime(

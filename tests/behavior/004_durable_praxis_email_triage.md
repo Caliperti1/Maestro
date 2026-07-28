@@ -31,6 +31,8 @@ work.
 | 4.10 | Replay a failed run. | The new run retains the original Gmail message ID instead of reading the latest inbox message. | Replay run input payload. | Not run |
 | 4.11 | Force Gmail polling to fail three times. | Trigger health becomes `error` and Maestro posts one actionable channel warning. | Gmail monitor, notification, and chat. | Not run |
 | 4.12 | Reset the Gmail cursor. | Monitoring resumes at the current mailbox state without back-processing the missed interval. | Cursor-reset warning and no historical runs. | Not run |
+| 4.13 | Let triage classify an email as noise and request only marking it read. | The agent removes only `UNREAD` without approval and completes the run. Other Gmail label mutations remain approval-gated. | Gmail tool trace and completed workflow run. | Automated; human trigger not run |
+| 4.14 | Force an approval-gated Gmail mutation such as archive. | Needs Attention and the main chat name the exact action and rationale. Approval completes the same blocked durable run rather than creating a new workflow. | Approval card, channel message, and original run ID. | Automated; human trigger not run |
 
 ## Pass Criteria
 
