@@ -138,6 +138,45 @@ export type SchedulerWorkerAgentRun = {
   staged_artifact_path: string | null;
   artifact_id: string | null;
   error_message: string | null;
+  email_triage_decision?: EmailTriageDecision | null;
+  email_triage_shadow_mode?: boolean | null;
+};
+
+export type EmailTriageRoutedCandidate = {
+  route_type: "contact" | "organization" | "event" | "todo" | "think_tank";
+  title: string;
+  content: string;
+  metadata: Array<{ key: string; value_json: string }>;
+  rationale: string;
+};
+
+export type EmailTriageDecision = {
+  schema_version: string;
+  message_id: string;
+  thread_id: string | null;
+  subject: string;
+  sender: string;
+  classification: "spam" | "noise" | "useful_information" | "response_required" | "action_required";
+  confidence: number;
+  summary: string;
+  requires_chris_response: boolean;
+  notification: {
+    should_notify: boolean;
+    title: string;
+    message: string;
+    severity: "info" | "warning" | "urgent";
+    reason: string;
+  };
+  routed_candidates: EmailTriageRoutedCandidate[];
+  linked_documents: Array<{
+    url: string;
+    kind: string;
+    title: string;
+    access_status: "read" | "inaccessible" | "not_read" | "irrelevant";
+    summary: string;
+  }>;
+  read_state_action: "none" | "mark_read";
+  rationale: string;
 };
 
 export type SchedulerWorkerStatus = {

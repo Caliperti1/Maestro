@@ -10,8 +10,9 @@ workflow when a new message arrives.
 2. Fetch the selected message or thread.
 3. Inspect relevant linked Google artifacts. Drive folder links are listed first, then only the
    relevant child Docs, Slides, or Sheets are read.
-4. Classify the email as spam/noise, response needed, useful information, or action required.
-5. Create internal routed candidates for useful extracted objects:
+4. Return a strict `EmailTriageDecision` classified as `spam`, `noise`,
+   `useful_information`, `response_required`, or `action_required`.
+5. Convert the typed decision into internal routed candidates for useful extracted objects:
    - contacts via `contact_manager`
    - Chris-owned todos/reminders via `to_do_manager`
    - events via `calendar_manager`
@@ -20,6 +21,13 @@ workflow when a new message arrives.
 7. Notify Chris only when a response, decision, material deadline, or meaningful risk requires his
    attention.
 8. Generate an agent report and stage the interaction artifact for memory curation.
+
+The iterative tool planner is evidence-only. It may read Gmail, memory, reports, and linked Google
+Workspace files, but it cannot perform email-triage writes. A reserved finalizer emits one strict
+decision containing source identity, classification, confidence, summary, routed candidates,
+notification judgment, linked-document outcomes, and a read-state action. Maestro then converts
+that decision into the small allowed operational tool set. This prevents an early planner draft and
+the final decision from both writing the same object.
 
 ## Safety
 
@@ -70,6 +78,19 @@ The agent also has `workflow.notification.create`. This is an internal, auto-exe
 tool, not an external side effect. It writes a provenance-linked notification and posts it to the
 main Maestro channel. Informational email should remain quiet.
 
+## Shadow Mode And Idempotency
+
+Newly installed Praxis Email Triage workflows start in **shadow mode**. Shadow runs perform the
+complete evidence and decision path, persist the decision in the run trace and report, and propose
+the exact operational actions without executing routed writes, notifications, or Gmail read-state
+changes. Shadow mode is stored per durable workflow and can be switched to live mode from its
+trigger card after the decisions have been reviewed.
+
+Operational retries are idempotent. Routed staging rejects a second candidate with the same domain,
+route type, normalized title, and Gmail message source. The canonical routed resolver still owns
+semantic identity resolution across different messages, such as updating an existing contact from
+a later interaction. Notifications independently deduplicate by workflow/source and content.
+
 ## Human Test
 
 Run the Praxis Email Agent once with auto tool loop enabled:
@@ -88,6 +109,8 @@ Expected behavior:
   still produce a specific approval card.
 - When a workflow does block, the main channel explains the concrete pending action and rationale
   rather than reporting only that the agent is blocked.
+- The selected agent run displays the typed Email Triage Decision and whether it was a shadow or
+  live run.
 
 ## Durable Trigger Foundation
 
@@ -112,7 +135,7 @@ the producer later, but require Google Cloud Pub/Sub plus periodic watch renewal
 contract and idempotency rules should remain the same.
 
 The Workflows screen now exposes a canonical Praxis Email Triage template. Installation always
-starts paused. Maestro validates the active Praxis domain, Praxis Email Agent, required tools and
+starts paused and in shadow mode. Maestro validates the active Praxis domain, Praxis Email Agent, required tools and
 skills, and the Praxis Google connection before activation. Gmail watch remains a separate switch:
 enable it on the installed workflow card only after reviewing and activating the definition so the
 first poll can bootstrap at the current mailbox cursor without processing old mail. The Gmail watch
@@ -123,3 +146,8 @@ Every durable run receives the immutable `gmail.message.received` event in sched
 agent runtime treats its `payload.message_id` as authoritative and reads that exact message instead
 of listing or resolving the latest inbox message. The definition uses Luna, permits three attempts,
 and preserves the original event on replay.
+
+When one Gmail History poll contains several new messages, each eligible message receives its own
+event ID and workflow run. Runs remain independent and can be parallel-ready, although the scheduler
+may serialize them when they contend for the same exclusive agent or tool resource. A replayed
+history page resolves to the existing runs instead of creating replacements.

@@ -87,6 +87,30 @@ class LLMMaestroPlanner:
             schema=schema,
         )
         try:
-            return MaestroPlannerResponse.model_validate(raw_response)
+            normalized = _normalize_planner_response(raw_response)
+            return MaestroPlannerResponse.model_validate(normalized)
         except ValidationError as exc:
             raise LLMClientError("LLM Maestro planner did not match the expected schema.") from exc
+
+
+def _normalize_planner_response(raw_response: Any) -> Any:
+    """Backfill additive planner hints without accepting malformed work items."""
+    if not isinstance(raw_response, dict):
+        return raw_response
+    work_items = raw_response.get("work_items")
+    if not isinstance(work_items, list):
+        return raw_response
+    normalized_items = []
+    for item in work_items:
+        if not isinstance(item, dict):
+            normalized_items.append(item)
+            continue
+        normalized_items.append(
+            {
+                **item,
+                "model_tier": item.get("model_tier") or "auto",
+                "model_rationale": item.get("model_rationale")
+                or "Runtime routing will select the appropriate model tier.",
+            }
+        )
+    return {**raw_response, "work_items": normalized_items}

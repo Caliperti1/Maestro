@@ -57,6 +57,7 @@ def test_praxis_email_template_installs_paused_with_canonical_contract(
         "filters": {"domain_key": "praxis"},
         "gmail_watch_enabled": False,
     }
+    assert definition.workflow_spec["shadow_mode"] is True
     item = definition.workflow_spec["queue_items"][0]
     assert item["agent_key"] == PRAXIS_EMAIL_AGENT_KEY
     assert item["required_skills"] == PRAXIS_EMAIL_SKILLS
@@ -191,3 +192,24 @@ def test_praxis_email_watch_is_scoped_to_active_definition(
     )
     assert enabled.json()["worker"]["enabled"] is True
     assert disabled.json()["worker"]["enabled"] is False
+
+
+def test_praxis_email_shadow_mode_is_per_workflow_definition(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    installed = client.post(
+        "/scheduler/templates/praxis-email-triage/install",
+        json={"is_active": False},
+    )
+    definition_id = installed.json()["definition"]["id"]
+
+    assert installed.json()["definition"]["workflow_spec"]["shadow_mode"] is True
+    updated = client.patch(
+        f"/scheduler/definitions/{definition_id}/shadow-mode",
+        json={"enabled": False},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["definition"]["workflow_spec"]["shadow_mode"] is False

@@ -66,10 +66,15 @@ def test_scheduler_completion_uses_agent_conversation_field(session: Session) ->
         report_id="report-1",
         execution_note="Completed.",
         output_text=output_text,
-        tool_calls=[],
+        tool_calls=[{
+            "tool_name": "llm.email_triage_finalizer",
+            "status": "complete",
+            "output_payload": {"shadow_mode": True},
+        }],
         staged_artifact_path=None,
         artifact_id=None,
         error_message=None,
+        email_triage_decision={"classification": "useful_information"},
     )
     payload = service._agent_run_payload(agent_run)
     queue_item = SimpleNamespace(output_payload=payload, external_key="email-triage")
@@ -78,6 +83,8 @@ def test_scheduler_completion_uses_agent_conversation_field(session: Session) ->
     message = service._delivery_completion_message(run, [queue_item])
 
     assert payload["conversation"].startswith("Chris, I triaged")
+    assert payload["email_triage_decision"]["classification"] == "useful_information"
+    assert payload["email_triage_shadow_mode"] is True
     assert message == payload["conversation"]
     assert "structured_report" not in message
 

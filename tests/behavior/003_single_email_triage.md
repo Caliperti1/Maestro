@@ -13,7 +13,8 @@ For exactly one email, the Praxis Email Agent must:
 
 1. Read message metadata and the full body or thread.
 2. Retrieve Praxis-scoped memory when business context is needed for interpretation.
-3. Classify the message as `spam_noise`, `response_needed`, `useful_info`, or `action_required`,
+3. Classify the message as `spam`, `noise`, `response_required`, `useful_information`, or
+   `action_required`,
    with confidence and evidence.
 4. Read a relevant linked Google Doc when the task permits it and preserve the link as provenance.
 5. Send contacts, organizations, events, and Chris-owned todos through `routed.item.create`.
@@ -25,7 +26,7 @@ For exactly one email, the Praxis Email Agent must:
 Agent execution steps such as "triage the email" or "record the contact" must never become
 Chris-owned todos.
 
-Classification is always relative to Chris Aliperti. `action_required` and `response_needed` mean
+Classification is always relative to Chris Aliperti. `action_required` and `response_required` mean
 he personally owes action and must produce a global Maestro-chat notification. An action owned only
 by another person is `useful_info` for Chris unless it creates a material risk or explicitly needs
 his awareness. Notifications persist in the primary channel across topic changes and reconnects.

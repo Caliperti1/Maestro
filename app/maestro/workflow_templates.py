@@ -54,6 +54,7 @@ _PRAXIS_EMAIL_TRIAGE_TEMPLATE: dict[str, Any] = {
         "gmail_watch_enabled": False,
     },
     "workflow_spec": {
+        "shadow_mode": True,
         "model_profile": "openrouter:openai/gpt-5.6-luna",
         "queue_items": [
             {

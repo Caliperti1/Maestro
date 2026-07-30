@@ -17,6 +17,7 @@ from typing import Any, Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.email_triage import EmailTriageDecision, decision_tool_requests
 from app.core.config import get_settings
 from app.db.models import (
     Agent,
@@ -226,6 +227,7 @@ class AgentRunResult:
     staged_artifact_path: str | None = None
     artifact_id: str | None = None
     error_message: str | None = None
+    email_triage_decision: dict[str, Any] | None = None
 
 
 class AgentRuntimeError(ValueError):
@@ -1086,6 +1088,7 @@ class PromptAggregationService:
         tool_loop_trace: dict[str, Any] = {"enabled": auto_tool_loop, "iterations": []}
         report_id: str | None = None
         status = "prepared"
+        email_triage_decision: dict[str, Any] | None = None
 
         if tool_requests:
             tool_service = ToolExecutionService(self.session, adapters=self.tool_adapters)
@@ -1126,6 +1129,7 @@ class PromptAggregationService:
                 if finalization is not None:
                     tool_call_payloads.extend(finalization["tool_calls"])
                     tool_loop_trace["iterations"].append(finalization["trace"])
+                email_triage_decision = _email_triage_decision_from_results(tool_call_payloads)
             if any(call.get("status") == "approval_required" for call in tool_call_payloads):
                 user_display_name = get_settings().user_display_name
                 task.status = "blocked"
@@ -1133,6 +1137,7 @@ class PromptAggregationService:
                     "run_id": run_id,
                     "tool_call_count": len(tool_call_payloads),
                     "approval_required": True,
+                    "email_triage_decision": email_triage_decision,
                 }
                 task.error_message = f"Waiting for {user_display_name} to approve tool use."
                 self._set_agent_current_action(
@@ -1219,6 +1224,7 @@ class PromptAggregationService:
                             "memory_included_count": package.memory_context.included_count,
                             "semantic_status": package.memory_context.semantic_status,
                             "tool_loop": tool_loop_trace,
+                            "email_triage_decision": email_triage_decision,
                         },
                     )
                     self.session.add(report)
@@ -1250,6 +1256,7 @@ class PromptAggregationService:
                         "report_id": str(report.id),
                         "output_preview": output_text[:500],
                         "operational_failures": operational_failures,
+                        "email_triage_decision": email_triage_decision,
                     }
                     task.completed_at = datetime.now(UTC)
                     self._set_agent_current_action(
@@ -1350,6 +1357,7 @@ class PromptAggregationService:
                         "run_id": run_id,
                         "execution_mode": "manual_run_once",
                         "status": status,
+                        "email_triage_decision": email_triage_decision,
                     },
                 )
             )
@@ -1375,6 +1383,7 @@ class PromptAggregationService:
             staged_artifact_path=staged_path,
             artifact_id=artifact_id,
             error_message=error_message,
+            email_triage_decision=email_triage_decision,
         )
 
     def _run_auto_tool_loop(
@@ -1601,6 +1610,7 @@ class PromptAggregationService:
 
         allowed_keys = {tool.key for tool in package.tool_manifest}
         operational_keys = allowed_keys & {
+            "gmail.message.modify",
             "routed.item.create",
             "workflow.notification.create",
         }
@@ -1649,24 +1659,28 @@ class PromptAggregationService:
             "blocked": [],
         }
         try:
-            plan = llm_client.structured_response(
+            raw_decision = llm_client.structured_response(
                 instructions=_EMAIL_TRIAGE_FINALIZER_INSTRUCTIONS,
                 input_text=planner_input,
-                schema_name="email_triage_operational_plan",
-                schema=_TOOL_PLAN_SCHEMA,
+                schema_name="email_triage_decision",
+                schema=EmailTriageDecision.model_json_schema(),
             )
+            decision = EmailTriageDecision.model_validate(raw_decision)
             requested = [
                 item
-                for item in _normalize_tool_plan(plan)
+                for item in decision_tool_requests(decision)
                 if item["tool_key"] in operational_keys
             ]
             requested = _normalize_email_action_requests(requested, prior_results)
             requested = _drop_completed_operational_duplicates(requested, prior_results)
+            shadow_mode = _email_triage_shadow_mode(package.user_context)
             planner_call.status = "complete"
             planner_call.output_payload = {
-                "plan_summary": plan.get("plan_summary"),
+                "plan_summary": decision.summary,
                 "tool_call_count": len(requested),
                 "planner_source": "llm_email_finalizer",
+                "email_triage_decision": decision.model_dump(mode="json"),
+                "shadow_mode": shadow_mode,
                 **_llm_call_metadata(llm_client),
             }
             planner_call.completed_at = datetime.now(UTC)
@@ -1676,20 +1690,25 @@ class PromptAggregationService:
             executed_calls.append(planner_payload)
             iteration_trace.update(
                 {
-                    "plan_summary": plan.get("plan_summary"),
+                    "plan_summary": decision.summary,
                     "requested_tools": requested,
+                    "email_triage_decision": decision.model_dump(mode="json"),
+                    "shadow_mode": shadow_mode,
                 }
             )
-            tool_service = ToolExecutionService(self.session, adapters=self.tool_adapters)
-            self._execute_auto_tool_requests(
-                tool_service=tool_service,
-                package=package,
-                task=task,
-                requested=requested,
-                iteration_trace=iteration_trace,
-                executed_calls=executed_calls,
-                prior_results=prior_results,
-            )
+            if shadow_mode:
+                iteration_trace["shadow_actions"] = requested
+            else:
+                tool_service = ToolExecutionService(self.session, adapters=self.tool_adapters)
+                self._execute_auto_tool_requests(
+                    tool_service=tool_service,
+                    package=package,
+                    task=task,
+                    requested=requested,
+                    iteration_trace=iteration_trace,
+                    executed_calls=executed_calls,
+                    prior_results=prior_results,
+                )
         except Exception as exc:
             planner_call.status = "failed"
             planner_call.error_message = str(exc)
@@ -2049,7 +2068,11 @@ def _harden_email_tool_plan(
         }
         for link in google_links:
             tool_key = tool_by_kind.get(link.get("kind") or "")
-            if not tool_key or tool_key not in allowed or _has_tool_result(prior_results, tool_key):
+            if (
+                not tool_key
+                or tool_key not in allowed
+                or _has_google_link_result(prior_results, tool_key, link["file_id"])
+            ):
                 continue
             dependency_requests.append(
                 {
@@ -2079,7 +2102,17 @@ def _harden_email_tool_plan(
     if dependency_requests:
         return dependency_requests[:5]
 
-    requested_tools = _normalize_email_action_requests(requested_tools, prior_results)
+    # Evidence gathering and operational writes are deliberately separate phases.
+    # The typed email finalizer owns these actions so retries cannot execute an
+    # unconstrained planner draft and then execute the final decision again.
+    operational_tools = {
+        "gmail.message.modify",
+        "routed.item.create",
+        "workflow.notification.create",
+    }
+    requested_tools = [
+        item for item in requested_tools if item.get("tool_key") not in operational_tools
+    ]
     hardened = []
     for item in requested_tools:
         tool_key = str(item.get("tool_key") or "")
@@ -2236,6 +2269,39 @@ def _google_workspace_links_from_gmail_results(
             if url and (url, file_id) not in {(item["url"], item["file_id"]) for item in links}:
                 links.append({"url": url, "file_id": file_id, "kind": kind})
     return links
+
+
+def _has_google_link_result(
+    prior_results: list[dict[str, Any]],
+    tool_key: str,
+    file_id: str,
+) -> bool:
+    for result in prior_results:
+        if not isinstance(result, dict) or result.get("tool_name") != tool_key:
+            continue
+        output = result.get("output_payload")
+        output = output if isinstance(output, dict) else {}
+        input_payload = result.get("input_payload")
+        input_payload = input_payload if isinstance(input_payload, dict) else {}
+        payload = input_payload.get("payload")
+        payload = payload if isinstance(payload, dict) else input_payload
+        candidate_ids = {
+            str(value)
+            for value in (
+                output.get("file_id"),
+                output.get("document_id"),
+                output.get("presentation_id"),
+                output.get("spreadsheet_id"),
+                payload.get("file_id"),
+                payload.get("document_id"),
+                payload.get("presentation_id"),
+                payload.get("spreadsheet_id"),
+            )
+            if value
+        }
+        if file_id in candidate_ids:
+            return True
+    return False
 
 
 def _hydrate_google_tool_from_email(
@@ -2483,6 +2549,35 @@ def _email_finalization_evidence(
         for result in prior_results
         if isinstance(result, dict) and result.get("tool_name") in evidence_tools
     ]
+
+
+def _email_triage_decision_from_results(
+    results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for result in reversed(results):
+        if not isinstance(result, dict) or result.get("tool_name") != "llm.email_triage_finalizer":
+            continue
+        output = result.get("output_payload")
+        if not isinstance(output, dict):
+            continue
+        decision = output.get("email_triage_decision")
+        if isinstance(decision, dict):
+            return decision
+    return None
+
+
+def _email_triage_shadow_mode(user_context: str | None) -> bool:
+    if not user_context:
+        return False
+    json_start = user_context.find("{")
+    if json_start < 0:
+        return False
+    try:
+        context = json.loads(user_context[json_start:])
+    except json.JSONDecodeError:
+        return False
+    workflow = context.get("workflow") if isinstance(context, dict) else None
+    return bool(isinstance(workflow, dict) and workflow.get("shadow_mode") is True)
 
 
 def _drop_completed_operational_duplicates(
