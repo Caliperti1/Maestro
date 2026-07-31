@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Maestro</title>
+  <path
+    d="M8 56V14l24 24 17-17h7v35"
+    fill="none"
+    stroke="#0B0D10"
+    stroke-linecap="square"
+    stroke-linejoin="miter"
+    stroke-width="7"
+  />
+  <path d="M41 21 59 3v18H41Z" fill="#2563EB" />
+</svg>

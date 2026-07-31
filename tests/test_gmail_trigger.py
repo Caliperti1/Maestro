@@ -16,6 +16,7 @@ from app.db.seed import seed_default_domains
 from app.maestro.gmail_trigger import (
     GMAIL_TRIGGER_CURSOR_PREFIX,
     GmailHistoryCursorExpired,
+    GmailMessageUnavailable,
     GmailTriggerService,
 )
 from app.maestro.scheduler import SchedulerService
@@ -88,6 +89,18 @@ class ExpiredGmailHistorySource(FakeGmailHistorySource):
 class FailingGmailHistorySource(FakeGmailHistorySource):
     def history_page(self, *args, **kwargs) -> dict[str, Any]:
         raise RuntimeError("Gmail is temporarily unavailable.")
+
+
+class MissingMessageGmailHistorySource(FakeGmailHistorySource):
+    def message_metadata(
+        self,
+        connection: ToolConnection,
+        *,
+        message_id: str,
+    ) -> dict[str, Any]:
+        if message_id == "msg-inbox":
+            raise GmailMessageUnavailable("Gmail message msg-inbox is no longer available.")
+        return super().message_metadata(connection, message_id=message_id)
 
 
 def _seed_trigger(session: Session) -> Domain:
@@ -246,7 +259,36 @@ def test_gmail_trigger_resets_expired_cursor_without_emitting_old_mail(
     session.refresh(cursor)
     assert cursor.value["history_id"] == "current-history"
     assert cursor.value["status"] == "cursor_reset"
+    assert cursor.value["error_count"] == 0
     assert session.scalars(select(WorkflowRun)).all() == []
+
+
+def test_gmail_trigger_skips_missing_message_and_advances_cursor(
+    session: Session,
+) -> None:
+    domain = _seed_trigger(session)
+    source = MissingMessageGmailHistorySource()
+    service = GmailTriggerService(session, source=source)
+    service.poll_once(page_size=25)
+
+    result = service.poll_once(page_size=25)
+
+    assert result["emitted_count"] == 0
+    assert result["domains"][0]["status"] == "healthy"
+    assert result["domains"][0]["missing_count"] == 1
+    assert result["domains"][0]["missing"] == [
+        {
+            "message_id": "msg-inbox",
+            "reason": "Gmail message msg-inbox is no longer available.",
+        }
+    ]
+    cursor = session.get(RuntimeSetting, f"{GMAIL_TRIGGER_CURSOR_PREFIX}{domain.key}")
+    assert cursor is not None
+    assert cursor.value["history_id"] == "105"
+    assert cursor.value["last_missing_count"] == 1
+    assert cursor.value["error_count"] == 0
+    assert session.scalars(select(WorkflowRun)).all() == []
+    assert session.scalars(select(WorkflowNotification)).all() == []
 
 
 def test_gmail_trigger_ignores_domains_without_active_email_definition(

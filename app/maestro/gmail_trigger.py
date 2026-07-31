@@ -47,6 +47,10 @@ class GmailHistoryCursorExpired(GmailTriggerError):
     """Raised when Gmail no longer retains the configured history cursor."""
 
 
+class GmailMessageUnavailable(GmailTriggerError):
+    """Raised when a History entry points to a message Gmail can no longer return."""
+
+
 class GmailHistorySource(Protocol):
     def profile(self, connection: ToolConnection) -> dict[str, Any]: ...
 
@@ -127,15 +131,22 @@ class GoogleGmailHistorySource:
     ) -> dict[str, Any]:
         token = self._token(connection)
         user_id = _gmail_user_id(connection, {})
-        message = _gmail_api_json(
-            "GET",
-            f"/gmail/v1/users/{quote(user_id, safe='')}/messages/{quote(message_id, safe='')}",
-            token=token,
-            params={
-                "format": "metadata",
-                "metadataHeaders": ["Subject", "From", "To", "Date"],
-            },
-        )
+        try:
+            message = _gmail_api_json(
+                "GET",
+                f"/gmail/v1/users/{quote(user_id, safe='')}/messages/{quote(message_id, safe='')}",
+                token=token,
+                params={
+                    "format": "metadata",
+                    "metadataHeaders": ["Subject", "From", "To", "Date"],
+                },
+            )
+        except ToolExecutionError as exc:
+            if "404" in str(exc):
+                raise GmailMessageUnavailable(
+                    f"Gmail message {message_id} is no longer available."
+                ) from exc
+            raise GmailTriggerError(str(exc)) from exc
         return _gmail_message_payload(message, max_body_chars=0)
 
 
@@ -284,8 +295,13 @@ class GmailTriggerService:
 
         emitted: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
+        missing: list[dict[str, Any]] = []
         for message_id in dict.fromkeys(message_ids):
-            metadata = self.source.message_metadata(connection, message_id=message_id)
+            try:
+                metadata = self.source.message_metadata(connection, message_id=message_id)
+            except GmailMessageUnavailable as exc:
+                missing.append({"message_id": message_id, "reason": str(exc)})
+                continue
             labels = {str(label) for label in metadata.get("label_ids") or []}
             if not _is_eligible_inbox_message(labels):
                 skipped.append({"message_id": message_id, "label_ids": sorted(labels)})
@@ -326,6 +342,7 @@ class GmailTriggerService:
                 "last_seen_count": len(message_ids),
                 "last_emitted_count": len(emitted),
                 "last_skipped_count": len(skipped),
+                "last_missing_count": len(missing),
                 "error_count": 0,
             },
         )
@@ -337,8 +354,10 @@ class GmailTriggerService:
             "seen_count": len(message_ids),
             "emitted_count": len(emitted),
             "skipped_count": len(skipped),
+            "missing_count": len(missing),
             "emitted": emitted,
             "skipped": skipped,
+            "missing": missing,
         }
 
     def _reset_domain(self, domain: Domain, *, reason: str, status: str) -> dict[str, Any]:
@@ -373,8 +392,10 @@ class GmailTriggerService:
                 "status": status,
                 "initialized_at": prior_payload.get("initialized_at") or now,
                 "last_polled_at": now,
-                "last_error": reason,
+                "last_error": reason if status == "cursor_reset" else None,
+                "last_reset_reason": reason or prior_payload.get("last_reset_reason"),
                 "cursor_reset_at": now if status in {"reset", "cursor_reset"} else prior_payload.get("cursor_reset_at"),
+                "error_count": 0,
             },
         )
         return {
