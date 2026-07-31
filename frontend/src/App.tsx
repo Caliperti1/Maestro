@@ -1631,16 +1631,33 @@ export function App() {
   }, [applyConversation]);
 
   const loadSchedulerDashboard = useCallback(async () => {
-    const [response, templateResponse] = await Promise.all([
+    const [dashboardResult, templatesResult] = await Promise.allSettled([
       apiJson<SchedulerDashboard>("/scheduler/dashboard"),
       apiJson<{ templates: WorkflowTemplate[] }>("/scheduler/templates"),
     ]);
-    setSchedulerDashboard(response);
-    setWorkflowTemplates(templateResponse.templates);
-    setSelectedSchedulerRun((selected) => {
-      if (!selected) return selected;
-      return response.runs.find((run) => run.id === selected.id) ?? null;
-    });
+    if (dashboardResult.status === "fulfilled") {
+      setSchedulerDashboard(dashboardResult.value);
+      setSelectedSchedulerRun((selected) => {
+        if (!selected) return selected;
+        return dashboardResult.value.runs.find((run) => run.id === selected.id) ?? null;
+      });
+    }
+    if (templatesResult.status === "fulfilled") {
+      setWorkflowTemplates(templatesResult.value.templates);
+    }
+    if (dashboardResult.status === "rejected") {
+      const message =
+        dashboardResult.reason instanceof Error
+          ? dashboardResult.reason.message
+          : "Could not load workflows.";
+      setSchedulerStatusMessage(message);
+      throw dashboardResult.reason;
+    }
+    if (templatesResult.status === "rejected") {
+      setSchedulerStatusMessage(
+        "Durable workflows loaded, but workflow templates could not be refreshed.",
+      );
+    }
   }, []);
 
   const installWorkflowTemplate = async (templateKey: string) => {
@@ -2470,9 +2487,12 @@ export function App() {
     <main className="app-shell">
       <aside className={sidebarOpen ? "sidebar" : "sidebar sidebar-closed"}>
         <div className="brand-row">
-          <div>
-            <p className="eyebrow">Local command</p>
-            <h1>Maestro</h1>
+          <div className="brand-lockup">
+            <img className="brand-mark" src="/maestro-mark.svg" alt="" />
+            <div className="brand-wordmark">
+              <h1>maestro</h1>
+              <p>system command</p>
+            </div>
           </div>
           <button
             className="icon-button"
@@ -3618,7 +3638,10 @@ function WorkflowsWorkspace({
       </div>
       <div className="output-card-grid">
         <section>
-          <h4>Active</h4>
+          <div className="section-title-row">
+            <h4>Active</h4>
+            <span className="count-badge">{runs.length}</span>
+          </div>
           {runs.map((run) => {
             const completed = run.queue_items.filter((item) => item.status === "completed").length;
             const blocked = run.queue_items.filter((item) => item.status === "blocked").length;
@@ -3658,7 +3681,10 @@ function WorkflowsWorkspace({
           {runs.length === 0 && <p className="empty-state">No active workflow runs are queued.</p>}
         </section>
         <section>
-          <h4>Scheduled</h4>
+          <div className="section-title-row">
+            <h4>Scheduled</h4>
+            <span className="count-badge">{scheduledDefinitions.length}</span>
+          </div>
           {scheduledDefinitions.map((definition) => (
             <article className="workflow-summary-card compact-run-card" key={definition.id}>
               <button type="button" className="card-reset" onClick={() => onSelectDefinition(definition)}>
@@ -3675,7 +3701,10 @@ function WorkflowsWorkspace({
           {scheduledDefinitions.length === 0 && <p className="empty-state">No scheduled workflows yet.</p>}
         </section>
         <section>
-          <h4>Triggers</h4>
+          <div className="section-title-row">
+            <h4>Durable triggers</h4>
+            <span className="count-badge">{triggerDefinitions.length}</span>
+          </div>
           {workflowTemplates.filter((template) => !template.installed).map((template) => (
             <article className="workflow-summary-card compact-run-card" key={template.key}>
               <span>available template</span>
@@ -3709,9 +3738,12 @@ function WorkflowsWorkspace({
               (domain) => domain.domain_key === definition.domain_key,
             );
             return (
-              <article className="workflow-summary-card compact-run-card" key={definition.id}>
+              <article
+                className="workflow-summary-card compact-run-card durable-workflow-card"
+                key={definition.id}
+              >
                 <button type="button" className="card-reset" onClick={() => onSelectDefinition(definition)}>
-                  <span>{definition.trigger_type}</span>
+                  <span>Durable {definition.trigger_type} workflow</span>
                   <h4>{definition.name}</h4>
                 </button>
                 <div className="preview-meta">
@@ -3724,8 +3756,16 @@ function WorkflowsWorkspace({
                   {gmailDomainStatus?.last_polled_at && (
                     <span>polled {formatDateTime(gmailDomainStatus.last_polled_at)}</span>
                   )}
-                  {gmailDomainStatus?.last_error && <span>{gmailDomainStatus.last_error}</span>}
+                  {gmailDomainStatus?.status === "error" && gmailDomainStatus.last_error && (
+                    <span className="warning-pill">Last poll failed</span>
+                  )}
                 </div>
+                {gmailDomainStatus?.status === "error" && gmailDomainStatus.last_error && (
+                  <details className="inline-error-details">
+                    <summary>Gmail watcher diagnostic</summary>
+                    <p>{gmailDomainStatus.last_error}</p>
+                  </details>
+                )}
                 <div className="scheduler-action-row compact-actions">
                   <label className="worker-toggle">
                     Workflow active

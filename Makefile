@@ -5,7 +5,7 @@ EVEN_DIR := EvenG2/maestro-even-client
 TAILSCALE_IP ?= 100.66.109.2
 RUNTIME_DIR ?= $(HOME)/Maestro-runtime
 
-.PHONY: help even-install even-dev even-sim even-sim-auto even-up even-build backend-reload frontend-tailscale runtime-setup runtime-sync runtime-backend-reload runtime-frontend-tailscale
+.PHONY: help even-install even-dev even-sim even-sim-auto even-up even-build backend-reload frontend-tailscale runtime-setup runtime-sync runtime-database runtime-tailscale runtime-backend-reload runtime-frontend-tailscale
 
 help:
 	@echo "Available targets:"
@@ -19,6 +19,8 @@ help:
 	@echo "  make frontend-tailscale - Start Maestro frontend for this Tailnet"
 	@echo "  make runtime-setup - Create/refresh the dedicated main runtime worktree"
 	@echo "  make runtime-sync - Fast-forward the dedicated runtime to origin/main"
+	@echo "  make runtime-database - Start Docker/Postgres and wait until healthy"
+	@echo "  make runtime-tailscale - Start Tailscale and wait until connected"
 	@echo "  make runtime-backend-reload - Start backend from the dedicated runtime"
 	@echo "  make runtime-frontend-tailscale - Start frontend from the dedicated runtime"
 
@@ -59,8 +61,35 @@ runtime-sync: runtime-setup
 	@git -C "$(RUNTIME_DIR)" fetch origin main
 	@git -C "$(RUNTIME_DIR)" pull --ff-only origin main
 
-runtime-backend-reload: runtime-sync
-	cd "$(RUNTIME_DIR)" && ./.venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
+runtime-database:
+	@if ! docker info >/dev/null 2>&1; then \
+		if command -v open >/dev/null 2>&1; then open -a Docker; fi; \
+		for attempt in $$(seq 1 30); do \
+			docker info >/dev/null 2>&1 && break; \
+			sleep 2; \
+		done; \
+	fi
+	@docker info >/dev/null 2>&1 || (echo "Docker did not become ready." && exit 1)
+	docker compose up -d postgres
+	@for attempt in $$(seq 1 30); do \
+		docker compose exec -T postgres pg_isready -U maestro -d maestro >/dev/null 2>&1 && exit 0; \
+		sleep 1; \
+	done; \
+	echo "Postgres did not become healthy."; \
+	exit 1
 
-runtime-frontend-tailscale: runtime-sync
+runtime-tailscale:
+	@if ! tailscale status >/dev/null 2>&1; then \
+		if command -v open >/dev/null 2>&1; then open -a Tailscale; fi; \
+		for attempt in $$(seq 1 30); do \
+			tailscale status >/dev/null 2>&1 && break; \
+			sleep 2; \
+		done; \
+	fi
+	@tailscale status >/dev/null 2>&1 || (echo "Tailscale did not become ready." && exit 1)
+
+runtime-backend-reload: runtime-sync runtime-database
+	cd "$(RUNTIME_DIR)" && ./.venv/bin/alembic upgrade head && ./.venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
+
+runtime-frontend-tailscale: runtime-sync runtime-tailscale
 	cd "$(RUNTIME_DIR)/frontend" && VITE_API_BASE_URL=http://$(TAILSCALE_IP):8000 npm run dev -- --host 0.0.0.0
