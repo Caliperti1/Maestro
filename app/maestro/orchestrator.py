@@ -1251,6 +1251,12 @@ class MaestroOrchestratorService:
                     )
                 )
         elif any(token in lowered for token in ("plan", "prepare", "coordinate", "workflow")):
+            planning_agents = self._agent_keys_matching(
+                registry_snapshot,
+                domain_key=domain_key,
+                include_any=("planning", "planner", "coordination"),
+                exclude_any=("email", "crm", "finance"),
+            )
             work_items.append(
                 PlannerWorkItem(
                     id=f"wi_{len(work_items) + 1}",
@@ -1266,7 +1272,7 @@ class MaestroOrchestratorService:
                     needs_user_input=False,
                     blocks_execution=False,
                     can_log_directly=False,
-                    suggested_agent_keys=[],
+                    suggested_agent_keys=planning_agents,
                     expected_output="Role-scoped workflow contribution and recommended next steps.",
                     model_tier="auto",
                     model_rationale="Runtime routing will select the appropriate execution tier.",
@@ -3723,7 +3729,9 @@ class MaestroOrchestratorService:
                 "skipped_labels"
             )
             if url:
-                details = f"Created issue: {url}."
+                number_match = re.search(r"/issues/(\d+)(?:$|[?#])", str(url))
+                issue_label = f"issue #{number_match.group(1)}" if number_match else "issue"
+                details = f"Created {issue_label}: {url}."
                 if isinstance(skipped_labels, list) and skipped_labels:
                     skipped = ", ".join(str(label) for label in skipped_labels)
                     details += f" Skipped missing label(s): {skipped}."
@@ -3834,7 +3842,16 @@ class MaestroOrchestratorService:
             )
 
         if conversation:
-            pass
+            completed_tool_details = [
+                str(item.get("details") or "").strip()
+                for item in tool_activity
+                if item.get("status") == "complete"
+                and item.get("tool_name") != "llm.tool_planner"
+                and str(item.get("details") or "").strip()
+            ]
+            new_details = [detail for detail in completed_tool_details if detail not in conversation]
+            if new_details:
+                lines.append("Completed action:\n" + "\n".join(f"- {detail}" for detail in new_details[:3]))
         elif isinstance(change_summary, str) and change_summary.strip():
             lines.append(change_summary.strip())
         else:

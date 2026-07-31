@@ -109,6 +109,10 @@ class WorkflowDefinitionGmailWatchBody(BaseModel):
     enabled: bool
 
 
+class WorkflowDefinitionShadowModeBody(BaseModel):
+    enabled: bool
+
+
 @router.get("/templates")
 def list_workflow_templates(db: Session = Depends(get_db)) -> dict[str, Any]:
     return {"templates": WorkflowTemplateService(db).list_templates()}
@@ -266,6 +270,33 @@ def update_workflow_definition_gmail_watch(
         "worker": worker,
         "status": GmailTriggerService(db).status(),
     }
+
+
+@router.patch("/definitions/{definition_id}/shadow-mode")
+def update_workflow_definition_shadow_mode(
+    definition_id: uuid.UUID,
+    body: WorkflowDefinitionShadowModeBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    definition = db.get(WorkflowDefinition, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow definition.")
+    trigger_config = definition.trigger_config or {}
+    if (
+        definition.trigger_type != "event"
+        or trigger_config.get("event_type") != "gmail.message.received"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Shadow mode is only supported for Gmail workflows.",
+        )
+    definition.workflow_spec = {
+        **(definition.workflow_spec or {}),
+        "shadow_mode": body.enabled,
+    }
+    db.commit()
+    db.refresh(definition)
+    return {"definition": SchedulerService(db).workflow_definition_payload(definition)}
 
 
 @router.get("/dashboard")

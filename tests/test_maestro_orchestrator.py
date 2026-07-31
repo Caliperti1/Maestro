@@ -1762,7 +1762,7 @@ def test_orchestrator_run_dispatches_children_and_stages_one_artifact(
     assert parent is not None
     assert parent.status == "completed"
     assert parent.output_payload["synthesis_report_id"] == run.synthesis_report_id
-    assert "completed" in run.chat_summary.lower()
+    assert "finished" in run.chat_summary.lower()
     assert any(child.agent.name == "Praxis Planning Agent" for child in run.child_runs)
     assert any("Agent registry and scoped memory were available" in child.output_text for child in run.child_runs)
     completed_queue = parent.input_payload["scheduler"]["queue_items"]

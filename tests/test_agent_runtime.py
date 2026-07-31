@@ -26,6 +26,7 @@ from app.db.models import (
     MemoryItem,
     Message,
     Report,
+    RoutedItem,
     Task,
     ToolCall,
     ToolConnection,
@@ -387,6 +388,9 @@ class FakeSingleEmailTriageLLMClient:
 
     def structured_response(self, *, instructions: str, input_text: str, **kwargs):
         self.structured_calls += 1
+        if kwargs.get("schema_name") == "email_triage_decision":
+            assert "Jordan Lee" in input_text
+            return _atlas_email_triage_decision()
         if self.structured_calls == 1:
             return {
                 "plan_summary": "Read exactly the latest Praxis email metadata.",
@@ -415,46 +419,9 @@ class FakeSingleEmailTriageLLMClient:
         if self.structured_calls == 3:
             assert "Jordan Lee" in input_text
             return {
-                "plan_summary": "Route the contact and notify Chris about the deadline.",
+                "plan_summary": "Evidence gathering is complete.",
                 "requires_final_answer": True,
-                "tool_calls": [
-                    {
-                        "tool_key": "routed.item.create",
-                        "payload_json": json.dumps(
-                            {
-                                "route_type": "contact",
-                                "title": "Jordan Lee",
-                                "content": "Jordan Lee is the partnerships director at Atlas Systems.",
-                                "metadata": {
-                                    "name": "Jordan Lee",
-                                    "email": "jordan@example.com",
-                                    "organization": "Atlas Systems",
-                                },
-                                "message_id": "msg-atlas-1",
-                                "thread_id": "thread-atlas-1",
-                                "subject": "Maestro triage test - Atlas partner sync",
-                                "from": "Jordan Lee <jordan@example.com>",
-                            }
-                        ),
-                        "rationale": "The sender is a durable Praxis contact.",
-                    },
-                    {
-                        "tool_key": "workflow.notification.create",
-                        "payload_json": json.dumps(
-                            {
-                                "title": "Praxis email needs your response",
-                                "message": "Confirm Atlas call availability by July 21.",
-                                "severity": "warning",
-                                "reason": "The sender requested a decision by a deadline.",
-                                "message_id": "msg-atlas-1",
-                                "thread_id": "thread-atlas-1",
-                                "subject": "Maestro triage test - Atlas partner sync",
-                                "from": "Jordan Lee <jordan@example.com>",
-                            }
-                        ),
-                        "rationale": "Chris must respond by a concrete deadline.",
-                    },
-                ],
+                "tool_calls": [],
             }
         return {
             "plan_summary": "Triage evidence and routed outputs are complete.",
@@ -463,8 +430,7 @@ class FakeSingleEmailTriageLLMClient:
         }
 
     def text_response(self, *, instructions: str, input_text: str) -> str:
-        assert "workflow.notification.create" in input_text
-        assert "routed.item.create" in input_text
+        assert "email_triage_decision" in input_text
         return (
             "conversation: I reviewed the Atlas email, saved Jordan as a Praxis contact, and "
             "notified you that a response is due July 21.\n\n"
@@ -513,7 +479,7 @@ class FakeEmailTriageFinalizationLLMClient:
 
     def structured_response(self, *, instructions: str, input_text: str, **kwargs):
         self.structured_calls += 1
-        is_finalizer = "operational finalizer" in instructions
+        is_finalizer = kwargs.get("schema_name") == "email_triage_decision"
         if self.structured_calls == 1 and not is_finalizer:
             return {
                 "plan_summary": "Select the latest Praxis email.",
@@ -546,57 +512,24 @@ class FakeEmailTriageFinalizationLLMClient:
             }
         if self.structured_calls == 4 and not is_finalizer:
             return {
-                "plan_summary": "Inspect the linked Drive folder.",
+                "plan_summary": "Evidence gathering is complete.",
                 "requires_final_answer": True,
-                "tool_calls": [{
-                    "tool_key": "google.drive.file.get",
-                    "payload_json": '{"file_id":"folder-atlas-1"}',
-                    "rationale": "Inspect supporting files when accessible.",
-                }],
+                "tool_calls": [],
             }
         assert is_finalizer
         assert "Jordan Lee" in input_text
-        return {
-            "plan_summary": "Route the contact and notify Chris despite the optional Drive failure.",
-            "requires_final_answer": True,
-            "tool_calls": [
-                {
-                    "tool_key": "routed.item.create",
-                    "payload_json": json.dumps({
-                        "route_type": "contact",
-                        "title": "Jordan Lee",
-                        "content": "Jordan Lee is the partnerships director at Atlas Systems.",
-                        "metadata": {
-                            "name": "Jordan Lee",
-                            "email": "jordan@example.com",
-                            "organization": "Atlas Systems",
-                        },
-                        "message_id": "msg-atlas-1",
-                        "thread_id": "thread-atlas-1",
-                        "subject": "Atlas response requested",
-                        "from": "Jordan Lee <jordan@example.com>",
-                    }),
-                    "rationale": "Preserve the durable contact.",
-                },
-                {
-                    "tool_key": "workflow.notification.create",
-                    "payload_json": json.dumps({
-                        "title": "Atlas email needs your response",
-                        "message": "Jordan asked you to confirm availability by July 21.",
-                        "severity": "warning",
-                        "reason": "Chris Aliperti personally owes a response.",
-                        "message_id": "msg-atlas-1",
-                        "thread_id": "thread-atlas-1",
-                        "subject": "Atlas response requested",
-                        "from": "Jordan Lee <jordan@example.com>",
-                    }),
-                    "rationale": "Surface the required response to Chris.",
-                },
-            ],
-        }
+        decision = _atlas_email_triage_decision(subject="Atlas response requested")
+        decision["linked_documents"] = [{
+            "url": "https://drive.google.com/drive/folders/folder-atlas-1",
+            "kind": "folder",
+            "title": "Atlas supporting files",
+            "access_status": "inaccessible",
+            "summary": "The folder is not shared with the Praxis Google account.",
+        }]
+        return decision
 
     def text_response(self, *, instructions: str, input_text: str) -> str:
-        assert "workflow.notification.create" in input_text
+        assert "email_triage_decision" in input_text
         return "conversation: I saved Jordan and notified you about the July 21 response."
 
 
@@ -624,6 +557,41 @@ class FakeEmailTriageEvidenceAdapter:
         if self.key == "gmail.thread.get":
             return {"thread_id": "thread-atlas-1", "text": "Chris Aliperti owns the response."}
         raise ToolExecutionError("Supporting Drive folder is not shared with this account.")
+
+
+def _atlas_email_triage_decision(*, subject: str = "Maestro triage test - Atlas partner sync") -> dict[str, object]:
+    return {
+        "schema_version": "1.0",
+        "message_id": "msg-atlas-1",
+        "thread_id": "thread-atlas-1",
+        "subject": subject,
+        "sender": "Jordan Lee <jordan@example.com>",
+        "classification": "response_required",
+        "confidence": 0.98,
+        "summary": "Jordan asked Chris to confirm Atlas partner-call availability by July 21.",
+        "requires_chris_response": True,
+        "notification": {
+            "should_notify": True,
+            "title": "Atlas email needs your response",
+            "message": "Jordan asked you to confirm availability by July 21.",
+            "severity": "warning",
+            "reason": "Chris Aliperti personally owes a response.",
+        },
+        "routed_candidates": [{
+            "route_type": "contact",
+            "title": "Jordan Lee",
+            "content": "Jordan Lee is the partnerships director at Atlas Systems.",
+            "metadata": [
+                {"key": "name", "value_json": '"Jordan Lee"'},
+                {"key": "email", "value_json": '"jordan@example.com"'},
+                {"key": "organization", "value_json": '"Atlas Systems"'},
+            ],
+            "rationale": "Preserve the durable Praxis contact.",
+        }],
+        "linked_documents": [],
+        "read_state_action": "none",
+        "rationale": "The sender supplied durable contact context and requested Chris's response.",
+    }
 
 
 class FakeAutoMergeMissingPrNumberLLMClient:
@@ -1050,6 +1018,7 @@ def test_seed_agent_merge_adds_gmail_read_permissions_to_existing_praxis_agent(
 
 def test_seeded_praxis_email_agent_has_email_triage_tools_skills_and_luna_model(
     session: Session,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = AgentRegistryService(session).get_spec("praxis-email-agent")
 
@@ -1076,9 +1045,14 @@ def test_seeded_praxis_email_agent_has_email_triage_tools_skills_and_luna_model(
     assert "email_triage" in allowed_skills
     assert "contact_manager" in allowed_skills
     assert "to_do_manager" in allowed_skills
-    client = _llm_client_for_model_profile(spec.model_profile)
-    assert client.provider == "openrouter"
-    assert client.model == "openai/gpt-5.6-luna"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    get_settings.cache_clear()
+    try:
+        client = _llm_client_for_model_profile(spec.model_profile)
+        assert client.provider == "openrouter"
+        assert client.model == "openai/gpt-5.6-luna"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_gmail_mark_read_is_the_only_autonomous_message_modify_action() -> None:
@@ -1398,6 +1372,53 @@ def test_email_tool_plan_reads_discovered_link_before_routing() -> None:
     ]
 
 
+def test_email_tool_plan_reads_each_discovered_document_once() -> None:
+    links = [
+        {
+            "kind": "document",
+            "file_id": "doc-1",
+            "url": "https://docs.google.com/document/d/doc-1/edit",
+        },
+        {
+            "kind": "document",
+            "file_id": "doc-2",
+            "url": "https://docs.google.com/document/d/doc-2/edit",
+        },
+    ]
+    prior_results = [
+        {
+            "tool_name": "gmail.message.get",
+            "status": "complete",
+            "output_payload": {
+                "message_id": "msg-docs",
+                "google_workspace_links": links,
+            },
+        },
+        {
+            "tool_name": "google.docs.get",
+            "status": "complete",
+            "input_payload": {"payload": {"file_id": "doc-1"}},
+            "output_payload": {"document_id": "doc-1", "text": "First document"},
+        },
+    ]
+
+    hardened = _harden_email_tool_plan(
+        [],
+        prior_results,
+        task_instruction="Inspect linked Google documents before completing email triage.",
+        allowed_tool_keys={"google.docs.get"},
+    )
+
+    assert hardened == [{
+        "tool_key": "google.docs.get",
+        "payload": {
+            "file_id": "doc-2",
+            "url": "https://docs.google.com/document/d/doc-2/edit",
+        },
+        "rationale": "Read the linked Google Workspace artifact before email routing.",
+    }]
+
+
 def test_email_tool_plan_lists_discovered_drive_folder_before_routing() -> None:
     message_result = {
         "tool_name": "gmail.message.get",
@@ -1515,7 +1536,7 @@ def test_deterministic_google_folder_plan_lists_children(session: Session) -> No
     ]
 
 
-def test_email_tool_plan_normalizes_routes_and_rejects_another_chris_owner() -> None:
+def test_email_tool_plan_reserves_all_operational_actions_for_typed_finalizer() -> None:
     prior_results = [
         {
             "tool_name": "gmail.message.list_recent",
@@ -1563,13 +1584,7 @@ def test_email_tool_plan_normalizes_routes_and_rejects_another_chris_owner() -> 
         task_instruction="Triage exactly the latest Praxis email.",
     )
 
-    assert hardened == [
-        {
-            "tool_key": "routed.item.create",
-            "payload": {"name": "Caleb Holt", "route_type": "contact"},
-            "rationale": "Record the sender.",
-        }
-    ]
+    assert hardened == []
 
 
 def test_routed_item_create_tool_promotes_contact_candidate(
@@ -1626,6 +1641,53 @@ def test_routed_item_create_tool_promotes_contact_candidate(
     contact = session.query(Contact).filter_by(email="jane@example.com").one()
     assert contact.name == "Jane Smith"
     assert contact.source_refs[0]["message_id"] == "msg-1"
+
+
+def test_routed_item_create_is_idempotent_for_same_gmail_source(
+    session: Session,
+) -> None:
+    registry = AgentRegistryService(session)
+    registry.get_spec("praxis-email-agent")
+    agent = AgentRepository(session).get_by_key("praxis-email-agent")
+    domain = DomainRepository(session).get_by_key("praxis")
+    assert agent is not None
+    assert domain is not None
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.routed_item_idempotency",
+        objective="Route a contact once even if execution is retried.",
+        input_payload={},
+    )
+    session.add(task)
+    session.commit()
+    service = ToolExecutionService(
+        session,
+        adapters={"routed.item.create": RoutedItemCreateToolAdapter()},
+    )
+    request = ToolExecutionRequest(
+        agent_key="praxis-email-agent",
+        tool_key="routed.item.create",
+        payload={
+            "route_type": "contact",
+            "title": "Jane Smith",
+            "content": "Jane Smith leads the Example Corp partnership.",
+            "metadata": {"name": "Jane Smith", "email": "jane@example.com"},
+            "message_id": "msg-retry-1",
+            "thread_id": "thread-retry-1",
+        },
+    )
+
+    first = service.execute_for_task(request, task=task)
+    second = service.execute_for_task(request, task=task)
+
+    assert first.output["created_count"] == 1
+    assert second.output["created_count"] == 0
+    assert second.output["duplicate_count"] == 1
+    assert session.query(RoutedItem).filter_by(route_type="contact").count() == 1
 
 
 def test_routed_item_create_accepts_model_aliases_and_nested_source(
@@ -3988,6 +4050,9 @@ def test_single_email_triage_routes_notifies_reports_and_stages_memory_artifact(
     )
 
     assert result.status == "completed"
+    assert result.email_triage_decision is not None
+    assert result.email_triage_decision["classification"] == "response_required"
+    assert result.email_triage_decision["notification"]["should_notify"] is True
     assert result.report_id is not None
     assert result.artifact_id is not None
     assert result.staged_artifact_path is not None
@@ -4011,6 +4076,49 @@ def test_single_email_triage_routes_notifies_reports_and_stages_memory_artifact(
     assert staged_artifact.uri == result.staged_artifact_path
 
 
+def test_single_email_triage_shadow_mode_records_decision_without_side_effects(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    get_settings().memory_dropbox_root = str(tmp_path)
+    _seed_memory(session)
+    result = PromptAggregationService(
+        session,
+        llm_client=FakeSingleEmailTriageLLMClient(),
+        tool_adapters={
+            "gmail.message.list_recent": FakeSingleEmailGmailAdapter("gmail.message.list_recent"),
+            "gmail.message.get": FakeSingleEmailGmailAdapter("gmail.message.get"),
+            "routed.item.create": RoutedItemCreateToolAdapter(),
+            "workflow.notification.create": WorkflowNotificationCreateToolAdapter(),
+        },
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction="Triage exactly one Praxis email without applying proposed writes.",
+            user_context=json.dumps({"workflow": {"shadow_mode": True}}),
+            required_skills=["email_triage", "contact_manager"],
+            use_semantic=False,
+        ),
+        stage_interaction=True,
+        execute_llm=True,
+        auto_tool_loop=True,
+        max_tool_iterations=4,
+    )
+
+    assert result.status == "completed"
+    assert result.email_triage_decision["classification"] == "response_required"
+    assert session.query(Contact).filter_by(email="jordan@example.com").count() == 0
+    assert session.query(WorkflowNotification).count() == 0
+    assert "routed.item.create" not in [call["tool_name"] for call in result.tool_calls]
+    finalization = result.tool_loop["iterations"][-1]
+    assert finalization["shadow_mode"] is True
+    assert {action["tool_key"] for action in finalization["shadow_actions"]} == {
+        "routed.item.create",
+        "workflow.notification.create",
+    }
+
+
 def test_email_triage_reserves_operational_finalization_after_evidence_budget(
     session: Session,
     tmp_path: Path,
@@ -4028,7 +4136,7 @@ def test_email_triage_reserves_operational_finalization_after_evidence_budget(
                 "gmail.message.list_recent",
                 "gmail.message.get",
                 "gmail.thread.get",
-                "google.drive.file.get",
+                "google.drive.folder.list",
             )
         }
         | {
@@ -4052,7 +4160,7 @@ def test_email_triage_reserves_operational_finalization_after_evidence_budget(
     )
 
     assert result.status == "completed"
-    assert llm_client.structured_calls == 4
+    assert llm_client.structured_calls == 5
     assert result.tool_loop["iterations"][-1]["phase"] == "email_operational_finalization"
     tool_names = [call["tool_name"] for call in result.tool_calls]
     assert "llm.email_triage_finalizer" in tool_names
@@ -4062,6 +4170,8 @@ def test_email_triage_reserves_operational_finalization_after_evidence_budget(
     notification = session.query(WorkflowNotification).one()
     assert notification.title == "Atlas email needs your response"
     assert notification.status == "delivered"
+    assert result.email_triage_decision is not None
+    assert result.email_triage_decision["linked_documents"][0]["access_status"] == "inaccessible"
     assert result.artifact_id is not None
 
 

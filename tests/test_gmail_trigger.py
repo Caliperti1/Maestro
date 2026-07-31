@@ -176,6 +176,55 @@ def test_gmail_trigger_bootstraps_then_emits_exact_inbox_message_once(
     assert len(session.scalars(select(WorkflowRun)).all()) == 1
 
 
+def test_gmail_trigger_emits_two_messages_as_independent_idempotent_runs(
+    session: Session,
+) -> None:
+    _seed_trigger(session)
+    source = FakeGmailHistorySource()
+    source.history_response = {
+        "historyId": "106",
+        "history": [{
+            "messagesAdded": [
+                {"message": {"id": "msg-first"}},
+                {"message": {"id": "msg-second"}},
+            ]
+        }],
+    }
+    source.message_metadata = lambda connection, message_id: {
+        "message_id": message_id,
+        "thread_id": f"thread-{message_id}",
+        "label_ids": ["INBOX", "UNREAD"],
+        "subject": f"Partner update {message_id}",
+        "from": "Partner <partner@example.com>",
+        "to": "Chris <chris.aliperti@praxis-defense.com>",
+        "date": "Tue, 21 Jul 2026 09:00:00 -0400",
+        "internal_date": "1784638800000",
+    }
+    service = GmailTriggerService(session, source=source)
+    service.poll_once(page_size=25)
+
+    emitted = service.poll_once(page_size=25)
+
+    assert emitted["emitted_count"] == 2
+    runs = session.scalars(select(WorkflowRun).order_by(WorkflowRun.created_at)).all()
+    assert len(runs) == 2
+    assert {
+        run.input_payload["event"]["payload"]["message_id"] for run in runs
+    } == {"msg-first", "msg-second"}
+    assert {run.input_payload["event"]["event_id"] for run in runs} == {
+        "praxis:msg-first",
+        "praxis:msg-second",
+    }
+
+    cursor = session.get(RuntimeSetting, f"{GMAIL_TRIGGER_CURSOR_PREFIX}praxis")
+    cursor.value = {**cursor.value, "history_id": "100"}
+    session.commit()
+    replayed = service.poll_once(page_size=25)
+
+    assert replayed["emitted_count"] == 2
+    assert len(session.scalars(select(WorkflowRun)).all()) == 2
+
+
 def test_gmail_trigger_resets_expired_cursor_without_emitting_old_mail(
     session: Session,
 ) -> None:

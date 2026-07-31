@@ -1865,6 +1865,7 @@ class RoutedItemCreateToolAdapter:
         raw_items = payload.get("items")
         items = raw_items if isinstance(raw_items, list) else [payload]
         created: list[RoutedItem] = []
+        duplicates: list[RoutedItem] = []
         for raw_item in items[:20]:
             if not isinstance(raw_item, dict):
                 continue
@@ -1892,6 +1893,15 @@ class RoutedItemCreateToolAdapter:
                 content = title
             metadata = _routed_item_metadata_from_payload(raw_item)
             source_refs = _source_refs_from_payload(raw_item)
+            existing = self._existing_source_item(
+                context,
+                route_type=route_type,
+                title=title,
+                source_refs=source_refs,
+            )
+            if existing is not None:
+                duplicates.append(existing)
+                continue
             item = RoutedItem(
                 domain_id=context.domain.id,
                 agent_id=context.agent.id,
@@ -1916,6 +1926,7 @@ class RoutedItemCreateToolAdapter:
         context.session.commit()
         return {
             "created_count": len(created),
+            "duplicate_count": len(duplicates),
             "promoted_count": len(promoted),
             "items": [
                 {
@@ -1926,6 +1937,15 @@ class RoutedItemCreateToolAdapter:
                     "metadata": item.metadata_,
                 }
                 for item in created
+            ],
+            "duplicate_items": [
+                {
+                    "id": str(item.id),
+                    "route_type": item.route_type,
+                    "title": item.title,
+                    "status": item.status,
+                }
+                for item in duplicates
             ],
             "promotions": [
                 {
@@ -1940,10 +1960,48 @@ class RoutedItemCreateToolAdapter:
             "summary": {
                 "type": "routed_item_create",
                 "created_count": len(created),
+                "duplicate_count": len(duplicates),
                 "promoted_count": len(promoted),
-                "route_types": sorted({item.route_type for item in created}),
+                "route_types": sorted(
+                    {item.route_type for item in [*created, *duplicates]}
+                ),
             },
         }
+
+    def _existing_source_item(
+        self,
+        context: ToolExecutionContext,
+        *,
+        route_type: str,
+        title: str,
+        source_refs: list[dict[str, Any]],
+    ) -> RoutedItem | None:
+        source_ids = {
+            str(ref.get("message_id") or ref.get("source_message_id") or "").strip()
+            for ref in source_refs
+            if isinstance(ref, dict)
+        } - {""}
+        if not source_ids:
+            return None
+        normalized_title = " ".join(title.lower().split())
+        candidates = context.session.scalars(
+            select(RoutedItem)
+            .where(
+                RoutedItem.domain_id == context.domain.id,
+                RoutedItem.route_type == route_type,
+            )
+        ).all()
+        for candidate in candidates:
+            if " ".join(candidate.title.lower().split()) != normalized_title:
+                continue
+            candidate_source_ids = {
+                str(ref.get("message_id") or ref.get("source_message_id") or "").strip()
+                for ref in candidate.source_refs or []
+                if isinstance(ref, dict)
+            } - {""}
+            if source_ids & candidate_source_ids:
+                return candidate
+        return None
 
 
 class WorkflowNotificationCreateToolAdapter:

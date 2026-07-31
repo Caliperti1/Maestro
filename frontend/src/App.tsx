@@ -1405,6 +1405,7 @@ export function App() {
   const [selectedSchedulerRun, setSelectedSchedulerRun] = useState<SchedulerRun | null>(null);
   const [selectedSchedulerDefinition, setSelectedSchedulerDefinition] =
     useState<SchedulerDefinition | null>(null);
+  const [selectedDefinitionRuns, setSelectedDefinitionRuns] = useState<SchedulerRun[]>([]);
 
   useEffect(() => {
     const thread = chatThreadRef.current;
@@ -1731,6 +1732,20 @@ export function App() {
     await loadSchedulerDashboard();
   };
 
+  const updateDefinitionShadowMode = async (definitionId: string, enabled: boolean) => {
+    await apiJson(`/scheduler/definitions/${definitionId}/shadow-mode`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    setSchedulerStatusMessage(
+      enabled
+        ? "Shadow mode enabled. Triage runs will record decisions without writing changes."
+        : "Live mode enabled. Triage runs may write routed items, notifications, and read state.",
+    );
+    await loadSchedulerDashboard();
+  };
+
   const pollGmailTriggers = async () => {
     await apiJson("/scheduler/triggers/gmail/poll", { method: "POST" });
     await Promise.all([loadGmailTriggerStatus(), loadSchedulerDashboard()]);
@@ -1833,8 +1848,13 @@ export function App() {
     await loadSchedulerDashboard();
   };
 
-  const selectSchedulerDefinition = (definition: SchedulerDefinition) => {
-    setSelectedSchedulerDefinition(definition);
+  const selectSchedulerDefinition = async (definition: SchedulerDefinition) => {
+    const response = await apiJson<{
+      definition: SchedulerDefinition;
+      runs: SchedulerRun[];
+    }>(`/scheduler/definitions/${definition.id}`);
+    setSelectedSchedulerDefinition(response.definition);
+    setSelectedDefinitionRuns(response.runs);
     setSchedulerDefinitionMode(definition.trigger_type === "event" ? "event" : "recurring");
     setSchedulerDefinitionName(definition.name);
     setSchedulerDefinitionDomain(definition.domain_key ?? "personal");
@@ -2729,6 +2749,7 @@ export function App() {
             workflowTemplates={workflowTemplates}
             selectedSchedulerRun={selectedSchedulerRun}
             selectedSchedulerDefinition={selectedSchedulerDefinition}
+            selectedDefinitionRuns={selectedDefinitionRuns}
             schedulerStatusMessage={schedulerStatusMessage}
             busyToolCallId={busyToolCallId}
             onRefresh={async () => {
@@ -2744,6 +2765,7 @@ export function App() {
             onApproveToolCall={approveToolCall}
             onRejectToolCall={rejectToolCall}
             onToggleDefinitionGmailWatch={updateDefinitionGmailWatch}
+            onToggleDefinitionShadowMode={updateDefinitionShadowMode}
             onToggleSchedulerWorker={(enabled) => updateSchedulerWorkerStatus({ enabled })}
             onPollGmailTriggers={pollGmailTriggers}
             onResetGmailDomain={resetGmailTriggerDomain}
@@ -3500,6 +3522,7 @@ function WorkflowsWorkspace({
   workflowTemplates,
   selectedSchedulerRun,
   selectedSchedulerDefinition,
+  selectedDefinitionRuns,
   schedulerStatusMessage,
   busyToolCallId,
   onRefresh,
@@ -3511,6 +3534,7 @@ function WorkflowsWorkspace({
   onApproveToolCall,
   onRejectToolCall,
   onToggleDefinitionGmailWatch,
+  onToggleDefinitionShadowMode,
   onToggleSchedulerWorker,
   onPollGmailTriggers,
   onResetGmailDomain,
@@ -3523,6 +3547,7 @@ function WorkflowsWorkspace({
   workflowTemplates: WorkflowTemplate[];
   selectedSchedulerRun: SchedulerRun | null;
   selectedSchedulerDefinition: SchedulerDefinition | null;
+  selectedDefinitionRuns: SchedulerRun[];
   schedulerStatusMessage: string;
   busyToolCallId: string | null;
   onRefresh: () => Promise<void>;
@@ -3530,10 +3555,11 @@ function WorkflowsWorkspace({
   onArchiveRun: (runId: string) => Promise<void>;
   onReplayRun: (runId: string) => Promise<void>;
   onReenterRun: (run: SchedulerRun) => Promise<void>;
-  onSelectDefinition: (definition: SchedulerDefinition) => void;
+  onSelectDefinition: (definition: SchedulerDefinition) => Promise<void>;
   onApproveToolCall: (toolCallId: string) => Promise<void>;
   onRejectToolCall: (toolCallId: string) => Promise<void>;
   onToggleDefinitionGmailWatch: (definitionId: string, enabled: boolean) => Promise<void>;
+  onToggleDefinitionShadowMode: (definitionId: string, enabled: boolean) => Promise<void>;
   onToggleSchedulerWorker: (enabled: boolean) => Promise<void>;
   onPollGmailTriggers: () => Promise<void>;
   onResetGmailDomain: (domainKey: string) => Promise<void>;
@@ -3678,6 +3704,7 @@ function WorkflowsWorkspace({
             const gmailWatchEnabled =
               configuredWatch === true
               || (configuredWatch === undefined && definition.key !== "praxis-email-triage");
+            const shadowMode = definition.workflow_spec?.shadow_mode === true;
             const gmailDomainStatus = gmailTriggerStatus?.domains.find(
               (domain) => domain.domain_key === definition.domain_key,
             );
@@ -3717,6 +3744,19 @@ function WorkflowsWorkspace({
                         checked={gmailWatchEnabled}
                         disabled={!definition.is_active}
                         onChange={(event) => onToggleDefinitionGmailWatch(
+                          definition.id,
+                          event.target.checked,
+                        )}
+                      />
+                    </label>
+                  )}
+                  {isGmailTrigger && (
+                    <label className="worker-toggle">
+                      Shadow mode
+                      <input
+                        type="checkbox"
+                        checked={shadowMode}
+                        onChange={(event) => onToggleDefinitionShadowMode(
                           definition.id,
                           event.target.checked,
                         )}
@@ -3852,6 +3892,57 @@ function WorkflowsWorkspace({
                   {selectedAgentRun.error_message && (
                     <p className="evaluation-note">{selectedAgentRun.error_message}</p>
                   )}
+                  {selectedAgentRun.email_triage_decision && (
+                    <div className="triage-decision-card">
+                      <h4>Email triage decision</h4>
+                      <div className="preview-meta">
+                        {selectedAgentRun.email_triage_shadow_mode !== null
+                          && selectedAgentRun.email_triage_shadow_mode !== undefined && (
+                          <span>{selectedAgentRun.email_triage_shadow_mode ? "shadow run" : "live run"}</span>
+                        )}
+                        <span>{selectedAgentRun.email_triage_decision.classification}</span>
+                        <span>{Math.round(selectedAgentRun.email_triage_decision.confidence * 100)}% confidence</span>
+                        <span>{selectedAgentRun.email_triage_decision.requires_chris_response ? "Chris response required" : "No Chris response"}</span>
+                        <span>{selectedAgentRun.email_triage_decision.notification.should_notify ? "Notification" : "No notification"}</span>
+                        <span>{selectedAgentRun.email_triage_decision.read_state_action.replace("_", " ")}</span>
+                      </div>
+                      <strong>{selectedAgentRun.email_triage_decision.subject}</strong>
+                      <p>{selectedAgentRun.email_triage_decision.summary}</p>
+                      <div className="preview-meta">
+                        <span>{selectedAgentRun.email_triage_decision.routed_candidates.length} routed candidates</span>
+                        {selectedAgentRun.email_triage_decision.routed_candidates.map((candidate, index) => (
+                          <span key={`${candidate.route_type}-${candidate.title}-${index}`}>
+                            {candidate.route_type}: {candidate.title}
+                          </span>
+                        ))}
+                      </div>
+                      <details>
+                        <summary>Decision rationale</summary>
+                        <p>From {selectedAgentRun.email_triage_decision.sender}</p>
+                        <p>{selectedAgentRun.email_triage_decision.rationale}</p>
+                        {selectedAgentRun.email_triage_decision.notification.should_notify && (
+                          <p>
+                            Notification: {selectedAgentRun.email_triage_decision.notification.message}
+                          </p>
+                        )}
+                        {selectedAgentRun.email_triage_decision.routed_candidates.map((candidate, index) => (
+                          <p key={`decision-${candidate.route_type}-${candidate.title}-${index}`}>
+                            {candidate.title}: {candidate.content} ({candidate.rationale})
+                          </p>
+                        ))}
+                      </details>
+                      {selectedAgentRun.email_triage_decision.linked_documents.length > 0 && (
+                        <details>
+                          <summary>Linked documents</summary>
+                          {selectedAgentRun.email_triage_decision.linked_documents.map((document, index) => (
+                            <p key={`${document.url}-${index}`}>
+                              {document.title || document.kind}: {document.access_status}. {document.summary}
+                            </p>
+                          ))}
+                        </details>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               {selectedToolCalls.length > 0 && (
@@ -3936,9 +4027,37 @@ function WorkflowsWorkspace({
         </section>
       )}
       {selectedSchedulerDefinition && (
-        <p className="evaluation-note">
-          Editing selected workflow definition: {selectedSchedulerDefinition.name}
-        </p>
+        <section className="workflow-detail-panel scheduler-detail-panel">
+          <div className="workflow-detail-heading">
+            <div>
+              <span>Durable workflow</span>
+              <h4>{selectedSchedulerDefinition.name}</h4>
+            </div>
+          </div>
+          <div className="preview-meta">
+            <span>{selectedSchedulerDefinition.is_active ? "active" : "paused"}</span>
+            <span>{selectedSchedulerDefinition.workflow_spec?.shadow_mode === true ? "shadow mode" : "live mode"}</span>
+            <span>{selectedDefinitionRuns.length} recent runs</span>
+          </div>
+          <div className="output-card-grid">
+            {selectedDefinitionRuns.map((run) => (
+              <article className="workflow-summary-card compact-run-card" key={run.id}>
+                <span>{run.status}</span>
+                <h4>{run.summary || "Email triage run"}</h4>
+                <div className="preview-meta">
+                  {run.created_at && <span>{formatDateTime(run.created_at)}</span>}
+                  <span>{run.queue_items.length} queue items</span>
+                </div>
+                <button type="button" onClick={() => onSelectRun(run.id)}>
+                  Inspect run
+                </button>
+              </article>
+            ))}
+            {selectedDefinitionRuns.length === 0 && (
+              <p className="empty-state">No runs have been recorded for this workflow.</p>
+            )}
+          </div>
+        </section>
       )}
       {schedulerStatusMessage && <p className="memory-status">{schedulerStatusMessage}</p>}
     </section>

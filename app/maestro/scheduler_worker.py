@@ -23,7 +23,17 @@ from app.agents.runtime import (
     PromptPackageRequest,
 )
 from app.core.config import get_settings
-from app.db.models import Agent, Artifact, Domain, Report, RuntimeSetting, Task, WorkflowQueueItem, WorkflowRun
+from app.db.models import (
+    Agent,
+    Artifact,
+    Domain,
+    Report,
+    RuntimeSetting,
+    Task,
+    WorkflowDefinition,
+    WorkflowQueueItem,
+    WorkflowRun,
+)
 from app.maestro.channel import record_channel_message
 from app.maestro.scheduler import SchedulerService
 from app.maestro.workflow_outputs import WorkflowOutputService
@@ -89,6 +99,16 @@ def _conversation_from_agent_output(output_text: str | None) -> str | None:
             value = match.group(1)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    return None
+
+
+def _email_triage_shadow_mode_from_calls(tool_calls: list[dict[str, Any]]) -> bool | None:
+    for call in reversed(tool_calls):
+        if call.get("tool_name") != "llm.email_triage_finalizer":
+            continue
+        output = call.get("output_payload")
+        if isinstance(output, dict) and isinstance(output.get("shadow_mode"), bool):
+            return output["shadow_mode"]
     return None
 
 
@@ -552,6 +572,11 @@ class SchedulerWorkerService:
         return None
 
     def _worker_user_context(self, run: WorkflowRun, item: WorkflowQueueItem) -> str:
+        workflow_spec: dict[str, Any] = {}
+        if run.workflow_definition_id is not None:
+            definition = self.session.get(WorkflowDefinition, run.workflow_definition_id)
+            if definition is not None and isinstance(definition.workflow_spec, dict):
+                workflow_spec = definition.workflow_spec
         context = {
             "workflow_run_id": str(run.id),
             "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
@@ -559,6 +584,9 @@ class SchedulerWorkerService:
             "summary": (run.input_payload or {}).get("summary"),
             "event": (run.input_payload or {}).get("event"),
             "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else None,
+            "workflow": {
+                "shadow_mode": workflow_spec.get("shadow_mode") is True,
+            },
             "queue_item": {
                 "external_key": item.external_key,
                 "stage_index": item.stage_index,
@@ -619,6 +647,8 @@ class SchedulerWorkerService:
             "staged_artifact_path": agent_run.staged_artifact_path,
             "artifact_id": agent_run.artifact_id,
             "error_message": agent_run.error_message,
+            "email_triage_decision": getattr(agent_run, "email_triage_decision", None),
+            "email_triage_shadow_mode": _email_triage_shadow_mode_from_calls(agent_run.tool_calls),
             "completed_at": datetime.now(UTC).isoformat(),
         }
 
