@@ -2670,7 +2670,18 @@ class LocalAppReloadAdapter:
             if expected_branch:
                 commands.append(["git", "checkout", expected_branch])
             commands.append(["git", "pull", "--ff-only"])
-        commands.extend(_reload_commands(context.connection, payload))
+        reload_commands = _reload_commands(context.connection, payload)
+        runtime_restart = target_path / "scripts" / "restart_runtime_services.py"
+        if not reload_commands and runtime_restart.exists():
+            reload_commands = [
+                [
+                    str(target_path / ".venv" / "bin" / "python"),
+                    str(runtime_restart),
+                    "--runtime-dir",
+                    str(target_path),
+                ]
+            ]
+        commands.extend(reload_commands)
         if not commands:
             raise ToolExecutionError("Reload tool has no configured commands to run.")
         results = []

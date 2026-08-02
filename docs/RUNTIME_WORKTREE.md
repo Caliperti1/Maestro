@@ -20,9 +20,10 @@ From the development workspace:
 make runtime-setup
 make runtime-backend-reload
 make runtime-frontend-tailscale
+make runtime-hot-restart
 ```
 
-`runtime-setup` creates the `main` worktree when needed and shares the existing local `.env`, Python virtual environment, and frontend dependencies. It never copies API keys into Git.
+`runtime-setup` creates the `main` worktree when needed and shares the existing local `.env`, Python virtual environment, and frontend dependencies. It never copies API keys into Git. `runtime-hot-restart` schedules a detached, health-checked restart of the backend and frontend without terminating the request that initiated it.
 
 To switch the currently running local application to the dedicated runtime after this PR is merged, stop the old backend and frontend, then start the two runtime commands above. The backend runs with Uvicorn autoreload and the frontend uses Vite HMR, so later approved deployments only need Maestro's runtime update tool.
 
@@ -34,7 +35,8 @@ For a coding workflow:
 2. Codex commits, pushes, and opens a PR.
 3. The original workflow remains active but blocked on Chris reviewing the PR.
 4. The approval card performs one intentional delivery action: merge the reviewed PR and fast-forward the dedicated runtime checkout.
-5. The workflow resumes, writes its final report/run log/artifact, and reports completion in the main Maestro channel.
+5. The reload action returns, then a detached supervisor restarts only service processes running from the dedicated runtime checkout.
+6. The workflow resumes, writes its final report/run log/artifact, and reports completion in the main Maestro channel before the scheduled restart disconnects clients briefly.
 
 No code is merged, stashed, or reloaded without Chris's explicit approval.
 

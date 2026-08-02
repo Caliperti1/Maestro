@@ -5,7 +5,7 @@ EVEN_DIR := EvenG2/maestro-even-client
 TAILSCALE_IP ?= 100.66.109.2
 RUNTIME_DIR ?= $(HOME)/Maestro-runtime
 
-.PHONY: help even-install even-dev even-sim even-sim-auto even-up even-build backend-reload frontend-tailscale runtime-setup runtime-sync runtime-database runtime-tailscale runtime-backend-reload runtime-frontend-tailscale
+.PHONY: help even-install even-dev even-sim even-sim-auto even-up even-build backend-reload frontend-tailscale runtime-setup runtime-sync runtime-database runtime-tailscale runtime-backend-reload runtime-frontend-tailscale runtime-hot-restart
 
 help:
 	@echo "Available targets:"
@@ -23,6 +23,7 @@ help:
 	@echo "  make runtime-tailscale - Start Tailscale and wait until connected"
 	@echo "  make runtime-backend-reload - Start backend from the dedicated runtime"
 	@echo "  make runtime-frontend-tailscale - Start frontend from the dedicated runtime"
+	@echo "  make runtime-hot-restart - Safely restart both dedicated runtime services"
 
 even-install:
 	cd $(EVEN_DIR) && npm install
@@ -93,3 +94,6 @@ runtime-backend-reload: runtime-sync runtime-database
 
 runtime-frontend-tailscale: runtime-sync runtime-tailscale
 	cd "$(RUNTIME_DIR)/frontend" && VITE_API_BASE_URL=http://$(TAILSCALE_IP):8000 npm run dev -- --host 0.0.0.0
+
+runtime-hot-restart: runtime-sync runtime-database runtime-tailscale
+	cd "$(RUNTIME_DIR)" && ./.venv/bin/python scripts/restart_runtime_services.py --runtime-dir "$(RUNTIME_DIR)" --tailscale-ip "$(TAILSCALE_IP)"
