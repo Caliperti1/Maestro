@@ -382,6 +382,41 @@ export type RoutedContact = {
   status: string;
   metadata: Record<string, unknown>;
   aliases: string[];
+  alias_records: Array<{ id: string; alias: string; source: string }>;
+  domain_notes: Array<{ domain_key: string | null; notes: string | null; source_refs: Array<Record<string, unknown>> }>;
+  interactions: Array<{
+    id: string;
+    domain_key: string | null;
+    interaction_type: string;
+    channel: string | null;
+    direction: string | null;
+    occurred_at: string;
+    summary: string;
+    source_refs: Array<Record<string, unknown>>;
+    provenance: Record<string, unknown>;
+  }>;
+  affiliations: Array<{
+    id: string;
+    entity_id: string;
+    organization: string;
+    domain_key: string | null;
+    role: string;
+    relationship_type: string;
+    is_primary: boolean;
+    source_refs: Array<Record<string, unknown>>;
+  }>;
+  relationships: Array<{
+    id: string;
+    contact_id: string;
+    name: string;
+    relationship_type: string;
+    description: string;
+    confidence: number;
+    source_refs: Array<Record<string, unknown>>;
+  }>;
+  retrieval_score?: number;
+  match_reasons?: string[];
+  semantic_similarity?: number | null;
   created_at: string | null;
 };
 

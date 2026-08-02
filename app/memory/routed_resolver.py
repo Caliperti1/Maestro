@@ -11,7 +11,17 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import CalendarEvent, Contact, ContactAlias, ContactDomainNote, Todo, RoutedItem
+from app.db.models import (
+    CalendarEvent,
+    Contact,
+    ContactAlias,
+    ContactDomainNote,
+    ContactInteraction,
+    ContactOrganizationAffiliation,
+    Entity,
+    Todo,
+    RoutedItem,
+)
 from app.prompts import load_prompt
 
 
@@ -141,13 +151,24 @@ class RoutedObjectResolver:
         *,
         name: str,
         email: str | None,
+        phone: str | None = None,
+        linkedin: str | None = None,
     ) -> ResolutionDecision:
         normalized = _normalize_key(name)
         candidates: list[ResolutionCandidate] = []
         if email:
-            contact = self.session.scalar(select(Contact).where(Contact.email == email))
+            contact = self.session.scalar(select(Contact).where(Contact.email.ilike(email.strip())))
             if contact is not None:
                 return self._decision("update_existing", "contact", contact.id, 0.99, "email", "Exact email match.", [])
+        normalized_phone = _normalize_phone(phone)
+        normalized_linkedin = _normalize_linkedin(linkedin)
+        if normalized_phone or normalized_linkedin:
+            contacts = list(self.session.scalars(select(Contact).where(Contact.status != "archived")))
+            for contact in contacts:
+                if normalized_phone and _normalize_phone(contact.phone) == normalized_phone:
+                    return self._decision("update_existing", "contact", contact.id, 0.98, "phone", "Exact phone match.", [])
+                if normalized_linkedin and _normalize_linkedin(contact.linkedin) == normalized_linkedin:
+                    return self._decision("update_existing", "contact", contact.id, 0.98, "linkedin", "Exact LinkedIn match.", [])
 
         contacts = list(
             self.session.scalars(
@@ -343,12 +364,44 @@ class RoutedObjectResolver:
             contact = self.session.get(Contact, candidate.object_id)
             if contact is None:
                 return {}
+            affiliations = self.session.execute(
+                select(ContactOrganizationAffiliation, Entity)
+                .join(Entity, Entity.id == ContactOrganizationAffiliation.entity_id)
+                .where(
+                    ContactOrganizationAffiliation.contact_id == contact.id,
+                    ContactOrganizationAffiliation.status == "active",
+                )
+            ).all()
+            interactions = self.session.scalars(
+                select(ContactInteraction)
+                .where(ContactInteraction.contact_id == contact.id)
+                .order_by(ContactInteraction.occurred_at.desc())
+                .limit(5)
+            ).all()
             return {
                 "object_id": str(contact.id),
                 "name": contact.name,
                 "email": contact.email,
+                "phone": contact.phone,
+                "linkedin": contact.linkedin,
                 "summary": contact.summary,
                 "aliases": sorted(_contact_aliases(contact)),
+                "affiliations": [
+                    {
+                        "organization": entity.name,
+                        "role": affiliation.role,
+                        "domain_id": str(affiliation.domain_id) if affiliation.domain_id else None,
+                    }
+                    for affiliation, entity in affiliations
+                ],
+                "recent_interactions": [
+                    {
+                        "summary": interaction.summary,
+                        "occurred_at": interaction.occurred_at.isoformat(),
+                        "domain_id": str(interaction.domain_id) if interaction.domain_id else None,
+                    }
+                    for interaction in interactions
+                ],
                 "score": candidate.score,
                 "strategy": candidate.strategy,
                 "reason": candidate.reason,
@@ -453,6 +506,15 @@ def _initial_alias_match(candidate: str, contact_name: str) -> bool:
 def _first_name(name: str) -> str | None:
     parts = _normalize_key(name).split()
     return parts[0] if parts else None
+
+
+def _normalize_phone(value: str | None) -> str:
+    digits = re.sub(r"\D", "", value or "")
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def _normalize_linkedin(value: str | None) -> str:
+    return (value or "").lower().rstrip("/").removeprefix("https://").removeprefix("http://").removeprefix("www.")
 
 
 def _event_participant_similarity(item: RoutedItem, event: CalendarEvent) -> float:

@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models import (
     Agent,
+    Contact,
     Domain,
     Report,
     RoutedItem,
@@ -51,6 +52,9 @@ from app.memory.retrieval import (
     MemoryRetrievalError,
     MemoryRetrievalService,
 )
+from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
+from app.memory.routed_hygiene import RoutedHygieneService
+from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_service import RoutedMemoryService
 
 
@@ -1852,6 +1856,84 @@ class GoogleWorkspaceToolAdapter:
         }
 
 
+class ContactIntelligenceToolAdapter:
+    def __init__(self, key: str):
+        self.key = key
+
+    def execute(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if context.dry_run:
+            return {"dry_run": True, "tool": self.key, "payload": payload}
+        service = ContactIntelligenceService(context.session)
+        if self.key == "contacts.search":
+            query_text = str(payload.get("query_text") or payload.get("query") or "").strip()
+            if not query_text:
+                raise ToolExecutionError("contacts.search requires query_text.")
+            limit = _bounded_int(payload.get("limit"), default=8, minimum=1, maximum=25)
+            results = service.search(
+                query_text,
+                domain_id=context.domain.id,
+                limit=limit,
+                use_semantic=_as_bool(payload.get("use_semantic"), default=True),
+            )
+            return {
+                "query_text": query_text,
+                "domain_key": context.domain.key,
+                "contacts": [
+                    {
+                        **result.payload,
+                        "retrieval_score": result.score,
+                        "match_reasons": result.match_reasons,
+                        "semantic_similarity": result.semantic_similarity,
+                    }
+                    for result in results
+                ],
+                "summary": {
+                    "type": "contact_search",
+                    "result_count": len(results),
+                    "top_matches": [result.contact.name for result in results[:3]],
+                },
+            }
+        contact_id = _required_uuid(payload, "contact_id")
+        if self.key == "contacts.get":
+            return {
+                "contact": service.get(contact_id, domain_id=context.domain.id),
+                "summary": {"type": "contact_detail", "contact_id": str(contact_id)},
+            }
+        if self.key == "contacts.update":
+            updates = payload.get("updates")
+            if not isinstance(updates, dict) or not updates:
+                raise ToolExecutionError("contacts.update requires a non-empty updates object.")
+            try:
+                contact = RoutedEditService(context.session).update_contact(contact_id, updates)
+            except ValueError as exc:
+                raise ToolExecutionError(str(exc)) from exc
+            ContactEmbeddingService(context.session).upsert(contact)
+            context.session.commit()
+            return {
+                "contact": service.contact_payload(contact, domain_id=context.domain.id),
+                "summary": {"type": "contact_update", "contact_id": str(contact.id)},
+            }
+        if self.key == "contacts.merge":
+            duplicate_id = _required_uuid(payload, "duplicate_contact_id")
+            survivor = context.session.get(Contact, contact_id)
+            duplicate = context.session.get(Contact, duplicate_id)
+            if survivor is None or duplicate is None:
+                raise ToolExecutionError("Contact not found.")
+            RoutedHygieneService(context.session).merge_contacts(survivor, duplicate, commit=False)
+            ContactEmbeddingService(context.session).upsert(survivor)
+            context.session.commit()
+            return {
+                "contact": service.contact_payload(survivor, domain_id=context.domain.id),
+                "merged_contact_id": str(duplicate_id),
+                "summary": {"type": "contact_merge", "survivor_contact_id": str(contact_id)},
+            }
+        raise ToolExecutionError(f"Unsupported contact tool: {self.key}")
+
+
 class RoutedItemCreateToolAdapter:
     key = "routed.item.create"
 
@@ -3019,6 +3101,8 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
     adapters["llm.gateway"] = LLMGatewayToolAdapter("llm.gateway")
     adapters["web.search"] = WebSearchToolAdapter("web.search")
     adapters["memory.context_bundle"] = MemoryContextBundleToolAdapter()
+    for key in ("contacts.search", "contacts.get", "contacts.update", "contacts.merge"):
+        adapters[key] = ContactIntelligenceToolAdapter(key)
     adapters["routed.item.create"] = RoutedItemCreateToolAdapter()
     adapters["workflow.notification.create"] = WorkflowNotificationCreateToolAdapter()
     adapters["reports.search"] = ReportRetrievalToolAdapter("reports.search")
@@ -4676,6 +4760,14 @@ def _required_text(payload: dict[str, Any], key: str) -> str:
     if not value:
         raise ToolExecutionError(f"GitHub tool requires `{key}`.")
     return value
+
+
+def _required_uuid(payload: dict[str, Any], key: str) -> uuid.UUID:
+    value = _required_text(payload, key)
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise ToolExecutionError(f"Tool payload `{key}` must be a UUID.") from exc
 
 
 def _required_any_text(payload: dict[str, Any], keys: tuple[str, ...]) -> str:

@@ -884,7 +884,22 @@ class AgentRegistryService:
             ).all()
         }
         manifest: list[ToolManifestItem] = []
-        for key, value in sorted(permissions.items()):
+        internal_order = {
+            "memory.context_bundle": 0,
+            "contacts.search": 1,
+            "contacts.get": 2,
+            "reports.get": 3,
+            "reports.search": 4,
+        }
+        ordered_permissions = sorted(
+            permissions.items(),
+            key=lambda item: (
+                1 if item[0] in internal_order else 0,
+                internal_order.get(item[0], 0),
+                item[0],
+            ),
+        )
+        for key, value in ordered_permissions:
             permission = "use"
             description = ""
             if isinstance(value, str):
@@ -2982,6 +2997,26 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": True,
         "reason": "Internal read-only retrieval from Maestro memory for RAG context.",
     },
+    "contacts.search": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only hybrid retrieval over domain-visible contact intelligence.",
+    },
+    "contacts.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only retrieval of a domain-visible contact profile and evidence.",
+    },
+    "contacts.update": {
+        "level": "internal_write",
+        "auto_executable": True,
+        "reason": "Low-impact internal contact update with provenance retained by Maestro.",
+    },
+    "contacts.merge": {
+        "level": "approval_required",
+        "auto_executable": False,
+        "reason": "Merging canonical contacts is destructive and requires Chris's approval.",
+    },
     "routed.item.create": {
         "level": "internal_write",
         "auto_executable": True,
@@ -3275,6 +3310,22 @@ _TOOL_DESCRIPTIONS = {
         "name": "Memory Context Bundle",
         "description": "Retrieve scoped, prompt-ready memory through the Memory Retrieval service.",
     },
+    "contacts.search": {
+        "name": "Contact Search",
+        "description": "Find domain-visible contacts by identity, organization, relationship, interaction context, or semantic similarity.",
+    },
+    "contacts.get": {
+        "name": "Contact Detail",
+        "description": "Read a contact's aliases, affiliations, relationships, domain notes, interactions, and provenance.",
+    },
+    "contacts.update": {
+        "name": "Update Contact",
+        "description": "Update canonical contact fields or aliases after resolving the intended person.",
+    },
+    "contacts.merge": {
+        "name": "Merge Contacts",
+        "description": "Merge a duplicate contact into a canonical survivor after user approval.",
+    },
     "routed.item.create": {
         "name": "Create Routed Candidate",
         "description": (
@@ -3524,6 +3575,20 @@ def _with_internal_default_tool_permissions(raw_permissions: dict[str, Any]) -> 
         {
             "permission": "read",
             "description": "Retrieve domain-scoped memory bundles for RAG.",
+        },
+    )
+    permissions.setdefault(
+        "contacts.search",
+        {
+            "permission": "read",
+            "description": "Find contacts visible to this agent's domain using identity and contextual evidence.",
+        },
+    )
+    permissions.setdefault(
+        "contacts.get",
+        {
+            "permission": "read",
+            "description": "Read a domain-visible contact profile and its supporting interactions.",
         },
     )
     permissions.setdefault(
@@ -3892,32 +3957,7 @@ For a warranted notification, call `workflow.notification.create` with `title`, 
         "category": "routed_memory",
         "description": "Create or update contact candidates from interactions.",
         "domain_key": None,
-        "instruction": """## Purpose
-Create high-quality contact candidates for real people so the routed resolver can create or update canonical contacts.
-
-## Use When
-- A person is mentioned with useful identity, role, relationship, or contact information.
-- A message/report describes a relationship, affiliation, preference, or interaction with a person.
-
-## Do Not Use When
-- The item is an organization, team, project, or abstract role with no person.
-- The only action is for Maestro/agent to record the contact; that is not a Chris todo.
-
-## Procedure
-1. Use the person's canonical display name as the candidate title.
-2. Put extracted fields in metadata: `name`, `email`, `phone`, `linkedin`, `organization`, `summary`, `relationship_context`, `last_contact_at`, `aliases`.
-3. Keep content as a short human-readable summary of why this contact matters.
-4. Include source_refs with the source message/report/artifact.
-5. Do not dedupe manually. If it might match an existing person, include aliases and provenance; the routed resolver adjudicates merge/update.
-6. Never create Chris Aliperti as a contact. He is the Maestro system owner; represent him as the
-   user in recipient, attendee, and ownership fields.
-
-## Output Contract
-Call `routed.item.create` with route_type `contact`, title as the person name, content summary, metadata fields, and source_refs.
-
-## Validation
-- Title must not be generic like "record contact" or "partner lead".
-- If only a first name is known, include contextual aliases/source refs and note uncertainty in metadata.""",
+        "instruction": load_prompt("skills/contact_manager.md"),
         "metadata": {"seeded_by": "maestro"},
     },
     {

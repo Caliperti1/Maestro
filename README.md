@@ -151,11 +151,13 @@ Current routed object types include:
 
 Relevant code:
 
+- `app/memory/contact_intelligence.py`
 - `app/memory/routed_service.py`
 - `app/memory/routed_resolver.py`
 - `app/memory/routed_hygiene.py`
 - `app/memory/routed_retrieval.py`
 - `app/api/memory.py`
+- `docs/CONTACT_INTELLIGENCE.md`
 
 ### Scheduler And Queue
 
@@ -255,7 +257,10 @@ USER_EMAIL=chris.aliperti@praxis-defense.com
 The user identity is a system principal, not a CRM contact. Routed contact and event processing
 uses these settings to recognize the user, suppress self-contact records, and retain the user as a
 distinct attendee or owner. Contact aliases are managed from the Contacts UI and participate in
-future routed-object resolution and deduplication.
+future routed-object resolution and deduplication. Contact intelligence also retains first-class,
+provenance-backed interactions, domain-specific notes, organization affiliations, typed person
+relationships, and local semantic embeddings. Maestro can search this evidence by identity or
+context; domain agents receive only contact evidence visible to their domain.
 
 Domain-specific tool credentials are stored as tool connections in the database. Connection config
 can reference environment variable names for secrets, so secrets do not need to be stored directly

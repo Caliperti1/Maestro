@@ -421,8 +421,88 @@ class ContactRelationship(TimestampMixin, Base):
     related_contact_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    relationship_type: Mapped[str] = mapped_column(String(80), default="associated_with", nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.7, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
     source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class ContactInteraction(TimestampMixin, Base):
+    __tablename__ = "contact_interactions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    routed_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("routed_items.id", ondelete="SET NULL"), unique=True, index=True
+    )
+    interaction_type: Mapped[str] = mapped_column(String(80), default="mention", nullable=False, index=True)
+    channel: Mapped[str | None] = mapped_column(String(80), index=True)
+    direction: Mapped[str | None] = mapped_column(String(40))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class ContactOrganizationAffiliation(TimestampMixin, Base):
+    __tablename__ = "contact_organization_affiliations"
+    __table_args__ = (
+        UniqueConstraint(
+            "contact_id",
+            "entity_id",
+            "domain_id",
+            "role",
+            name="uq_contact_affiliation_context",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    relationship_type: Mapped[str] = mapped_column(String(80), default="works_at", nullable=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class ContactEmbedding(TimestampMixin, Base):
+    __tablename__ = "contact_embeddings"
+    __table_args__ = (
+        UniqueConstraint("contact_id", "provider", "model", name="uq_contact_embeddings_model"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(160), nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(), nullable=False)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 

@@ -600,8 +600,11 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [busy, setBusy] = useState(false);
+  const [contactQuery, setContactQuery] = useState("");
+  const [contactSearchDraft, setContactSearchDraft] = useState("");
+  const [mergeTargetId, setMergeTargetId] = useState("");
 
-  const supportsDomainFilter = surface === "calendar" || surface === "todos" || surface === "ideas";
+  const supportsDomainFilter = surface === "calendar" || surface === "contacts" || surface === "todos" || surface === "ideas";
   const supportsLifecycleFilters = surface === "calendar" || surface === "todos" || surface === "ideas";
   const visibleItems = useMemo(
     () =>
@@ -640,6 +643,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     if (supportsDomainFilter && domainFilter !== "all") {
       params.set("domain_key", domainFilter);
     }
+    if (surface === "contacts" && contactQuery.trim()) {
+      params.set("query_text", contactQuery.trim());
+    }
     const response = await apiJson<Record<string, RoutedObjectRecord[]>>(
       `${config.endpoint}?${params.toString()}`,
     );
@@ -649,7 +655,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       current && nextItems.some((item) => item.id === current) ? current : (nextItems[0]?.id ?? null),
     );
     setStatusMessage("Ready");
-  }, [config.endpoint, config.responseKey, domainFilter, supportsDomainFilter]);
+  }, [config.endpoint, config.responseKey, contactQuery, domainFilter, supportsDomainFilter, surface]);
 
   useEffect(() => {
     refreshItems().catch((error) =>
@@ -782,6 +788,25 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     }
   };
 
+  const mergeSelectedContact = async () => {
+    if (surface !== "contacts" || !selectedItem || !mergeTargetId) return;
+    setBusy(true);
+    try {
+      await apiJson(`${config.endpoint}/${selectedItem.id}/merge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ duplicate_contact_id: mergeTargetId }),
+      });
+      setMergeTargetId("");
+      setStatusMessage("Contacts merged. The selected contact was kept as canonical.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Contact merge failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="routed-object-workspace">
       <section className="memory-panel routed-object-list-panel" aria-labelledby={`${surface}-heading`}>
@@ -809,6 +834,24 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 ))}
             </select>
           </label>
+        )}
+
+        {surface === "contacts" && (
+          <form
+            className="contact-search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setContactQuery(contactSearchDraft.trim());
+            }}
+          >
+            <Search size={17} />
+            <input
+              value={contactSearchDraft}
+              onChange={(event) => setContactSearchDraft(event.target.value)}
+              placeholder="Name, organization, relationship, or prior discussion"
+            />
+            <button className="planner-action" type="submit">Search</button>
+          </form>
         )}
 
         {supportsLifecycleFilters && (
@@ -898,7 +941,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     ? `${formatDateOnly(item.start_at)} / ${item.status}`
                     : surface === "todos" && "due_at" in item
                       ? `${domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"} / ${item.status} / ${item.priority}`
-                      : item.status}
+                      : surface === "contacts" && "match_reasons" in item && item.match_reasons?.length
+                        ? item.match_reasons.join(" / ")
+                        : item.status}
                 </small>
               </span>
             </button>
@@ -1031,9 +1076,60 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
                 </label>
                 <div className="preview-meta">
-                  <span>{selectedItem.organization_entity_id ? `Organization ${selectedItem.organization_entity_id.slice(0, 8)}` : "No linked organization"}</span>
+                  <span>{selectedItem.affiliations[0]?.organization ?? "No linked organization"}</span>
                   <span>{selectedItem.scheduled_event_ids.length} scheduled contacts</span>
                 </div>
+                {selectedItem.affiliations.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>Organizations</h4>
+                    {selectedItem.affiliations.map((affiliation) => (
+                      <div className="contact-evidence-row" key={affiliation.id}>
+                        <strong>{affiliation.organization}</strong>
+                        <span>{[affiliation.role, affiliation.domain_key].filter(Boolean).join(" / ") || affiliation.relationship_type}</span>
+                      </div>
+                    ))}
+                  </section>
+                )}
+                {selectedItem.interactions.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>Interaction timeline</h4>
+                    {selectedItem.interactions.map((interaction) => (
+                      <div className="contact-evidence-row" key={interaction.id}>
+                        <strong>{formatDateTime(interaction.occurred_at)}</strong>
+                        <span>{[interaction.domain_key, interaction.channel, interaction.interaction_type].filter(Boolean).join(" / ")}</span>
+                        <p>{interaction.summary}</p>
+                      </div>
+                    ))}
+                  </section>
+                )}
+                {selectedItem.relationships.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>Relationships</h4>
+                    {selectedItem.relationships.map((relationship) => (
+                      <div className="contact-evidence-row" key={relationship.id}>
+                        <strong>{relationship.name}</strong>
+                        <span>{relationship.relationship_type.replace(/_/g, " ")}</span>
+                        <p>{relationship.description}</p>
+                      </div>
+                    ))}
+                  </section>
+                )}
+                <section className="contact-intelligence-section">
+                  <h4>Merge duplicate</h4>
+                  <div className="contact-merge-row">
+                    <select value={mergeTargetId} onChange={(event) => setMergeTargetId(event.target.value)}>
+                      <option value="">Select duplicate contact</option>
+                      {items
+                        .filter((item) => "email" in item && item.id !== selectedItem.id)
+                        .map((item) => (
+                          <option key={item.id} value={item.id}>{routedObjectTitle(item)}</option>
+                        ))}
+                    </select>
+                    <button className="danger-action" type="button" disabled={!mergeTargetId || busy} onClick={mergeSelectedContact}>
+                      Merge
+                    </button>
+                  </div>
+                </section>
               </>
             )}
 

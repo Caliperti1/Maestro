@@ -26,6 +26,8 @@ from app.db.models import (
     Contact,
     ContactAlias,
     ContactDomainNote,
+    ContactInteraction,
+    ContactOrganizationAffiliation,
     ContactRelationship,
     DecisionRecord,
     Entity,
@@ -36,6 +38,7 @@ from app.db.models import (
     RoutedObjectLink,
     Todo,
 )
+from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.routed_resolver import (
     RoutedObjectResolver,
     contact_aliases_for,
@@ -138,10 +141,30 @@ class RoutedMemoryService:
         limit: int = 20,
     ) -> dict[str, Any]:
         query = (query_text or "").strip().lower()
+        if query:
+            contact_results = ContactIntelligenceService(self.session).search(
+                query_text or "",
+                domain_id=domain_id,
+                limit=limit,
+            )
+            contacts = [
+                {
+                    **result.payload,
+                    "retrieval_score": result.score,
+                    "match_reasons": result.match_reasons,
+                    "semantic_similarity": result.semantic_similarity,
+                }
+                for result in contact_results
+            ]
+        else:
+            contacts = [
+                ContactIntelligenceService(self.session).contact_payload(item, domain_id=domain_id)
+                for item in self._contacts(domain_id, query, limit)
+            ]
         return {
             "events": [self._event_payload(item) for item in self._events(domain_id, query, limit)],
             "todos": [self._todo_payload(item) for item in self._todos(domain_id, query, limit)],
-            "contacts": [self._contact_payload(item) for item in self._contacts(domain_id, query, limit)],
+            "contacts": contacts,
             "entities": [self._entity_payload(item) for item in self._entities(domain_id, query, limit)],
             "ideas": [self._idea_payload(item) for item in self._ideas(domain_id, query, limit)],
             "decisions": [self._decision_payload(item) for item in self._decisions(domain_id, query, limit)],
@@ -259,7 +282,15 @@ class RoutedMemoryService:
             }
             return None
         normalized_name = _normalize_key(name)
-        decision = self.resolver.resolve_contact(item, name=name, email=email)
+        phone = _phone_from_text(item.content) or _string_from_metadata(item.metadata_, "phone")
+        linkedin = _linkedin_from_text(item.content) or _string_from_metadata(item.metadata_, "linkedin")
+        decision = self.resolver.resolve_contact(
+            item,
+            name=name,
+            email=email,
+            phone=phone,
+            linkedin=linkedin,
+        )
         self._attach_resolution(item, decision)
         contact = self.session.get(Contact, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
         action = "updated" if contact is not None else "created"
@@ -268,8 +299,8 @@ class RoutedMemoryService:
                 name=name,
                 normalized_name=normalized_name,
                 email=email,
-                phone=_phone_from_text(item.content) or _string_from_metadata(item.metadata_, "phone"),
-                linkedin=_linkedin_from_text(item.content) or _string_from_metadata(item.metadata_, "linkedin"),
+                phone=phone,
+                linkedin=linkedin,
                 summary=_contact_summary_from_item(item),
                 origination=_string_from_metadata(item.metadata_, "origination"),
                 last_contact_at=_datetime_from_metadata(item.metadata_, "last_contact_at"),
@@ -295,6 +326,8 @@ class RoutedMemoryService:
             }
             if email and not contact.email:
                 contact.email = email
+            contact.phone = contact.phone or phone
+            contact.linkedin = contact.linkedin or linkedin
         organization = _organization_from_text(item.content) or _string_from_metadata(item.metadata_, "organization")
         if organization:
             entity = self._upsert_entity(organization, item)
@@ -303,9 +336,13 @@ class RoutedMemoryService:
                 **(contact.metadata_ or {}),
                 "organization": entity.name,
             }
+            self._upsert_contact_affiliation(contact, entity, item)
         self._upsert_contact_aliases(contact, name, item)
         self._upsert_contact_domain_note(contact, item)
+        self._upsert_contact_interaction(contact, item)
         self._extract_contact_relationships(contact, item)
+        embedding_status = ContactEmbeddingService(self.session).upsert(contact)
+        contact.metadata_ = {**(contact.metadata_ or {}), "embedding_status": embedding_status}
         return self._link(item, "contact", contact.id, action)
 
     def _attach_resolution(self, item: RoutedItem, decision) -> None:
@@ -392,6 +429,74 @@ class RoutedMemoryService:
             note.source_refs = _merge_source_refs(note.source_refs, item.source_refs)
             note.metadata_ = {**(note.metadata_ or {}), **self._canonical_metadata(item)}
 
+    def _upsert_contact_interaction(self, contact: Contact, item: RoutedItem) -> None:
+        existing = self.session.scalar(
+            select(ContactInteraction).where(ContactInteraction.routed_item_id == item.id)
+        )
+        if existing is not None:
+            return
+        metadata = item.metadata_ or {}
+        occurred_at = (
+            _datetime_from_metadata(metadata, "occurred_at")
+            or _datetime_from_metadata(metadata, "last_contact_at")
+            or item.created_at
+            or datetime.now(UTC)
+        )
+        channel = _string_from_metadata(metadata, "channel") or _source_channel(item.source_refs)
+        interaction_type = _string_from_metadata(metadata, "interaction_type") or channel or "mention"
+        interaction = ContactInteraction(
+            contact_id=contact.id,
+            domain_id=item.domain_id,
+            routed_item_id=item.id,
+            interaction_type=interaction_type,
+            channel=channel,
+            direction=_string_from_metadata(metadata, "direction"),
+            occurred_at=occurred_at,
+            summary=_contact_summary_from_item(item),
+            source_refs=item.source_refs,
+            provenance=self._provenance(item),
+            metadata_=self._canonical_metadata(item),
+        )
+        self.session.add(interaction)
+        if interaction_type != "mention" and (
+            contact.last_contact_at is None or occurred_at > contact.last_contact_at
+        ):
+            contact.last_contact_at = occurred_at
+
+    def _upsert_contact_affiliation(self, contact: Contact, entity: Entity, item: RoutedItem) -> None:
+        metadata = item.metadata_ or {}
+        role = (
+            _string_from_metadata(metadata, "role")
+            or _string_from_metadata(metadata, "title")
+            or _role_from_text(item.content)
+            or ""
+        )
+        affiliation = self.session.scalar(
+            select(ContactOrganizationAffiliation).where(
+                ContactOrganizationAffiliation.contact_id == contact.id,
+                ContactOrganizationAffiliation.entity_id == entity.id,
+                ContactOrganizationAffiliation.domain_id == item.domain_id,
+                ContactOrganizationAffiliation.role == role,
+            )
+        )
+        if affiliation is None:
+            self.session.add(
+                ContactOrganizationAffiliation(
+                    contact_id=contact.id,
+                    entity_id=entity.id,
+                    domain_id=item.domain_id,
+                    role=role,
+                    relationship_type=_string_from_metadata(metadata, "affiliation_type") or "works_at",
+                    is_primary=contact.organization_entity_id == entity.id,
+                    source_refs=item.source_refs,
+                    provenance=self._provenance(item),
+                    metadata_=self._canonical_metadata(item),
+                )
+            )
+        else:
+            affiliation.source_refs = _merge_source_refs(affiliation.source_refs, item.source_refs)
+            affiliation.metadata_ = {**(affiliation.metadata_ or {}), **self._canonical_metadata(item)}
+
     def _upsert_contact_aliases(self, contact: Contact, name: str, item: RoutedItem) -> None:
         aliases = set(contact_aliases_for(contact.name))
         aliases.update(contact_aliases_for(name))
@@ -449,7 +554,10 @@ class RoutedMemoryService:
                 ContactRelationship(
                     contact_id=contact.id,
                     related_contact_id=related.id,
+                    domain_id=item.domain_id,
+                    relationship_type=_relationship_type(description),
                     description=description,
+                    confidence=0.75,
                     source_refs=item.source_refs,
                     metadata_=self._canonical_metadata(item),
                 )
@@ -1090,6 +1198,43 @@ def _organization_from_text(text: str) -> str | None:
         text,
     )
     return match.group(1).strip(" .") if match else None
+
+
+def _role_from_text(text: str) -> str | None:
+    patterns = (
+        r"\b(?:is|serves as|works as)\s+(?:the\s+)?([A-Za-z][A-Za-z /&-]{2,80}?)\s+(?:at|for|with)\b",
+        r"\b([A-Za-z][A-Za-z /&-]{2,80}?)\s+at\s+[A-Z]",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip(" .,")
+    return None
+
+
+def _source_channel(source_refs: list[dict[str, Any]]) -> str | None:
+    for source in source_refs or []:
+        if not isinstance(source, dict):
+            continue
+        source_type = str(source.get("source_type") or source.get("type") or "").lower()
+        if "gmail" in source_type or source.get("message_id"):
+            return "email"
+        if "calendar" in source_type or source.get("event_id"):
+            return "calendar"
+        if "chat" in source_type or source.get("conversation_id"):
+            return "chat"
+    return None
+
+
+def _relationship_type(description: str | None) -> str:
+    normalized = (description or "").lower()
+    if "reports to" in normalized:
+        return "reports_to"
+    if "works with" in normalized or "collaborates" in normalized:
+        return "works_with"
+    if "partner" in normalized:
+        return "partners_with"
+    return "associated_with"
 
 
 def _relationship_from_text(contact_name: str, text: str) -> tuple[str | None, str | None]:

@@ -194,6 +194,8 @@ def test_agent_update_and_tool_registry_endpoint(
     assert agent["current_action"] == "Drafting partner-call prep."
     assert [tool["key"] for tool in agent["allowed_tools"]] == [
         "memory.context_bundle",
+        "contacts.search",
+        "contacts.get",
         "reports.get",
         "reports.search",
     ]
