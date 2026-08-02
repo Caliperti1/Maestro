@@ -88,6 +88,7 @@ import type {
 import {
   candidateResultClass,
   candidateResultLabel,
+  createClientId,
   definitionQueueItems,
   formatDateOnly,
   formatDateTime,
@@ -2068,9 +2069,9 @@ export function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         event_type: schedulerDefinitionEvent,
-        event_id: schedulerEventId || crypto.randomUUID(),
+        event_id: schedulerEventId || createClientId(),
         event_payload: {
-          id: schedulerEventId || crypto.randomUUID(),
+          id: schedulerEventId || createClientId(),
           domain_key: schedulerDefinitionDomain,
           source: "maestro-ui",
         },
@@ -2234,7 +2235,7 @@ export function App() {
       await pollActiveChannel().catch(() => {
         setChatMessages((messages) => [
           ...messages,
-          { id: crypto.randomUUID(), sender: "maestro", content: response.message },
+          { id: createClientId(), sender: "maestro", content: response.message },
         ]);
       });
       setMaestroStatus(
@@ -2253,7 +2254,7 @@ export function App() {
       const message = error instanceof Error ? error.message : "Tool approval failed.";
       setChatMessages((messages) => [
         ...messages,
-        { id: crypto.randomUUID(), sender: "maestro", content: message },
+        { id: createClientId(), sender: "maestro", content: message },
       ]);
       setMaestroStatus(message);
     } finally {
@@ -2280,7 +2281,7 @@ export function App() {
       await pollActiveChannel().catch(() => {
         setChatMessages((messages) => [
           ...messages,
-          { id: crypto.randomUUID(), sender: "maestro", content: response.message },
+          { id: createClientId(), sender: "maestro", content: response.message },
         ]);
       });
       setMaestroStatus("Tool rejected.");
@@ -2290,7 +2291,7 @@ export function App() {
       const message = error instanceof Error ? error.message : "Tool rejection failed.";
       setChatMessages((messages) => [
         ...messages,
-        { id: crypto.randomUUID(), sender: "maestro", content: message },
+        { id: createClientId(), sender: "maestro", content: message },
       ]);
       setMaestroStatus(message);
     } finally {
@@ -2317,8 +2318,8 @@ export function App() {
       } else {
         setChatMessages((messages) => [
           ...messages,
-          { id: crypto.randomUUID(), sender: "user", content: message },
-          { id: crypto.randomUUID(), sender: "maestro", content: response.message },
+          { id: createClientId(), sender: "user", content: message },
+          { id: createClientId(), sender: "maestro", content: response.message },
         ]);
       }
       const responsePlan = response.plan ?? response.active_plan ?? null;
@@ -2352,7 +2353,7 @@ export function App() {
   const sendMaestroMessage = async () => {
     if (!draftMessage.trim()) return;
     const outgoingMessage: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: createClientId(),
       sender: "user",
       content: draftMessage.trim(),
     };
@@ -2373,7 +2374,7 @@ export function App() {
         setChatMessages((messages) => [
           ...messages,
           {
-            id: crypto.randomUUID(),
+            id: createClientId(),
             sender: "maestro",
             content:
               "I found multiple actions waiting for approval. Use the Approve button on the specific tool card you want me to run.",
@@ -2408,7 +2409,7 @@ export function App() {
         setChatMessages((messages) => [
           ...messages,
           {
-            id: crypto.randomUUID(),
+            id: createClientId(),
             sender: "maestro",
             content: response.message,
           },
@@ -2431,7 +2432,7 @@ export function App() {
       const message = error instanceof Error ? error.message : "Maestro planning failed.";
       setChatMessages((messages) => [
         ...messages,
-        { id: crypto.randomUUID(), sender: "maestro", content: message },
+        { id: createClientId(), sender: "maestro", content: message },
       ]);
       setMaestroStatus(message);
     } finally {
@@ -2470,7 +2471,7 @@ export function App() {
         return [
           ...messages,
           {
-            id: crypto.randomUUID(),
+            id: createClientId(),
             sender: "maestro",
             content:
               response.run.status === "completed" || response.run.status === "scheduled"
@@ -2494,7 +2495,7 @@ export function App() {
       setMaestroPlan(shouldShowPlanPreview(submittedPlan) ? submittedPlan : null);
       setChatMessages((messages) => [
         ...messages,
-        { id: crypto.randomUUID(), sender: "maestro", content: message },
+        { id: createClientId(), sender: "maestro", content: message },
       ]);
       setMaestroStatus(message);
     } finally {
@@ -2529,7 +2530,7 @@ export function App() {
       const message = error instanceof Error ? error.message : "Could not clear candidate workflow.";
       setChatMessages((messages) => [
         ...messages,
-        { id: crypto.randomUUID(), sender: "maestro", content: message },
+        { id: createClientId(), sender: "maestro", content: message },
       ]);
       setMaestroStatus(message);
     } finally {
