@@ -410,13 +410,15 @@ MVP local app tools:
 - `local.app.reload`: approval-gated local update/reload action. By default it runs
   `git pull --ff-only` in the configured target path. A domain can configure additional
   `reload_commands` for its own app/process manager without changing the agent-facing contract.
+  When a Maestro checkout contains `scripts/restart_runtime_services.py` and no explicit commands
+  are configured, the adapter schedules that supervisor automatically.
 
 Example Maestro reload connection:
 
 ```json
 {
-  "default_cwd": "/Users/christopheraliperti/Maestro",
-  "allowed_roots": ["/Users/christopheraliperti/Maestro"],
+  "default_cwd": "/Users/christopheraliperti/Maestro-runtime",
+  "allowed_roots": ["/Users/christopheraliperti/Maestro-runtime"],
   "branch": "main",
   "pull_latest": true,
   "reload_commands": []
@@ -424,8 +426,9 @@ Example Maestro reload connection:
 ```
 
 `local.app.reload` does not invoke a shell; command strings are parsed with `shlex`, and list-form
-commands are preferred. True backend process restart should be configured through a deliberate
-local process manager command once the scheduler/resource-lock layer is ready.
+commands are preferred. The Maestro supervisor returns before restarting services, allowing the
+workflow to persist its result and the UI to reconnect after the brief restart window. It only
+terminates listeners whose working directory is inside the dedicated runtime checkout.
 
 The seeded `maestro-coding-agent` is the default Maestro Development agent intended to use this
 tool. Existing hand-created Maestro Development agents need `codex.task.run` added to their tool
