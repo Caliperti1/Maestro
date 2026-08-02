@@ -2,9 +2,11 @@ import uuid
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy.orm import Session
 
 from app.db.models import MemoryItem
 from app.llm.client import LLMClient, LLMClientError
+from app.llm.telemetry import record_llm_call
 from app.memory.service import MemoryCandidate, MemoryEvaluation
 from app.prompts import load_prompt
 
@@ -55,8 +57,9 @@ class MemoryEvaluationResponse(BaseModel):
 
 
 class LLMMemoryEvaluator:
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClient, session: Session | None = None):
         self.llm_client = llm_client
+        self.session = session
 
     def evaluate(
         self,
@@ -90,12 +93,29 @@ class LLMMemoryEvaluator:
                 for memory in existing_memories
             ],
         }
+        input_text = str(payload)
         raw_response = self.llm_client.structured_response(
             instructions=MEMORY_EVALUATION_INSTRUCTIONS,
-            input_text=str(payload),
+            input_text=input_text,
             schema_name="memory_evaluation_response",
             schema=MemoryEvaluationResponse.model_json_schema(),
         )
+        if self.session is not None:
+            record_llm_call(
+                self.session,
+                component="memory.evaluation",
+                client=self.llm_client,
+                task_id=candidate.task_id,
+                workflow_run_id=candidate.metadata.get("workflow_run_id"),
+                prompt_chars=len(input_text),
+                prompt_sections={
+                    "candidate": len(candidate.title) + len(candidate.content),
+                    "existing_memories": sum(
+                        len(memory.title) + len(memory.content) for memory in existing_memories
+                    ),
+                },
+                metadata={"existing_memory_count": len(existing_memories)},
+            )
         try:
             response = MemoryEvaluationResponse.model_validate(raw_response)
         except ValidationError as exc:

@@ -1,8 +1,11 @@
+import uuid
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy.orm import Session
 
 from app.llm.client import LLMClient, LLMClientError
+from app.llm.telemetry import record_llm_call
 from app.prompts import load_prompt
 
 ExtractedScope = Literal["global", "maestro_session", "domain", "agent"]
@@ -123,8 +126,9 @@ class ExtractedMemoryResponse(BaseModel):
 
 
 class LLMMemoryExtractor:
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClient, session: Session | None = None):
         self.llm_client = llm_client
+        self.session = session
 
     def extract(
         self,
@@ -132,6 +136,8 @@ class LLMMemoryExtractor:
         source_title: str,
         source_text: str,
         domain_key: str,
+        task_id: uuid.UUID | None = None,
+        workflow_run_id: str | uuid.UUID | None = None,
     ) -> ExtractedMemoryResponse:
         input_text = f"""\
 Domain key: {domain_key}
@@ -147,6 +153,20 @@ Source:
             schema_name="memory_extraction_response",
             schema=ExtractedMemoryResponse.model_json_schema(),
         )
+        if self.session is not None:
+            record_llm_call(
+                self.session,
+                component="memory.extraction",
+                client=self.llm_client,
+                task_id=task_id,
+                workflow_run_id=workflow_run_id,
+                prompt_chars=len(input_text),
+                prompt_sections={
+                    "source": len(source_text),
+                    "domain_context": len(_domain_context(domain_key)),
+                },
+                metadata={"source_title": source_title, "domain_key": domain_key},
+            )
         try:
             return ExtractedMemoryResponse.model_validate(raw_response)
         except ValidationError as exc:

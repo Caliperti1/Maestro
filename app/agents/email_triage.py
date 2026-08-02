@@ -64,7 +64,10 @@ class EmailTriageDecision(BaseModel):
     classification: EmailClassification
     confidence: float = Field(ge=0.0, le=1.0)
     summary: str
+    conversation: str
     requires_chris_response: bool
+    memory_worthy: bool
+    memory_summary: str
     notification: EmailNotificationDecision
     routed_candidates: list[EmailRoutedCandidate] = Field(max_length=20)
     linked_documents: list[EmailLinkedDocumentDecision] = Field(max_length=20)

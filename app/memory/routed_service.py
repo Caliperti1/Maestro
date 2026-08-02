@@ -10,7 +10,7 @@ import re
 import uuid
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from urllib import error, request
 from zoneinfo import ZoneInfo
@@ -788,7 +788,15 @@ def _deterministic_enrichment(item: RoutedItem) -> dict[str, Any]:
             "summary": _contact_summary_from_item(item),
         }
     if item.route_type in {"task", "human_input", "project", "integration_note"}:
-        due_at = _datetime_from_text(f"{item.title}\n{item.content}")
+        metadata = item.metadata_ or {}
+        due_at = (
+            _datetime_from_metadata(metadata, "due_at")
+            or _datetime_from_date_time_metadata(
+                metadata,
+                date_key="due_date",
+                time_key="due_time",
+            )
+        )
         return {
             "due_at": due_at.isoformat() if due_at else None,
             "summary": item.content,
@@ -803,7 +811,16 @@ def _deterministic_enrichment(item: RoutedItem) -> dict[str, Any]:
 
 def _deterministic_event_enrichment(item: RoutedItem) -> dict[str, Any]:
     text = f"{item.title}\n{item.content}"
-    start_at = _datetime_from_metadata(item.metadata_ or {}, "start_at") or _datetime_from_text(text)
+    metadata = item.metadata_ or {}
+    start_at = (
+        _datetime_from_metadata(metadata, "start_at")
+        or _datetime_from_date_time_metadata(
+            metadata,
+            date_key="start_date",
+            time_key="start_time",
+        )
+        or _datetime_from_text(text)
+    )
     duration_minutes = _duration_minutes_from_text(text)
     end_at = None
     if start_at:
@@ -1102,6 +1119,32 @@ def _datetime_from_metadata(metadata: dict[str, Any], key: str) -> datetime | No
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=home_timezone())
+
+
+def _datetime_from_date_time_metadata(
+    metadata: dict[str, Any],
+    *,
+    date_key: str,
+    time_key: str,
+) -> datetime | None:
+    raw_date = str(metadata.get(date_key) or "").strip()
+    if not raw_date:
+        return None
+    try:
+        parsed_date = date.fromisoformat(raw_date)
+    except ValueError:
+        return None
+    raw_time = str(metadata.get(time_key) or "").strip()
+    try:
+        parsed_time = time.fromisoformat(raw_time) if raw_time else time.min
+    except ValueError:
+        return None
+    timezone_name = str(metadata.get("timezone") or get_settings().home_timezone).strip()
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception:
+        zone = home_timezone()
+    return datetime.combine(parsed_date, parsed_time, zone).astimezone(UTC)
 
 
 def _datetime_from_text(text: str) -> datetime | None:

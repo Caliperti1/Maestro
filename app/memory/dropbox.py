@@ -198,8 +198,8 @@ class MemoryDropboxProcessor:
             llm_client = OpenAILLMClient()
             self.curator = LLMMemoryCurator(
                 self.session,
-                LLMMemoryExtractor(llm_client),
-                semantic_evaluator=LLMMemoryEvaluator(llm_client),
+                LLMMemoryExtractor(llm_client, self.session),
+                semantic_evaluator=LLMMemoryEvaluator(llm_client, self.session),
                 embedding_service=MemoryEmbeddingService(self.session),
             )
         return self.curator

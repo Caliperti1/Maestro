@@ -39,6 +39,10 @@ work.
 | 4.14 | Force an approval-gated Gmail mutation such as archive. | Needs Attention and the main chat name the exact action and rationale. Approval completes the same blocked durable run rather than creating a new workflow. | Approval card, channel message, and original run ID. | Automated; human trigger not run |
 | 4.15 | Send an email containing two relevant Google Docs. | Each unique file is read once. The final decision records `read`, `inaccessible`, `not_read`, or `irrelevant` for each discovered linked artifact and never invents inaccessible content. | Google tool calls and `linked_documents` decision entries. | Automated link sequencing; human OAuth run not run |
 | 4.16 | Retry the same operational decision after an interrupted write. | Same-message routed candidates and notifications remain singletons; the run reports duplicate resolution instead of creating copies. | `duplicate_count`, stable source-linked IDs, and run log. | Automated |
+| 4.17 | Inspect model usage for one triggered email run. | The durable path uses one Luna email-finalizer reasoning call, no generic agent-planner calls, and no separate report-generation call. Prompt section sizes, tokens, model, provider, and cost are attributed to the workflow run. | Run-log `llm_usage` and `/workflow-outputs/llm-calls?workflow_run_id=...`. | Automated |
+| 4.18 | Process an email whose only durable outcomes are routed objects and run history. | Maestro creates routed records and a run log but skips the canonical-memory artifact, preventing redundant Terra curation. A genuinely durable relationship, decision, or long-lived fact stages one workflow artifact. | Run `memory_curation_status`, memory inbox, and artifact provenance. | Automated decision boundary; human live run not run |
+| 4.19 | Process an action-required email that creates an attention record. | The notification is held until workflow completion, then one conversational Maestro message is posted. No separate report-snippet message or generic workflow-completed notification is created. | Primary channel and notification row linked to the same workflow run. | Automated |
+| 4.20 | Process a future event and todo with explicit Eastern date/time data. | Canonical event and todo timestamps preserve the supplied date and Eastern timezone instead of defaulting to the processing date. | Calendar and todo detail views. | Automated |
 
 ## Pass Criteria
 
@@ -47,6 +51,8 @@ work.
   time.
 - Initial enablement, restarts, retries, replay, and cursor recovery are deterministic.
 - Quiet mail stays quiet; Chris-action mail produces one useful conversational notification.
+- A normal triggered email requires one Luna reasoning call; all model usage is attributable to the
+  workflow run and redundant memory curation is skipped.
 - Trigger polling and workflow execution remain observable and do not block Maestro chat.
 
 ## Execution Trace
@@ -69,12 +75,15 @@ sequenceDiagram
     Scheduler-->>Worker: Queue parallel-ready triage item
     Worker->>Agent: Objective plus immutable trigger event context
     Agent->>Gmail: Read exact message_id and optional thread
-    Agent->>Agent: Emit strict EmailTriageDecision
+    Agent->>Agent: One Luna call emits strict EmailTriageDecision
     alt Shadow mode
         Agent->>Outputs: Record proposed actions without side effects
     else Live mode
-        Agent->>Outputs: Resolve routed items, report, run log, and memory artifact
-        Agent-->>Maestro: Notify only when Chris must act
+        Agent->>Outputs: Resolve routed items, report, and run log
+        opt Decision contains separate durable memory
+            Agent->>Outputs: Stage one canonical workflow memory artifact
+        end
+        Agent-->>Maestro: Post one conversational notification only when Chris must act
     end
     Worker->>Scheduler: Complete, retry, or block the run
     Trigger->>Trigger: Advance cursor only after event emission succeeds

@@ -23,6 +23,7 @@ from app.core.config import get_settings
 from app.db.models import (
     Artifact,
     Contact,
+    LLMCallLog,
     MemoryItem,
     Message,
     Report,
@@ -569,7 +570,10 @@ def _atlas_email_triage_decision(*, subject: str = "Maestro triage test - Atlas 
         "classification": "response_required",
         "confidence": 0.98,
         "summary": "Jordan asked Chris to confirm Atlas partner-call availability by July 21.",
+        "conversation": "Chris, Jordan asked you to confirm Atlas partner-call availability by July 21.",
         "requires_chris_response": True,
+        "memory_worthy": True,
+        "memory_summary": "Jordan Lee requested confirmation for an Atlas partner call by July 21.",
         "notification": {
             "should_notify": True,
             "title": "Atlas email needs your response",
@@ -4070,10 +4074,72 @@ def test_single_email_triage_routes_notifies_reports_and_stages_memory_artifact(
     assert notification.metadata_["source_message_id"] == "msg-atlas-1"
     report = session.get(Report, uuid.UUID(result.report_id))
     assert report is not None
-    assert "response_needed" in report.body_markdown
+    assert '"classification": "response_required"' in report.body_markdown
     staged_artifact = session.get(Artifact, uuid.UUID(result.artifact_id))
     assert staged_artifact is not None
     assert staged_artifact.uri == result.staged_artifact_path
+
+
+def test_triggered_email_triage_uses_one_reasoning_call_and_no_generic_planner(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    get_settings().memory_dropbox_root = str(tmp_path)
+    _seed_memory(session)
+    llm_client = FakeSingleEmailTriageLLMClient()
+    result = PromptAggregationService(
+        session,
+        llm_client=llm_client,
+        tool_adapters={
+            "gmail.message.get": FakeSingleEmailGmailAdapter("gmail.message.get"),
+            "routed.item.create": RoutedItemCreateToolAdapter(),
+            "workflow.notification.create": WorkflowNotificationCreateToolAdapter(),
+        },
+    ).run_agent_once(
+        PromptPackageRequest(
+            agent_key="praxis-email-agent",
+            task_instruction="Triage the exact Gmail trigger message.",
+            user_context=(
+                "Scheduler context.\n\n"
+                + json.dumps(
+                    {
+                        "event": {
+                            "event_type": "gmail.message.received",
+                            "payload": {"message_id": "msg-atlas-1"},
+                        }
+                    }
+                )
+            ),
+            required_skills=["email_triage", "contact_manager"],
+            use_semantic=False,
+        ),
+        stage_interaction=False,
+        execute_llm=True,
+        tool_requests=[
+            AgentToolRequest(
+                tool_key="gmail.message.get",
+                payload={"message_id": "msg-atlas-1", "max_body_chars": 8000},
+            )
+        ],
+        auto_tool_loop=True,
+        max_tool_iterations=4,
+        source_type="scheduler_worker",
+    )
+
+    tool_names = [call["tool_name"] for call in result.tool_calls]
+    assert result.status == "completed"
+    assert llm_client.structured_calls == 1
+    assert "llm.tool_planner" not in tool_names
+    assert "llm.gateway" not in tool_names
+    assert tool_names.count("llm.email_triage_finalizer") == 1
+    assert tool_names.count("email.report.render") == 1
+    assert (
+        session.query(LLMCallLog)
+        .filter_by(component="agent.email_triage_finalizer")
+        .count()
+        == 1
+    )
 
 
 def test_single_email_triage_shadow_mode_records_decision_without_side_effects(

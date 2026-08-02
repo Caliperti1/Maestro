@@ -777,6 +777,52 @@ def test_routed_memory_service_enriches_event_fields_from_messy_text(
     assert routed_item.metadata_["enrichment_source"] == "routed_item_enricher"
 
 
+def test_routed_memory_service_prefers_explicit_event_and_todo_dates(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    event_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Partner meeting with Jane Smith",
+        content="Confirm the partner meeting and send the Praxis overview.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "gmail_message", "id": "msg-explicit-date"}],
+        metadata_={
+            "start_date": "2026-08-04",
+            "start_time": "14:00:00",
+            "timezone": "America/New_York",
+            "attendees": [{"name": "Jane Smith"}],
+        },
+    )
+    todo_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="task",
+        title="Send Jane the Praxis overview",
+        content="Send the overview before the partner meeting.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "gmail_message", "id": "msg-explicit-date"}],
+        metadata_={
+            "due_date": "2026-08-04",
+            "due_time": "13:00:00",
+            "timezone": "America/New_York",
+        },
+    )
+    session.add_all([event_item, todo_item])
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([event_item, todo_item])
+
+    event = session.query(CalendarEvent).one()
+    todo = session.query(Todo).one()
+    assert event.start_at.replace(tzinfo=UTC) == datetime(2026, 8, 4, 18, 0, tzinfo=UTC)
+    assert todo.due_at.replace(tzinfo=UTC) == datetime(2026, 8, 4, 17, 0, tzinfo=UTC)
+
+
 def test_routed_memory_service_updates_incomplete_event_from_followup_reference(
     session: Session,
     tmp_path: Path,
