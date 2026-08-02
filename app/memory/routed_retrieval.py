@@ -62,7 +62,24 @@ class RoutedRetrievalService:
             for item in items:
                 if label == "contacts":
                     detail = item.get("summary") or item.get("email") or ""
-                    lines.append(f"- {item.get('name')}: {detail}")
+                    affiliations = ", ".join(
+                        str(affiliation.get("organization"))
+                        for affiliation in item.get("affiliations") or []
+                        if affiliation.get("organization")
+                    )
+                    recent_interaction = next(iter(item.get("interactions") or []), {})
+                    reasons = ", ".join(item.get("match_reasons") or [])
+                    context = "; ".join(
+                        part
+                        for part in (
+                            detail,
+                            f"organizations: {affiliations}" if affiliations else "",
+                            f"recent interaction: {recent_interaction.get('summary')}" if recent_interaction else "",
+                            f"matched by: {reasons}" if reasons else "",
+                        )
+                        if part
+                    )
+                    lines.append(f"- {item.get('name')}: {context}")
                 elif label == "events":
                     when = item.get("start_at") or "unscheduled"
                     lines.append(f"- {item.get('title')} ({when}): {item.get('summary') or ''}")

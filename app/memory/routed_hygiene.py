@@ -11,6 +11,9 @@ from app.db.models import (
     Contact,
     ContactAlias,
     ContactDomainNote,
+    ContactEmbedding,
+    ContactInteraction,
+    ContactOrganizationAffiliation,
     ContactRelationship,
     RoutedObjectChangeLog,
     RoutedObjectLink,
@@ -286,6 +289,33 @@ class RoutedHygieneService:
                 relationship.contact_id = survivor.id
             if relationship.related_contact_id == duplicate.id:
                 relationship.related_contact_id = survivor.id
+        for interaction in self.session.scalars(
+            select(ContactInteraction).where(ContactInteraction.contact_id == duplicate.id)
+        ):
+            interaction.contact_id = survivor.id
+        for affiliation in self.session.scalars(
+            select(ContactOrganizationAffiliation).where(
+                ContactOrganizationAffiliation.contact_id == duplicate.id
+            )
+        ):
+            existing = self.session.scalar(
+                select(ContactOrganizationAffiliation).where(
+                    ContactOrganizationAffiliation.contact_id == survivor.id,
+                    ContactOrganizationAffiliation.entity_id == affiliation.entity_id,
+                    ContactOrganizationAffiliation.domain_id == affiliation.domain_id,
+                    ContactOrganizationAffiliation.role == affiliation.role,
+                )
+            )
+            if existing is None:
+                affiliation.contact_id = survivor.id
+            else:
+                existing.source_refs = _merge_source_refs(existing.source_refs, affiliation.source_refs)
+                existing.metadata_ = _merge_metadata(existing.metadata_, affiliation.metadata_)
+                self.session.delete(affiliation)
+        for embedding in self.session.scalars(
+            select(ContactEmbedding).where(ContactEmbedding.contact_id == duplicate.id)
+        ):
+            self.session.delete(embedding)
         self._finalize_merge("contact", survivor.id, duplicate)
 
     def _merge_event(self, survivor: CalendarEvent, duplicate: CalendarEvent) -> None:

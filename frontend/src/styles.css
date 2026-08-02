@@ -1829,6 +1829,8 @@ h4 {
 }
 
 .routed-filter select,
+.contact-search input,
+.contact-merge-row select,
 .routed-object-detail input,
 .routed-object-detail textarea {
   width: 100%;
@@ -1838,6 +1840,49 @@ h4 {
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
   border-radius: 8px;
+}
+
+.contact-search {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.contact-intelligence-section {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.contact-intelligence-section h4 {
+  margin: 0;
+  color: var(--color-heading);
+  font-size: 0.86rem;
+}
+
+.contact-evidence-row {
+  display: grid;
+  gap: 3px;
+  padding: 9px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.contact-evidence-row span,
+.contact-evidence-row p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.contact-merge-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
 }
 
 .calendar-shell {

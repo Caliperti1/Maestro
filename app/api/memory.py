@@ -15,7 +15,6 @@ from app.db.models import (
     Artifact,
     CalendarEvent,
     Contact,
-    ContactAlias,
     DecisionRecord,
     Entity,
     Idea,
@@ -29,6 +28,7 @@ from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
+from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.retrieval import (
@@ -73,6 +73,10 @@ class PromoteRoutedItemsRequest(BaseModel):
 
 class UpdateRoutedObjectRequest(BaseModel):
     updates: dict[str, Any]
+
+
+class MergeContactRequest(BaseModel):
+    duplicate_contact_id: uuid.UUID
 
 
 class ReclassifySourceRequest(BaseModel):
@@ -344,10 +348,68 @@ def update_todo(
 
 
 @router.get("/routed-objects/contacts")
-def list_contacts(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
+def list_contacts(
+    limit: int = 50,
+    query_text: str | None = None,
+    domain_key: str | None = None,
+    use_semantic: bool = True,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
-    contacts = db.scalars(select(Contact).order_by(Contact.updated_at.desc()).limit(limit)).all()
-    return {"contacts": [_contact_payload(db, contact) for contact in contacts]}
+    domain_id = None
+    if domain_key:
+        domain = DomainRepository(db).get_by_key(domain_key)
+        if domain is None:
+            raise HTTPException(status_code=404, detail="Domain not found.")
+        domain_id = domain.id
+    service = ContactIntelligenceService(db)
+    if query_text:
+        results = service.search(
+            query_text,
+            domain_id=domain_id,
+            limit=limit,
+            use_semantic=use_semantic,
+        )
+        return {
+            "contacts": [
+                {
+                    **result.payload,
+                    "retrieval_score": result.score,
+                    "match_reasons": result.match_reasons,
+                    "semantic_similarity": result.semantic_similarity,
+                }
+                for result in results
+            ]
+        }
+    contacts = service.search("", domain_id=domain_id, limit=limit, use_semantic=False)
+    return {"contacts": [result.payload for result in contacts]}
+
+
+@router.post("/routed-objects/contacts/embeddings/backfill")
+def backfill_contact_embeddings(
+    limit: int | None = Query(default=None, ge=1, le=10000),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return ContactEmbeddingService(db).backfill(limit=limit)
+
+
+@router.get("/routed-objects/contacts/{contact_id}")
+def get_contact(
+    contact_id: uuid.UUID,
+    domain_key: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = None
+    if domain_key:
+        domain = DomainRepository(db).get_by_key(domain_key)
+        if domain is None:
+            raise HTTPException(status_code=404, detail="Domain not found.")
+        domain_id = domain.id
+    try:
+        payload = ContactIntelligenceService(db).get(contact_id, domain_id=domain_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"contact": payload}
 
 
 @router.patch("/routed-objects/contacts/{contact_id}")
@@ -364,7 +426,27 @@ def update_contact(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    ContactEmbeddingService(db).upsert(contact)
+    db.commit()
     return {"contact": _contact_payload(db, contact)}
+
+
+@router.post("/routed-objects/contacts/{contact_id}/merge")
+def merge_contact(
+    contact_id: uuid.UUID,
+    body: MergeContactRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    survivor = db.get(Contact, contact_id)
+    duplicate = db.get(Contact, body.duplicate_contact_id)
+    if survivor is None or duplicate is None:
+        raise HTTPException(status_code=404, detail="Contact not found.")
+    if survivor.id == duplicate.id:
+        raise HTTPException(status_code=400, detail="A contact cannot be merged into itself.")
+    RoutedHygieneService(db).merge_contacts(survivor, duplicate, commit=False)
+    ContactEmbeddingService(db).upsert(survivor)
+    db.commit()
+    return {"contact": _contact_payload(db, survivor), "merged_contact_id": str(duplicate.id)}
 
 
 @router.patch("/routed-objects/{object_type}/{object_id}/archive")
@@ -845,32 +927,7 @@ def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
 
 
 def _contact_payload(db: Session, contact: Contact) -> dict[str, Any]:
-    aliases = db.scalars(
-        select(ContactAlias.alias)
-        .where(
-            ContactAlias.contact_id == contact.id,
-            ContactAlias.source == "manual",
-        )
-        .order_by(ContactAlias.normalized_alias)
-    ).all()
-    return {
-        "id": str(contact.id),
-        "name": contact.name,
-        "phone": contact.phone,
-        "email": contact.email,
-        "linkedin": contact.linkedin,
-        "organization_entity_id": str(contact.organization_entity_id) if contact.organization_entity_id else None,
-        "summary": contact.summary,
-        "origination": contact.origination,
-        "last_contact_at": contact.last_contact_at.isoformat() if contact.last_contact_at else None,
-        "scheduled_event_ids": contact.scheduled_event_ids,
-        "source_refs": contact.source_refs,
-        "provenance": contact.provenance,
-        "status": contact.status,
-        "metadata": contact.metadata_,
-        "aliases": aliases,
-        "created_at": contact.created_at.isoformat() if contact.created_at else None,
-    }
+    return ContactIntelligenceService(db).contact_payload(contact)
 
 
 def _entity_payload(entity: Entity) -> dict[str, Any]:
