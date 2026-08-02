@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.runtime import (
+    AgentToolRequest,
     AgentRuntimeError,
     InteractionArtifactPackager,
     PromptAggregationService,
@@ -31,6 +32,7 @@ from app.db.models import (
     RuntimeSetting,
     Task,
     WorkflowDefinition,
+    WorkflowNotification,
     WorkflowQueueItem,
     WorkflowRun,
 )
@@ -49,6 +51,33 @@ def _queue_item_required_skills(item: WorkflowQueueItem) -> list[str]:
     if not isinstance(skills, list):
         return []
     return [str(skill).strip() for skill in skills if str(skill).strip()]
+
+
+def _trigger_email_bootstrap_requests(run: WorkflowRun) -> list[AgentToolRequest]:
+    event = (run.input_payload or {}).get("event")
+    if not isinstance(event, dict) or event.get("event_type") != "gmail.message.received":
+        return []
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return []
+    message_id = str(payload.get("message_id") or "").strip()
+    thread_id = str(payload.get("thread_id") or "").strip()
+    requests: list[AgentToolRequest] = []
+    if message_id:
+        requests.append(
+            AgentToolRequest(
+                tool_key="gmail.message.get",
+                payload={"message_id": message_id, "max_body_chars": 8000},
+            )
+        )
+    if thread_id:
+        requests.append(
+            AgentToolRequest(
+                tool_key="gmail.thread.get",
+                payload={"thread_id": thread_id, "max_body_chars": 6000},
+            )
+        )
+    return requests
 
 
 def _coding_pr_number(tool_calls: list[dict[str, Any]]) -> int | None:
@@ -110,6 +139,47 @@ def _email_triage_shadow_mode_from_calls(tool_calls: list[dict[str, Any]]) -> bo
         if isinstance(output, dict) and isinstance(output.get("shadow_mode"), bool):
             return output["shadow_mode"]
     return None
+
+
+def _email_triage_decision_from_queue_items(
+    queue_items: list[WorkflowQueueItem],
+) -> dict[str, Any] | None:
+    for item in reversed(queue_items):
+        item_output = item.output_payload or {}
+        agent_run = (
+            item_output.get("agent_run")
+            if isinstance(item_output.get("agent_run"), dict)
+            else item_output
+        )
+        decision = agent_run.get("email_triage_decision")
+        if isinstance(decision, dict):
+            return decision
+    return None
+
+
+def _compact_tool_calls_for_artifact(
+    tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for call in tool_calls:
+        call_id = str(call.get("id") or "")
+        if call_id and call_id in seen:
+            continue
+        if call_id:
+            seen.add(call_id)
+        output = call.get("output_payload")
+        output = output if isinstance(output, dict) else {}
+        compact.append(
+            {
+                "id": call_id or None,
+                "tool_name": call.get("tool_name"),
+                "status": call.get("status"),
+                "summary": output.get("summary"),
+                "error_message": call.get("error_message"),
+            }
+        )
+    return compact
 
 
 def _tool_call_blocker_message(call: dict[str, Any]) -> str:
@@ -321,9 +391,11 @@ class SchedulerWorkerService:
                     use_semantic=True,
                     required_skills=_queue_item_required_skills(item),
                     model_profile=_queue_item_model_profile(run, item, agent),
+                    workflow_run_id=str(run.id),
                 ),
-                stage_interaction=True,
+                stage_interaction=False,
                 execute_llm=execute_llm,
+                tool_requests=_trigger_email_bootstrap_requests(run),
                 initial_tool_results=_approved_tool_results(item),
                 auto_tool_loop=auto_tool_loop,
                 max_tool_iterations=max_tool_iterations,
@@ -661,6 +733,17 @@ class SchedulerWorkerService:
             for item in self.scheduler._queue_items_for_run(run.id)
             if item.status != "archived"
         ]
+        email_decision = _email_triage_decision_from_queue_items(queue_items)
+        if email_decision is not None and not bool(email_decision.get("memory_worthy")):
+            run.output_payload = {
+                **(run.output_payload or {}),
+                "memory_curation_status": "skipped_not_durable",
+                "memory_curation_reason": (
+                    "The typed email decision contained routed/run history only and no durable memory."
+                ),
+            }
+            self.session.commit()
+            return
         domain_key = "maestro-development"
         domain_id = run.domain_id
         if domain_id is None:
@@ -689,7 +772,10 @@ class SchedulerWorkerService:
                 }
             )
             if isinstance(agent_run.get("tool_calls"), list):
-                tool_calls.extend(agent_run["tool_calls"])
+                if email_decision is not None:
+                    tool_calls.extend(_compact_tool_calls_for_artifact(agent_run["tool_calls"]))
+                else:
+                    tool_calls.extend(agent_run["tool_calls"])
             preview = str(
                 agent_run.get("output_preview")
                 or agent_run.get("execution_note")
@@ -697,6 +783,11 @@ class SchedulerWorkerService:
             ).strip()
             if preview:
                 output_sections.append(f"## {item.external_key}\n{preview}")
+        if email_decision is not None:
+            output_sections = [
+                "## Durable email context\n"
+                + str(email_decision.get("memory_summary") or email_decision.get("summary") or "").strip()
+            ]
         package = InteractionArtifactPackager(self.session).build_package(
             domain_key=domain_key,
             agent_key=None,
@@ -711,6 +802,7 @@ class SchedulerWorkerService:
                 "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
                 "canonical_scheduled_workflow_artifact": True,
                 "source_type": run.source_type,
+                "email_memory_worthy": email_decision.get("memory_worthy") if email_decision else None,
             },
         )
         staged = InteractionArtifactPackager(self.session).stage_package(package)
@@ -726,6 +818,7 @@ class SchedulerWorkerService:
             **output_payload,
             "staged_artifact_path": staged.path,
             "artifact_id": staged.artifact_id,
+            "memory_curation_status": "staged",
         }
         self.session.commit()
 
@@ -774,19 +867,46 @@ class SchedulerWorkerService:
     def _post_workflow_completion_update(self, run: WorkflowRun) -> str:
         self.session.refresh(run)
         output_payload = run.output_payload or {}
+        queue_items = [
+            item
+            for item in self.scheduler._queue_items_for_run(run.id)
+            if item.status != "archived"
+        ]
+        email_decision = _email_triage_decision_from_queue_items(queue_items)
+        attention_notification = self.session.scalar(
+            select(WorkflowNotification)
+            .where(
+                WorkflowNotification.workflow_run_id == run.id,
+                WorkflowNotification.notification_type == "email_attention",
+            )
+            .order_by(WorkflowNotification.created_at.desc())
+        )
+        should_publish = email_decision is None or bool(
+            ((email_decision.get("notification") or {}).get("should_notify"))
+        )
+        if not should_publish:
+            run.output_payload = {
+                **output_payload,
+                "completion_channel_message_suppressed": True,
+                "completion_channel_message_reason": (
+                    "Email triage completed without a warranted notification."
+                ),
+            }
+            self.session.commit()
+            return ""
+
         message = str(output_payload.get("completion_channel_message") or "")
         if not message:
-            queue_items = [
-                item
-                for item in self.scheduler._queue_items_for_run(run.id)
-                if item.status != "archived"
-            ]
             message = self._delivery_completion_message(run, queue_items)
         if not message:
             summaries: list[str] = []
             for item in queue_items[:4]:
                 item_output = item.output_payload or {}
-                agent_run = item_output.get("agent_run") if isinstance(item_output.get("agent_run"), dict) else item_output
+                agent_run = (
+                    item_output.get("agent_run")
+                    if isinstance(item_output.get("agent_run"), dict)
+                    else item_output
+                )
                 preview = str(
                     agent_run.get("output_preview")
                     or agent_run.get("execution_note")
@@ -811,10 +931,18 @@ class SchedulerWorkerService:
                     "status": "completed",
                     "workflow_run_id": str(run.id),
                     "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
-                    "event_type": "workflow_completed",
+                    "event_type": "email_attention" if attention_notification is not None else "workflow_completed",
                     "channel_visibility": "global",
+                    "notification_id": str(attention_notification.id) if attention_notification is not None else None,
                 },
             )
+            if attention_notification is not None:
+                attention_notification.status = "delivered"
+                attention_notification.delivered_at = datetime.now(UTC)
+                attention_notification.metadata_ = {
+                    **(attention_notification.metadata_ or {}),
+                    "delivered_by": "scheduler_completion",
+                }
             run.output_payload = {
                 **(run.output_payload or {}),
                 "completion_channel_message_posted": True,
@@ -823,6 +951,8 @@ class SchedulerWorkerService:
             self.session.commit()
 
         self.session.refresh(run)
+        if attention_notification is not None:
+            return message
         if not (run.output_payload or {}).get("completion_notification_posted"):
             WorkflowOutputService(self.session).create_notification(
                 run,

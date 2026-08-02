@@ -11,6 +11,8 @@ from app.core.config import get_settings
 
 @pytest.fixture(autouse=True)
 def disable_live_local_classifiers(monkeypatch):
+    # Test runs must never consume the developer's real OpenRouter credentials from .env.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
     monkeypatch.setenv("MAESTRO_INTENT_CLASSIFIER_PROVIDER", "none")
     monkeypatch.setenv("MAESTRO_TOPIC_RESOLVER_PROVIDER", "none")
     get_settings.cache_clear()

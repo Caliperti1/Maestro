@@ -33,6 +33,7 @@ from app.db.models import (
 from app.db.repositories import AgentRepository, DomainRepository, SkillRepository
 from app.db.seed import seed_default_domains
 from app.llm.client import LLMClient, OllamaLLMClient, OpenAILLMClient
+from app.llm.telemetry import record_llm_call
 from app.memory.retrieval import (
     MemoryContextBundle,
     MemoryContextBundleRequest,
@@ -159,6 +160,7 @@ class PromptPackageRequest:
     use_semantic: bool = True
     required_skills: list[str] | None = None
     model_profile: str | None = None
+    workflow_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,7 @@ class PromptPackage:
     tool_manifest: list[ToolManifestItem]
     skill_manifest: list[SkillManifestItem]
     output_contract: dict[str, Any]
+    workflow_run_id: str | None
     assembled_prompt: str
     created_at: str
 
@@ -960,6 +963,7 @@ class PromptAggregationService:
             tool_manifest=spec.allowed_tools,
             skill_manifest=skill_manifest,
             output_contract=output_contract,
+            workflow_run_id=request.workflow_run_id,
             assembled_prompt=self._render_prompt(
                 global_context=global_context,
                 domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
@@ -1073,6 +1077,7 @@ class PromptAggregationService:
                     for result in (initial_tool_results or [])
                     if result.get("id")
                 ],
+                "workflow_run_id": request.workflow_run_id,
             },
             started_at=datetime.now(UTC) if execute_llm else None,
         )
@@ -1111,13 +1116,20 @@ class PromptAggregationService:
                     request.model_profile or package.agent.model_profile
                 )
             if auto_tool_loop:
-                loop_results = self._run_auto_tool_loop(
-                    package=package,
-                    task=task,
-                    llm_client=llm_client,
-                    initial_tool_results=tool_call_payloads,
-                    max_iterations=max_tool_iterations,
-                )
+                if _is_triggered_email_package(package):
+                    loop_results = self._run_triggered_email_evidence(
+                        package=package,
+                        task=task,
+                        initial_tool_results=tool_call_payloads,
+                    )
+                else:
+                    loop_results = self._run_auto_tool_loop(
+                        package=package,
+                        task=task,
+                        llm_client=llm_client,
+                        initial_tool_results=tool_call_payloads,
+                        max_iterations=max_tool_iterations,
+                    )
                 tool_call_payloads.extend(loop_results["tool_calls"])
                 tool_loop_trace = loop_results["trace"]
                 finalization = self._run_email_operational_finalization(
@@ -1151,7 +1163,8 @@ class PromptAggregationService:
                 status = "blocked"
             else:
                 assembled_prompt = package.assembled_prompt
-                if tool_call_payloads:
+                rendered_email_report = email_triage_decision is not None
+                if tool_call_payloads and not rendered_email_report:
                     compact_tool_results = _compact_tool_results_for_prompt(tool_call_payloads)
                     assembled_prompt = (
                         f"{assembled_prompt}\n\n## Tool Results\n"
@@ -1166,15 +1179,18 @@ class PromptAggregationService:
                 tool_call = ToolCall(
                     task_id=task.id,
                     agent_id=package.agent.id,
-                    tool_name="llm.gateway",
+                    tool_name="email.report.render" if rendered_email_report else "llm.gateway",
                     input_payload={
                         "provider": getattr(llm_client, "provider", "configured"),
                         "model": request.model_profile or package.agent.model_profile,
-                        "prompt_chars": len(assembled_prompt),
+                        "prompt_chars": 0 if rendered_email_report else len(assembled_prompt),
                         "base_prompt_chars": len(package.assembled_prompt),
                         "tool_result_raw_chars": len(json.dumps(tool_call_payloads, default=str)),
                         "tool_result_prompt_chars": len(
-                            json.dumps(_compact_tool_results_for_prompt(tool_call_payloads), default=str)
+                            json.dumps(
+                                _compact_tool_results_for_prompt(tool_call_payloads),
+                                default=str,
+                            )
                         )
                         if tool_call_payloads
                         else 0,
@@ -1191,23 +1207,48 @@ class PromptAggregationService:
                         "provider": getattr(llm_client, "provider", "unknown"),
                         "model": getattr(llm_client, "model", package.agent.model_profile),
                     }
-                    output_text = llm_client.text_response(
-                        instructions=(
-                            "You are executing as a Maestro domain agent. Follow the provided "
-                            "assembled prompt exactly, stay within your domain, respect the tool "
-                            "manifest, and produce the requested structured output. Include a "
-                            "top-level `conversation` field written as a concise plain-English "
-                            "message Maestro can say directly to Chris. Tool results, when present, "
-                            "have already been executed by Maestro; do not emit synthetic "
-                            "tool-call markup or function-call requests in your answer."
-                        ),
-                        input_text=assembled_prompt,
-                    )
+                    if rendered_email_report:
+                        output_text = _render_email_triage_output(
+                            email_triage_decision,
+                            tool_call_payloads,
+                        )
+                    else:
+                        output_text = llm_client.text_response(
+                            instructions=(
+                                "You are executing as a Maestro domain agent. Follow the provided "
+                                "assembled prompt exactly, stay within your domain, respect the tool "
+                                "manifest, and produce the requested structured output. Include a "
+                                "top-level `conversation` field written as a concise plain-English "
+                                "message Maestro can say directly to Chris. Tool results, when present, "
+                                "have already been executed by Maestro; do not emit synthetic "
+                                "tool-call markup or function-call requests in your answer."
+                            ),
+                            input_text=assembled_prompt,
+                        )
+                        record_llm_call(
+                            self.session,
+                            component="agent.final_response",
+                            client=llm_client,
+                            task_id=task.id,
+                            workflow_run_id=package.workflow_run_id,
+                            prompt_chars=len(assembled_prompt),
+                            prompt_sections=_prompt_section_sizes(package),
+                            metadata={
+                                "tool_result_prompt_chars": len(
+                                    json.dumps(
+                                        _compact_tool_results_for_prompt(tool_call_payloads),
+                                        default=str,
+                                    )
+                                )
+                                if tool_call_payloads
+                                else 0,
+                            },
+                        )
                     tool_call.status = "complete"
                     tool_call.output_payload = {
                         "output_chars": len(output_text),
                         "output_preview": output_text[:500],
-                        **_llm_call_metadata(llm_client),
+                        **({} if rendered_email_report else _llm_call_metadata(llm_client)),
                     }
                     tool_call.completed_at = datetime.now(UTC)
                     report = Report(
@@ -1249,7 +1290,11 @@ class PromptAggregationService:
                     else:
                         task.status = "completed"
                         task.error_message = None
-                        execution_note = "Manual run completed through the LLM gateway."
+                        execution_note = (
+                            "Email triage completed from its typed decision."
+                            if rendered_email_report
+                            else "Manual run completed through the LLM gateway."
+                        )
                         status = "completed"
                     task.output_payload = {
                         "run_id": run_id,
@@ -1386,6 +1431,44 @@ class PromptAggregationService:
             email_triage_decision=email_triage_decision,
         )
 
+    def _run_triggered_email_evidence(
+        self,
+        *,
+        package: PromptPackage,
+        task: Task,
+        initial_tool_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Follow explicit Workspace links without spending a planning LLM turn."""
+        requested = _triggered_email_evidence_requests(package, initial_tool_results)
+        trace: dict[str, Any] = {
+            "enabled": True,
+            "max_iterations": 0,
+            "iterations": [],
+        }
+        if not requested:
+            return {"tool_calls": [], "trace": trace}
+        executed_calls: list[dict[str, Any]] = []
+        prior_results = list(initial_tool_results)
+        iteration_trace: dict[str, Any] = {
+            "iteration": 0,
+            "plan_summary": "Read explicit Google Workspace links from the triggered email.",
+            "planner_source": "deterministic_trigger_evidence",
+            "requested_tools": requested,
+            "executed": [],
+            "blocked": [],
+        }
+        self._execute_auto_tool_requests(
+            tool_service=ToolExecutionService(self.session, adapters=self.tool_adapters),
+            package=package,
+            task=task,
+            requested=requested,
+            iteration_trace=iteration_trace,
+            executed_calls=executed_calls,
+            prior_results=prior_results,
+        )
+        trace["iterations"].append(iteration_trace)
+        return {"tool_calls": executed_calls, "trace": trace}
+
     def _run_auto_tool_loop(
         self,
         *,
@@ -1440,6 +1523,16 @@ class PromptAggregationService:
                     schema=_TOOL_PLAN_SCHEMA,
                 )
                 requested = _normalize_tool_plan(plan)
+                record_llm_call(
+                    self.session,
+                    component="agent.tool_planner",
+                    client=llm_client,
+                    task_id=task.id,
+                    workflow_run_id=package.workflow_run_id,
+                    prompt_chars=len(tool_planner_input),
+                    prompt_sections=_prompt_section_sizes(package),
+                    metadata={"iteration": index + 1},
+                )
                 requested = _harden_email_tool_plan(
                     requested,
                     prior_results,
@@ -1637,9 +1730,14 @@ class PromptAggregationService:
         planner_input = "\n\n".join(
             [
                 f"## Agent Task\n{_compact_task_instruction_for_prompt(package.task_instruction)}",
+                "## Scoped Maestro Context\n"
+                + _truncate_text(package.memory_context.rendered_text, 1600),
                 f"## Allowed Operational Tools\n{json.dumps(sorted(operational_keys))}",
                 "## Email Evidence And Existing Writes\n"
-                + json.dumps(_compact_tool_results_for_prompt(evidence, max_total_chars=14000), indent=2),
+                + json.dumps(
+                    _compact_tool_results_for_prompt(evidence, max_total_chars=10000),
+                    indent=2,
+                ),
             ]
         )
         planner_call.input_payload = {
@@ -1652,7 +1750,9 @@ class PromptAggregationService:
         executed_calls: list[dict[str, Any]] = []
         iteration_trace: dict[str, Any] = {
             "phase": "email_operational_finalization",
-            "plan_summary": "Finalize routed items and Chris-facing notification after evidence gathering.",
+            "plan_summary": (
+                "Finalize routed items and Chris-facing notification after evidence gathering."
+            ),
             "planner_source": "llm_email_finalizer",
             "requested_tools": [],
             "executed": [],
@@ -1666,6 +1766,24 @@ class PromptAggregationService:
                 schema=EmailTriageDecision.model_json_schema(),
             )
             decision = EmailTriageDecision.model_validate(raw_decision)
+            record_llm_call(
+                self.session,
+                component="agent.email_triage_finalizer",
+                client=llm_client,
+                task_id=task.id,
+                workflow_run_id=package.workflow_run_id,
+                prompt_chars=len(planner_input),
+                prompt_sections={
+                    "task": len(_compact_task_instruction_for_prompt(package.task_instruction)),
+                    "memory": len(_truncate_text(package.memory_context.rendered_text, 1600)),
+                    "evidence": len(
+                        json.dumps(
+                            _compact_tool_results_for_prompt(evidence, max_total_chars=10000)
+                        )
+                    ),
+                },
+                metadata={"evidence_result_count": len(evidence)},
+            )
             requested = [
                 item
                 for item in decision_tool_requests(decision)
@@ -1700,6 +1818,7 @@ class PromptAggregationService:
                 iteration_trace["shadow_actions"] = requested
             else:
                 tool_service = ToolExecutionService(self.session, adapters=self.tool_adapters)
+                execution_context = list(prior_results)
                 self._execute_auto_tool_requests(
                     tool_service=tool_service,
                     package=package,
@@ -1707,7 +1826,7 @@ class PromptAggregationService:
                     requested=requested,
                     iteration_trace=iteration_trace,
                     executed_calls=executed_calls,
-                    prior_results=prior_results,
+                    prior_results=execution_context,
                 )
         except Exception as exc:
             planner_call.status = "failed"
@@ -2525,6 +2644,82 @@ def _should_finalize_email_triage(
         and "email_triage" in skill_keys
         and has_email_evidence
     )
+
+
+def _is_triggered_email_package(package: PromptPackage) -> bool:
+    return bool(_triggered_gmail_message_id(package.user_context))
+
+
+def _triggered_email_evidence_requests(
+    package: PromptPackage,
+    prior_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    allowed = {tool.key for tool in package.tool_manifest}
+    tool_by_kind = {
+        "document": "google.docs.get",
+        "presentation": "google.slides.get",
+        "spreadsheet": "google.sheets.get",
+        "folder": "google.drive.folder.list",
+    }
+    requested: list[dict[str, Any]] = []
+    for link in _google_workspace_links_from_gmail_results(prior_results):
+        tool_key = tool_by_kind.get(link.get("kind") or "")
+        if (
+            not tool_key
+            or tool_key not in allowed
+            or _has_google_link_result(prior_results, tool_key, link["file_id"])
+        ):
+            continue
+        requested.append(
+            {
+                "tool_key": tool_key,
+                "payload": {"file_id": link["file_id"], "url": link["url"]},
+                "rationale": "Read an explicit Google Workspace link from the triggered email.",
+            }
+        )
+    return requested[:4]
+
+
+def _render_email_triage_output(
+    decision: dict[str, Any],
+    tool_calls: list[dict[str, Any]],
+) -> str:
+    completed_tools = [
+        str(call.get("tool_name") or "")
+        for call in tool_calls
+        if call.get("status") == "complete"
+        and str(call.get("tool_name") or "")
+        not in {"llm.email_triage_finalizer", "email.report.render"}
+    ]
+    routed = [
+        candidate.get("title")
+        for candidate in decision.get("routed_candidates") or []
+        if isinstance(candidate, dict) and candidate.get("title")
+    ]
+    payload = {
+        "format": "structured_report",
+        "conversation": (
+            decision.get("conversation")
+            or decision.get("summary")
+            or "Email triage completed."
+        ),
+        "summary": {
+            "classification": decision.get("classification"),
+            "confidence": decision.get("confidence"),
+            "message_id": decision.get("message_id"),
+            "subject": decision.get("subject"),
+            "sender": decision.get("sender"),
+            "requires_chris_response": decision.get("requires_chris_response"),
+            "memory_worthy": decision.get("memory_worthy"),
+            "memory_summary": decision.get("memory_summary"),
+        },
+        "notification": decision.get("notification"),
+        "routed_items": routed,
+        "linked_documents": decision.get("linked_documents") or [],
+        "completed_tools": list(dict.fromkeys(completed_tools)),
+        "rationale": decision.get("rationale"),
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=True)
 
 
 def _email_finalization_evidence(
@@ -3448,6 +3643,23 @@ def _llm_call_metadata(llm_client: LLMClient) -> dict[str, Any]:
     if isinstance(usage, dict) and usage:
         metadata["usage"] = usage
     return metadata
+
+
+def _prompt_section_sizes(package: PromptPackage) -> dict[str, int]:
+    return {
+        "global_context": len(package.global_context),
+        "domain_context": len(package.domain_context),
+        "role_prompt": len(package.role_prompt),
+        "task_instruction": len(package.task_instruction),
+        "user_context": len(package.user_context or ""),
+        "memory_context": len(package.memory_context.rendered_text),
+        "skills": sum(len(skill.instruction) for skill in package.skill_manifest),
+        "tools": sum(
+            len(tool.key) + len(tool.permission) + len(tool.description or tool.name)
+            for tool in package.tool_manifest
+        ),
+        "output_contract": len(json.dumps(package.output_contract, default=str)),
+    }
 
 
 def _compact_tool_results_for_prompt(

@@ -50,6 +50,8 @@ class LLMMemoryCurator:
             source_title=source.title or "Untitled staged source",
             source_text=source.content,
             domain_key=domain_key,
+            task_id=source.task_id,
+            workflow_run_id=source.metadata.get("workflow_run_id"),
         )
         candidates: list[MemoryCandidate] = []
         for extracted_candidate in extracted.candidates:
@@ -90,6 +92,8 @@ class LLMMemoryCurator:
             source_title=source.title or "Untitled staged source",
             source_text=source.content,
             domain_key=domain_key,
+            task_id=source.task_id,
+            workflow_run_id=source.metadata.get("workflow_run_id"),
         )
         return self._routed_items_from_extraction(source, extracted.routed_items)
 
@@ -103,6 +107,8 @@ class LLMMemoryCurator:
             source_title=source.title or "Untitled staged source",
             source_text=source.content,
             domain_key=domain_key,
+            task_id=source.task_id,
+            workflow_run_id=source.metadata.get("workflow_run_id"),
         )
         candidates: list[MemoryCandidate] = []
         for extracted_candidate in extracted.candidates:

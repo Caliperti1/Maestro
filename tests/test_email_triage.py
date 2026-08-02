@@ -11,7 +11,10 @@ def _decision(**overrides):
         "classification": "action_required",
         "confidence": 0.94,
         "summary": "Jane asked Chris to send the revised brief by Friday.",
+        "conversation": "Chris, Jane asked you to send the revised brief by Friday.",
         "requires_chris_response": True,
+        "memory_worthy": True,
+        "memory_summary": "Jane Smith requested the revised partner brief by Friday.",
         "notification": {
             "should_notify": True,
             "title": "Partner brief due Friday",

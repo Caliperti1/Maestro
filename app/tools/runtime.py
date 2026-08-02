@@ -2078,15 +2078,21 @@ class WorkflowNotificationCreateToolAdapter:
             ).strip()
             or None,
             "reason": str(payload.get("reason") or "").strip() or None,
+            "delivery_policy": (
+                "workflow_completion"
+                if context.task.source_type == "scheduler_worker"
+                else "immediate"
+            ),
         }
+        deferred_delivery = context.task.source_type == "scheduler_worker"
         notification = WorkflowOutputService(context.session).create_notification(
             run,
             title=title,
             message=message,
             severity=severity,
             notification_type="email_attention",
-            status="delivered",
-            delivered_at=datetime.now(UTC),
+            status="pending" if deferred_delivery else "delivered",
+            delivered_at=None if deferred_delivery else datetime.now(UTC),
             metadata=metadata,
         )
         if run is None:
@@ -2094,22 +2100,31 @@ class WorkflowNotificationCreateToolAdapter:
             notification.domain_id = context.domain.id
             context.session.commit()
             context.session.refresh(notification)
-        record_channel_message(
-            context.session,
-            sender="maestro",
-            content=f"{notification.title}\n\n{notification.message}",
-            metadata={
-                "source": self.key,
-                "event_type": "email_attention",
-                "channel_visibility": "global",
-                "notification_id": str(notification.id),
-                "workflow_run_id": str(run.id) if run is not None else None,
-                "task_id": str(context.task.id),
-            },
-        )
+        if not deferred_delivery:
+            record_channel_message(
+                context.session,
+                sender="maestro",
+                content=f"{notification.title}\n\n{notification.message}",
+                metadata={
+                    "source": self.key,
+                    "event_type": "email_attention",
+                    "channel_visibility": "global",
+                    "notification_id": str(notification.id),
+                    "workflow_run_id": str(run.id) if run is not None else None,
+                    "task_id": str(context.task.id),
+                },
+            )
         return self._result(notification, duplicate=False)
 
     def _workflow_run(self, context: ToolExecutionContext) -> WorkflowRun | None:
+        workflow_run_id = str((context.task.input_payload or {}).get("workflow_run_id") or "").strip()
+        if workflow_run_id:
+            try:
+                run = context.session.get(WorkflowRun, uuid.UUID(workflow_run_id))
+            except ValueError:
+                run = None
+            if run is not None:
+                return run
         parent_task_ids = [context.task.id]
         if context.task.parent_task_id is not None:
             parent_task_ids.insert(0, context.task.parent_task_id)

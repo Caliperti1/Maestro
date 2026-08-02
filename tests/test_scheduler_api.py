@@ -15,6 +15,7 @@ from app.db.models import (
     Agent,
     Conversation,
     Domain,
+    LLMCallLog,
     Message,
     Report,
     Task,
@@ -87,6 +88,196 @@ def test_scheduler_completion_uses_agent_conversation_field(session: Session) ->
     assert payload["email_triage_shadow_mode"] is True
     assert message == payload["conversation"]
     assert "structured_report" not in message
+
+
+def test_email_completion_posts_one_conversational_message_and_delivers_existing_notification(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    praxis = session.query(Domain).filter(Domain.key == "praxis").one()
+    run = WorkflowRun(
+        domain_id=praxis.id,
+        source_type="event",
+        status="completed",
+        priority="normal",
+        input_payload={"summary": "Triage one Praxis email."},
+        output_payload={},
+        completed_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.flush()
+    decision = {
+        "classification": "action_required",
+        "conversation": (
+            "Chris, I triaged Jane's email. You need to confirm the August 4 meeting, and I "
+            "saved the event, follow-up, contact, and organization."
+        ),
+        "memory_worthy": False,
+        "notification": {"should_notify": True},
+    }
+    session.add(
+        WorkflowQueueItem(
+            workflow_run_id=run.id,
+            domain_id=praxis.id,
+            external_key="email-triage",
+            status="completed",
+            objective="Triage the trigger email.",
+            dependency_keys=[],
+            resource_locks=[],
+            input_payload={},
+            output_payload={
+                "agent_run": {
+                    "agent_name": "Praxis Email Agent",
+                    "conversation": decision["conversation"],
+                    "email_triage_decision": decision,
+                    "tool_calls": [],
+                }
+            },
+        )
+    )
+    notification = WorkflowNotification(
+        workflow_run_id=run.id,
+        domain_id=praxis.id,
+        severity="warning",
+        status="pending",
+        title="Partner meeting needs confirmation",
+        message="Confirm the August 4 partner meeting.",
+        notification_type="email_attention",
+        target="maestro_chat",
+        metadata_={"delivery_policy": "workflow_completion"},
+    )
+    session.add(notification)
+    session.commit()
+
+    message = SchedulerWorkerService(session)._post_workflow_completion_update(run)
+
+    assert message == decision["conversation"]
+    channel_messages = session.query(Message).all()
+    assert len(channel_messages) == 1
+    assert channel_messages[0].content == decision["conversation"]
+    assert channel_messages[0].metadata_["event_type"] == "email_attention"
+    session.refresh(notification)
+    assert notification.status == "delivered"
+    assert (
+        session.query(WorkflowNotification)
+        .filter_by(workflow_run_id=run.id, notification_type="workflow_completed")
+        .count()
+        == 0
+    )
+
+
+def test_quiet_email_completion_does_not_post_to_primary_channel(session: Session) -> None:
+    seed_default_domains(session)
+    praxis = session.query(Domain).filter(Domain.key == "praxis").one()
+    run = WorkflowRun(
+        domain_id=praxis.id,
+        source_type="event",
+        status="completed",
+        priority="normal",
+        input_payload={"summary": "Triage one quiet Praxis email."},
+        output_payload={},
+        completed_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.flush()
+    session.add(
+        WorkflowQueueItem(
+            workflow_run_id=run.id,
+            domain_id=praxis.id,
+            external_key="email-triage",
+            status="completed",
+            objective="Triage the trigger email.",
+            dependency_keys=[],
+            resource_locks=[],
+            input_payload={},
+            output_payload={
+                "agent_run": {
+                    "conversation": "I recorded the useful update; nothing needs your attention.",
+                    "email_triage_decision": {
+                        "classification": "useful_information",
+                        "memory_worthy": False,
+                        "notification": {"should_notify": False},
+                    },
+                    "tool_calls": [],
+                }
+            },
+        )
+    )
+    session.commit()
+
+    message = SchedulerWorkerService(session)._post_workflow_completion_update(run)
+
+    assert message == ""
+    assert session.query(Message).count() == 0
+    session.refresh(run)
+    assert run.output_payload["completion_channel_message_suppressed"] is True
+
+
+def test_email_memory_artifact_is_staged_only_for_separate_durable_context(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    get_settings.cache_clear()
+    get_settings().memory_dropbox_root = str(tmp_path)
+    praxis = session.query(Domain).filter(Domain.key == "praxis").one()
+
+    def add_run(*, memory_worthy: bool, memory_summary: str) -> WorkflowRun:
+        run = WorkflowRun(
+            domain_id=praxis.id,
+            source_type="event",
+            status="completed",
+            priority="normal",
+            input_payload={"summary": "Triage one Praxis email."},
+            output_payload={},
+            completed_at=datetime.now(UTC),
+        )
+        session.add(run)
+        session.flush()
+        session.add(
+            WorkflowQueueItem(
+                workflow_run_id=run.id,
+                domain_id=praxis.id,
+                external_key="email-triage",
+                status="completed",
+                objective="Triage the trigger email.",
+                dependency_keys=[],
+                resource_locks=[],
+                input_payload={},
+                output_payload={
+                    "agent_run": {
+                        "email_triage_decision": {
+                            "classification": "useful_information",
+                            "summary": "The email was triaged.",
+                            "memory_worthy": memory_worthy,
+                            "memory_summary": memory_summary,
+                            "notification": {"should_notify": False},
+                        },
+                        "tool_calls": [],
+                    }
+                },
+            )
+        )
+        session.commit()
+        return run
+
+    skipped_run = add_run(memory_worthy=False, memory_summary="")
+    staged_run = add_run(
+        memory_worthy=True,
+        memory_summary="Jane Smith is the durable Praxis relationship owner at Example Corp.",
+    )
+    worker = SchedulerWorkerService(session)
+
+    worker._stage_completed_workflow_run(skipped_run)
+    worker._stage_completed_workflow_run(staged_run)
+
+    session.refresh(skipped_run)
+    session.refresh(staged_run)
+    assert skipped_run.output_payload["memory_curation_status"] == "skipped_not_durable"
+    assert skipped_run.output_payload.get("artifact_id") is None
+    assert staged_run.output_payload["memory_curation_status"] == "staged"
+    assert staged_run.output_payload["artifact_id"]
+    assert Path(staged_run.output_payload["staged_artifact_path"]).is_file()
 
 
 def test_scheduler_blocker_message_explains_the_pending_tool_action() -> None:
@@ -295,6 +486,56 @@ def test_workflow_outputs_api_archives_reports(session: Session, tmp_path: Path)
     included = client.get("/workflow-outputs/reports?include_archived=true")
     assert included.status_code == 200
     assert included.json()["reports"][0]["archived"] is True
+
+
+def test_workflow_outputs_api_attributes_llm_usage_to_workflow_run(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+    praxis = session.query(Domain).filter(Domain.key == "praxis").one()
+    run = WorkflowRun(
+        domain_id=praxis.id,
+        source_type="event",
+        status="completed",
+        priority="normal",
+        input_payload={"summary": "Triage one email."},
+        output_payload={},
+    )
+    session.add(run)
+    session.flush()
+    session.add(
+        LLMCallLog(
+            workflow_run_id=run.id,
+            component="agent.email_triage_finalizer",
+            provider="openrouter",
+            model="openai/gpt-5.6-luna",
+            status="complete",
+            prompt_chars=4200,
+            prompt_tokens=1100,
+            completion_tokens=240,
+            cached_tokens=100,
+            cost=0.0123,
+            prompt_sections={"evidence": 3100},
+            metadata_={"evidence_result_count": 2},
+        )
+    )
+    session.commit()
+
+    response = client.get(f"/workflow-outputs/llm-calls?workflow_run_id={run.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"] == {
+        "call_count": 1,
+        "prompt_tokens": 1100,
+        "completion_tokens": 240,
+        "cached_tokens": 100,
+        "cost": 0.0123,
+    }
+    assert payload["calls"][0]["component"] == "agent.email_triage_finalizer"
+    assert payload["calls"][0]["prompt_sections"] == {"evidence": 3100}
 
 
 def test_run_log_extracts_routed_ids_from_agent_tool_results(session: Session) -> None:
