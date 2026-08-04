@@ -24,6 +24,7 @@ from app.db.session import SessionLocal
 from app.maestro.gmail_trigger import GmailTriggerService, gmail_trigger_worker_settings
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
 from app.memory.dropbox import MemoryDropboxProcessor
+from app.memory.contact_hydration import ContactHydrationService
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
                 asyncio.create_task(_scheduler_worker_loop()),
                 asyncio.create_task(_gmail_trigger_worker_loop()),
                 asyncio.create_task(_memory_dropbox_worker_loop()),
+                asyncio.create_task(_contact_hydration_worker_loop()),
             ]
         )
         try:
@@ -144,6 +146,23 @@ def _process_memory_dropbox_once() -> None:
                 len(results),
                 ", ".join(result.status for result in results),
             )
+
+
+async def _contact_hydration_worker_loop() -> None:
+    while True:
+        settings = get_settings()
+        try:
+            await asyncio.to_thread(_process_contact_hydration_once)
+        except Exception:
+            logger.exception("Contact hydration worker heartbeat failed.")
+        await asyncio.sleep(max(5, settings.contact_hydration_interval_seconds))
+
+
+def _process_contact_hydration_once() -> None:
+    with SessionLocal() as session:
+        job = ContactHydrationService(session).process_once()
+        if job is not None:
+            logger.info("Contact hydration job %s advanced to %s.", job.id, job.status)
 
 
 app = create_app()

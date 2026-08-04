@@ -1796,6 +1796,123 @@ h4 {
   align-items: start;
 }
 
+.hydration-panel {
+  grid-column: 1 / -1;
+  padding: 12px;
+  color: var(--color-ink);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.hydration-panel > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.hydration-panel > summary span {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-weight: 800;
+}
+
+.hydration-panel > summary small {
+  color: var(--color-muted);
+}
+
+.hydration-controls {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(260px, 1.6fr) repeat(2, minmax(130px, 0.6fr));
+  gap: 10px;
+  align-items: end;
+  padding-top: 14px;
+}
+
+.hydration-controls label,
+.hydration-job-select {
+  display: grid;
+  gap: 5px;
+  color: var(--color-muted-strong);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.hydration-controls input,
+.hydration-controls select,
+.hydration-job-select select {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  color: var(--color-ink);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.hydration-controls .toggle-row {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+}
+
+.hydration-controls .toggle-row input {
+  width: auto;
+}
+
+.hydration-job-select,
+.hydration-stats,
+.hydration-actions,
+.hydration-candidates {
+  margin-top: 12px;
+}
+
+.hydration-actions,
+.hydration-candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hydration-actions button,
+.hydration-candidate-actions button {
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
+.hydration-candidates {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.hydration-candidates article {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.hydration-candidates article div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.hydration-candidates small,
+.hydration-candidates p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
 .routed-object-list-panel,
 .routed-object-detail-panel,
 .routed-object-list,
@@ -2595,6 +2712,10 @@ h4 {
     grid-template-columns: 1fr;
   }
 
+  .hydration-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .reports-list-panel,
   .report-renderer-panel {
     max-height: none;
@@ -2646,7 +2767,8 @@ h4 {
   }
 
   .two-column-fields,
-  .attention-grid {
+  .attention-grid,
+  .hydration-controls {
     grid-template-columns: 1fr;
   }
 

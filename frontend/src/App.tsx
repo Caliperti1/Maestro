@@ -50,6 +50,8 @@ import type {
   AgentSpec,
   AgentTask,
   ChatMessage,
+  ContactHydrationCandidate,
+  ContactHydrationJob,
   DomainContext,
   DropboxDomain,
   GmailTriggerStatus,
@@ -583,9 +585,210 @@ function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string>
   return {
     name: item.name ?? "",
     website: item.website ?? "",
+    aliases: item.aliases.join(", "),
     summary: item.summary ?? "",
     status: item.status ?? "active",
   };
+}
+
+function ContactHydrationPanel({ surface }: { surface: "contacts" | "organizations" }) {
+  const candidateType = surface === "contacts" ? "contact" : "organization";
+  const [domainKey, setDomainKey] = useState("praxis");
+  const [query, setQuery] = useState("in:sent newer_than:90d");
+  const [maxMessages, setMaxMessages] = useState(200);
+  const [maxContacts, setMaxContacts] = useState(100);
+  const [enableEnrichment, setEnableEnrichment] = useState(true);
+  const [enableCloudFallback, setEnableCloudFallback] = useState(false);
+  const [jobs, setJobs] = useState<ContactHydrationJob[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<ContactHydrationCandidate[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("Ready");
+  const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
+
+  const refresh = useCallback(async () => {
+    const response = await apiJson<{ jobs: ContactHydrationJob[] }>(
+      `/memory/contact-hydration/jobs?limit=20`,
+    );
+    setJobs(response.jobs);
+    const nextJobId = selectedJobId && response.jobs.some((job) => job.id === selectedJobId)
+      ? selectedJobId
+      : (response.jobs[0]?.id ?? null);
+    setSelectedJobId(nextJobId);
+    if (nextJobId) {
+      const candidateResponse = await apiJson<{ candidates: ContactHydrationCandidate[] }>(
+        `/memory/contact-hydration/jobs/${nextJobId}/candidates?candidate_type=${candidateType}&limit=500`,
+      );
+      setCandidates(candidateResponse.candidates);
+    } else {
+      setCandidates([]);
+    }
+  }, [candidateType, selectedJobId]);
+
+  useEffect(() => {
+    refresh().catch((error) => setMessage(error instanceof Error ? error.message : "Unable to load imports."));
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!selectedJob || !["pending", "scanning", "enriching", "promoting"].includes(selectedJob.status)) return;
+    const timer = window.setInterval(() => {
+      refresh().catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [refresh, selectedJob]);
+
+  const startImport = async () => {
+    setBusy(true);
+    try {
+      const response = await apiJson<{ job: ContactHydrationJob }>("/memory/contact-hydration/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          domain_key: domainKey,
+          query,
+          max_messages: maxMessages,
+          max_contacts: maxContacts,
+          enable_enrichment: enableEnrichment,
+          enable_cloud_fallback: enableCloudFallback,
+          max_cloud_calls: enableCloudFallback ? 10 : 0,
+        }),
+      });
+      setSelectedJobId(response.job.id);
+      setMessage("Historical Gmail import started in shadow mode.");
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to start import.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const actOnJob = async (action: string) => {
+    if (!selectedJob) return;
+    setBusy(true);
+    try {
+      await apiJson(`/memory/contact-hydration/jobs/${selectedJob.id}/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      setMessage(`Import ${action} request applied.`);
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `Unable to ${action} import.`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const approveHighConfidence = async () => {
+    if (!selectedJob) return;
+    setBusy(true);
+    try {
+      await apiJson(`/memory/contact-hydration/jobs/${selectedJob.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ minimum_confidence: 0.8 }),
+      });
+      setMessage("High-confidence candidates approved for background promotion.");
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Approval failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reviewCandidate = async (candidate: ContactHydrationCandidate, decision: "create" | "update" | "reject") => {
+    setBusy(true);
+    try {
+      await apiJson(`/memory/contact-hydration/candidates/${candidate.id}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          decision,
+          existing_object_id: decision === "update" ? candidate.existing_object_id : null,
+        }),
+      });
+      setMessage(`${candidate.display_name} marked ${decision}.`);
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Candidate review failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <details className="hydration-panel">
+      <summary>
+        <span><HardDriveUpload size={17} /> Historical Gmail import</span>
+        <small>{selectedJob ? `${selectedJob.status} / ${selectedJob.messages_scanned} messages` : "No import yet"}</small>
+      </summary>
+      <div className="hydration-controls">
+        <label>Domain
+          <select value={domainKey} onChange={(event) => setDomainKey(event.target.value)}>
+            {Object.entries(domainLabels).filter(([key]) => key !== "global").map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </select>
+        </label>
+        <label>Gmail query
+          <input value={query} onChange={(event) => setQuery(event.target.value)} />
+        </label>
+        <label>Maximum messages
+          <input type="number" min="1" max="10000" value={maxMessages} onChange={(event) => setMaxMessages(Number(event.target.value))} />
+        </label>
+        <label>Maximum contacts
+          <input type="number" min="1" max="5000" value={maxContacts} onChange={(event) => setMaxContacts(Number(event.target.value))} />
+        </label>
+        <label className="toggle-row"><input type="checkbox" checked={enableEnrichment} onChange={(event) => setEnableEnrichment(event.target.checked)} /> Enrich representative threads locally</label>
+        <label className="toggle-row"><input type="checkbox" checked={enableCloudFallback} onChange={(event) => setEnableCloudFallback(event.target.checked)} /> Allow capped Terra fallback</label>
+        <button className="planner-action" type="button" onClick={startImport} disabled={busy}>Start shadow import</button>
+      </div>
+      {jobs.length > 0 && (
+        <label className="hydration-job-select">Import run
+          <select value={selectedJob?.id ?? ""} onChange={(event) => setSelectedJobId(event.target.value)}>
+            {jobs.map((job) => <option key={job.id} value={job.id}>{formatDateTime(job.created_at)} / {job.status} / {job.query}</option>)}
+          </select>
+        </label>
+      )}
+      {selectedJob && (
+        <>
+          <div className="preview-meta hydration-stats">
+            <span>{selectedJob.messages_scanned} scanned</span>
+            <span>{selectedJob.candidates_found} candidates</span>
+            <span>{selectedJob.ambiguous_count} ambiguous</span>
+            <span>{selectedJob.promoted_count} promoted</span>
+          </div>
+          <div className="hydration-actions">
+            {!["paused", "complete", "cancelled", "failed"].includes(selectedJob.status) && <button type="button" onClick={() => actOnJob("pause")} disabled={busy}>Pause</button>}
+            {selectedJob.status === "paused" && <button type="button" onClick={() => actOnJob("resume")} disabled={busy}>Resume</button>}
+            {!["complete", "cancelled"].includes(selectedJob.status) && <button type="button" className="danger-action" onClick={() => actOnJob("cancel")} disabled={busy}>Cancel</button>}
+            {selectedJob.status === "review" && <button type="button" className="planner-action" onClick={approveHighConfidence} disabled={busy}>Approve confidence 80%+</button>}
+          </div>
+          {selectedJob.error_message && <p className="error-message">{selectedJob.error_message}</p>}
+          <div className="hydration-candidates">
+            {candidates.filter((candidate) => candidate.status !== "excluded").map((candidate) => (
+              <article key={candidate.id}>
+                <div><strong>{candidate.display_name}</strong><small>{candidate.action} / {candidate.status} / {Math.round(candidate.confidence * 100)}%</small></div>
+                <p>{String(candidate.proposed_data.summary ?? candidate.identity_key)}</p>
+                {candidate.status === "review" && (
+                  <div className="hydration-candidate-actions">
+                    <button type="button" onClick={() => reviewCandidate(candidate, "create")} disabled={busy}>Create{candidate.existing_object_id ? " separate" : ""}</button>
+                    {candidate.existing_object_id && <button type="button" onClick={() => reviewCandidate(candidate, "update")} disabled={busy}>Update matched</button>}
+                    <button type="button" className="danger-action" onClick={() => reviewCandidate(candidate, "reject")} disabled={busy}>Reject</button>
+                  </div>
+                )}
+              </article>
+            ))}
+            {candidates.length === 0 && <p className="empty-state">No {candidateType} candidates in this import yet.</p>}
+          </div>
+        </>
+      )}
+      <p className="memory-status">{message}</p>
+    </details>
+  );
 }
 
 function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
@@ -605,7 +808,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const [contactSearchDraft, setContactSearchDraft] = useState("");
   const [mergeTargetId, setMergeTargetId] = useState("");
 
-  const supportsDomainFilter = surface === "calendar" || surface === "contacts" || surface === "todos" || surface === "ideas";
+  const supportsDomainFilter = surface === "calendar" || surface === "contacts" || surface === "todos" || surface === "organizations" || surface === "ideas";
   const supportsLifecycleFilters = surface === "calendar" || surface === "todos" || surface === "ideas";
   const visibleItems = useMemo(
     () =>
@@ -644,7 +847,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     if (supportsDomainFilter && domainFilter !== "all") {
       params.set("domain_key", domainFilter);
     }
-    if (surface === "contacts" && contactQuery.trim()) {
+    if ((surface === "contacts" || surface === "organizations") && contactQuery.trim()) {
       params.set("query_text", contactQuery.trim());
     }
     const response = await apiJson<Record<string, RoutedObjectRecord[]>>(
@@ -808,8 +1011,28 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     }
   };
 
+  const mergeSelectedOrganization = async () => {
+    if (surface !== "organizations" || !selectedItem || !mergeTargetId) return;
+    setBusy(true);
+    try {
+      await apiJson(`${config.endpoint}/${selectedItem.id}/merge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ duplicate_organization_id: mergeTargetId }),
+      });
+      setMergeTargetId("");
+      setStatusMessage("Organizations merged. The selected organization was kept as canonical.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Organization merge failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="routed-object-workspace">
+      {(surface === "contacts" || surface === "organizations") && <ContactHydrationPanel surface={surface} />}
       <section className="memory-panel routed-object-list-panel" aria-labelledby={`${surface}-heading`}>
         <div className="section-heading">
           <div>
@@ -837,7 +1060,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           </label>
         )}
 
-        {surface === "contacts" && (
+        {(surface === "contacts" || surface === "organizations") && (
           <form
             className="contact-search"
             onSubmit={(event) => {
@@ -849,7 +1072,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             <input
               value={contactSearchDraft}
               onChange={(event) => setContactSearchDraft(event.target.value)}
-              placeholder="Name, organization, relationship, or prior discussion"
+              placeholder={surface === "contacts" ? "Name, organization, relationship, or prior discussion" : "Name, alias, website, person, or prior interaction"}
             />
             <button className="planner-action" type="submit">Search</button>
           </form>
@@ -942,7 +1165,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     ? `${formatDateOnly(item.start_at)} / ${item.status}`
                     : surface === "todos" && "due_at" in item
                       ? `${domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"} / ${item.status} / ${item.priority}`
-                      : surface === "contacts" && "match_reasons" in item && item.match_reasons?.length
+                      : (surface === "contacts" || surface === "organizations") && "match_reasons" in item && item.match_reasons?.length
                         ? item.match_reasons.join(" / ")
                         : item.status}
                 </small>
@@ -1145,6 +1368,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   <input value={draft.website ?? ""} onChange={(event) => updateDraft("website", event.target.value)} />
                 </label>
                 <label>
+                  Aliases
+                  <input
+                    value={draft.aliases ?? ""}
+                    onChange={(event) => updateDraft("aliases", event.target.value)}
+                    placeholder="Acme, Acme Corp"
+                  />
+                </label>
+                <label>
                   Summary
                   <textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} />
                 </label>
@@ -1152,6 +1383,52 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   Status
                   <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
                 </label>
+                {selectedItem.contacts.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>People</h4>
+                    {selectedItem.contacts.map((contact) => (
+                      <div className="contact-evidence-row" key={`${contact.id}-${contact.domain_key ?? "global"}-${contact.role}`}>
+                        <strong>{contact.name}</strong>
+                        <span>{[contact.role, contact.domain_key, contact.email].filter(Boolean).join(" / ")}</span>
+                      </div>
+                    ))}
+                  </section>
+                )}
+                {selectedItem.interactions.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>Interaction timeline</h4>
+                    {selectedItem.interactions.map((interaction) => (
+                      <div className="contact-evidence-row" key={interaction.id}>
+                        <strong>{interaction.contact_name} / {formatDateTime(interaction.occurred_at)}</strong>
+                        <span>{[interaction.domain_key, interaction.channel, interaction.interaction_type].filter(Boolean).join(" / ")}</span>
+                        <p>{interaction.summary}</p>
+                      </div>
+                    ))}
+                  </section>
+                )}
+                {selectedItem.domain_notes.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>Domain context</h4>
+                    {selectedItem.domain_notes.map((note, index) => (
+                      <div className="contact-evidence-row" key={`${note.domain_key ?? "global"}-${index}`}>
+                        <strong>{domainLabels[note.domain_key ?? "global"] ?? note.domain_key ?? "Global"}</strong>
+                        <p>{note.notes}</p>
+                      </div>
+                    ))}
+                  </section>
+                )}
+                <section className="contact-intelligence-section">
+                  <h4>Merge duplicate</h4>
+                  <div className="contact-merge-row">
+                    <select value={mergeTargetId} onChange={(event) => setMergeTargetId(event.target.value)}>
+                      <option value="">Select duplicate organization</option>
+                      {items
+                        .filter((item) => "website" in item && !("email" in item) && item.id !== selectedItem.id)
+                        .map((item) => <option key={item.id} value={item.id}>{routedObjectTitle(item)}</option>)}
+                    </select>
+                    <button className="danger-action" type="button" disabled={!mergeTargetId || busy} onClick={mergeSelectedOrganization}>Merge</button>
+                  </div>
+                </section>
               </>
             )}
 

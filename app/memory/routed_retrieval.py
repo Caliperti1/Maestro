@@ -8,7 +8,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.time import home_timezone
-from app.db.models import CalendarEvent, Contact, ContactAlias, Entity, Idea, DecisionRecord, Todo
+from app.db.models import (
+    CalendarEvent,
+    Contact,
+    ContactAlias,
+    DecisionRecord,
+    Entity,
+    Idea,
+    OrganizationAlias,
+    Todo,
+)
 from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_resolver import contact_aliases_for
 from app.memory.routed_service import RoutedMemoryService
@@ -214,11 +223,41 @@ class RoutedEditService:
         for key in ("website", "summary", "status"):
             if key in updates:
                 setattr(entity, key, updates[key])
+        if "aliases" in updates:
+            self._replace_organization_aliases(entity, updates["aliases"])
         if "metadata" in updates and isinstance(updates["metadata"], dict):
             entity.metadata_ = {**(entity.metadata_ or {}), **updates["metadata"]}
         self.session.commit()
         self.session.refresh(entity)
         return entity
+
+    def _replace_organization_aliases(self, entity: Entity, aliases: Any) -> None:
+        requested = [str(value).strip() for value in (aliases or []) if str(value).strip()]
+        requested.append(entity.name)
+        requested_by_key = {_normalize_key(value): value for value in requested if _normalize_key(value)}
+        existing_rows = list(
+            self.session.scalars(select(OrganizationAlias).where(OrganizationAlias.entity_id == entity.id))
+        )
+        for row in existing_rows:
+            if row.normalized_alias not in requested_by_key:
+                self.session.delete(row)
+        for normalized, alias in requested_by_key.items():
+            conflict = self.session.scalar(
+                select(OrganizationAlias).where(OrganizationAlias.normalized_alias == normalized)
+            )
+            if conflict is not None and conflict.entity_id != entity.id:
+                raise ValueError(f"Organization alias '{alias}' already belongs to another organization.")
+            if conflict is None:
+                self.session.add(
+                    OrganizationAlias(
+                        entity_id=entity.id,
+                        alias=alias,
+                        normalized_alias=normalized,
+                        source="manual_edit",
+                        source_refs=[],
+                        metadata_={},
+                    )
+                )
 
     def update_idea(self, idea_id: uuid.UUID, updates: dict[str, Any]) -> Idea:
         idea = self.session.get(Idea, idea_id)

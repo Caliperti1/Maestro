@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     memory_dropbox_root: str = "maestro_dropbox"
     memory_dropbox_autorun: bool = True
     memory_dropbox_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 30
+    contact_hydration_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 10
     home_timezone: str = "America/New_York"
     embedding_provider: str = "ollama"
     embedding_model: str = "nomic-embed-text"

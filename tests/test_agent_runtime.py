@@ -2104,7 +2104,11 @@ def test_gmail_adapter_searches_and_decodes_message_metadata(
     def fake_gmail_api(method, path, *, token, params=None, body=None, timeout=60):
         calls.append({"method": method, "path": path, "token": token, "params": params, "body": body})
         if path.endswith("/messages") and method == "GET":
-            return {"messages": [{"id": "msg-1", "threadId": "thread-1"}], "resultSizeEstimate": 1}
+            return {
+                "messages": [{"id": "msg-1", "threadId": "thread-1"}],
+                "resultSizeEstimate": 1,
+                "nextPageToken": "next-page",
+            }
         if path.endswith("/messages/msg-1"):
             return {
                 "id": "msg-1",
@@ -2133,7 +2137,7 @@ def test_gmail_adapter_searches_and_decodes_message_metadata(
             task=task,
             connection=connection,
         ),
-        {"query": "from:jane newer_than:7d", "limit": 5},
+        {"query": "from:jane newer_than:7d", "limit": 5, "page_token": "current-page"},
     )
 
     assert output["summary"]["type"] == "gmail_message_list"
@@ -2141,6 +2145,9 @@ def test_gmail_adapter_searches_and_decodes_message_metadata(
     assert output["messages"][0]["subject"] == "Partner update"
     assert calls[0]["token"] == "gmail-token"
     assert calls[0]["params"]["q"] == "from:jane newer_than:7d"
+    assert calls[0]["params"]["pageToken"] == "current-page"
+    assert output["next_page_token"] == "next-page"
+    assert output["summary"]["has_more"] is True
 
 
 def test_gmail_adapter_gets_full_message_body(

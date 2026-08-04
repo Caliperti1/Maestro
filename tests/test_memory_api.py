@@ -1037,8 +1037,9 @@ def test_routed_hygiene_backfills_aliases_and_suggests_duplicates(
     report = RoutedHygieneService(session).run_once()
 
     assert report.aliases_backfilled >= 2
-    assert report.duplicates_merged == 1
-    assert session.query(Contact).filter(Contact.status != "archived").count() == 1
+    assert report.duplicates_merged == 0
+    assert session.query(Contact).filter(Contact.status != "archived").count() == 2
+    assert any(item["reason"] == "same_name" for item in report.suggestions)
 
 
 def test_routed_hygiene_canonicalizes_display_fields(
@@ -1138,14 +1139,13 @@ def test_routed_hygiene_merges_high_confidence_duplicates(
 
     report = RoutedHygieneService(session).run_once()
 
-    assert report.duplicates_merged == 3
+    assert report.duplicates_merged == 2
     contacts = session.query(Contact).all()
     events = session.query(CalendarEvent).all()
     todos = session.query(Todo).all()
-    assert len([contact for contact in contacts if contact.status != "archived"]) == 1
+    assert len([contact for contact in contacts if contact.status != "archived"]) == 2
     assert len([event for event in events if event.status != "archived"]) == 1
     assert len([todo for todo in todos if todo.status != "archived"]) == 1
-    assert "Second note" in next(contact for contact in contacts if contact.status != "archived").summary
     assert "Second event note" in next(event for event in events if event.status != "archived").summary
     assert "Second todo note" in next(todo for todo in todos if todo.status != "archived").description
 

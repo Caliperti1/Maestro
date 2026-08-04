@@ -21,6 +21,7 @@ chat responses toward persistent execution.
 - Tool runtime with approval gates, domain credential resolution, and agent permissions.
 - GitHub, Gmail, Codex, and app reload tool foundations.
 - Canonical workflow artifacts staged for memory curation at workflow completion.
+- Resumable historical Gmail hydration for contact and organization intelligence with shadow review.
 - React/Vite frontend for Maestro chat, memory, domains, agents, tools, and queue surfaces.
 
 ## System Shape
@@ -152,6 +153,8 @@ Current routed object types include:
 Relevant code:
 
 - `app/memory/contact_intelligence.py`
+- `app/memory/contact_hydration.py`
+- `app/memory/organization_intelligence.py`
 - `app/memory/routed_service.py`
 - `app/memory/routed_resolver.py`
 - `app/memory/routed_hygiene.py`

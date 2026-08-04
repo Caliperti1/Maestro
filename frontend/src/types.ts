@@ -429,7 +429,74 @@ export type RoutedEntity = {
   provenance: Record<string, unknown>;
   status: string;
   metadata: Record<string, unknown>;
+  aliases: string[];
+  alias_records: Array<{ id: string; alias: string; source: string }>;
+  domain_notes: Array<{ domain_key: string | null; notes: string | null; source_refs: Array<Record<string, unknown>> }>;
+  contacts: Array<{
+    id: string;
+    name: string;
+    email: string | null;
+    domain_key: string | null;
+    role: string;
+    relationship_type: string;
+    source_refs: Array<Record<string, unknown>>;
+  }>;
+  interactions: Array<{
+    id: string;
+    contact_id: string;
+    contact_name: string;
+    domain_key: string | null;
+    interaction_type: string;
+    channel: string | null;
+    occurred_at: string;
+    summary: string;
+    source_refs: Array<Record<string, unknown>>;
+  }>;
+  retrieval_score?: number;
+  match_reasons?: string[];
+  semantic_similarity?: number | null;
   created_at: string | null;
+};
+
+export type ContactHydrationJob = {
+  id: string;
+  domain_id: string;
+  query: string;
+  mode: string;
+  status: string;
+  page_size: number;
+  max_messages: number;
+  max_contacts: number;
+  messages_scanned: number;
+  candidates_found: number;
+  promoted_count: number;
+  excluded_count: number;
+  ambiguous_count: number;
+  enable_enrichment: boolean;
+  enable_cloud_fallback: boolean;
+  max_cloud_calls: number;
+  cloud_calls: number;
+  candidate_status_counts: Record<string, number>;
+  candidate_type_counts: Record<string, number>;
+  error_message: string | null;
+  created_at: string | null;
+};
+
+export type ContactHydrationCandidate = {
+  id: string;
+  job_id: string;
+  candidate_type: "contact" | "organization";
+  identity_key: string;
+  display_name: string;
+  action: string;
+  status: string;
+  confidence: number;
+  existing_object_id: string | null;
+  promoted_object_id: string | null;
+  proposed_data: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  source_refs: Array<Record<string, unknown>>;
+  error_message: string | null;
 };
 
 export type RoutedIdea = {
