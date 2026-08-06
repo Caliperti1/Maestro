@@ -13,6 +13,9 @@ behind what the system knows about them. It is routed operational data, not dura
   optionally scoped to a domain.
 - `contact_relationships`: typed person-to-person links with confidence and supporting sources.
 - `contact_embeddings`: local semantic representation of the assembled profile for contextual search.
+- `organization_aliases` and `organization_embeddings`: organization identity and semantic retrieval.
+- `contact_hydration_jobs` and `contact_hydration_candidates`: resumable historical import state and
+  its shadow-review ledger for both people and organizations.
 
 Postgres remains the source of truth. Relationships are represented relationally so they can later
 be projected into a graph view without introducing a second canonical database.
@@ -58,10 +61,27 @@ affiliations, interaction history, person relationships, provenance inspection, 
 Existing profiles can be embedded with `POST /memory/routed-objects/contacts/embeddings/backfill`;
 unchanged profiles are skipped by source hash.
 
+Organizations use the same operating pattern: contextual and semantic search, aliases, domain notes,
+linked people, interaction history, provenance, profile edits, and approval-gated duplicate merge.
+Agents receive `organizations.search`, `organizations.get`, `organizations.update`, and
+`organizations.merge` through the same domain-scoped tool contract as contacts.
+
+## Historical Hydration
+
+Historical Gmail hydration is a dedicated background job rather than a Maestro workflow. One run:
+
+1. pages Gmail metadata using a bounded Gmail query;
+2. groups participants by exact email and organizations by non-personal email domain;
+3. filters Chris and automated senders;
+4. optionally enriches representative threads with local Qwen and a capped Terra fallback;
+5. pauses in shadow review without changing canonical records;
+6. promotes approved contact and organization candidates through the existing routed write service;
+7. runs hygiene and embedding backfill after promotion.
+
+See `docs/CONTACT_HYDRATION.md` for controls, lifecycle, and testing.
+
 ## Remaining Work
 
-- Run staged historical Gmail/contact imports in shadow mode and review resolver decisions before
-  promoting the full corpus.
 - Add a dedicated graph visualization over existing affiliation and relationship records.
 - Add review queues for ambiguous identity decisions and stale/conflicting profile fields.
 - Add periodic profile-conflict review and embedding freshness reporting to routed hygiene.

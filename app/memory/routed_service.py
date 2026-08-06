@@ -33,12 +33,14 @@ from app.db.models import (
     Entity,
     EntityDomainNote,
     Idea,
+    OrganizationAlias,
     RoutedItem,
     RoutedObjectChangeLog,
     RoutedObjectLink,
     Todo,
 )
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
+from app.memory.organization_intelligence import OrganizationEmbeddingService
 from app.memory.routed_resolver import (
     RoutedObjectResolver,
     contact_aliases_for,
@@ -284,15 +286,48 @@ class RoutedMemoryService:
         normalized_name = _normalize_key(name)
         phone = _phone_from_text(item.content) or _string_from_metadata(item.metadata_, "phone")
         linkedin = _linkedin_from_text(item.content) or _string_from_metadata(item.metadata_, "linkedin")
-        decision = self.resolver.resolve_contact(
-            item,
-            name=name,
-            email=email,
-            phone=phone,
-            linkedin=linkedin,
-        )
-        self._attach_resolution(item, decision)
-        contact = self.session.get(Contact, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
+        resolution_action = _string_from_metadata(item.metadata_, "resolution_action")
+        existing_object_id = _uuid_from_metadata(item.metadata_, "existing_object_id")
+        if resolution_action == "update" and existing_object_id:
+            contact = self.session.get(Contact, existing_object_id)
+            if contact is None:
+                raise ValueError("Explicit contact update target was not found.")
+            item.metadata_ = {
+                **(item.metadata_ or {}),
+                "resolution": {
+                    "action": "update_existing",
+                    "object_id": str(contact.id),
+                    "reason": "explicit_hydration_review",
+                },
+            }
+        elif resolution_action == "create":
+            contact = (
+                self.session.scalar(select(Contact).where(func.lower(Contact.email) == email.lower()))
+                if email
+                else None
+            )
+            item.metadata_ = {
+                **(item.metadata_ or {}),
+                "resolution": {
+                    "action": "update_existing" if contact else "create_new",
+                    "object_id": str(contact.id) if contact else None,
+                    "reason": "exact_email_guard" if contact else "explicit_hydration_review",
+                },
+            }
+        else:
+            decision = self.resolver.resolve_contact(
+                item,
+                name=name,
+                email=email,
+                phone=phone,
+                linkedin=linkedin,
+            )
+            self._attach_resolution(item, decision)
+            contact = (
+                self.session.get(Contact, decision.object_id)
+                if decision.action == "update_existing" and decision.object_id
+                else None
+            )
         action = "updated" if contact is not None else "created"
         if contact is None:
             contact = Contact(
@@ -354,6 +389,9 @@ class RoutedMemoryService:
     def _promote_entity(self, item: RoutedItem) -> RoutedPromotionResult:
         entity = self._upsert_entity(_entity_name_from_item(item), item)
         self._upsert_entity_domain_note(entity, item)
+        self._upsert_organization_aliases(entity, item)
+        embedding_status = OrganizationEmbeddingService(self.session).upsert(entity)
+        entity.metadata_ = {**(entity.metadata_ or {}), "embedding_status": embedding_status}
         return self._link(item, "entity", entity.id, "upserted")
 
     def _promote_idea(self, item: RoutedItem, *, object_type: str = "idea") -> RoutedPromotionResult:
@@ -386,11 +424,27 @@ class RoutedMemoryService:
 
     def _upsert_entity(self, name: str, item: RoutedItem) -> Entity:
         normalized = _normalize_key(name)
-        entity = self.session.scalar(select(Entity).where(Entity.normalized_name == normalized))
+        resolution_action = (
+            _string_from_metadata(item.metadata_, "resolution_action")
+            if item.route_type in {"entity", "organization"}
+            else None
+        )
+        existing_object_id = (
+            _uuid_from_metadata(item.metadata_, "existing_object_id")
+            if resolution_action
+            else None
+        )
+        if resolution_action == "update" and existing_object_id:
+            entity = self.session.get(Entity, existing_object_id)
+            if entity is None:
+                raise ValueError("Explicit organization update target was not found.")
+        else:
+            entity = self.session.scalar(select(Entity).where(Entity.normalized_name == normalized))
         if entity is None:
             entity = Entity(
                 name=name.strip() or item.title,
                 normalized_name=normalized,
+                website=_string_from_metadata(item.metadata_, "website"),
                 summary=item.content,
                 source_refs=item.source_refs,
                 provenance=self._provenance(item),
@@ -399,10 +453,35 @@ class RoutedMemoryService:
             self.session.add(entity)
             self.session.flush()
         else:
+            entity.website = entity.website or _string_from_metadata(item.metadata_, "website")
             entity.summary = _append_note(entity.summary, item.content)
             entity.source_refs = _merge_source_refs(entity.source_refs, item.source_refs)
             entity.metadata_ = {**(entity.metadata_ or {}), **self._canonical_metadata(item)}
         return entity
+
+    def _upsert_organization_aliases(self, entity: Entity, item: RoutedItem) -> None:
+        aliases = {entity.name}
+        raw_aliases = (item.metadata_ or {}).get("aliases") or []
+        if isinstance(raw_aliases, list):
+            aliases.update(str(value).strip() for value in raw_aliases if str(value).strip())
+        for alias in aliases:
+            normalized = _normalize_key(alias)
+            if not normalized:
+                continue
+            existing = self.session.scalar(
+                select(OrganizationAlias).where(OrganizationAlias.normalized_alias == normalized)
+            )
+            if existing is None:
+                self.session.add(
+                    OrganizationAlias(
+                        entity_id=entity.id,
+                        alias=alias,
+                        normalized_alias=normalized,
+                        source="routed_item",
+                        source_refs=item.source_refs,
+                        metadata_={"routed_item_id": str(item.id)},
+                    )
+                )
 
     def _upsert_contact_domain_note(self, contact: Contact, item: RoutedItem) -> None:
         note = self.session.scalar(
@@ -1367,6 +1446,16 @@ def _string_from_metadata(metadata: dict[str, Any], key: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _uuid_from_metadata(metadata: dict[str, Any], key: str) -> uuid.UUID | None:
+    value = metadata.get(key)
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        return None
 
 
 def _list_from_metadata(metadata: dict[str, Any], key: str) -> list[dict[str, Any]]:

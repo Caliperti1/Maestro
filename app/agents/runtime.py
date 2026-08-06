@@ -888,8 +888,10 @@ class AgentRegistryService:
             "memory.context_bundle": 0,
             "contacts.search": 1,
             "contacts.get": 2,
-            "reports.get": 3,
-            "reports.search": 4,
+            "organizations.search": 3,
+            "organizations.get": 4,
+            "reports.get": 5,
+            "reports.search": 6,
         }
         ordered_permissions = sorted(
             permissions.items(),
@@ -3017,6 +3019,26 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": False,
         "reason": "Merging canonical contacts is destructive and requires Chris's approval.",
     },
+    "organizations.search": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only hybrid retrieval over domain-visible organization intelligence.",
+    },
+    "organizations.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only retrieval of a domain-visible organization profile and evidence.",
+    },
+    "organizations.update": {
+        "level": "internal_write",
+        "auto_executable": True,
+        "reason": "Low-impact internal organization update with provenance retained by Maestro.",
+    },
+    "organizations.merge": {
+        "level": "approval_required",
+        "auto_executable": False,
+        "reason": "Merging canonical organizations is destructive and requires Chris's approval.",
+    },
     "routed.item.create": {
         "level": "internal_write",
         "auto_executable": True,
@@ -3326,6 +3348,22 @@ _TOOL_DESCRIPTIONS = {
         "name": "Merge Contacts",
         "description": "Merge a duplicate contact into a canonical survivor after user approval.",
     },
+    "organizations.search": {
+        "name": "Organization Search",
+        "description": "Find domain-visible organizations by name, alias, website, people, interactions, or semantic similarity.",
+    },
+    "organizations.get": {
+        "name": "Organization Detail",
+        "description": "Read an organization's aliases, domain notes, people, interactions, and provenance.",
+    },
+    "organizations.update": {
+        "name": "Update Organization",
+        "description": "Update canonical organization fields or aliases after resolving the intended organization.",
+    },
+    "organizations.merge": {
+        "name": "Merge Organizations",
+        "description": "Merge a duplicate organization into a canonical survivor after user approval.",
+    },
     "routed.item.create": {
         "name": "Create Routed Candidate",
         "description": (
@@ -3589,6 +3627,20 @@ def _with_internal_default_tool_permissions(raw_permissions: dict[str, Any]) -> 
         {
             "permission": "read",
             "description": "Read a domain-visible contact profile and its supporting interactions.",
+        },
+    )
+    permissions.setdefault(
+        "organizations.search",
+        {
+            "permission": "read",
+            "description": "Find organizations visible to this agent's domain using identity and contextual evidence.",
+        },
+    )
+    permissions.setdefault(
+        "organizations.get",
+        {
+            "permission": "read",
+            "description": "Read a domain-visible organization profile and its supporting people and interactions.",
         },
     )
     permissions.setdefault(
@@ -4033,28 +4085,7 @@ Call `routed.item.create` with route_type `event`, title, content summary, metad
         "category": "routed_memory",
         "description": "Create or update organization candidates from interactions.",
         "domain_key": None,
-        "instruction": """## Purpose
-Create organization candidates for companies, agencies, military units, vendors, partners, schools, labs, and institutions.
-
-## Use When
-- A source names an organization with useful relationship, context, website, contact, or opportunity information.
-- A person/contact is affiliated with an organization and the organization itself matters.
-
-## Do Not Use When
-- The name is a person, product feature, event, or vague group with no durable identity.
-
-## Procedure
-1. Use the organization name as the title.
-2. Metadata may include `entity_name`, `website`, `summary`, `relationship_context`, `domain_context`, `known_contacts`, and `aliases`.
-3. Content should summarize the domain-specific relevance.
-4. Include source_refs.
-5. Do not dedupe manually; provide aliases/provenance and let the routed resolver merge/update.
-
-## Output Contract
-Call `routed.item.create` with route_type `entity`, title as organization name, content summary, metadata, and source_refs.
-
-## Validation
-- Do not create organization candidates for generic nouns like "partner" or "customer" unless a named organization is known.""",
+        "instruction": load_prompt("skills/organization_manager.md"),
         "metadata": {"seeded_by": "maestro"},
     },
 ]

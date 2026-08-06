@@ -32,6 +32,7 @@ from app.db.models import (
     Agent,
     Contact,
     Domain,
+    Entity,
     Report,
     RoutedItem,
     Task,
@@ -53,6 +54,7 @@ from app.memory.retrieval import (
     MemoryRetrievalService,
 )
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
+from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
 from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_service import RoutedMemoryService
@@ -1346,6 +1348,9 @@ class GmailApiToolAdapter:
             maximum=50,
         )
         params: dict[str, Any] = {"maxResults": limit}
+        page_token = str(payload.get("page_token") or "").strip()
+        if page_token:
+            params["pageToken"] = page_token
         if query:
             params["q"] = query
         label_ids = _string_list(payload.get("label_ids") or payload.get("labels"))
@@ -1369,6 +1374,8 @@ class GmailApiToolAdapter:
         return {
             "query": query,
             "limit": limit,
+            "page_token": page_token or None,
+            "next_page_token": response.get("nextPageToken") if isinstance(response, dict) else None,
             "messages": hydrated,
             "result_size_estimate": response.get("resultSizeEstimate") if isinstance(response, dict) else None,
             "summary": {
@@ -1376,6 +1383,7 @@ class GmailApiToolAdapter:
                 "query": query,
                 "count": len(hydrated),
                 "user_id": user_id,
+                "has_more": bool(response.get("nextPageToken")) if isinstance(response, dict) else False,
             },
         }
 
@@ -1552,7 +1560,10 @@ class GmailApiToolAdapter:
             "GET",
             f"/gmail/v1/users/{quote(user_id, safe='')}/messages/{quote(message_id, safe='')}",
             token=token,
-            params={"format": "metadata", "metadataHeaders": ["Subject", "From", "To", "Date"]},
+            params={
+                "format": "metadata",
+                "metadataHeaders": ["Subject", "From", "To", "Cc", "Bcc", "Reply-To", "Date"],
+            },
         )
         return _gmail_message_payload(message, max_body_chars=0)
 
@@ -1932,6 +1943,79 @@ class ContactIntelligenceToolAdapter:
                 "summary": {"type": "contact_merge", "survivor_contact_id": str(contact_id)},
             }
         raise ToolExecutionError(f"Unsupported contact tool: {self.key}")
+
+
+class OrganizationIntelligenceToolAdapter:
+    def __init__(self, key: str):
+        self.key = key
+
+    def execute(self, context: ToolExecutionContext, payload: dict[str, Any]) -> dict[str, Any]:
+        if context.dry_run:
+            return {"dry_run": True, "tool": self.key, "payload": payload}
+        service = OrganizationIntelligenceService(context.session)
+        if self.key == "organizations.search":
+            query_text = str(payload.get("query_text") or payload.get("query") or "").strip()
+            if not query_text:
+                raise ToolExecutionError("organizations.search requires query_text.")
+            results = service.search(
+                query_text,
+                domain_id=context.domain.id,
+                limit=_bounded_int(payload.get("limit"), default=8, minimum=1, maximum=25),
+                use_semantic=_as_bool(payload.get("use_semantic"), default=True),
+            )
+            return {
+                "query_text": query_text,
+                "domain_key": context.domain.key,
+                "organizations": [
+                    {
+                        **result.payload,
+                        "retrieval_score": result.score,
+                        "match_reasons": result.match_reasons,
+                        "semantic_similarity": result.semantic_similarity,
+                    }
+                    for result in results
+                ],
+                "summary": {
+                    "type": "organization_search",
+                    "result_count": len(results),
+                    "top_matches": [result.organization.name for result in results[:3]],
+                },
+            }
+        organization_id = _required_uuid(payload, "organization_id")
+        if self.key == "organizations.get":
+            return {
+                "organization": service.get(organization_id, domain_id=context.domain.id),
+                "summary": {"type": "organization_detail", "organization_id": str(organization_id)},
+            }
+        if self.key == "organizations.update":
+            updates = payload.get("updates")
+            if not isinstance(updates, dict) or not updates:
+                raise ToolExecutionError("organizations.update requires a non-empty updates object.")
+            try:
+                organization = RoutedEditService(context.session).update_entity(organization_id, updates)
+            except ValueError as exc:
+                raise ToolExecutionError(str(exc)) from exc
+            OrganizationEmbeddingService(context.session).upsert(organization)
+            context.session.commit()
+            return {
+                "organization": service.organization_payload(organization, domain_id=context.domain.id),
+                "summary": {"type": "organization_update", "organization_id": str(organization.id)},
+            }
+        if self.key == "organizations.merge":
+            duplicate_id = _required_uuid(payload, "duplicate_organization_id")
+            survivor = context.session.get(Entity, organization_id)
+            duplicate = context.session.get(Entity, duplicate_id)
+            if survivor is None or duplicate is None:
+                raise ToolExecutionError("Organization not found.")
+            RoutedHygieneService(context.session).merge_entities(survivor, duplicate, commit=False)
+            OrganizationEmbeddingService(context.session).upsert(survivor)
+            context.session.commit()
+            return {
+                "organization": service.organization_payload(survivor, domain_id=context.domain.id),
+                "merged_organization_id": str(duplicate_id),
+                "summary": {"type": "organization_merge", "survivor_organization_id": str(organization_id)},
+            }
+        raise ToolExecutionError(f"Unsupported organization tool: {self.key}")
 
 
 class RoutedItemCreateToolAdapter:
@@ -3114,6 +3198,8 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
     adapters["memory.context_bundle"] = MemoryContextBundleToolAdapter()
     for key in ("contacts.search", "contacts.get", "contacts.update", "contacts.merge"):
         adapters[key] = ContactIntelligenceToolAdapter(key)
+    for key in ("organizations.search", "organizations.get", "organizations.update", "organizations.merge"):
+        adapters[key] = OrganizationIntelligenceToolAdapter(key)
     adapters["routed.item.create"] = RoutedItemCreateToolAdapter()
     adapters["workflow.notification.create"] = WorkflowNotificationCreateToolAdapter()
     adapters["reports.search"] = ReportRetrievalToolAdapter("reports.search")

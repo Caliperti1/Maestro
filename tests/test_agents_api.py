@@ -196,6 +196,8 @@ def test_agent_update_and_tool_registry_endpoint(
         "memory.context_bundle",
         "contacts.search",
         "contacts.get",
+        "organizations.search",
+        "organizations.get",
         "reports.get",
         "reports.search",
     ]

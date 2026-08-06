@@ -353,6 +353,41 @@ class EntityDomainNote(TimestampMixin, Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
+class OrganizationAlias(TimestampMixin, Base):
+    __tablename__ = "organization_aliases"
+    __table_args__ = (
+        UniqueConstraint("normalized_alias", name="uq_organization_aliases_normalized_alias"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    alias: Mapped[str] = mapped_column(String(240), nullable=False)
+    normalized_alias: Mapped[str] = mapped_column(String(260), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(80), default="system", nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class OrganizationEmbedding(TimestampMixin, Base):
+    __tablename__ = "organization_embeddings"
+    __table_args__ = (
+        UniqueConstraint("entity_id", "provider", "model", name="uq_organization_embeddings_model"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(160), nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(), nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
 class Contact(TimestampMixin, Base):
     __tablename__ = "contacts"
 
@@ -503,6 +538,79 @@ class ContactEmbedding(TimestampMixin, Base):
     dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
     source_text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(), nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class ContactHydrationJob(TimestampMixin, Base):
+    __tablename__ = "contact_hydration_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("tasks.id", ondelete="SET NULL"), index=True
+    )
+    source: Mapped[str] = mapped_column(String(80), default="gmail", nullable=False)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(String(40), default="shadow", nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False, index=True)
+    page_token: Mapped[str | None] = mapped_column(Text)
+    page_size: Mapped[int] = mapped_column(Integer, default=25, nullable=False)
+    max_messages: Mapped[int] = mapped_column(Integer, default=200, nullable=False)
+    max_contacts: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    messages_scanned: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    candidates_found: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    promoted_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    excluded_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    ambiguous_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    local_model_profile: Mapped[str] = mapped_column(String(240), default="ollama:qwen3:8b", nullable=False)
+    cloud_model_profile: Mapped[str] = mapped_column(
+        String(240), default="openrouter:openai/gpt-5.6-terra", nullable=False
+    )
+    max_cloud_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cloud_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    enable_enrichment: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    enable_cloud_fallback: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(200), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    stats: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ContactHydrationCandidate(TimestampMixin, Base):
+    __tablename__ = "contact_hydration_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id",
+            "candidate_type",
+            "identity_key",
+            name="uq_contact_hydration_candidate_identity",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("contact_hydration_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    candidate_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    identity_key: Mapped[str] = mapped_column(String(360), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(40), default="create", nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="discovered", nullable=False, index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    existing_object_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, index=True)
+    promoted_object_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, index=True)
+    routed_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("routed_items.id", ondelete="SET NULL"), index=True
+    )
+    proposed_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 

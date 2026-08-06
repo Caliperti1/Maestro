@@ -15,6 +15,7 @@ from app.db.models import (
     Artifact,
     CalendarEvent,
     Contact,
+    ContactHydrationJob,
     DecisionRecord,
     Entity,
     Idea,
@@ -29,6 +30,7 @@ from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
+from app.memory.contact_hydration import ContactHydrationError, ContactHydrationService
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.retrieval import (
@@ -50,6 +52,7 @@ from app.memory.routed_retrieval import (
     RoutedRetrievalService,
 )
 from app.memory.routed_service import RoutedMemoryService
+from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
@@ -77,6 +80,35 @@ class UpdateRoutedObjectRequest(BaseModel):
 
 class MergeContactRequest(BaseModel):
     duplicate_contact_id: uuid.UUID
+
+
+class MergeOrganizationRequest(BaseModel):
+    duplicate_organization_id: uuid.UUID
+
+
+class CreateContactHydrationRequest(BaseModel):
+    domain_key: str
+    query: str = "in:sent newer_than:90d"
+    page_size: int = 25
+    max_messages: int = 200
+    max_contacts: int = 100
+    enable_enrichment: bool = True
+    enable_cloud_fallback: bool = False
+    max_cloud_calls: int = 0
+
+
+class ContactHydrationActionRequest(BaseModel):
+    action: str
+
+
+class ApproveContactHydrationRequest(BaseModel):
+    candidate_ids: list[uuid.UUID] | None = None
+    minimum_confidence: float = 0.8
+
+
+class ReviewContactHydrationCandidateRequest(BaseModel):
+    decision: str
+    existing_object_id: uuid.UUID | None = None
 
 
 class ReclassifySourceRequest(BaseModel):
@@ -462,11 +494,169 @@ def archive_routed_object(
     return {"status": "archived", "object_type": object_type, "object_id": str(obj.id)}
 
 
+@router.post("/contact-hydration/jobs")
+def create_contact_hydration_job(
+    body: CreateContactHydrationRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        domain_id = _domain_id_for_key(db, body.domain_key)
+        job = ContactHydrationService(db).create_job(
+            domain_id=domain_id,
+            query=body.query,
+            page_size=body.page_size,
+            max_messages=body.max_messages,
+            max_contacts=body.max_contacts,
+            enable_enrichment=body.enable_enrichment,
+            enable_cloud_fallback=body.enable_cloud_fallback,
+            max_cloud_calls=body.max_cloud_calls,
+        )
+    except (ContactHydrationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"job": ContactHydrationService(db).job_payload(job)}
+
+
+@router.get("/contact-hydration/jobs")
+def list_contact_hydration_jobs(
+    domain_key: str | None = None,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    service = ContactHydrationService(db)
+    return {"jobs": [service.job_payload(job) for job in service.list_jobs(domain_id=domain_id, limit=limit)]}
+
+
+@router.get("/contact-hydration/jobs/{job_id}")
+def get_contact_hydration_job(job_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    job = db.get(ContactHydrationJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Contact hydration job not found.")
+    return {"job": ContactHydrationService(db).job_payload(job)}
+
+
+@router.get("/contact-hydration/jobs/{job_id}/candidates")
+def list_contact_hydration_candidates(
+    job_id: uuid.UUID,
+    candidate_type: str | None = None,
+    status: str | None = None,
+    limit: int = 500,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    service = ContactHydrationService(db)
+    if db.get(ContactHydrationJob, job_id) is None:
+        raise HTTPException(status_code=404, detail="Contact hydration job not found.")
+    return {
+        "candidates": [
+            service.candidate_payload(candidate)
+            for candidate in service.candidates(
+                job_id,
+                candidate_type=candidate_type,
+                status=status,
+                limit=limit,
+            )
+        ]
+    }
+
+
+@router.post("/contact-hydration/jobs/{job_id}/action")
+def action_contact_hydration_job(
+    job_id: uuid.UUID,
+    body: ContactHydrationActionRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    service = ContactHydrationService(db)
+    try:
+        job = service.update_job_status(job_id, body.action)
+    except ContactHydrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"job": service.job_payload(job)}
+
+
+@router.post("/contact-hydration/jobs/{job_id}/approve")
+def approve_contact_hydration_candidates(
+    job_id: uuid.UUID,
+    body: ApproveContactHydrationRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    service = ContactHydrationService(db)
+    try:
+        job = service.approve_candidates(
+            job_id,
+            candidate_ids=body.candidate_ids,
+            minimum_confidence=body.minimum_confidence,
+        )
+    except ContactHydrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"job": service.job_payload(job)}
+
+
+@router.post("/contact-hydration/candidates/{candidate_id}/review")
+def review_contact_hydration_candidate(
+    candidate_id: uuid.UUID,
+    body: ReviewContactHydrationCandidateRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    service = ContactHydrationService(db)
+    try:
+        candidate = service.review_candidate(
+            candidate_id,
+            decision=body.decision,
+            existing_object_id=body.existing_object_id,
+        )
+    except ContactHydrationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"candidate": service.candidate_payload(candidate)}
+
+
+@router.post("/contact-hydration/process-once")
+def process_contact_hydration_once(db: Session = Depends(get_db)) -> dict[str, Any]:
+    job = ContactHydrationService(db).process_once(owner="contact-hydration-api")
+    return {"job": ContactHydrationService(db).job_payload(job) if job else None}
+
+
 @router.get("/routed-objects/entities")
-def list_entities(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
+def list_entities(
+    query_text: str | None = None,
+    domain_key: str | None = None,
+    use_semantic: bool = True,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
-    entities = db.scalars(select(Entity).order_by(Entity.updated_at.desc()).limit(limit)).all()
-    return {"entities": [_entity_payload(entity) for entity in entities]}
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    service = OrganizationIntelligenceService(db)
+    results = service.search(
+        query_text or "",
+        domain_id=domain_id,
+        limit=limit,
+        use_semantic=use_semantic,
+    )
+    return {
+        "entities": [
+            {
+                **result.payload,
+                "retrieval_score": round(result.score, 4),
+                "match_reasons": result.match_reasons,
+                "semantic_similarity": result.semantic_similarity,
+            }
+            for result in results
+        ]
+    }
+
+
+@router.get("/routed-objects/entities/{entity_id}")
+def get_entity(
+    entity_id: uuid.UUID,
+    domain_key: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    try:
+        entity = OrganizationIntelligenceService(db).get(entity_id, domain_id=domain_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"entity": entity}
 
 
 @router.patch("/routed-objects/entities/{entity_id}")
@@ -479,7 +669,40 @@ def update_entity(
         entity = RoutedEditService(db).update_entity(entity_id, body.updates)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"entity": _entity_payload(entity)}
+    OrganizationEmbeddingService(db).upsert(entity)
+    db.commit()
+    return {"entity": OrganizationIntelligenceService(db).organization_payload(entity)}
+
+
+@router.post("/routed-objects/entities/{entity_id}/merge")
+def merge_entity(
+    entity_id: uuid.UUID,
+    body: MergeOrganizationRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    survivor = db.get(Entity, entity_id)
+    duplicate = db.get(Entity, body.duplicate_organization_id)
+    if survivor is None or duplicate is None:
+        raise HTTPException(status_code=404, detail="Organization not found.")
+    if survivor.id == duplicate.id:
+        raise HTTPException(status_code=400, detail="An organization cannot be merged into itself.")
+    RoutedHygieneService(db).merge_entities(survivor, duplicate, commit=False)
+    OrganizationEmbeddingService(db).upsert(survivor)
+    db.commit()
+    return {
+        "entity": OrganizationIntelligenceService(db).organization_payload(survivor),
+        "merged_organization_id": str(duplicate.id),
+    }
+
+
+@router.post("/routed-objects/entities/embedding-backfill")
+def backfill_organization_embeddings(
+    limit: int = 200,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = OrganizationEmbeddingService(db).backfill(limit=limit)
+    db.commit()
+    return result
 
 
 @router.get("/routed-objects/ideas")

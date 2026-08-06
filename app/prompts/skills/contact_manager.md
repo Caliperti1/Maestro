@@ -48,6 +48,14 @@ the source's timestamp. Do not invent missing identity, title, employer, relatio
 - Record domain context so an agent sees only interactions relevant to its own domain.
 - Contact summaries describe the person; interaction records describe what happened. Do not conflate them.
 
+## Historical Hydration
+- Historical Gmail hydration is a dedicated background import, not an agent workflow and not a sequence of `routed.item.create` calls.
+- Import participants by exact email identity first. A matching display name with a different email is ambiguous and must remain in review.
+- Exclude Chris Aliperti, automated senders, notification accounts, and role inboxes.
+- Infer organizations from non-personal email domains, then refine them only from representative source threads.
+- Keep the import in shadow mode until Chris approves candidates. Do not claim candidates are canonical contacts before promotion completes.
+- One hydration run creates both contact and organization candidates; do not schedule a second organization-only pass over the same corpus.
+
 ## Output Contract
 For new evidence, call `routed.item.create` with `route_type: contact`, the person name as `title`, a
 human-readable contact/interaction summary as `content`, the structured metadata above, and source refs.

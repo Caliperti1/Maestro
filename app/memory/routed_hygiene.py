@@ -15,6 +15,10 @@ from app.db.models import (
     ContactInteraction,
     ContactOrganizationAffiliation,
     ContactRelationship,
+    Entity,
+    EntityDomainNote,
+    OrganizationAlias,
+    OrganizationEmbedding,
     RoutedObjectChangeLog,
     RoutedObjectLink,
     RuntimeSetting,
@@ -92,6 +96,75 @@ class RoutedHygieneService:
         if survivor.id == duplicate.id:
             return
         self._merge_contact(survivor, duplicate)
+        if commit:
+            self.session.commit()
+
+    def merge_entities(self, survivor: Entity, duplicate: Entity, *, commit: bool = True) -> None:
+        if survivor.id == duplicate.id:
+            return
+        from app.memory.routed_service import _append_note, _merge_source_refs
+
+        survivor.summary = _append_note(survivor.summary, duplicate.summary or "")
+        survivor.website = survivor.website or duplicate.website
+        survivor.source_refs = _merge_source_refs(survivor.source_refs, duplicate.source_refs)
+        survivor.metadata_ = _merge_metadata(survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id)
+        for contact in self.session.scalars(
+            select(Contact).where(Contact.organization_entity_id == duplicate.id)
+        ):
+            contact.organization_entity_id = survivor.id
+        for affiliation in self.session.scalars(
+            select(ContactOrganizationAffiliation).where(
+                ContactOrganizationAffiliation.entity_id == duplicate.id
+            )
+        ):
+            existing = self.session.scalar(
+                select(ContactOrganizationAffiliation).where(
+                    ContactOrganizationAffiliation.contact_id == affiliation.contact_id,
+                    ContactOrganizationAffiliation.entity_id == survivor.id,
+                    ContactOrganizationAffiliation.domain_id == affiliation.domain_id,
+                    ContactOrganizationAffiliation.role == affiliation.role,
+                )
+            )
+            if existing is None:
+                affiliation.entity_id = survivor.id
+            else:
+                existing.source_refs = _merge_source_refs(existing.source_refs, affiliation.source_refs)
+                existing.metadata_ = _merge_metadata(existing.metadata_, affiliation.metadata_)
+                self.session.delete(affiliation)
+        for note in self.session.scalars(
+            select(EntityDomainNote).where(EntityDomainNote.entity_id == duplicate.id)
+        ):
+            existing = self.session.scalar(
+                select(EntityDomainNote).where(
+                    EntityDomainNote.entity_id == survivor.id,
+                    EntityDomainNote.domain_id == note.domain_id,
+                )
+            )
+            if existing is None:
+                note.entity_id = survivor.id
+            else:
+                existing.notes = _append_note(existing.notes, note.notes or "")
+                existing.interaction_log = [*(existing.interaction_log or []), *(note.interaction_log or [])]
+                existing.source_refs = _merge_source_refs(existing.source_refs, note.source_refs)
+                existing.metadata_ = _merge_metadata(existing.metadata_, note.metadata_)
+                self.session.delete(note)
+        for alias in self.session.scalars(
+            select(OrganizationAlias).where(OrganizationAlias.entity_id == duplicate.id)
+        ):
+            existing = self.session.scalar(
+                select(OrganizationAlias).where(
+                    OrganizationAlias.normalized_alias == alias.normalized_alias
+                )
+            )
+            if existing is None or existing.id == alias.id:
+                alias.entity_id = survivor.id
+            else:
+                self.session.delete(alias)
+        for embedding in self.session.scalars(
+            select(OrganizationEmbedding).where(OrganizationEmbedding.entity_id == duplicate.id)
+        ):
+            self.session.delete(embedding)
+        self._finalize_merge("entity", survivor.id, duplicate)
         if commit:
             self.session.commit()
 
@@ -173,9 +246,11 @@ class RoutedHygieneService:
         merged = 0
         by_key: dict[str, Contact] = {}
         for contact in sorted(contacts, key=lambda item: item.created_at or datetime.now(UTC)):
-            keys = [f"name:{_normalize(contact.name)}"]
-            if contact.email:
-                keys.insert(0, f"email:{contact.email.lower()}")
+            # Names are discovery signals, not safe merge keys. Keep name-only duplicates in the
+            # review suggestions below and auto-merge only exact durable identifiers.
+            keys = [f"email:{contact.email.lower()}"] if contact.email else []
+            if not keys:
+                continue
             survivor = next((by_key[key] for key in keys if key in by_key), None)
             if survivor is None:
                 for key in keys:
