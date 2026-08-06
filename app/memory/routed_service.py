@@ -265,7 +265,9 @@ class RoutedMemoryService:
         return self.session.scalar(statement.limit(1))
 
     def _promote_contact(self, item: RoutedItem) -> RoutedPromotionResult | None:
-        email = _email_from_text(item.content) or _string_from_metadata(item.metadata_, "email")
+        metadata_emails = _emails_from_metadata(item.metadata_, "email")
+        email = _email_from_text(item.content) or (metadata_emails[0] if metadata_emails else None)
+        alternate_emails = sorted(value for value in metadata_emails if value != email)
         name = (
             _string_from_metadata(item.metadata_, "name")
             or _string_from_metadata(item.metadata_, "contact_name")
@@ -345,6 +347,7 @@ class RoutedMemoryService:
                 metadata_={
                     **self._canonical_metadata(item),
                     "aliases": sorted(contact_aliases_for(name)),
+                    "alternate_emails": alternate_emails,
                 },
             )
             self.session.add(contact)
@@ -355,10 +358,19 @@ class RoutedMemoryService:
             aliases = set(contact.metadata_.get("aliases") or []) if contact.metadata_ else set()
             aliases.update(contact_aliases_for(contact.name))
             aliases.update(contact_aliases_for(name))
+            existing_alternate_emails = (contact.metadata_ or {}).get("alternate_emails") or []
+            if not isinstance(existing_alternate_emails, list):
+                existing_alternate_emails = []
             contact.metadata_ = {
                 **(contact.metadata_ or {}),
                 **self._canonical_metadata(item),
                 "aliases": sorted(alias for alias in aliases if alias),
+                "alternate_emails": sorted(
+                    {
+                        *existing_alternate_emails,
+                        *alternate_emails,
+                    }
+                ),
             }
             if email and not contact.email:
                 contact.email = email
@@ -1475,6 +1487,18 @@ def _string_from_metadata(metadata: dict[str, Any], key: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _emails_from_metadata(metadata: dict[str, Any], key: str) -> list[str]:
+    value = metadata.get(key)
+    values = value if isinstance(value, list) else [value]
+    emails: list[str] = []
+    for candidate in values:
+        for match in re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", str(candidate or "")):
+            normalized = match.lower()
+            if normalized not in emails:
+                emails.append(normalized)
+    return emails
 
 
 def _uuid_from_metadata(metadata: dict[str, Any], key: str) -> uuid.UUID | None:
