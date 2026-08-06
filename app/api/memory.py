@@ -311,6 +311,7 @@ def run_routed_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
     report = RoutedHygieneService(db).run_once()
     return {
         "aliases_backfilled": report.aliases_backfilled,
+        "aliases_pruned": report.aliases_pruned,
         "display_fields_canonicalized": report.display_fields_canonicalized,
         "duplicates_merged": report.duplicates_merged,
         "suggestions": report.suggestions,

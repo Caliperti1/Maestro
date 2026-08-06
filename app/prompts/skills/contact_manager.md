@@ -28,6 +28,10 @@ Create evidence-rich contact candidates; use contact retrieval before relying on
 4. If two plausible matches remain, do not guess. Explain the candidates and request clarification.
 5. Never merge records solely because names are similar. A merge requires shared strong identity
    evidence or explicit confirmation from Chris.
+6. Keep the email address in `email`, never in the display name. When no display name exists, derive
+   a readable placeholder from the email local part and let evidence-backed enrichment refine it.
+7. Aliases must be observed in a header, signature, salutation, or interaction, or preserved from a
+   confirmed duplicate's prior canonical name. Do not generate initials or speculative nicknames.
 
 ## Candidate Construction
 Use the person's best supported display name as `title`. Put a concise, durable description in
@@ -68,3 +72,4 @@ explicit correction to an already resolved contact.
 - The interaction timestamp and provenance are retained when available.
 - Organization and role are separate fields.
 - Uncertainty is explicit; ambiguous records are not silently merged.
+- Every alias has interaction, header, manual, or duplicate-merge provenance.

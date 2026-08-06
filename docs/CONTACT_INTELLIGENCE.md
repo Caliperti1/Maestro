@@ -66,6 +66,11 @@ linked people, interaction history, provenance, profile edits, and approval-gate
 Agents receive `organizations.search`, `organizations.get`, `organizations.update`, and
 `organizations.merge` through the same domain-scoped tool contract as contacts.
 
+Contact and organization aliases are evidence records, not generated search shortcuts. Message
+headers, signatures, explicit manual edits, domain identifiers, and confirmed duplicate merges may
+create aliases; speculative initials, nicknames, legal suffixes, and acronyms do not persist. A
+merge retains the duplicate record's prior canonical name as an alias of the survivor.
+
 ## Historical Hydration
 
 Historical Gmail hydration is a dedicated background job rather than a Maestro workflow. One run:

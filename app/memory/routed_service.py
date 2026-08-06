@@ -272,6 +272,7 @@ class RoutedMemoryService:
             or _name_from_content(item.content)
             or _name_from_title(item.title)
         )
+        name = _contact_name_from_email(name, email)
         if is_maestro_user_reference(name=name, email=email):
             item.status = "ignored"
             item.metadata_ = {
@@ -423,6 +424,7 @@ class RoutedMemoryService:
         return self._link(item, "decision", decision.id, "created")
 
     def _upsert_entity(self, name: str, item: RoutedItem) -> Entity:
+        name = _organization_name_from_identifier(name)
         normalized = _normalize_key(name)
         resolution_action = (
             _string_from_metadata(item.metadata_, "resolution_action")
@@ -1332,6 +1334,33 @@ def _relationship_from_text(contact_name: str, text: str) -> tuple[str | None, s
 
 def _title_case_name(value: str) -> str:
     return " ".join(part[:1].upper() + part[1:] for part in value.strip().split())
+
+
+def _contact_name_from_email(name: str, email: str | None) -> str:
+    if not email or ("@" not in name and _normalize_key(name) != _normalize_key(email)):
+        return name
+    local = email.split("@", 1)[0]
+    ignored = {"army", "civ", "ctr", "mil", "usa", "usaf", "usarmy", "usmc", "usn"}
+    parts: list[str] = []
+    for raw_part in re.split(r"[._+-]+", local):
+        part = re.sub(r"\d+$", "", raw_part.lower())
+        if part and part not in ignored:
+            parts.append(part.upper() if len(part) == 1 else part.capitalize())
+    return " ".join(parts).strip() or name
+
+
+def _organization_name_from_identifier(name: str) -> str:
+    cleaned = name.strip()
+    candidate = cleaned.removeprefix("https://").removeprefix("http://").removeprefix("www.")
+    candidate = candidate.split("/", 1)[0]
+    if "@" in candidate:
+        candidate = candidate.rsplit("@", 1)[-1]
+    if "." not in candidate or " " in candidate:
+        return cleaned
+    parts = candidate.lower().split(".")
+    stem = parts[-2] if len(parts) >= 2 else parts[0]
+    words = [part for part in re.split(r"[-_]", stem) if part]
+    return " ".join(word.upper() if len(word) <= 3 else word.capitalize() for word in words) or cleaned
 
 
 def _datetime_from_metadata(metadata: dict[str, Any], key: str) -> datetime | None:
