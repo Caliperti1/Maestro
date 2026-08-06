@@ -478,13 +478,7 @@ def resolution_metadata(decision: ResolutionDecision) -> dict[str, Any]:
 
 def contact_aliases_for(name: str) -> set[str]:
     normalized = _normalize_key(name)
-    aliases = {normalized} if normalized else set()
-    parts = normalized.split()
-    if len(parts) >= 2:
-        aliases.add(f"{parts[0]} {parts[-1][0]}")
-        aliases.add(f"{parts[0]} {parts[-1][0]}.")
-        aliases.add(" ".join(part[0] for part in parts if part))
-    return {alias for alias in aliases if alias}
+    return {normalized} if normalized else set()
 
 
 def _contact_aliases(contact: Contact) -> set[str]:

@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import uuid
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.main import create_app
@@ -1036,7 +1037,7 @@ def test_routed_hygiene_backfills_aliases_and_suggests_duplicates(
 
     report = RoutedHygieneService(session).run_once()
 
-    assert report.aliases_backfilled >= 2
+    assert report.aliases_backfilled == 1
     assert report.duplicates_merged == 0
     assert session.query(Contact).filter(Contact.status != "archived").count() == 2
     assert any(item["reason"] == "same_name" for item in report.suggestions)
@@ -1073,6 +1074,96 @@ def test_routed_hygiene_canonicalizes_display_fields(
     assert report.display_fields_canonicalized == 2
     assert session.query(Contact).one().name == "Ben Daniels"
     assert session.query(CalendarEvent).one().title == "Meeting with Ben Daniels"
+
+
+def test_routed_hygiene_cleans_identifier_names_and_synthetic_aliases(
+    session: Session,
+) -> None:
+    contact = Contact(
+        name="william.r.rollins2.mil@army.mil",
+        normalized_name="william r rollins2 mil army mil",
+        email="william.r.rollins2.mil@army.mil",
+        source_refs=[],
+        provenance={},
+        metadata_={"aliases": ["w r", "Will Rollins"]},
+    )
+    entity = Entity(
+        name="praxis-defense.com",
+        normalized_name="praxis defense com",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([contact, entity])
+    session.flush()
+    session.add_all(
+        [
+            ContactAlias(
+                contact_id=contact.id,
+                alias="w r",
+                normalized_alias="w r",
+                source="routed_promote",
+                source_refs=[],
+                metadata_={},
+            ),
+            ContactAlias(
+                contact_id=contact.id,
+                alias="Will Rollins",
+                normalized_alias="will rollins",
+                source="routed_promote",
+                source_refs=[],
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+
+    session.refresh(contact)
+    session.refresh(entity)
+    assert contact.name == "William R Rollins"
+    assert contact.email == "william.r.rollins2.mil@army.mil"
+    assert entity.name == "Praxis Defense"
+    assert report.aliases_pruned >= 2
+    assert session.scalar(select(ContactAlias).where(ContactAlias.normalized_alias == "w r")) is None
+    assert session.scalar(
+        select(ContactAlias).where(ContactAlias.normalized_alias == "will rollins")
+    ) is not None
+
+
+def test_routed_hygiene_merges_contact_with_email_embedded_in_display_name(
+    session: Session,
+) -> None:
+    canonical = Contact(
+        name="Todd Poindexter",
+        normalized_name="todd poindexter",
+        email="todd.l.poindexter2.mil@army.mil",
+        source_refs=[{"id": "canonical"}],
+        provenance={},
+        metadata_={},
+    )
+    duplicate = Contact(
+        name="Todd L. Poindexter <todd.l.poindexter2.mil@army.mil>",
+        normalized_name="todd l poindexter todd l poindexter2 mil army mil",
+        source_refs=[{"id": "observed-header"}],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([canonical, duplicate])
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+
+    assert report.duplicates_merged == 1
+    assert duplicate.status == "archived"
+    alias = session.scalar(
+        select(ContactAlias).where(ContactAlias.normalized_alias == "todd l poindexter")
+    )
+    assert alias is not None
+    assert alias.contact_id == canonical.id
+    assert alias.source == "duplicate_merge"
+    assert session.scalar(select(ContactAlias).where(ContactAlias.alias.contains("@"))) is None
 
 
 def test_routed_hygiene_merges_high_confidence_duplicates(

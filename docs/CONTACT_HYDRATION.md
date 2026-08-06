@@ -26,8 +26,13 @@ Each promoted record retains Gmail message/thread source references and the hydr
 
 - Exact email is the primary contact key.
 - Chris Aliperti and configured self email are excluded.
-- Email headers own contact identity. The enrichment model receives compact owner/domain context
-  and may add profile context, but it cannot replace a candidate's header-derived name or email.
+- Email headers own contact identity. Address-only headers produce a readable name from the email
+  local part while preserving the full address only in `email`.
+- The enrichment model receives compact owner/domain context. It may refine an email-derived name
+  and extract contact or organization aliases only when supplied threads contain supporting identity
+  evidence; header-derived and existing canonical names remain authoritative.
+- Confirmed contact and organization merges preserve the retired canonical name as an alias. Initials,
+  speculative nicknames, legal suffixes, and acronyms are never generated merely for convenience.
 - Automated and no-reply addresses are excluded.
 - The same display name with a different email stays ambiguous for manual review.
 - A non-personal email domain creates an organization candidate but does not prove a polished name.

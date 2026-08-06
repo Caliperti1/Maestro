@@ -1,5 +1,6 @@
 """Resumable, low-cost historical Gmail hydration for contacts and organizations."""
 
+import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -60,6 +61,35 @@ AUTOMATED_LOCAL_PARTS = {
     "noreply",
     "notifications",
     "support",
+}
+PERSON_NAME_STOP_TOKENS = {
+    "army",
+    "civ",
+    "ctr",
+    "mil",
+    "navy",
+    "usaf",
+    "usarmy",
+    "usmc",
+    "usn",
+    "usa",
+}
+PERSON_TITLE_TOKENS = {
+    "1lt",
+    "2lt",
+    "capt",
+    "captain",
+    "col",
+    "cpt",
+    "dr",
+    "gen",
+    "lt",
+    "ltc",
+    "maj",
+    "mr",
+    "mrs",
+    "ms",
+    "sgm",
 }
 
 
@@ -410,12 +440,14 @@ class ContactHydrationService:
             if _automated_address(normalized_email):
                 self._upsert_excluded_candidate(job, normalized_email, display_name or normalized_email)
                 continue
-            name = _display_name(display_name, normalized_email)
+            name, name_source, observed_names = _display_name(display_name, normalized_email)
             if is_maestro_user_reference(name=name, email=normalized_email):
                 continue
             candidate = self._upsert_contact_candidate(
                 job,
                 name=name,
+                name_source=name_source,
+                observed_names=observed_names,
                 email=normalized_email,
                 direction=direction,
                 sample=sample,
@@ -437,6 +469,8 @@ class ContactHydrationService:
         job: ContactHydrationJob,
         *,
         name: str,
+        name_source: str,
+        observed_names: set[str],
         email: str,
         direction: str,
         sample: dict[str, Any],
@@ -466,19 +500,26 @@ class ContactHydrationService:
                 status = "review"
                 confidence = 0.45
                 existing_id = name_collision.id
+            canonical_name = existing.name if existing else name
             candidate = ContactHydrationCandidate(
                 job_id=job.id,
                 candidate_type="contact",
                 identity_key=email,
-                display_name=name,
+                display_name=canonical_name,
                 action=action,
                 status=status,
                 confidence=confidence,
                 existing_object_id=existing_id,
-                proposed_data={"name": name, "email": email},
-                evidence={"message_count": 0, "inbound_count": 0, "outbound_count": 0, "samples": []},
+                proposed_data={"name": canonical_name, "email": email},
+                evidence={
+                    "message_count": 0,
+                    "inbound_count": 0,
+                    "outbound_count": 0,
+                    "observed_names": [],
+                    "samples": [],
+                },
                 source_refs=[],
-                metadata_={},
+                metadata_={"name_source": "existing_contact" if existing else name_source},
             )
             self.session.add(candidate)
             self.session.flush()
@@ -486,21 +527,29 @@ class ContactHydrationService:
         evidence["message_count"] = int(evidence.get("message_count") or 0) + 1
         count_key = "outbound_count" if direction == "outbound" else "inbound_count"
         evidence[count_key] = int(evidence.get(count_key) or 0) + 1
-        observed_names = {
+        accumulated_names = {
             str(value).strip()
             for value in evidence.get("observed_names") or []
             if str(value).strip()
         }
-        if name.strip() and not is_maestro_user_reference(name=name, email=email):
-            observed_names.add(name.strip())
-        evidence["observed_names"] = sorted(observed_names)
+        accumulated_names.update(
+            value
+            for value in observed_names
+            if value and not is_maestro_user_reference(name=value, email=email)
+        )
+        evidence["observed_names"] = sorted(accumulated_names)
         samples = list(evidence.get("samples") or [])
         if len(samples) < 8 and sample.get("message_id") not in {item.get("message_id") for item in samples}:
             samples.append(sample)
         evidence["samples"] = samples
         candidate.evidence = evidence
         candidate.source_refs = _merge_source_refs(candidate.source_refs, [source_ref], limit=30)
-        if _name_quality(name) > _name_quality(candidate.display_name):
+        current_source = str((candidate.metadata_ or {}).get("name_source") or "email_local")
+        if name_source == "header" and current_source == "email_local":
+            candidate.display_name = name
+            candidate.proposed_data = {**candidate.proposed_data, "name": name}
+            candidate.metadata_ = {**(candidate.metadata_ or {}), "name_source": "header"}
+        elif name_source == current_source and _name_quality(name) > _name_quality(candidate.display_name):
             candidate.display_name = name
             candidate.proposed_data = {**candidate.proposed_data, "name": name}
         return candidate
@@ -590,6 +639,8 @@ class ContactHydrationService:
             )
         )
         contacts.sort(key=lambda item: int((item.evidence or {}).get("message_count") or 0), reverse=True)
+        for candidate in contacts:
+            _apply_observed_contact_aliases(candidate)
         for candidate in contacts[job.max_contacts:]:
             candidate.action = "exclude"
             candidate.status = "excluded"
@@ -706,30 +757,38 @@ class ContactHydrationService:
             if enriched is None:
                 candidate.error_message = f"Enrichment skipped: {local_error}"
         if enriched:
-            observed_names = {
-                str(value).strip()
-                for value in (candidate.evidence or {}).get("observed_names") or []
-                if str(value).strip()
-                and not is_maestro_user_reference(name=str(value), email=candidate.identity_key)
-            }
-            aliases = sorted(
-                value
-                for value in observed_names
-                if _normalize(value) != _normalize(candidate.display_name)
+            canonical_name, aliases, identity_evidence = _verified_contact_identity(
+                candidate,
+                enriched,
+                evidence_payload,
             )
+            candidate.display_name = canonical_name
+            organization_value = candidate.proposed_data.get("organization")
+            organization_name = str(enriched.get("organization") or "").strip()
+            if organization_name:
+                verified_organization = self._apply_enriched_organization(
+                    job,
+                    candidate,
+                    organization_name,
+                    [
+                        str(value).strip()
+                        for value in enriched.get("organization_aliases") or []
+                        if str(value).strip()
+                    ],
+                    evidence_payload,
+                )
+                organization_value = verified_organization or organization_value
             candidate.proposed_data = {
                 **candidate.proposed_data,
-                "name": candidate.display_name,
+                "name": canonical_name,
                 "aliases": aliases,
-                "organization": str(enriched.get("organization") or candidate.proposed_data.get("organization") or "").strip() or None,
+                "alias_evidence": identity_evidence,
+                "organization": str(organization_value or "").strip() or None,
                 "role": str(enriched.get("role") or "").strip() or None,
                 "summary": str(enriched.get("summary") or "").strip() or None,
                 "relationship_context": str(enriched.get("relationship_context") or "").strip() or None,
             }
             candidate.confidence = max(candidate.confidence, float(enriched.get("confidence") or 0.0))
-            organization_name = str(enriched.get("organization") or "").strip()
-            if organization_name:
-                self._apply_enriched_organization(job, candidate, organization_name)
         if candidate.action != "needs_review":
             candidate.status = "review"
         self.session.commit()
@@ -763,7 +822,11 @@ class ContactHydrationService:
                     "candidate_identity": {
                         "name": candidate.display_name,
                         "email": candidate.identity_key,
-                        "instruction": "Immutable identity established from email headers",
+                        "name_source": (candidate.metadata_ or {}).get("name_source"),
+                        "instruction": (
+                            "Header names are authoritative. An email-local name may be refined "
+                            "only from direct signature or header evidence."
+                        ),
                     },
                     "interaction_stats": candidate.evidence,
                     "representative_threads": evidence_payload,
@@ -774,17 +837,25 @@ class ContactHydrationService:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
+                    "canonical_name": {"type": "string"},
+                    "contact_aliases": {"type": "array", "items": {"type": "string"}},
                     "organization": {"type": "string"},
+                    "organization_aliases": {"type": "array", "items": {"type": "string"}},
                     "role": {"type": "string"},
                     "summary": {"type": "string"},
                     "relationship_context": {"type": "string"},
+                    "identity_evidence": {"type": "array", "items": {"type": "string"}},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 },
                 "required": [
+                    "canonical_name",
+                    "contact_aliases",
                     "organization",
+                    "organization_aliases",
                     "role",
                     "summary",
                     "relationship_context",
+                    "identity_evidence",
                     "confidence",
                 ],
             },
@@ -795,31 +866,62 @@ class ContactHydrationService:
         job: ContactHydrationJob,
         contact_candidate: ContactHydrationCandidate,
         organization_name: str,
-    ) -> None:
+        organization_aliases: list[str],
+        evidence_payload: list[dict[str, Any]],
+    ) -> str | None:
         email = str(contact_candidate.proposed_data.get("email") or "")
         domain = email.rsplit("@", 1)[-1] if "@" in email else ""
         if not domain or domain in PERSONAL_EMAIL_DOMAINS:
-            return
+            return None
+        verified_name, verified_aliases = _verified_organization_identity(
+            domain,
+            organization_name,
+            organization_aliases,
+            evidence_payload,
+        )
+        if not verified_name:
+            return None
         organization = self._upsert_organization_candidate(
             job,
             domain=domain,
             source_ref=contact_candidate.source_refs[0] if contact_candidate.source_refs else {},
             sample=((contact_candidate.evidence or {}).get("samples") or [{}])[0],
         )
-        organization.display_name = organization_name
+        final_name = organization.display_name if organization.existing_object_id else verified_name
+        final_aliases = set(verified_aliases)
+        if _normalize(verified_name) != _normalize(final_name):
+            final_aliases.add(verified_name)
+        organization.display_name = final_name
         organization.proposed_data = {
             **organization.proposed_data,
-            "name": organization_name,
+            "name": final_name,
+            "aliases": sorted(final_aliases),
             "summary": f"Organization associated with {contact_candidate.display_name} in historical Gmail evidence.",
         }
         existing = self.session.scalar(
-            select(Entity).where(Entity.normalized_name == _normalize(organization_name))
+            select(Entity).where(Entity.normalized_name == _normalize(verified_name))
         )
         if existing:
             organization.action = "update"
             organization.existing_object_id = existing.id
+            organization.display_name = existing.name
+            organization.proposed_data = {
+                **organization.proposed_data,
+                "name": existing.name,
+                "aliases": sorted(
+                    {
+                        *final_aliases,
+                        *(
+                            [verified_name]
+                            if _normalize(verified_name) != _normalize(existing.name)
+                            else []
+                        ),
+                    }
+                ),
+            }
             organization.confidence = 0.99
         organization.status = "review"
+        return organization.display_name
 
     def _promote_batch(self, job: ContactHydrationJob) -> None:
         candidates = list(
@@ -998,13 +1100,54 @@ def _internal_date_iso(value: Any) -> str | None:
         return None
 
 
-def _display_name(raw_name: str, email: str) -> str:
+def _display_name(raw_name: str, email: str) -> tuple[str, str, set[str]]:
     cleaned = re.sub(r"\s+", " ", raw_name.replace('"', "")).strip()
     if cleaned and "@" not in cleaned:
-        return cleaned
+        canonical, aliases = _person_name_from_header(cleaned)
+        return canonical, "header", aliases
     local = email.split("@", 1)[0]
-    parts = [part for part in re.split(r"[._+-]+", local) if part]
-    return " ".join(part.capitalize() for part in parts) or email
+    parts = []
+    for raw_part in re.split(r"[._+-]+", local):
+        part = re.sub(r"\d+$", "", raw_part.lower())
+        if part and part not in PERSON_NAME_STOP_TOKENS:
+            parts.append(part.upper() if len(part) == 1 else part.capitalize())
+    name = " ".join(parts).strip() or local.replace("@", " ").strip().title()
+    return name, "email_local", set()
+
+
+def _person_name_from_header(value: str) -> tuple[str, set[str]]:
+    raw = re.sub(r"\([^)]*\)", " ", value)
+    raw = re.sub(r"\s+", " ", raw).strip(" ,")
+    rank = next(
+        (token.upper() for token in re.findall(r"[A-Za-z0-9]+", raw) if token.lower() in PERSON_TITLE_TOKENS),
+        None,
+    )
+    if "," in raw:
+        surname, remainder = (part.strip() for part in raw.split(",", 1))
+        given_tokens = _person_tokens_before_marker(remainder)
+        canonical_tokens = [*given_tokens, *_person_tokens_before_marker(surname)]
+    else:
+        tokens = _person_tokens_before_marker(raw)
+        canonical_tokens = tokens[1:] if tokens and tokens[0].lower() in PERSON_TITLE_TOKENS else tokens
+    canonical = " ".join(canonical_tokens).strip() or raw
+    aliases = {canonical}
+    surname = canonical_tokens[-1] if canonical_tokens else ""
+    if rank and surname:
+        aliases.add(f"{rank} {surname}")
+        if len(canonical_tokens) >= 2:
+            aliases.add(f"{rank} {canonical_tokens[0]} {surname}")
+    return canonical, {alias for alias in aliases if alias.strip()}
+
+
+def _person_tokens_before_marker(value: str) -> list[str]:
+    tokens: list[str] = []
+    for token in re.findall(r"[A-Za-z][A-Za-z'’-]*|[A-Za-z]", value):
+        lowered = token.lower().rstrip(".")
+        if lowered in PERSON_NAME_STOP_TOKENS or (lowered in PERSON_TITLE_TOKENS and tokens):
+            break
+        if lowered not in PERSON_TITLE_TOKENS:
+            tokens.append(token)
+    return tokens
 
 
 def _automated_address(email: str) -> bool:
@@ -1026,6 +1169,109 @@ def _normalize(value: str) -> str:
 
 def _name_quality(value: str) -> int:
     return (2 if " " in value.strip() else 0) + (1 if "@" not in value else 0) + min(len(value), 40)
+
+
+def _verified_contact_identity(
+    candidate: ContactHydrationCandidate,
+    enriched: dict[str, Any],
+    evidence_payload: list[dict[str, Any]],
+) -> tuple[str, list[str], dict[str, str]]:
+    corpus = _identity_corpus(evidence_payload, (candidate.evidence or {}).get("observed_names") or [])
+    canonical = candidate.display_name
+    proposed = str(enriched.get("canonical_name") or "").strip()
+    name_source = str((candidate.metadata_ or {}).get("name_source") or "email_local")
+    if (
+        name_source == "email_local"
+        and proposed
+        and not is_maestro_user_reference(name=proposed, email=candidate.identity_key)
+        and _phrase_is_observed(proposed, corpus)
+    ):
+        canonical = proposed
+
+    values = {
+        str(value).strip(): "email_header"
+        for value in (candidate.evidence or {}).get("observed_names") or []
+        if str(value).strip()
+    }
+    for value in enriched.get("contact_aliases") or []:
+        alias = str(value).strip()
+        if alias and _supported_person_alias(alias, canonical, corpus):
+            values[alias] = "interaction_evidence"
+    normalized_canonical = _normalize(canonical)
+    aliases = sorted(
+        alias
+        for alias in values
+        if _normalize(alias) != normalized_canonical
+        and not is_maestro_user_reference(name=alias, email=candidate.identity_key)
+    )
+    return canonical, aliases, {alias: values[alias] for alias in aliases}
+
+
+def _apply_observed_contact_aliases(candidate: ContactHydrationCandidate) -> None:
+    normalized_name = _normalize(candidate.display_name)
+    aliases = sorted(
+        {
+            str(value).strip()
+            for value in (candidate.evidence or {}).get("observed_names") or []
+            if str(value).strip()
+            and _normalize(str(value)) != normalized_name
+            and not is_maestro_user_reference(name=str(value), email=candidate.identity_key)
+        }
+    )
+    candidate.proposed_data = {
+        **(candidate.proposed_data or {}),
+        "aliases": aliases,
+        "alias_evidence": {alias: "email_header" for alias in aliases},
+    }
+
+
+def _verified_organization_identity(
+    email_domain: str,
+    proposed_name: str,
+    proposed_aliases: list[str],
+    evidence_payload: list[dict[str, Any]],
+) -> tuple[str | None, list[str]]:
+    corpus = _identity_corpus(evidence_payload, [])
+    domain_name = _organization_name_from_domain(email_domain)
+    domain_tokens = set(_normalize(domain_name).split())
+    normalized_proposed = _normalize(proposed_name)
+    proposed_tokens = set(normalized_proposed.split())
+    supported = _phrase_is_observed(proposed_name, corpus) or (
+        bool(domain_tokens) and domain_tokens == proposed_tokens
+    )
+    if not supported:
+        return None, []
+    aliases = {
+        alias
+        for alias in proposed_aliases
+        if _phrase_is_observed(alias, corpus)
+        and _normalize(alias) != normalized_proposed
+    }
+    if _normalize(domain_name) != normalized_proposed:
+        aliases.add(domain_name)
+    return proposed_name, sorted(aliases)
+
+
+def _identity_corpus(evidence_payload: list[dict[str, Any]], observed_names: list[str]) -> str:
+    serialized = json.dumps({"threads": evidence_payload, "observed_names": observed_names})
+    return _normalize(serialized.replace("\\n", " ").replace("\\r", " "))
+
+
+def _phrase_is_observed(value: str, normalized_corpus: str) -> bool:
+    phrase = _normalize(value)
+    return bool(phrase and len(phrase) >= 3 and phrase in normalized_corpus)
+
+
+def _supported_person_alias(alias: str, canonical_name: str, normalized_corpus: str) -> bool:
+    if _phrase_is_observed(alias, normalized_corpus):
+        return True
+    alias_tokens = _normalize(alias).split()
+    canonical_tokens = _normalize(canonical_name).split()
+    if len(alias_tokens) < 2 or len(canonical_tokens) < 2:
+        return False
+    if alias_tokens[-1] != canonical_tokens[-1]:
+        return False
+    return all(token in normalized_corpus.split() for token in alias_tokens)
 
 
 def _merge_source_refs(

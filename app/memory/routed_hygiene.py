@@ -30,6 +30,7 @@ from app.memory.routed_resolver import contact_aliases_for
 @dataclass(frozen=True)
 class RoutedHygieneReport:
     aliases_backfilled: int
+    aliases_pruned: int
     display_fields_canonicalized: int
     duplicates_merged: int
     suggestions: list[dict[str, Any]]
@@ -48,6 +49,7 @@ class RoutedHygieneService:
 
     def run_once(self, *, persist_report: bool = True) -> RoutedHygieneReport:
         display_fields_canonicalized = self.canonicalize_display_fields()
+        aliases_pruned = self.prune_unsubstantiated_contact_aliases()
         aliases_backfilled = self.backfill_contact_aliases()
         duplicates_merged = self.merge_high_confidence_duplicates()
         suggestions = [
@@ -57,6 +59,7 @@ class RoutedHygieneService:
         ]
         report = RoutedHygieneReport(
             aliases_backfilled=aliases_backfilled,
+            aliases_pruned=aliases_pruned,
             display_fields_canonicalized=display_fields_canonicalized,
             duplicates_merged=duplicates_merged,
             suggestions=suggestions,
@@ -65,6 +68,7 @@ class RoutedHygieneService:
             setting = self.session.get(RuntimeSetting, self.SETTING_KEY)
             payload = {
                 "aliases_backfilled": aliases_backfilled,
+                "aliases_pruned": aliases_pruned,
                 "display_fields_canonicalized": display_fields_canonicalized,
                 "duplicates_merged": duplicates_merged,
                 "suggestions": suggestions,
@@ -104,6 +108,7 @@ class RoutedHygieneService:
             return
         from app.memory.routed_service import _append_note, _merge_source_refs
 
+        self._preserve_organization_merge_alias(survivor, duplicate)
         survivor.summary = _append_note(survivor.summary, duplicate.summary or "")
         survivor.website = survivor.website or duplicate.website
         survivor.source_refs = _merge_source_refs(survivor.source_refs, duplicate.source_refs)
@@ -178,7 +183,23 @@ class RoutedHygieneService:
         count = 0
         contacts = self.session.scalars(select(Contact)).all()
         for contact in contacts:
-            cleaned_name = _name_from_title(contact.name)
+            embedded_email = _contact_email_identity(contact)
+            if embedded_email:
+                contact.metadata_ = {
+                    **(contact.metadata_ or {}),
+                    "observed_email_identity": embedded_email,
+                }
+            if embedded_email and not contact.email:
+                collision = self.session.scalar(
+                    select(Contact).where(
+                        Contact.email == embedded_email,
+                        Contact.id != contact.id,
+                        Contact.status != "archived",
+                    )
+                )
+                if collision is None:
+                    contact.email = embedded_email
+            cleaned_name = _name_from_contact_email(contact) or _name_from_title(contact.name)
             if cleaned_name and _normalize(cleaned_name) != _normalize(contact.name):
                 contact.metadata_ = {
                     **(contact.metadata_ or {}),
@@ -187,6 +208,26 @@ class RoutedHygieneService:
                 }
                 contact.name = cleaned_name
                 contact.normalized_name = _normalize(cleaned_name)
+                count += 1
+        entities = self.session.scalars(select(Entity)).all()
+        for entity in entities:
+            cleaned_name = _name_from_organization_identifier(entity.name)
+            if cleaned_name and _normalize(cleaned_name) != _normalize(entity.name):
+                collision = self.session.scalar(
+                    select(Entity).where(
+                        Entity.normalized_name == _normalize(cleaned_name),
+                        Entity.id != entity.id,
+                    )
+                )
+                if collision is not None:
+                    continue
+                entity.metadata_ = {
+                    **(entity.metadata_ or {}),
+                    "previous_name": entity.name,
+                    "canonicalized_by_hygiene": True,
+                }
+                entity.name = cleaned_name
+                entity.normalized_name = _normalize(cleaned_name)
                 count += 1
         events = self.session.scalars(select(CalendarEvent)).all()
         for event in events:
@@ -201,6 +242,38 @@ class RoutedHygieneService:
                 }
                 event.title = title
                 count += 1
+        if count:
+            self.session.commit()
+        return count
+
+    def prune_unsubstantiated_contact_aliases(self) -> int:
+        count = 0
+        contacts = {
+            contact.id: contact
+            for contact in self.session.scalars(select(Contact)).all()
+        }
+        for alias in self.session.scalars(select(ContactAlias)).all():
+            contact = contacts.get(alias.contact_id)
+            if contact is None:
+                continue
+            if alias.source not in {"manual", "duplicate_merge"} and _alias_is_synthetic(
+                alias.alias,
+                contact.name,
+            ):
+                self.session.delete(alias)
+                count += 1
+        for contact in contacts.values():
+            metadata_aliases = (contact.metadata_ or {}).get("aliases") or []
+            if not isinstance(metadata_aliases, list):
+                continue
+            kept = [
+                str(alias).strip()
+                for alias in metadata_aliases
+                if str(alias).strip() and not _alias_is_synthetic(str(alias), contact.name)
+            ]
+            if kept != metadata_aliases:
+                count += max(0, len(metadata_aliases) - len(kept))
+                contact.metadata_ = {**(contact.metadata_ or {}), "aliases": sorted(set(kept))}
         if count:
             self.session.commit()
         return count
@@ -245,10 +318,18 @@ class RoutedHygieneService:
         contacts = list(self.session.scalars(select(Contact).where(Contact.status != "archived")))
         merged = 0
         by_key: dict[str, Contact] = {}
-        for contact in sorted(contacts, key=lambda item: item.created_at or datetime.now(UTC)):
+        for contact in sorted(
+            contacts,
+            key=lambda item: (
+                0 if item.email else 1,
+                0 if "@" not in item.name else 1,
+                item.created_at or datetime.now(UTC),
+            ),
+        ):
             # Names are discovery signals, not safe merge keys. Keep name-only duplicates in the
             # review suggestions below and auto-merge only exact durable identifiers.
-            keys = [f"email:{contact.email.lower()}"] if contact.email else []
+            email_identity = _contact_email_identity(contact)
+            keys = [f"email:{email_identity}"] if email_identity else []
             if not keys:
                 continue
             survivor = next((by_key[key] for key in keys if key in by_key), None)
@@ -293,6 +374,7 @@ class RoutedHygieneService:
     def _merge_contact(self, survivor: Contact, duplicate: Contact) -> None:
         from app.memory.routed_service import _append_note, _merge_source_refs
 
+        self._preserve_contact_merge_alias(survivor, duplicate)
         survivor.summary = _append_note(survivor.summary, duplicate.summary or "")
         survivor.source_refs = _merge_source_refs(survivor.source_refs, duplicate.source_refs)
         survivor.metadata_ = _merge_metadata(survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id)
@@ -392,6 +474,74 @@ class RoutedHygieneService:
         ):
             self.session.delete(embedding)
         self._finalize_merge("contact", survivor.id, duplicate)
+
+    def _preserve_contact_merge_alias(self, survivor: Contact, duplicate: Contact) -> None:
+        normalized = _normalize(duplicate.name)
+        if not normalized or normalized == _normalize(survivor.name) or "@" in duplicate.name:
+            return
+        existing = self.session.scalar(
+            select(ContactAlias).where(ContactAlias.normalized_alias == normalized)
+        )
+        if existing is None:
+            self.session.add(
+                ContactAlias(
+                    contact_id=survivor.id,
+                    alias=duplicate.name,
+                    normalized_alias=normalized,
+                    source="duplicate_merge",
+                    source_refs=duplicate.source_refs,
+                    metadata_={"duplicate_contact_id": str(duplicate.id)},
+                )
+            )
+        elif existing.contact_id == duplicate.id:
+            existing.contact_id = survivor.id
+            existing.source = "duplicate_merge"
+        explicit = {
+            str(value).strip()
+            for value in (survivor.metadata_ or {}).get("aliases") or []
+            if str(value).strip()
+        }
+        explicit.update(
+            str(value).strip()
+            for value in (duplicate.metadata_ or {}).get("aliases") or []
+            if str(value).strip()
+        )
+        explicit.add(duplicate.name)
+        survivor.metadata_ = {**(survivor.metadata_ or {}), "aliases": sorted(explicit)}
+
+    def _preserve_organization_merge_alias(self, survivor: Entity, duplicate: Entity) -> None:
+        normalized = _normalize(duplicate.name)
+        if not normalized or normalized == _normalize(survivor.name):
+            return
+        existing = self.session.scalar(
+            select(OrganizationAlias).where(OrganizationAlias.normalized_alias == normalized)
+        )
+        if existing is None:
+            self.session.add(
+                OrganizationAlias(
+                    entity_id=survivor.id,
+                    alias=duplicate.name,
+                    normalized_alias=normalized,
+                    source="duplicate_merge",
+                    source_refs=duplicate.source_refs,
+                    metadata_={"duplicate_entity_id": str(duplicate.id)},
+                )
+            )
+        elif existing.entity_id == duplicate.id:
+            existing.entity_id = survivor.id
+            existing.source = "duplicate_merge"
+        explicit = {
+            str(value).strip()
+            for value in (survivor.metadata_ or {}).get("aliases") or []
+            if str(value).strip()
+        }
+        explicit.update(
+            str(value).strip()
+            for value in (duplicate.metadata_ or {}).get("aliases") or []
+            if str(value).strip()
+        )
+        explicit.add(duplicate.name)
+        survivor.metadata_ = {**(survivor.metadata_ or {}), "aliases": sorted(explicit)}
 
     def _merge_event(self, survivor: CalendarEvent, duplicate: CalendarEvent) -> None:
         from app.memory.routed_service import _append_note, _merge_attendees, _merge_source_refs
@@ -516,6 +666,14 @@ def _merge_metadata(
     duplicate_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     merged = {**(survivor or {}), **(duplicate or {})}
+    aliases = {
+        str(value).strip()
+        for source in (survivor or {}, duplicate or {})
+        for value in source.get("aliases") or []
+        if str(value).strip()
+    }
+    if aliases:
+        merged["aliases"] = sorted(aliases)
     duplicate_ids = list((survivor or {}).get("merged_duplicate_ids") or [])
     if duplicate_id is not None:
         duplicate_ids.append(str(duplicate_id))
@@ -530,3 +688,71 @@ def _normalize(value: str | None) -> str:
 
     normalized = re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
     return re.sub(r"\s+", " ", normalized)
+
+
+def _name_from_contact_email(contact: Contact) -> str | None:
+    import re
+
+    email = _contact_email_identity(contact)
+    if not email:
+        return None
+    header_match = re.match(r"\s*([^<]+?)\s*<[^>]+@[^>]+>\s*$", contact.name)
+    if header_match:
+        return header_match.group(1).strip().strip('"') or None
+    normalized_name = _normalize(contact.name)
+    normalized_email = _normalize(email)
+    local = email.split("@", 1)[0]
+    normalized_local = _normalize(local)
+    if "@" not in contact.name and normalized_name not in {normalized_email, normalized_local}:
+        return None
+    ignored = {"army", "civ", "ctr", "mil", "usa", "usaf", "usarmy", "usmc", "usn"}
+    parts: list[str] = []
+    for raw_part in re.split(r"[._+-]+", local):
+        part = re.sub(r"\d+$", "", raw_part.lower())
+        if part and part not in ignored:
+            parts.append(part.upper() if len(part) == 1 else part.capitalize())
+    return " ".join(parts).strip() or None
+
+
+def _contact_email_identity(contact: Contact) -> str | None:
+    import re
+
+    if contact.email:
+        return contact.email.strip().lower()
+    observed = str((contact.metadata_ or {}).get("observed_email_identity") or "").strip()
+    if observed:
+        return observed.lower()
+    match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", contact.name)
+    return match.group(0).lower() if match else None
+
+
+def _alias_is_synthetic(alias: str, canonical_name: str) -> bool:
+    normalized = _normalize(alias)
+    canonical = _normalize(canonical_name)
+    if not normalized or normalized == canonical:
+        return False
+    tokens = normalized.split()
+    canonical_tokens = canonical.split()
+    if "@" in alias or any(token in {"com", "edu", "mil", "net", "org"} for token in tokens):
+        return True
+    if tokens and all(len(token) == 1 for token in tokens):
+        return True
+    if len(tokens) == 2 and len(tokens[-1]) == 1:
+        return True
+    return bool(canonical_tokens and len(tokens) > len(canonical_tokens) + 1)
+
+
+def _name_from_organization_identifier(name: str) -> str | None:
+    import re
+
+    cleaned = name.strip()
+    candidate = cleaned.removeprefix("https://").removeprefix("http://").removeprefix("www.")
+    candidate = candidate.split("/", 1)[0]
+    if "@" in candidate:
+        candidate = candidate.rsplit("@", 1)[-1]
+    if "." not in candidate or " " in candidate:
+        return None
+    parts = candidate.lower().split(".")
+    stem = parts[-2] if len(parts) >= 2 else parts[0]
+    words = [part for part in re.split(r"[-_]", stem) if part]
+    return " ".join(word.upper() if len(word) <= 3 else word.capitalize() for word in words) or None

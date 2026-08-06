@@ -20,6 +20,10 @@ Organizations are domain-agnostic identities with domain-scoped context, affilia
 3. Treat abbreviations and similarly named units as ambiguous unless evidence connects them.
 4. If two plausible matches remain, do not guess or merge. Request clarification.
 5. Preserve former names and common abbreviations as aliases.
+6. Treat email domains and websites as identifiers, not display names. Derive a readable placeholder
+   when necessary, then refine it only from direct interaction evidence.
+7. Preserve a confirmed duplicate organization's prior canonical name as an alias. Do not invent
+   legal suffixes, abbreviations, or acronyms that are not present in evidence.
 
 ## Candidate Construction
 Use the canonical organization name as `title`. Include `entity_name`, `website`, `email_domain`,
@@ -44,3 +48,4 @@ explicit correction to an already resolved organization.
 - At least one identity or contextual resolution signal is present.
 - People, domain context, interactions, aliases, and provenance remain distinct fields.
 - Ambiguous records are not silently merged.
+- Every alias has interaction, identifier, manual, or duplicate-merge provenance.

@@ -26,6 +26,10 @@ Expected:
 - Chris Aliperti, the configured self email, no-reply senders, and automated accounts are absent.
 - Header-derived candidate names and emails remain unchanged after LLM enrichment; another thread
   participant, including Chris, cannot replace the candidate identity.
+- Address-only participants receive a readable email-derived name, with the address retained in the
+  email field. Direct signature evidence may refine only that placeholder.
+- Contact and organization aliases are retained only when observed or unambiguously derived from
+  supplied interaction evidence. Confirmed duplicate merges preserve the retired canonical name.
 - Enrichment receives compact global and Praxis context and describes relationships from Chris's
   perspective without creating Chris as a CRM record.
 - Every candidate shows identity, action, status, confidence, and evidence-backed summary.
