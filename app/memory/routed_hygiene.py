@@ -183,13 +183,23 @@ class RoutedHygieneService:
         count = 0
         contacts = self.session.scalars(select(Contact)).all()
         for contact in contacts:
-            embedded_email = _contact_email_identity(contact)
+            observed_emails = _contact_email_identities(contact)
+            embedded_email = observed_emails[0] if observed_emails else None
             if embedded_email:
+                existing_alternate_emails = (contact.metadata_ or {}).get("alternate_emails") or []
+                if not isinstance(existing_alternate_emails, list):
+                    existing_alternate_emails = []
                 contact.metadata_ = {
                     **(contact.metadata_ or {}),
                     "observed_email_identity": embedded_email,
+                    "alternate_emails": sorted(
+                        {
+                            *existing_alternate_emails,
+                            *observed_emails[1:],
+                        }
+                    ),
                 }
-            if embedded_email and not contact.email:
+            if embedded_email and contact.email != embedded_email:
                 collision = self.session.scalar(
                     select(Contact).where(
                         Contact.email == embedded_email,
@@ -321,7 +331,10 @@ class RoutedHygieneService:
         for contact in sorted(
             contacts,
             key=lambda item: (
-                0 if item.email else 1,
+                0
+                if item.email
+                and item.email.strip().lower() == _contact_email_identity(item)
+                else 1,
                 0 if "@" not in item.name else 1,
                 item.created_at or datetime.now(UTC),
             ),
@@ -715,15 +728,29 @@ def _name_from_contact_email(contact: Contact) -> str | None:
 
 
 def _contact_email_identity(contact: Contact) -> str | None:
+    identities = _contact_email_identities(contact)
+    return identities[0] if identities else None
+
+
+def _contact_email_identities(contact: Contact) -> list[str]:
     import re
 
-    if contact.email:
-        return contact.email.strip().lower()
-    observed = str((contact.metadata_ or {}).get("observed_email_identity") or "").strip()
-    if observed:
-        return observed.lower()
-    match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", contact.name)
-    return match.group(0).lower() if match else None
+    identities: list[str] = []
+    for source in (
+        contact.email,
+        (contact.metadata_ or {}).get("observed_email_identity"),
+        contact.name,
+    ):
+        for match in re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", str(source or "")):
+            normalized = match.lower()
+            if normalized not in identities:
+                identities.append(normalized)
+    for source in (contact.metadata_ or {}).get("alternate_emails") or []:
+        for match in re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", str(source or "")):
+            normalized = match.lower()
+            if normalized not in identities:
+                identities.append(normalized)
+    return identities
 
 
 def _alias_is_synthetic(alias: str, canonical_name: str) -> bool:

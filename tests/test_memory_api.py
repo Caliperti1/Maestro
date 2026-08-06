@@ -394,6 +394,33 @@ def test_routed_memory_service_dedupes_contacts_and_links_entities(
     assert session.query(ContactDomainNote).one().domain_id == praxis.id
 
 
+def test_routed_memory_service_normalizes_multiple_contact_emails(session: Session) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="contact",
+        title="Brenden Shutt",
+        content="Brenden Shutt is a Praxis contact.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "gmail_message", "id": "multiple-email-contact"}],
+        metadata_={
+            "name": "Brenden Shutt",
+            "email": ["brenden.m.shutt.mil@army.mil", "brendenshutt@gmail.com"],
+        },
+    )
+    session.add(routed_item)
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([routed_item])
+
+    contact = session.query(Contact).one()
+    assert contact.email == "brenden.m.shutt.mil@army.mil"
+    assert contact.metadata_["alternate_emails"] == ["brendenshutt@gmail.com"]
+
+
 def test_routed_memory_service_resolves_contact_aliases(session: Session, tmp_path: Path) -> None:
     seed_default_domains(session)
     praxis = DomainRepository(session).get_by_key("praxis")
@@ -1164,6 +1191,25 @@ def test_routed_hygiene_merges_contact_with_email_embedded_in_display_name(
     assert alias.contact_id == canonical.id
     assert alias.source == "duplicate_merge"
     assert session.scalar(select(ContactAlias).where(ContactAlias.alias.contains("@"))) is None
+
+
+def test_routed_hygiene_repairs_serialized_contact_email_list(session: Session) -> None:
+    contact = Contact(
+        name="Brenden M. Shutt",
+        normalized_name="brenden m shutt",
+        email="['brenden.m.shutt.mil@army.mil', 'brendenshutt@gmail.com']",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(contact)
+    session.commit()
+
+    RoutedHygieneService(session).run_once()
+
+    session.refresh(contact)
+    assert contact.email == "brenden.m.shutt.mil@army.mil"
+    assert contact.metadata_["alternate_emails"] == ["brendenshutt@gmail.com"]
 
 
 def test_routed_hygiene_merges_high_confidence_duplicates(
