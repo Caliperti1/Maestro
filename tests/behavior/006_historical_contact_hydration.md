@@ -24,6 +24,10 @@ Expected:
 - Progress updates every few seconds and reaches `review`.
 - No candidate becomes a canonical contact before approval.
 - Chris Aliperti, the configured self email, no-reply senders, and automated accounts are absent.
+- Header-derived candidate names and emails remain unchanged after LLM enrichment; another thread
+  participant, including Chris, cannot replace the candidate identity.
+- Enrichment receives compact global and Praxis context and describes relationships from Chris's
+  perspective without creating Chris as a CRM record.
 - Every candidate shows identity, action, status, confidence, and evidence-backed summary.
 
 ## Test B: Organization Parity

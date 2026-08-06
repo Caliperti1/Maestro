@@ -10,13 +10,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.identity import is_maestro_user_reference
+from app.core.identity import is_maestro_user_reference, maestro_user_identity
 from app.db.models import (
     Agent,
     Contact,
     ContactHydrationCandidate,
     ContactHydrationJob,
+    Domain,
     Entity,
+    RuntimeSetting,
     Task,
 )
 from app.llm.client import LLMClient, LLMClientError, OllamaLLMClient, OpenAILLMClient
@@ -484,6 +486,14 @@ class ContactHydrationService:
         evidence["message_count"] = int(evidence.get("message_count") or 0) + 1
         count_key = "outbound_count" if direction == "outbound" else "inbound_count"
         evidence[count_key] = int(evidence.get(count_key) or 0) + 1
+        observed_names = {
+            str(value).strip()
+            for value in evidence.get("observed_names") or []
+            if str(value).strip()
+        }
+        if name.strip() and not is_maestro_user_reference(name=name, email=email):
+            observed_names.add(name.strip())
+        evidence["observed_names"] = sorted(observed_names)
         samples = list(evidence.get("samples") or [])
         if len(samples) < 8 and sample.get("message_id") not in {item.get("message_id") for item in samples}:
             samples.append(sample)
@@ -663,7 +673,12 @@ class ContactHydrationService:
                 }
             )
         try:
-            enriched = self._enrichment_response(job.local_model_profile, candidate, evidence_payload)
+            enriched = self._enrichment_response(
+                job,
+                job.local_model_profile,
+                candidate,
+                evidence_payload,
+            )
             job.stats = {
                 **(job.stats or {}),
                 "local_calls": int((job.stats or {}).get("local_calls") or 0) + 1,
@@ -676,7 +691,12 @@ class ContactHydrationService:
             enriched = None
             if job.enable_cloud_fallback and job.cloud_calls < job.max_cloud_calls:
                 try:
-                    enriched = self._enrichment_response(job.cloud_model_profile, candidate, evidence_payload)
+                    enriched = self._enrichment_response(
+                        job,
+                        job.cloud_model_profile,
+                        candidate,
+                        evidence_payload,
+                    )
                     job.cloud_calls += 1
                 except Exception:
                     job.stats = {
@@ -686,8 +706,17 @@ class ContactHydrationService:
             if enriched is None:
                 candidate.error_message = f"Enrichment skipped: {local_error}"
         if enriched:
-            candidate.display_name = str(enriched.get("name") or candidate.display_name).strip()
-            aliases = [str(alias).strip() for alias in enriched.get("aliases") or [] if str(alias).strip()]
+            observed_names = {
+                str(value).strip()
+                for value in (candidate.evidence or {}).get("observed_names") or []
+                if str(value).strip()
+                and not is_maestro_user_reference(name=str(value), email=candidate.identity_key)
+            }
+            aliases = sorted(
+                value
+                for value in observed_names
+                if _normalize(value) != _normalize(candidate.display_name)
+            )
             candidate.proposed_data = {
                 **candidate.proposed_data,
                 "name": candidate.display_name,
@@ -707,16 +736,35 @@ class ContactHydrationService:
 
     def _enrichment_response(
         self,
+        job: ContactHydrationJob,
         profile: str,
         candidate: ContactHydrationCandidate,
         evidence_payload: list[dict[str, Any]],
     ) -> dict[str, Any]:
         client = self.llm_factory(profile)
+        identity = maestro_user_identity()
+        domain = self.session.get(Domain, job.domain_id)
+        global_setting = self.session.get(RuntimeSetting, "global_maestro_context")
+        global_context = str(
+            ((global_setting.value or {}).get("context") if global_setting else "")
+            or "Maestro is Chris Aliperti's cross-domain chief-of-staff system."
+        )
         return client.structured_response(
             instructions=load_prompt("contact_hydration.md"),
             input_text=str(
                 {
-                    "candidate": candidate.proposed_data,
+                    "owner": {
+                        "name": identity.full_name,
+                        "email": identity.email,
+                        "role": "Maestro system owner; never a CRM contact candidate",
+                    },
+                    "global_context": global_context[:4000],
+                    "domain_context": str(domain.description or "")[:4000] if domain else "",
+                    "candidate_identity": {
+                        "name": candidate.display_name,
+                        "email": candidate.identity_key,
+                        "instruction": "Immutable identity established from email headers",
+                    },
                     "interaction_stats": candidate.evidence,
                     "representative_threads": evidence_payload,
                 }
@@ -726,8 +774,6 @@ class ContactHydrationService:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "name": {"type": "string"},
-                    "aliases": {"type": "array", "items": {"type": "string"}},
                     "organization": {"type": "string"},
                     "role": {"type": "string"},
                     "summary": {"type": "string"},
@@ -735,8 +781,6 @@ class ContactHydrationService:
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 },
                 "required": [
-                    "name",
-                    "aliases",
                     "organization",
                     "role",
                     "summary",
@@ -827,6 +871,13 @@ class ContactHydrationService:
 
         data = candidate.proposed_data or {}
         route_type = "contact" if candidate.candidate_type == "contact" else "entity"
+        if route_type == "contact" and is_maestro_user_reference(
+            name=str(data.get("name") or candidate.display_name),
+            email=str(data.get("email") or candidate.identity_key),
+        ):
+            candidate.status = "rejected"
+            candidate.error_message = "Suppressed Maestro owner identity from CRM hydration."
+            return
         summary = str(data.get("summary") or "").strip()
         if not summary:
             summary = (

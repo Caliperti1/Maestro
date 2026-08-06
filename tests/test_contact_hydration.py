@@ -33,6 +33,22 @@ class FakeGmailTools:
         return SimpleNamespace(status="complete", output=output, error_message=None)
 
 
+class MisidentifyingHydrationLLM:
+    provider = "test"
+    model = "test-hydration"
+
+    def structured_response(self, **kwargs):
+        return {
+            "name": "Chris Aliperti",
+            "aliases": ["Chris Aliperti"],
+            "organization": "Example Corp",
+            "role": "Partner Lead",
+            "summary": "Coordinates partner planning with Praxis.",
+            "relationship_context": "Works with Chris on Praxis partner planning.",
+            "confidence": 0.94,
+        }
+
+
 def _gmail_agent(session: Session):
     seed_default_domains(session)
     praxis = DomainRepository(session).get_by_key("praxis")
@@ -135,6 +151,51 @@ def test_hydration_same_name_different_email_requires_review(session: Session) -
     assert candidate is not None
     assert candidate.action == "needs_review"
     assert candidate.status == "review"
+
+
+def test_hydration_llm_cannot_overwrite_header_identity_with_maestro_owner(
+    session: Session,
+) -> None:
+    praxis, _ = _gmail_agent(session)
+    tools = FakeGmailTools(
+        [
+            {
+                "messages": [
+                    _message(
+                        "identity-1",
+                        sender="Jane Smith <jane@example.com>",
+                        to="Chris Aliperti <chris.aliperti@praxis-defense.com>",
+                    )
+                ],
+                "next_page_token": None,
+            }
+        ]
+    )
+    service = ContactHydrationService(
+        session,
+        tool_service=tools,
+        llm_factory=lambda profile: MisidentifyingHydrationLLM(),
+    )
+    job = service.create_job(
+        domain_id=praxis.id,
+        query="newer_than:30d",
+        enable_enrichment=True,
+    )
+
+    service.process_once()
+    service.process_once()
+
+    candidate = session.scalar(
+        select(ContactHydrationCandidate).where(
+            ContactHydrationCandidate.job_id == job.id,
+            ContactHydrationCandidate.identity_key == "jane@example.com",
+        )
+    )
+    assert candidate is not None
+    assert candidate.display_name == "Jane Smith"
+    assert candidate.proposed_data["name"] == "Jane Smith"
+    assert candidate.proposed_data["aliases"] == []
+    assert candidate.proposed_data["organization"] == "Example Corp"
 
 
 def test_hydration_promotes_contacts_and_organizations_in_one_run(session: Session, monkeypatch) -> None:
