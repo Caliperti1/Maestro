@@ -32,7 +32,7 @@ def _domain_ids(session: Session):
     seed_default_domains(session)
     repo = DomainRepository(session)
     praxis = repo.get_by_key("praxis")
-    ophi = repo.get_by_key("ophi")
+    ophi = repo.get_by_key("perti-laboratories")
     assert praxis is not None
     assert ophi is not None
     return praxis.id, ophi.id
@@ -100,7 +100,7 @@ def test_retrieval_isolates_agent_visibility_and_ranks_query_matches(session: Se
         scope="agent",
         domain_id=ophi_id,
         agent_id=ophi_agent_id,
-        title="Ophi hidden agent note",
+        title="Perti Laboratories hidden agent note",
         content="This should not leak into Praxis retrieval.",
         importance=1.0,
     )
@@ -119,7 +119,7 @@ def test_retrieval_isolates_agent_visibility_and_ranks_query_matches(session: Se
     ids = [retrieved.memory.id for retrieved in result.results]
     assert ids[0] == praxis_match.id
     assert praxis_agent_memory.id in ids
-    assert all("Ophi hidden" not in retrieved.memory.title for retrieved in result.results)
+    assert all("Perti Laboratories hidden" not in retrieved.memory.title for retrieved in result.results)
     assert "query relevance" in " ".join(result.results[0].score_reasons)
 
 
@@ -168,7 +168,7 @@ def test_retrieval_returns_provenance_and_visible_links(session: Session) -> Non
     hidden = _memory(
         session,
         domain_id=ophi_id,
-        title="Hidden Ophi relation",
+        title="Hidden Perti Laboratories relation",
         content="This linked memory belongs to another domain.",
         importance=0.9,
     )
@@ -415,8 +415,8 @@ def test_agent_context_bundle_groups_visible_memory_without_cross_domain_leaks(
     _memory(
         session,
         domain_id=ophi_id,
-        title="Ophi private context",
-        content="This Ophi memory must not appear in a Praxis agent bundle.",
+        title="Perti Laboratories private context",
+        content="This Perti Laboratories memory must not appear in a Praxis agent bundle.",
         importance=1.0,
     )
 
@@ -440,7 +440,7 @@ def test_agent_context_bundle_groups_visible_memory_without_cross_domain_leaks(
         "agent",
     ]
     assert bundle.included_count == 3
-    assert "Ophi private context" not in bundle.rendered_text
+    assert "Perti Laboratories private context" not in bundle.rendered_text
     assert str(praxis_memory.id) in bundle.rendered_text
     assert bundle.rendered_text.startswith("[Global Memory]")
 

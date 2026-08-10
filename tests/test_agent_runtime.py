@@ -61,7 +61,7 @@ def _seed_memory(session: Session) -> None:
     seed_default_domains(session)
     repo = DomainRepository(session)
     praxis = repo.get_by_key("praxis")
-    ophi = repo.get_by_key("ophi")
+    ophi = repo.get_by_key("perti-laboratories")
     assert praxis is not None
     assert ophi is not None
     session.add_all(
@@ -89,8 +89,8 @@ def _seed_memory(session: Session) -> None:
                 scope="domain",
                 domain_id=ophi.id,
                 memory_type="fact",
-                title="Ophi private roadmap",
-                content="This Ophi context must not appear in a Praxis prompt package.",
+                title="Perti Laboratories private roadmap",
+                content="This Perti Laboratories context must not appear in a Praxis prompt package.",
                 impact_level="medium",
                 importance=1.0,
                 metadata_={},
@@ -782,7 +782,7 @@ def test_prompt_aggregation_includes_scoped_memory_and_tools(session: Session) -
     assert package.agent.domain_key == "praxis"
     assert "Praxis Defense" in package.domain_context
     assert "Praxis partner follow-up" in package.assembled_prompt
-    assert "Ophi private roadmap" not in package.assembled_prompt
+    assert "Perti Laboratories private roadmap" not in package.assembled_prompt
     assert "memory.context_bundle" in package.assembled_prompt
     assert package.memory_context.included_count >= 1
 
@@ -3877,7 +3877,7 @@ def test_github_adapter_lists_and_creates_repos_with_provider_connection(
             task=task,
             connection=connection,
         ),
-        {"name": "new-irad", "description": "Personal IRAD sandbox", "private": True},
+        {"name": "new-irad", "description": "Perti Laboratories sandbox", "private": True},
     )
 
     assert listed["repos"][0]["nameWithOwner"] == "Caliperti1/Maestro"
@@ -3899,7 +3899,7 @@ def test_github_adapter_lists_and_creates_repos_with_provider_connection(
         "Caliperti1/new-irad",
         "--private",
         "--description",
-        "Personal IRAD sandbox",
+        "Perti Laboratories sandbox",
     ]
 
 

@@ -11,14 +11,19 @@ from app.core.config import get_settings
 from app.db.models import (
     Artifact,
     CalendarEvent,
+    CalendarEventAttendee,
+    CalendarEventOrganization,
     Contact,
     ContactAlias,
     ContactDomainNote,
     ContactRelationship,
+    ContactInteraction,
     Entity,
     MemoryItem,
     MemoryProposal,
     RoutedItem,
+    OrganizationIdentifier,
+    OrganizationRelationship,
     SeedPackage,
     Todo,
 )
@@ -29,6 +34,7 @@ from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_resolver import RoutedObjectResolver
 from app.memory.routed_retrieval import RoutedRetrievalService
 from app.memory.routed_service import RoutedMemoryService
+from app.memory.dropbox import MemoryDropboxProcessor
 
 
 def test_todo_resolver_matches_retry_from_same_source_with_rephrased_title(
@@ -92,24 +98,229 @@ def test_memory_status_and_upload(session: Session, tmp_path: Path) -> None:
     status = client.get("/memory/dropbox/status")
     assert status.status_code == 200
     assert status.json()["root"] == str(tmp_path)
-    assert any(domain["key"] == "ophi" for domain in status.json()["domains"])
-    assert next(domain for domain in status.json()["domains"] if domain["key"] == "ophi")[
+    assert any(domain["key"] == "perti-laboratories" for domain in status.json()["domains"])
+    assert next(domain for domain in status.json()["domains"] if domain["key"] == "perti-laboratories")[
         "processing"
     ] == 0
 
     upload = client.post(
-        "/memory/dropbox/ophi/upload",
-        files={"file": ("note.md", b"# Ophi note\nMemory test.", "text/markdown")},
+        "/memory/dropbox/perti-laboratories/upload",
+        files={"file": ("note.md", b"# Perti Laboratories note\nMemory test.", "text/markdown")},
     )
 
     assert upload.status_code == 200
     assert upload.json()["status"] == "uploaded"
-    assert (tmp_path / "ophi" / "inbox" / "note.md").is_file()
+    assert (tmp_path / "perti-laboratories" / "inbox" / "note.md").is_file()
+
+
+def test_memory_dropbox_consolidates_legacy_perti_directories(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "ophi" / "inbox").mkdir(parents=True)
+    (tmp_path / "personal-irad-projects" / "inbox").mkdir(parents=True)
+    (tmp_path / "ophi" / "inbox" / "product.md").write_text("Ophi product context", encoding="utf-8")
+    (tmp_path / "personal-irad-projects" / "inbox" / "research.md").write_text(
+        "Personal research context",
+        encoding="utf-8",
+    )
+
+    MemoryDropboxProcessor(session, root=tmp_path).ensure_directories()
+
+    assert (tmp_path / "perti-laboratories" / "inbox" / "product.md").read_text() == (
+        "Ophi product context"
+    )
+    assert (tmp_path / "perti-laboratories" / "inbox" / "research.md").read_text() == (
+        "Personal research context"
+    )
+    assert not (tmp_path / "ophi").exists()
+    assert not (tmp_path / "personal-irad-projects").exists()
+
+
+def test_calendar_create_links_contacts_organizations_and_reports_conflicts(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    perti = DomainRepository(session).get_by_key("perti-laboratories")
+    assert praxis is not None and perti is not None
+    contact = Contact(
+        name="Jane Smith",
+        normalized_name="jane smith",
+        email="jane@example.com",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    organization = Entity(
+        name="Example Corp",
+        normalized_name="example corp",
+        website="https://example.com",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    conflict = CalendarEvent(
+        domain_id=perti.id,
+        title="Perti product review",
+        start_at=datetime(2030, 8, 12, 14, 30, tzinfo=UTC),
+        end_at=datetime(2030, 8, 12, 15, 30, tzinfo=UTC),
+        attendees=[],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([contact, organization, conflict])
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.post(
+        "/memory/routed-objects/events",
+        json={
+            "domain_key": "praxis",
+            "title": "Partner review with Jane Smith",
+            "summary": "Review the updated Praxis partnership plan.",
+            "start_at": "2030-08-12T14:00:00Z",
+            "end_at": "2030-08-12T15:00:00Z",
+            "timezone": "America/New_York",
+            "conferencing_url": "https://meet.google.com/example",
+            "attendees": [{"contact_id": str(contact.id), "name": "Jane Smith"}],
+            "organizations": [{"id": str(organization.id), "role": "partner"}],
+        },
+    )
+
+    assert response.status_code == 200
+    event = response.json()["event"]
+    assert event["attendees"][0]["contact_id"] == str(contact.id)
+    assert event["organizations"] == [
+        {"id": str(organization.id), "name": "Example Corp", "role": "partner"}
+    ]
+    assert event["conflicts"][0]["title"] == "Perti product review"
+    assert session.query(CalendarEventAttendee).count() == 1
+    assert session.query(CalendarEventOrganization).count() == 1
+
+    invalid_window = client.patch(
+        f"/memory/routed-objects/events/{event['id']}",
+        json={"updates": {"end_at": "2030-08-12T13:00:00Z"}},
+    )
+    assert invalid_window.status_code == 422
+
+    contact_response = client.get(
+        "/memory/routed-objects/contacts",
+        params={"query_text": "Jane Smith", "use_semantic": "false"},
+    )
+    assert contact_response.status_code == 200
+    assert contact_response.json()["contacts"][0]["upcoming_events"][0]["title"] == (
+        "Partner review with Jane Smith"
+    )
+
+
+def test_calendar_completed_event_materializes_one_contact_interaction(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    contact = Contact(
+        name="Jane Smith",
+        normalized_name="jane smith",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(contact)
+    session.commit()
+    client = _client(session, tmp_path)
+    created = client.post(
+        "/memory/routed-objects/events",
+        json={
+            "domain_key": "praxis",
+            "title": "Completed partner review",
+            "summary": "Reviewed partnership milestones.",
+            "start_at": "2020-08-12T14:00:00Z",
+            "end_at": "2020-08-12T15:00:00Z",
+            "attendees": [{"contact_id": str(contact.id), "name": contact.name}],
+        },
+    )
+    assert created.status_code == 200
+    event_id = created.json()["event"]["id"]
+
+    updated = client.patch(
+        f"/memory/routed-objects/events/{event_id}",
+        json={"updates": {"status": "done"}},
+    )
+    assert updated.status_code == 200
+    interactions = session.scalars(
+        select(ContactInteraction).where(ContactInteraction.calendar_event_id == uuid.UUID(event_id))
+    ).all()
+    assert len(interactions) == 1
+    assert interactions[0].contact_id == contact.id
+    assert interactions[0].summary == "Reviewed partnership milestones."
+
+
+def test_organization_intelligence_resolves_identifiers_and_relationships(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    parent = Entity(
+        name="Example Holdings",
+        normalized_name="example holdings",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(parent)
+    session.commit()
+    routed = RoutedItem(
+        domain_id=praxis.id,
+        route_type="entity",
+        title="Example Corp",
+        content="Example Corp is a Praxis partner and subsidiary of Example Holdings.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "gmail_message", "id": "organization-1"}],
+        metadata_={
+            "entity_name": "Example Corp",
+            "website": "https://example.com",
+            "email_domain": "example.com",
+            "aliases": ["Example"],
+            "relationships": [
+                {
+                    "organization_id": str(parent.id),
+                    "relationship_type": "subsidiary_of",
+                    "description": "Example Corp is a subsidiary of Example Holdings.",
+                }
+            ],
+        },
+    )
+    session.add(routed)
+    session.commit()
+    RoutedMemoryService(session).promote_items([routed])
+    client = _client(session, tmp_path)
+
+    response = client.get(
+        "/memory/routed-objects/entities",
+        params={"query_text": "example.com", "domain_key": "praxis", "use_semantic": "false"},
+    )
+
+    assert response.status_code == 200
+    organization = response.json()["entities"][0]
+    assert organization["name"] == "Example Corp"
+    assert {item["type"] for item in organization["identifiers"]} == {"website", "web_domain", "email_domain"}
+    assert organization["relationships"][0]["organization"] == "Example Holdings"
+    assert session.query(OrganizationIdentifier).count() == 3
+    assert session.query(OrganizationRelationship).count() == 1
 
 
 def test_memory_preview_listing(session: Session, tmp_path: Path) -> None:
     client = _client(session, tmp_path)
-    preview_dir = tmp_path / "ophi" / "previews"
+    preview_dir = tmp_path / "perti-laboratories" / "previews"
     preview_dir.mkdir(parents=True)
     (preview_dir / "note.preview.json").write_text(
         """
@@ -124,7 +335,7 @@ def test_memory_preview_listing(session: Session, tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    response = client.get("/memory/dropbox/previews?domain_key=ophi")
+    response = client.get("/memory/dropbox/previews?domain_key=perti-laboratories")
 
     assert response.status_code == 200
     previews = response.json()["previews"]
@@ -145,7 +356,7 @@ def test_routed_items_endpoint_filters_by_domain_and_type(
 ) -> None:
     seed_default_domains(session)
     praxis = DomainRepository(session).get_by_key("praxis")
-    ophi = DomainRepository(session).get_by_key("ophi")
+    ophi = DomainRepository(session).get_by_key("perti-laboratories")
     assert praxis is not None
     assert ophi is not None
     session.add_all(
@@ -163,7 +374,7 @@ def test_routed_items_endpoint_filters_by_domain_and_type(
             RoutedItem(
                 domain_id=ophi.id,
                 route_type="task",
-                title="Ophi task",
+                title="Perti Laboratories task",
                 content="This should not appear in Praxis RFI filter.",
                 priority="normal",
                 status="open",
@@ -1385,7 +1596,7 @@ def test_memory_preview_listing_marks_in_progress_writes(
     tmp_path: Path,
 ) -> None:
     client = _client(session, tmp_path)
-    preview_dir = tmp_path / "ophi" / "previews"
+    preview_dir = tmp_path / "perti-laboratories" / "previews"
     preview_dir.mkdir(parents=True)
     (preview_dir / "note.preview.json").write_text(
         """
@@ -1399,7 +1610,7 @@ def test_memory_preview_listing_marks_in_progress_writes(
         encoding="utf-8",
     )
 
-    response = client.get("/memory/dropbox/previews?domain_key=ophi")
+    response = client.get("/memory/dropbox/previews?domain_key=perti-laboratories")
 
     assert response.status_code == 200
     preview = response.json()["previews"][0]
@@ -1537,7 +1748,7 @@ def test_memory_retrieval_endpoint_returns_scored_context(
 ) -> None:
     seed_default_domains(session)
     praxis = DomainRepository(session).get_by_key("praxis")
-    ophi = DomainRepository(session).get_by_key("ophi")
+    ophi = DomainRepository(session).get_by_key("perti-laboratories")
     assert praxis is not None
     assert ophi is not None
     praxis_memory = MemoryItem(
@@ -1554,8 +1765,8 @@ def test_memory_retrieval_endpoint_returns_scored_context(
         scope="domain",
         domain_id=ophi.id,
         memory_type="fact",
-        title="Ophi research model",
-        content="Ophi memory should not appear in Praxis-scoped retrieval.",
+        title="Perti Laboratories research model",
+        content="Perti Laboratories memory should not appear in Praxis-scoped retrieval.",
         impact_level="low",
         importance=1.0,
         metadata_={},
@@ -1588,7 +1799,7 @@ def test_memory_retrieval_endpoint_returns_scored_context(
     assert payload["results"][0]["query_relevance"] > 0
     assert payload["results"][0]["semantic_similarity"] is None
     assert payload["results"][0]["provenance"]["source_refs"][0]["id"] == "artifact-1"
-    assert all(result["domain_key"] != "ophi" for result in payload["results"])
+    assert all(result["domain_key"] != "perti-laboratories" for result in payload["results"])
 
 
 def test_memory_context_bundle_endpoint_returns_grouped_prompt_context(

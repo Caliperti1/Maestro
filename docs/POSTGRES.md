@@ -70,9 +70,9 @@ Expected domains:
 
 - `l3`
 - `maestro-development`
-- `ophi`
+- `perti-laboratories`
 - `personal`
-- `personal-irad-projects`
+- `perti-laboratories`
 - `praxis`
 - `usma`
 

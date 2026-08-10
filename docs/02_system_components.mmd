@@ -24,9 +24,8 @@ flowchart TB
     Registry --> PersonalAgents
     Registry --> MaestroDevAgents
     Registry --> PraxisAgents
-    Registry --> OphiAgents
+    Registry --> PertiAgents
     Registry --> USMAAgents
-    Registry --> IRADAgents
     Registry --> L3Agents
 
     subgraph Personal[Personal Enclave]
@@ -71,19 +70,25 @@ flowchart TB
         PraxisAgents --> PraxisMem
     end
 
-    subgraph Ophi[Ophi Enclave]
-        OphiMem[(Ophi Domain Memory)]
-        OphiAgents[Ophi Agents]
-        OphiCTO[Ophi CTO / Product Agent]
-        OphiMarket[Ophi Market Research Agent]
-        OphiTech[Technical Research / SOTA Agent]
-        OphiAgents --> OphiCTO
-        OphiAgents --> OphiMarket
-        OphiAgents --> OphiTech
-        OphiCTO --> OphiCTOMem[(Ophi CTO Agent Memory)]
-        OphiMarket --> OphiMarketMem[(Ophi Market Agent Memory)]
-        OphiTech --> OphiTechMem[(Ophi Technical Research Agent Memory)]
-        OphiAgents --> OphiMem
+    subgraph Perti[Perti Laboratories Enclave]
+        PertiMem[(Perti Laboratories Domain Memory)]
+        PertiAgents[Perti Laboratories Agents]
+        PertiCTO[Perti Laboratories CTO / Product Agent]
+        PertiMarket[Perti Laboratories Market Research Agent]
+        PertiTech[Technical Research / SOTA Agent]
+        ProjectAgent[Project Scaffolding Agent]
+        BuildPlanAgent[Build Plan Agent]
+        PertiAgents --> PertiCTO
+        PertiAgents --> PertiMarket
+        PertiAgents --> PertiTech
+        PertiAgents --> ProjectAgent
+        PertiAgents --> BuildPlanAgent
+        PertiCTO --> PertiCTOMem[(Perti Laboratories CTO Agent Memory)]
+        PertiMarket --> PertiMarketMem[(Perti Laboratories Market Agent Memory)]
+        PertiTech --> PertiTechMem[(Perti Laboratories Technical Research Agent Memory)]
+        ProjectAgent --> ProjectAgentMem[(Project Agent Memory)]
+        BuildPlanAgent --> BuildPlanMem[(Build Plan Agent Memory)]
+        PertiAgents --> PertiMem
     end
 
     subgraph USMA[USMA Enclave]
@@ -98,18 +103,6 @@ flowchart TB
         USMAAgents --> USMAMem
     end
 
-    subgraph IRAD[Personal IRAD Projects Enclave]
-        IRADMem[(Personal IRAD Domain Memory)]
-        IRADAgents[IRAD Agents]
-        ProjectAgent[Project Scaffolding Agent]
-        BuildPlanAgent[Build Plan Agent]
-        IRADAgents --> ProjectAgent
-        IRADAgents --> BuildPlanAgent
-        ProjectAgent --> ProjectAgentMem[(Project Agent Memory)]
-        BuildPlanAgent --> BuildPlanMem[(Build Plan Agent Memory)]
-        IRADAgents --> IRADMem
-    end
-
     subgraph L3[L3 Enclave]
         L3Mem[(L3 Domain Memory)]
         L3Agents[L3 Agents]
@@ -122,9 +115,8 @@ flowchart TB
     Queue --> PersonalAgents
     Queue --> MaestroDevAgents
     Queue --> PraxisAgents
-    Queue --> OphiAgents
+    Queue --> PertiAgents
     Queue --> USMAAgents
-    Queue --> IRADAgents
     Queue --> L3Agents
 
     subgraph Memory[Memory + Persistence]
@@ -147,17 +139,15 @@ flowchart TB
     Curator --> PersonalMem
     Curator --> MaestroDevMem
     Curator --> PraxisMem
-    Curator --> OphiMem
+    Curator --> PertiMem
     Curator --> USMAMem
-    Curator --> IRADMem
     Curator --> L3Mem
     Curator --> Approvals
     PersonalMem --> DB
     MaestroDevMem --> DB
     PraxisMem --> DB
-    OphiMem --> DB
+    PertiMem --> DB
     USMAMem --> DB
-    IRADMem --> DB
     L3Mem --> DB
     GlobalMem --> DB
     MaestroSession --> DB
@@ -184,11 +174,11 @@ flowchart TB
     PraxisCTO --> GitHub
     PraxisCGO --> ClickUp
     PraxisMarket --> WebSearch
-    OphiCTO --> GitHub
-    OphiMarket --> WebSearch
-    OphiTech --> WebSearch
+    PertiCTO --> GitHub
+    PertiMarket --> WebSearch
+    PertiTech --> WebSearch
     USMAAgents --> GCal
     USMAAgents --> LocalFiles
-    IRADAgents --> GitHub
-    IRADAgents --> Codex
+    PertiAgents --> GitHub
+    PertiAgents --> Codex
     L3Agents --> LocalFiles

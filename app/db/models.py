@@ -311,12 +311,66 @@ class CalendarEvent(TimestampMixin, Base):
     summary: Mapped[str | None] = mapped_column(Text)
     start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    timezone: Mapped[str] = mapped_column(String(80), default="America/New_York", nullable=False)
+    all_day: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    recurrence_rule: Mapped[str | None] = mapped_column(Text)
     location: Mapped[str | None] = mapped_column(String(320))
+    conferencing_url: Mapped[str | None] = mapped_column(String(640))
+    organizer_name: Mapped[str | None] = mapped_column(String(240))
+    organizer_email: Mapped[str | None] = mapped_column(String(320))
     attendees: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     supporting_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="scheduled", nullable=False, index=True)
+    external_provider: Mapped[str | None] = mapped_column(String(80), index=True)
+    external_calendar_id: Mapped[str | None] = mapped_column(String(320))
+    external_event_id: Mapped[str | None] = mapped_column(String(320), index=True)
+    external_etag: Mapped[str | None] = mapped_column(String(320))
+    sync_status: Mapped[str] = mapped_column(String(40), default="local", nullable=False, index=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class CalendarEventAttendee(TimestampMixin, Base):
+    __tablename__ = "calendar_event_attendees"
+    __table_args__ = (
+        UniqueConstraint("event_id", "normalized_identity", name="uq_calendar_attendee_identity"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("calendar_events.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    contact_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("contacts.id", ondelete="SET NULL"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(240), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320), index=True)
+    normalized_identity: Mapped[str] = mapped_column(String(360), nullable=False, index=True)
+    attendee_type: Mapped[str] = mapped_column(String(40), default="required", nullable=False)
+    response_status: Mapped[str] = mapped_column(String(40), default="needs_action", nullable=False)
+    is_organizer: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_user: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class CalendarEventOrganization(TimestampMixin, Base):
+    __tablename__ = "calendar_event_organizations"
+    __table_args__ = (
+        UniqueConstraint("event_id", "entity_id", "role", name="uq_calendar_event_organization"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("calendar_events.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(80), default="related", nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
@@ -366,6 +420,53 @@ class OrganizationAlias(TimestampMixin, Base):
     alias: Mapped[str] = mapped_column(String(240), nullable=False)
     normalized_alias: Mapped[str] = mapped_column(String(260), nullable=False, index=True)
     source: Mapped[str] = mapped_column(String(80), default="system", nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class OrganizationIdentifier(TimestampMixin, Base):
+    __tablename__ = "organization_identifiers"
+    __table_args__ = (
+        UniqueConstraint("identifier_type", "normalized_value", name="uq_organization_identifier"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    identifier_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    value: Mapped[str] = mapped_column(String(640), nullable=False)
+    normalized_value: Mapped[str] = mapped_column(String(640), nullable=False, index=True)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class OrganizationRelationship(TimestampMixin, Base):
+    __tablename__ = "organization_relationships"
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_id",
+            "related_entity_id",
+            "domain_id",
+            "relationship_type",
+            name="uq_organization_relationship_context",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    related_entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    relationship_type: Mapped[str] = mapped_column(String(80), default="associated_with", nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.8, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
     source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
@@ -469,6 +570,9 @@ class ContactRelationship(TimestampMixin, Base):
 
 class ContactInteraction(TimestampMixin, Base):
     __tablename__ = "contact_interactions"
+    __table_args__ = (
+        UniqueConstraint("contact_id", "calendar_event_id", name="uq_contact_calendar_interaction"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     contact_id: Mapped[uuid.UUID] = mapped_column(
@@ -479,6 +583,9 @@ class ContactInteraction(TimestampMixin, Base):
     )
     routed_item_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("routed_items.id", ondelete="SET NULL"), unique=True, index=True
+    )
+    calendar_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("calendar_events.id", ondelete="CASCADE"), index=True
     )
     interaction_type: Mapped[str] = mapped_column(String(80), default="mention", nullable=False, index=True)
     channel: Mapped[str | None] = mapped_column(String(80), index=True)

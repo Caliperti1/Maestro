@@ -80,7 +80,7 @@ Handles:
 * Research
 * Innovation consulting
 
-Ophi Domain
+Perti Laboratories Domain
 
 Handles:
 
@@ -275,7 +275,7 @@ Maestro Orchestrator
            │
            ├── Personal Agents
            ├── Praxis Agents
-           ├── Ophi Agents
+           ├── Perti Laboratories Agents
            └── Academic Agents
 
 ⸻
@@ -647,7 +647,7 @@ Praxis
 
 Business growth and consulting execution.
 
-Ophi
+Perti Laboratories
 
 Product and technology development.
 

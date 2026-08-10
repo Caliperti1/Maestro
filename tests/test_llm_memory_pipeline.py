@@ -62,8 +62,8 @@ def test_dropbox_processor_creates_domain_folders(session: Session, tmp_path: Pa
 
     assert (tmp_path / "global" / "inbox").is_dir()
     assert (tmp_path / "global" / "processing").is_dir()
-    assert (tmp_path / "ophi" / "inbox").is_dir()
-    assert (tmp_path / "ophi" / "processing").is_dir()
+    assert (tmp_path / "perti-laboratories" / "inbox").is_dir()
+    assert (tmp_path / "perti-laboratories" / "processing").is_dir()
     assert (tmp_path / "maestro-development" / "previews").is_dir()
 
 
@@ -107,8 +107,8 @@ def test_dropbox_processor_extracts_previews_writes_memory_and_moves_processed_f
     }
     processor = MemoryDropboxProcessor(session, root=tmp_path, curator=_curator(session, payload))
     processor.ensure_directories()
-    source_path = tmp_path / "ophi" / "inbox" / "strategy.md"
-    source_path.write_text("# Ophi strategy\nUse the memory dropbox.\n", encoding="utf-8")
+    source_path = tmp_path / "perti-laboratories" / "inbox" / "strategy.md"
+    source_path.write_text("# Perti Laboratories strategy\nUse the memory dropbox.\n", encoding="utf-8")
 
     results = processor.process_once()
 
@@ -119,9 +119,9 @@ def test_dropbox_processor_extracts_previews_writes_memory_and_moves_processed_f
     assert result.written_count == 1
     assert result.pending_approval_count == 1
     assert not source_path.exists()
-    assert not (tmp_path / "ophi" / "processing" / "strategy.md").exists()
-    assert (tmp_path / "ophi" / "processed" / "strategy.md").is_file()
-    assert (tmp_path / "ophi" / "previews" / "strategy.preview.json").is_file()
+    assert not (tmp_path / "perti-laboratories" / "processing" / "strategy.md").exists()
+    assert (tmp_path / "perti-laboratories" / "processed" / "strategy.md").is_file()
+    assert (tmp_path / "perti-laboratories" / "previews" / "strategy.preview.json").is_file()
 
     memories = session.query(MemoryItem).all()
     proposals = session.query(MemoryProposal).all()
@@ -136,28 +136,28 @@ def test_dropbox_processor_extracts_previews_writes_memory_and_moves_processed_f
     assert len(seed_packages) == 1
     assert seed_packages[0].status == "processed"
     assert seed_packages[0].metadata_["processed_path"] == str(
-        tmp_path / "ophi" / "processed" / "strategy.md"
+        tmp_path / "perti-laboratories" / "processed" / "strategy.md"
     )
     assert len(artifacts) == 1
-    assert artifacts[0].uri == str(tmp_path / "ophi" / "processed" / "strategy.md")
+    assert artifacts[0].uri == str(tmp_path / "perti-laboratories" / "processed" / "strategy.md")
     assert artifacts[0].metadata_["processed_path"] == str(
-        tmp_path / "ophi" / "processed" / "strategy.md"
+        tmp_path / "perti-laboratories" / "processed" / "strategy.md"
     )
     assert memories[0].metadata_["artifact_id"] == str(artifacts[0].id)
     assert memories[0].metadata_["artifact_uri"] == str(
-        tmp_path / "ophi" / "processed" / "strategy.md"
+        tmp_path / "perti-laboratories" / "processed" / "strategy.md"
     )
     assert memories[0].metadata_["processed_path"] == str(
-        tmp_path / "ophi" / "processed" / "strategy.md"
+        tmp_path / "perti-laboratories" / "processed" / "strategy.md"
     )
     assert memories[0].metadata_["source_refs"][0]["processed_path"] == str(
-        tmp_path / "ophi" / "processed" / "strategy.md"
+        tmp_path / "perti-laboratories" / "processed" / "strategy.md"
     )
     assert proposals[0].metadata_["processed_path"] == str(
-        tmp_path / "ophi" / "processed" / "strategy.md"
+        tmp_path / "perti-laboratories" / "processed" / "strategy.md"
     )
     assert proposals[0].source_refs[0]["processed_path"] == str(
-        tmp_path / "ophi" / "processed" / "strategy.md"
+        tmp_path / "perti-laboratories" / "processed" / "strategy.md"
     )
 
 
@@ -237,7 +237,7 @@ def test_dropbox_processor_extracts_pdf_text_for_curator(
 ) -> None:
     class FakePage:
         def extract_text(self) -> str:
-            return "PDF says Chris wants Ophi notes to become memory."
+            return "PDF says Chris wants Perti Laboratories notes to become memory."
 
     class FakePdfReader:
         is_encrypted = False
@@ -252,13 +252,13 @@ def test_dropbox_processor_extracts_pdf_text_for_curator(
 
     processor = MemoryDropboxProcessor(session, root=tmp_path, curator=curator)
     processor.ensure_directories()
-    source_path = tmp_path / "ophi" / "inbox" / "research.pdf"
+    source_path = tmp_path / "perti-laboratories" / "inbox" / "research.pdf"
     source_path.write_bytes(b"%PDF fake bytes")
 
     results = processor.process_once()
 
     assert results[0].status == "processed"
-    assert "PDF says Chris wants Ophi notes" in client.calls[0]["input_text"]
+    assert "PDF says Chris wants Perti Laboratories notes" in client.calls[0]["input_text"]
     artifact = session.query(Artifact).one()
     assert artifact.mime_type == "application/pdf"
     assert artifact.metadata_["extraction_method"] == "pdf_text"
@@ -390,7 +390,7 @@ def test_llm_extractor_rejects_invalid_model_output() -> None:
     extractor = _extractor({"candidates": [{"scope": "domain"}], "routed_items": []})
 
     with pytest.raises(LLMClientError):
-        extractor.extract(source_title="bad", source_text="bad", domain_key="ophi")
+        extractor.extract(source_title="bad", source_text="bad", domain_key="perti-laboratories")
 
 
 def test_llm_extractor_prompt_includes_memory_policy_and_domain_context() -> None:

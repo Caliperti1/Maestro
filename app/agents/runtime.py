@@ -2961,15 +2961,12 @@ _DOMAIN_CONTEXTS = {
         "Praxis domain for Tactical Innovation, partner engagement, training, transition "
         "planning, and program development."
     ),
-    "ophi": (
-        "Ophi domain for product strategy, research loops, market learning, and "
-        "operational experiments."
+    "perti-laboratories": (
+        "Perti Laboratories domain for software products, applied research, independent R&D, "
+        "market learning, and technical operations."
     ),
     "usma": (
         "USMA domain for teaching, cadet support, academic prep, and institutional obligations."
-    ),
-    "personal-irad-projects": (
-        "Personal IRAD domain for independent research and development projects."
     ),
     "l3": "L3 domain for professional obligations and L3-related work context.",
 }
@@ -4050,33 +4047,7 @@ Call `routed.item.create` with route_type `task`, title, description/content, pr
         "category": "routed_memory",
         "description": "Create or update event candidates from interactions.",
         "domain_key": None,
-        "instruction": """## Purpose
-Create event candidates for meetings, calls, deadlines with time windows, travel, ceremonies, and other calendar-worthy items.
-
-## Use When
-- A source contains a date/time, meeting/call/sync, appointment, travel window, or event summary.
-- A prior event is being updated with new time/location/attendee details.
-
-## Do Not Use When
-- The item is only an undated task or general reminder.
-- The time/date is too ambiguous to be useful; create an RFI instead.
-
-## Procedure
-1. Title should be what would appear on a calendar, e.g. "Partner sync with Jane Smith".
-2. Metadata should include `event_title`, `start_at`, `end_at`, `duration_minutes`, `location`, `attendees`, and `summary` when known.
-3. If attendees are mentioned and contacts do not exist, still include attendee names; the routed resolver can create/link contacts.
-4. Infer a reasonable duration only when the source implies a typical meeting and uncertainty is low.
-5. When the source gives a date and time without a timezone, use Chris's home timezone,
-   America/New_York (Eastern Time, including daylight-saving transitions). Preserve an explicit
-   source timezone when one is provided.
-6. Include source_refs.
-
-## Output Contract
-Call `routed.item.create` with route_type `event`, title, content summary, metadata, and source_refs.
-
-## Validation
-- Do not title events "recorded meeting metadata" or similar system language.
-- Ask for clarification if missing date/time would cause a bad calendar entry.""",
+        "instruction": load_prompt("skills/calendar_manager.md"),
         "metadata": {"seeded_by": "maestro"},
     },
     {

@@ -21,7 +21,7 @@ def _domain_and_agents(session: Session):
     seed_default_domains(session)
     domain_repo = DomainRepository(session)
     praxis = domain_repo.get_by_key("praxis")
-    ophi = domain_repo.get_by_key("ophi")
+    ophi = domain_repo.get_by_key("perti-laboratories")
     assert praxis is not None
     assert ophi is not None
 
@@ -35,7 +35,7 @@ def _domain_and_agents(session: Session):
     ophi_agent = agent_repo.create(
         domain_id=ophi.id,
         key="ophi-memory-test-agent",
-        name="Ophi Memory Test Agent",
+        name="Perti Laboratories Memory Test Agent",
         agent_type="domain_agent",
     )
     return praxis, ophi, praxis_agent, ophi_agent
@@ -208,8 +208,8 @@ def test_agent_retrieval_is_limited_to_global_own_domain_and_own_agent_memory(
             agent_id=ophi_agent.id,
             scope="agent",
             memory_type="standing_instruction",
-            title="Ophi agent instruction",
-            content="Ophi agent should inspect product notes first.",
+            title="Perti Laboratories agent instruction",
+            content="Perti Laboratories agent should inspect product notes first.",
             impact_level="low",
         )
     )
@@ -245,7 +245,7 @@ def test_maestro_retrieval_can_span_domains_and_filter_importance(session: Sessi
             domain_id=ophi.id,
             scope="domain",
             memory_type="decision",
-            title="Important Ophi item",
+            title="Important Perti Laboratories item",
             content="This should be visible to Maestro.",
             impact_level="low",
             importance=0.85,
