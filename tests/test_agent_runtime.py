@@ -2264,9 +2264,11 @@ def test_gmail_adapter_preserves_google_doc_meeting_notes_links(
     connection = session.query(ToolConnection).filter_by(tool_key="gmail").one()
     doc_url = "https://docs.google.com/document/d/doc-123/edit"
     folder_url = "https://drive.google.com/drive/folders/folder-123?usp=sharing"
+    meeting_url = "https://meet.google.com/abc-defg-hij?hs=224"
     html_body = (
         f'<p>Here are the <a href="{doc_url}">Meeting notes</a> and '
-        f'<a href="{folder_url}">supporting files</a> from today.</p>'
+        f'<a href="{folder_url}">supporting files</a> from today. '
+        f'<a href="{meeting_url}">Join meeting</a>.</p>'
     )
     encoded_body = base64.urlsafe_b64encode(html_body.encode("utf-8")).decode("ascii").rstrip("=")
 
@@ -2302,6 +2304,8 @@ def test_gmail_adapter_preserves_google_doc_meeting_notes_links(
     assert output["google_workspace_links"][1]["file_id"] == "folder-123"
     assert output["google_workspace_links"][1]["kind"] == "folder"
     assert output["meeting_notes"][0]["url"] == doc_url
+    assert output["conferencing_links"][0]["url"] == meeting_url
+    assert output["conferencing_links"][0]["provider"] == "google_meet"
 
 
 def test_gmail_tools_inherit_google_connection(

@@ -3856,6 +3856,11 @@ def _compact_output_summary(output: Any) -> Any:
     for id_key in ("url", "html_url", "number", "title", "path", "repo", "branch", "pr_number"):
         if id_key in output:
             compact[id_key] = _truncate_nested(output[id_key], max_text_chars=220)
+    if output.get("conferencing_links"):
+        compact["conferencing_links"] = _truncate_nested(
+            output["conferencing_links"],
+            max_text_chars=500,
+        )
     return compact
 
 
@@ -3882,6 +3887,8 @@ def _evidence_text(output: Any) -> str:
         "annotations",
         "attachments",
         "citations",
+        "conferencing_links",
+        "google_workspace_links",
         "results",
         "issues",
         "pull_requests",

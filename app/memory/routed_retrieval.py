@@ -21,7 +21,10 @@ from app.db.models import (
     Todo,
 )
 from app.memory.routed_hygiene import RoutedHygieneService
-from app.memory.calendar_intelligence import CalendarIntelligenceService
+from app.memory.calendar_intelligence import (
+    CalendarIntelligenceService,
+    conferencing_url_from_values,
+)
 from app.memory.routed_resolver import contact_aliases_for
 from app.memory.routed_service import RoutedMemoryService
 
@@ -201,7 +204,10 @@ class RoutedEditService:
             "organizer_email",
         ):
             if key in updates:
-                setattr(event, key, updates[key])
+                value = updates[key]
+                if key == "conferencing_url":
+                    value = conferencing_url_from_values({"conferencing_url": value})
+                setattr(event, key, value)
         if "all_day" in updates:
             event.all_day = bool(updates["all_day"])
         for key in ("start_at", "end_at"):

@@ -33,9 +33,11 @@ structured metadata, and a short rationale. Represent candidate metadata as `key
 entries; each `value_json` must be valid compact JSON (for example `"Jane"`, `true`, or
 `["Chris Aliperti"]`). For events, include `start_at` and `end_at` as complete ISO 8601 values
 with an explicit timezone whenever the source supplies date/time information; also include
-`attendees`, `location`, and `timezone` when known. For todos, include `owner` and `due_at` as a
-complete ISO 8601 value whenever a deadline is available. Do not split a known date and time into
-ambiguous prose-only fields. The notification decision always includes complete
+`attendees`, `location`, `timezone`, and `conferencing_url` when known. Extract the complete URL from
+visible text or metadata such as `join_url`, `meeting_link`, `hangoutLink`, and `onlineMeetingUrl`;
+do not leave a Meet, Zoom, Teams, or Webex URL only in the event summary. For todos, include `owner`
+and `due_at` as a complete ISO 8601 value whenever a deadline is available. Do not split a known
+date and time into ambiguous prose-only fields. The notification decision always includes complete
 fields, even when `should_notify=false`; use empty strings only when there is genuinely no
 notification content.
 Never create Chris Aliperti as a contact candidate; he is the Maestro system owner, not a CRM

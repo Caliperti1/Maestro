@@ -10,3 +10,6 @@ America/New_York (Eastern Time, including daylight-saving transitions). Preserve
 timezone when one is provided.
 
 Prefer practical calendar/CRM values, not instructions like "record meeting metadata".
+For events, inspect both visible text and structured metadata for join_url, meeting_link,
+hangoutLink, onlineMeetingUrl, Google Meet, Zoom, Teams, Webex, or equivalent conference URLs.
+Put the complete clickable URL in conferencing_url; do not leave it only in summary or location.
