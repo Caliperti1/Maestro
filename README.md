@@ -22,6 +22,7 @@ chat responses toward persistent execution.
 - GitHub, Gmail, Codex, and app reload tool foundations.
 - Canonical workflow artifacts staged for memory curation at workflow completion.
 - Resumable historical Gmail hydration for contact and organization intelligence with shadow review.
+- Cross-domain calendar with linked contacts/organizations, conflict detection, and completed-meeting history.
 - React/Vite frontend for Maestro chat, memory, domains, agents, tools, and queue surfaces.
 
 ## System Shape
@@ -154,6 +155,7 @@ Relevant code:
 
 - `app/memory/contact_intelligence.py`
 - `app/memory/contact_hydration.py`
+- `app/memory/calendar_intelligence.py`
 - `app/memory/organization_intelligence.py`
 - `app/memory/routed_service.py`
 - `app/memory/routed_resolver.py`
@@ -161,6 +163,7 @@ Relevant code:
 - `app/memory/routed_retrieval.py`
 - `app/api/memory.py`
 - `docs/CONTACT_INTELLIGENCE.md`
+- `docs/CALENDAR_ORGANIZATION_INTELLIGENCE.md`
 
 ### Scheduler And Queue
 

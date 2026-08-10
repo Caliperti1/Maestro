@@ -5,9 +5,8 @@ export const domainLabels: Record<string, string> = {
   personal: "Personal",
   "maestro-development": "Maestro Development",
   praxis: "Praxis",
-  ophi: "Ophi",
   usma: "USMA",
-  "personal-irad-projects": "Personal IRAD",
+  "perti-laboratories": "Perti Laboratories",
   l3: "L3",
 };
 
@@ -24,9 +23,8 @@ export const domains = [
   "Personal",
   "Maestro Development",
   "Praxis",
-  "Ophi",
   "USMA",
-  "Personal IRAD",
+  "Perti Laboratories",
   "L3",
 ];
 

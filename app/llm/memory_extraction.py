@@ -71,11 +71,11 @@ DOMAIN_CONTEXTS = {
     "praxis": (
         "Praxis domain covering company strategy, product, engineering, growth, and operations."
     ),
-    "ophi": "Ophi domain covering product research, market research, operations, and strategy.",
-    "usma": "USMA domain covering teaching, administration, cadet support, and academic work.",
-    "personal-irad-projects": (
-        "Personal IRAD Projects domain covering independent research, prototypes, and build plans."
+    "perti-laboratories": (
+        "Perti Laboratories domain covering software products, applied research, independent R&D, "
+        "market development, and technical operations."
     ),
+    "usma": "USMA domain covering teaching, administration, cadet support, and academic work.",
     "l3": "L3 domain covering L3 work context and related professional obligations.",
 }
 

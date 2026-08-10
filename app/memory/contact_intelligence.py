@@ -12,6 +12,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    CalendarEvent,
+    CalendarEventAttendee,
     Contact,
     ContactAlias,
     ContactDomainNote,
@@ -154,6 +156,21 @@ class ContactIntelligenceService:
         interactions = self.session.execute(
             interaction_statement.order_by(ContactInteraction.occurred_at.desc()).limit(interaction_limit)
         ).all()
+        upcoming_statement = (
+            select(CalendarEventAttendee, CalendarEvent, Domain)
+            .join(CalendarEvent, CalendarEvent.id == CalendarEventAttendee.event_id)
+            .join(Domain, Domain.id == CalendarEvent.domain_id, isouter=True)
+            .where(
+                CalendarEventAttendee.contact_id == contact.id,
+                CalendarEvent.status.notin_(["archived", "cancelled"]),
+                CalendarEvent.start_at >= datetime.now(UTC),
+            )
+        )
+        if domain_id is not None:
+            upcoming_statement = upcoming_statement.where(CalendarEvent.domain_id == domain_id)
+        upcoming_events = self.session.execute(
+            upcoming_statement.order_by(CalendarEvent.start_at).limit(20)
+        ).all()
         affiliation_statement = (
             select(ContactOrganizationAffiliation, Entity, Domain)
             .join(Entity, Entity.id == ContactOrganizationAffiliation.entity_id)
@@ -182,7 +199,7 @@ class ContactIntelligenceService:
             "summary": contact.summary,
             "origination": contact.origination,
             "last_contact_at": contact.last_contact_at.isoformat() if contact.last_contact_at else None,
-            "scheduled_event_ids": contact.scheduled_event_ids,
+            "scheduled_event_ids": [str(event.id) for _, event, _ in upcoming_events],
             "source_refs": contact.source_refs,
             "provenance": contact.provenance,
             "status": contact.status,
@@ -213,6 +230,18 @@ class ContactIntelligenceService:
                     "provenance": interaction.provenance,
                 }
                 for interaction, domain in interactions
+            ],
+            "upcoming_events": [
+                {
+                    "id": str(event.id),
+                    "title": event.title,
+                    "domain_key": domain.key if domain else None,
+                    "start_at": event.start_at.isoformat() if event.start_at else None,
+                    "end_at": event.end_at.isoformat() if event.end_at else None,
+                    "location": event.location,
+                    "response_status": attendee.response_status,
+                }
+                for attendee, event, domain in upcoming_events
             ],
             "affiliations": [
                 {

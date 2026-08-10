@@ -339,8 +339,36 @@ export type RoutedEvent = {
   summary: string | null;
   start_at: string | null;
   end_at: string | null;
+  timezone: string;
+  all_day: boolean;
+  recurrence_rule: string | null;
   location: string | null;
-  attendees: unknown[];
+  conferencing_url: string | null;
+  organizer_name: string | null;
+  organizer_email: string | null;
+  attendees: Array<{
+    id: string | null;
+    contact_id: string | null;
+    name: string;
+    email: string | null;
+    attendee_type: string;
+    response_status: string;
+    is_organizer: boolean;
+    is_user: boolean;
+  }>;
+  organizations: Array<{ id: string; name: string; role: string }>;
+  conflicts: Array<{
+    id: string;
+    title: string;
+    domain_key: string | null;
+    start_at: string | null;
+    end_at: string | null;
+  }>;
+  external_provider: string | null;
+  external_calendar_id: string | null;
+  external_event_id: string | null;
+  sync_status: string;
+  last_synced_at: string | null;
   supporting_refs?: Array<Record<string, unknown>>;
   source_refs: Array<Record<string, unknown>>;
   provenance: Record<string, unknown>;
@@ -395,6 +423,15 @@ export type RoutedContact = {
     source_refs: Array<Record<string, unknown>>;
     provenance: Record<string, unknown>;
   }>;
+  upcoming_events: Array<{
+    id: string;
+    title: string;
+    domain_key: string | null;
+    start_at: string | null;
+    end_at: string | null;
+    location: string | null;
+    response_status: string;
+  }>;
   affiliations: Array<{
     id: string;
     entity_id: string;
@@ -430,6 +467,7 @@ export type RoutedEntity = {
   status: string;
   metadata: Record<string, unknown>;
   aliases: string[];
+  identifiers: Array<{ id: string; type: string; value: string }>;
   alias_records: Array<{ id: string; alias: string; source: string }>;
   domain_notes: Array<{ domain_key: string | null; notes: string | null; source_refs: Array<Record<string, unknown>> }>;
   contacts: Array<{
@@ -440,6 +478,24 @@ export type RoutedEntity = {
     role: string;
     relationship_type: string;
     source_refs: Array<Record<string, unknown>>;
+  }>;
+  relationships: Array<{
+    id: string;
+    organization_id: string;
+    organization: string;
+    domain_key: string | null;
+    relationship_type: string;
+    description: string;
+    confidence: number;
+    direction: string;
+  }>;
+  events: Array<{
+    id: string;
+    title: string;
+    domain_key: string | null;
+    start_at: string | null;
+    status: string;
+    role: string;
   }>;
   interactions: Array<{
     id: string;

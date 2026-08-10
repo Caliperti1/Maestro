@@ -35,7 +35,7 @@ maestro_dropbox/
     processed/
     failed/
     previews/
-  ophi/
+  perti-laboratories/
     inbox/
     processing/
     processed/
@@ -47,7 +47,7 @@ maestro_dropbox/
     processed/
     failed/
     previews/
-  personal-irad-projects/
+  perti-laboratories/
     inbox/
     processing/
     processed/
@@ -233,14 +233,14 @@ occupying port `8000`.
 
 The command-line path is still useful when you want to test the processor directly.
 
-Create a small file in the Ophi inbox:
+Create a small file in the Perti Laboratories inbox:
 
 ```bash
-mkdir -p maestro_dropbox/ophi/inbox
-cat > maestro_dropbox/ophi/inbox/ophi-memory-test.md <<'EOF'
-# Ophi memory test
+mkdir -p maestro_dropbox/perti-laboratories/inbox
+cat > maestro_dropbox/perti-laboratories/inbox/perti-memory-test.md <<'EOF'
+# Perti Laboratories memory test
 
-Ophi should prioritize a lightweight product research loop before adding complex CRM
+Perti Laboratories should prioritize a lightweight product research loop before adding complex CRM
 automation. Chris prefers concise memory previews before writes so he can debug the pipeline.
 Do not allow Maestro to make external commitments without explicit approval.
 EOF
@@ -255,15 +255,15 @@ python -m app.memory.dropbox
 Expected result:
 
 - the command prints one JSON result with `status` set to `processed`
-- `maestro_dropbox/ophi/processed/ophi-memory-test.md` exists
-- `maestro_dropbox/ophi/previews/ophi-memory-test.preview.json` exists
+- `maestro_dropbox/perti-laboratories/processed/perti-memory-test.md` exists
+- `maestro_dropbox/perti-laboratories/previews/perti-memory-test.preview.json` exists
 - low/medium/high candidates are written to `memory_items`
 - very-high-impact candidates are queued in `memory_proposals`
 
 Inspect the preview:
 
 ```bash
-cat maestro_dropbox/ophi/previews/ophi-memory-test.preview.json
+cat maestro_dropbox/perti-laboratories/previews/perti-memory-test.preview.json
 ```
 
 Inspect memory rows:

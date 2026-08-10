@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     CalendarEvent,
+    CalendarEventAttendee,
+    CalendarEventOrganization,
     Contact,
     ContactAlias,
     ContactDomainNote,
@@ -19,6 +21,8 @@ from app.db.models import (
     EntityDomainNote,
     OrganizationAlias,
     OrganizationEmbedding,
+    OrganizationIdentifier,
+    OrganizationRelationship,
     RoutedObjectChangeLog,
     RoutedObjectLink,
     RuntimeSetting,
@@ -30,6 +34,7 @@ from app.memory.routed_resolver import contact_aliases_for
 @dataclass(frozen=True)
 class RoutedHygieneReport:
     aliases_backfilled: int
+    organization_identifiers_backfilled: int
     aliases_pruned: int
     display_fields_canonicalized: int
     duplicates_merged: int
@@ -51,6 +56,7 @@ class RoutedHygieneService:
         display_fields_canonicalized = self.canonicalize_display_fields()
         aliases_pruned = self.prune_unsubstantiated_contact_aliases()
         aliases_backfilled = self.backfill_contact_aliases()
+        organization_identifiers_backfilled = self.backfill_organization_identifiers()
         duplicates_merged = self.merge_high_confidence_duplicates()
         suggestions = [
             *self.contact_duplicate_suggestions(),
@@ -59,6 +65,7 @@ class RoutedHygieneService:
         ]
         report = RoutedHygieneReport(
             aliases_backfilled=aliases_backfilled,
+            organization_identifiers_backfilled=organization_identifiers_backfilled,
             aliases_pruned=aliases_pruned,
             display_fields_canonicalized=display_fields_canonicalized,
             duplicates_merged=duplicates_merged,
@@ -68,6 +75,7 @@ class RoutedHygieneService:
             setting = self.session.get(RuntimeSetting, self.SETTING_KEY)
             payload = {
                 "aliases_backfilled": aliases_backfilled,
+                "organization_identifiers_backfilled": organization_identifiers_backfilled,
                 "aliases_pruned": aliases_pruned,
                 "display_fields_canonicalized": display_fields_canonicalized,
                 "duplicates_merged": duplicates_merged,
@@ -84,6 +92,7 @@ class RoutedHygieneService:
     def merge_high_confidence_duplicates(self) -> int:
         merged = 0
         merged += self._merge_duplicate_contacts()
+        merged += self._merge_duplicate_entities()
         merged += self._merge_duplicate_events()
         merged += self._merge_duplicate_todos()
         if merged:
@@ -165,6 +174,68 @@ class RoutedHygieneService:
                 alias.entity_id = survivor.id
             else:
                 self.session.delete(alias)
+        for identifier in self.session.scalars(
+            select(OrganizationIdentifier).where(OrganizationIdentifier.entity_id == duplicate.id)
+        ):
+            existing = self.session.scalar(
+                select(OrganizationIdentifier).where(
+                    OrganizationIdentifier.identifier_type == identifier.identifier_type,
+                    OrganizationIdentifier.normalized_value == identifier.normalized_value,
+                )
+            )
+            if existing is None or existing.id == identifier.id:
+                identifier.entity_id = survivor.id
+            else:
+                self.session.delete(identifier)
+        for link in self.session.scalars(
+            select(CalendarEventOrganization).where(CalendarEventOrganization.entity_id == duplicate.id)
+        ):
+            existing = self.session.scalar(
+                select(CalendarEventOrganization).where(
+                    CalendarEventOrganization.event_id == link.event_id,
+                    CalendarEventOrganization.entity_id == survivor.id,
+                    CalendarEventOrganization.role == link.role,
+                )
+            )
+            if existing is None:
+                link.entity_id = survivor.id
+            else:
+                self.session.delete(link)
+        relationships = list(
+            self.session.scalars(
+                select(OrganizationRelationship).where(
+                    (OrganizationRelationship.entity_id == duplicate.id)
+                    | (OrganizationRelationship.related_entity_id == duplicate.id)
+                )
+            )
+        )
+        for relationship in relationships:
+            next_entity_id = survivor.id if relationship.entity_id == duplicate.id else relationship.entity_id
+            next_related_id = (
+                survivor.id
+                if relationship.related_entity_id == duplicate.id
+                else relationship.related_entity_id
+            )
+            if next_entity_id == next_related_id:
+                self.session.delete(relationship)
+                continue
+            existing = self.session.scalar(
+                select(OrganizationRelationship).where(
+                    OrganizationRelationship.id != relationship.id,
+                    OrganizationRelationship.entity_id == next_entity_id,
+                    OrganizationRelationship.related_entity_id == next_related_id,
+                    OrganizationRelationship.domain_id == relationship.domain_id,
+                    OrganizationRelationship.relationship_type == relationship.relationship_type,
+                )
+            )
+            if existing is not None:
+                existing.description = existing.description or relationship.description
+                existing.source_refs = _merge_source_refs(existing.source_refs, relationship.source_refs)
+                existing.metadata_ = _merge_metadata(existing.metadata_, relationship.metadata_)
+                self.session.delete(relationship)
+                continue
+            relationship.entity_id = next_entity_id
+            relationship.related_entity_id = next_related_id
         for embedding in self.session.scalars(
             select(OrganizationEmbedding).where(OrganizationEmbedding.entity_id == duplicate.id)
         ):
@@ -324,6 +395,64 @@ class RoutedHygieneService:
             self.session.commit()
         return count
 
+    def backfill_organization_identifiers(self) -> int:
+        count = 0
+        for entity in self.session.scalars(select(Entity).where(Entity.status != "archived")):
+            values: list[tuple[str, str]] = []
+            if entity.website:
+                values.append(("website", entity.website))
+                host = _web_domain(entity.website)
+                if host:
+                    values.append(("web_domain", host))
+            for key in ("email_domain", "sender_email_domain"):
+                value = str((entity.metadata_ or {}).get(key) or "").strip()
+                if value:
+                    values.append(("email_domain", value))
+            for identifier_type, value in values:
+                normalized = _normalize_identifier(identifier_type, value)
+                existing = self.session.scalar(
+                    select(OrganizationIdentifier).where(
+                        OrganizationIdentifier.identifier_type == identifier_type,
+                        OrganizationIdentifier.normalized_value == normalized,
+                    )
+                )
+                if existing is None:
+                    self.session.add(
+                        OrganizationIdentifier(
+                            entity_id=entity.id,
+                            identifier_type=identifier_type,
+                            value=value,
+                            normalized_value=normalized,
+                            source_refs=entity.source_refs,
+                            metadata_={"backfilled_by_hygiene": True},
+                        )
+                    )
+                    count += 1
+        if count:
+            self.session.commit()
+        return count
+
+    def _merge_duplicate_entities(self) -> int:
+        merged = 0
+        by_identifier: dict[tuple[str, str], Entity] = {}
+        rows = self.session.execute(
+            select(OrganizationIdentifier, Entity)
+            .join(Entity, Entity.id == OrganizationIdentifier.entity_id)
+            .where(Entity.status != "archived")
+            .order_by(Entity.created_at)
+        ).all()
+        for identifier, entity in rows:
+            key = (identifier.identifier_type, identifier.normalized_value)
+            survivor = by_identifier.get(key)
+            if survivor is None:
+                by_identifier[key] = entity
+                continue
+            if survivor.id == entity.id or entity.status == "archived":
+                continue
+            self.merge_entities(survivor, entity, commit=False)
+            merged += 1
+        return merged
+
     def _merge_duplicate_contacts(self) -> int:
         contacts = list(self.session.scalars(select(Contact).where(Contact.status != "archived")))
         merged = 0
@@ -424,6 +553,22 @@ class RoutedHygieneService:
                 updated_attendees.append(next_attendee)
             if changed:
                 event.attendees = updated_attendees
+        for attendee in self.session.scalars(
+            select(CalendarEventAttendee).where(CalendarEventAttendee.contact_id == duplicate.id)
+        ):
+            survivor_identity = f"contact:{survivor.id}"
+            existing = self.session.scalar(
+                select(CalendarEventAttendee).where(
+                    CalendarEventAttendee.event_id == attendee.event_id,
+                    CalendarEventAttendee.normalized_identity == survivor_identity,
+                )
+            )
+            if existing is not None:
+                self.session.delete(attendee)
+            else:
+                attendee.contact_id = survivor.id
+                attendee.name = survivor.name
+                attendee.normalized_identity = survivor_identity
         for alias in self.session.scalars(select(ContactAlias).where(ContactAlias.contact_id == duplicate.id)):
             existing = self.session.scalar(
                 select(ContactAlias).where(ContactAlias.normalized_alias == alias.normalized_alias)
@@ -462,7 +607,20 @@ class RoutedHygieneService:
         for interaction in self.session.scalars(
             select(ContactInteraction).where(ContactInteraction.contact_id == duplicate.id)
         ):
-            interaction.contact_id = survivor.id
+            existing = None
+            if interaction.calendar_event_id is not None:
+                existing = self.session.scalar(
+                    select(ContactInteraction).where(
+                        ContactInteraction.contact_id == survivor.id,
+                        ContactInteraction.calendar_event_id == interaction.calendar_event_id,
+                    )
+                )
+            if existing is not None:
+                existing.summary = _append_note(existing.summary, interaction.summary)
+                existing.source_refs = _merge_source_refs(existing.source_refs, interaction.source_refs)
+                self.session.delete(interaction)
+            else:
+                interaction.contact_id = survivor.id
         for affiliation in self.session.scalars(
             select(ContactOrganizationAffiliation).where(
                 ContactOrganizationAffiliation.contact_id == duplicate.id
@@ -567,6 +725,48 @@ class RoutedHygieneService:
         survivor.supporting_refs = _merge_source_refs(survivor.supporting_refs, duplicate.supporting_refs)
         survivor.source_refs = _merge_source_refs(survivor.source_refs, duplicate.source_refs)
         survivor.metadata_ = _merge_metadata(survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id)
+        for attendee in self.session.scalars(
+            select(CalendarEventAttendee).where(CalendarEventAttendee.event_id == duplicate.id)
+        ):
+            existing = self.session.scalar(
+                select(CalendarEventAttendee).where(
+                    CalendarEventAttendee.event_id == survivor.id,
+                    CalendarEventAttendee.normalized_identity == attendee.normalized_identity,
+                )
+            )
+            if existing is None:
+                attendee.event_id = survivor.id
+            else:
+                self.session.delete(attendee)
+        for organization in self.session.scalars(
+            select(CalendarEventOrganization).where(CalendarEventOrganization.event_id == duplicate.id)
+        ):
+            existing = self.session.scalar(
+                select(CalendarEventOrganization).where(
+                    CalendarEventOrganization.event_id == survivor.id,
+                    CalendarEventOrganization.entity_id == organization.entity_id,
+                    CalendarEventOrganization.role == organization.role,
+                )
+            )
+            if existing is None:
+                organization.event_id = survivor.id
+            else:
+                self.session.delete(organization)
+        for interaction in self.session.scalars(
+            select(ContactInteraction).where(ContactInteraction.calendar_event_id == duplicate.id)
+        ):
+            existing = self.session.scalar(
+                select(ContactInteraction).where(
+                    ContactInteraction.contact_id == interaction.contact_id,
+                    ContactInteraction.calendar_event_id == survivor.id,
+                )
+            )
+            if existing is None:
+                interaction.calendar_event_id = survivor.id
+            else:
+                existing.summary = _append_note(existing.summary, interaction.summary)
+                existing.source_refs = _merge_source_refs(existing.source_refs, interaction.source_refs)
+                self.session.delete(interaction)
         self._finalize_merge("event", survivor.id, duplicate)
 
     def _merge_todo(self, survivor: Todo, duplicate: Todo) -> None:
@@ -783,3 +983,16 @@ def _name_from_organization_identifier(name: str) -> str | None:
     stem = parts[-2] if len(parts) >= 2 else parts[0]
     words = [part for part in re.split(r"[-_]", stem) if part]
     return " ".join(word.upper() if len(word) <= 3 else word.capitalize() for word in words) or None
+
+
+def _web_domain(value: str) -> str | None:
+    candidate = value.strip().lower().removeprefix("https://").removeprefix("http://")
+    candidate = candidate.split("/", 1)[0].removeprefix("www.")
+    return candidate or None
+
+
+def _normalize_identifier(identifier_type: str, value: str) -> str:
+    normalized = value.strip().lower().rstrip("/")
+    if identifier_type in {"web_domain", "email_domain"}:
+        normalized = normalized.removeprefix("www.")
+    return normalized

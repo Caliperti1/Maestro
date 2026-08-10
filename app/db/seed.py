@@ -30,19 +30,14 @@ DEFAULT_DOMAINS = [
         "Praxis Defense business development, delivery, product, and technical operations.",
     ),
     DomainSeed(
-        "ophi",
-        "Ophi",
-        "Ophiuchus Labs product, research, market, and technical operations.",
+        "perti-laboratories",
+        "Perti Laboratories",
+        "Perti Laboratories software products, applied research, market development, and technical operations.",
     ),
     DomainSeed(
         "usma",
         "USMA",
         "USMA teaching, admin, research, and academic operations.",
-    ),
-    DomainSeed(
-        "personal-irad-projects",
-        "Personal IRAD Projects",
-        "Personal independent R&D projects, scaffolding, build plans, and low-priority async development.",
     ),
     DomainSeed("l3", "L3", "L3 domain operations and memory."),
 ]

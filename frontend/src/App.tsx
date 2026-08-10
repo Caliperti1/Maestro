@@ -27,12 +27,15 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { Calendar, dateFnsLocalizer, View, Views } from "react-big-calendar";
-import withDragAndDrop, {
-  type EventInteractionArgs,
-} from "react-big-calendar/lib/addons/dragAndDrop";
-import { format, getDay, parse, startOfWeek } from "date-fns";
-import { enUS } from "date-fns/locale/en-US";
+import FullCalendar from "@fullcalendar/react";
+import dayGridPlugin from "@fullcalendar/daygrid";
+import timeGridPlugin from "@fullcalendar/timegrid";
+import listPlugin from "@fullcalendar/list";
+import interactionPlugin, {
+  type EventResizeDoneArg,
+} from "@fullcalendar/interaction";
+import rrulePlugin from "@fullcalendar/rrule";
+import type { DateSelectArg, EventDropArg, EventInput } from "@fullcalendar/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { API_BASE_URL, apiJson, websocketUrl } from "./api";
@@ -70,6 +73,8 @@ import type {
   PromptPackage,
   RetrievedMemory,
   RoutedEvent,
+  RoutedContact,
+  RoutedEntity,
   RoutedItem,
   RoutedObjectRecord,
   RoutedObjectSurface,
@@ -103,23 +108,15 @@ import {
   unassignedDefinitionItemCount,
 } from "./uiHelpers";
 
-const calendarLocalizer = dateFnsLocalizer({
-  format,
-  parse,
-  startOfWeek,
-  getDay,
-  locales: { "en-US": enUS },
-});
-
-type CalendarSurfaceEvent = {
-  id: string;
-  title: string;
-  start: Date;
-  end: Date;
-  resource: RoutedEvent;
+const calendarColors: Record<string, string> = {
+  personal: "#22a06b",
+  "maestro-development": "#2563eb",
+  praxis: "#ef7d32",
+  "perti-laboratories": "#7c3aed",
+  usma: "#b42318",
+  l3: "#536471",
+  global: "#111827",
 };
-
-const DragAndDropCalendar = withDragAndDrop<CalendarSurfaceEvent>(Calendar);
 
 const staleWorkflowProgressLabels = new Set(["Not started.", "Not Started", "not_started"]);
 
@@ -546,9 +543,13 @@ function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string>
     return {
       title: item.title ?? "",
       summary: item.summary ?? "",
-      start_at: item.start_at ?? "",
-      end_at: item.end_at ?? "",
+      start_at: calendarInputValue(item.start_at),
+      end_at: calendarInputValue(item.end_at),
+      timezone: item.timezone ?? "America/New_York",
+      all_day: item.all_day ? "true" : "false",
+      recurrence_rule: item.recurrence_rule ?? "",
       location: item.location ?? "",
+      conferencing_url: item.conferencing_url ?? "",
       status: item.status ?? "scheduled",
     };
   }
@@ -588,6 +589,38 @@ function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string>
     aliases: item.aliases.join(", "),
     summary: item.summary ?? "",
     status: item.status ?? "active",
+  };
+}
+
+function calendarInputValue(value: string | null | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function calendarApiValue(value: string): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function calendarRecurrence(item: RoutedEvent): Record<string, string | number> | undefined {
+  if (!item.recurrence_rule || !item.start_at) return undefined;
+  const options = Object.fromEntries(
+    item.recurrence_rule
+      .split(";")
+      .map((part) => part.split("=", 2))
+      .filter((part) => part.length === 2)
+      .map(([key, value]) => [key.toLowerCase(), value]),
+  );
+  if (!options.freq) return undefined;
+  return {
+    ...options,
+    freq: String(options.freq).toLowerCase(),
+    ...(options.interval ? { interval: Number(options.interval) } : {}),
+    dtstart: item.start_at,
   };
 }
 
@@ -799,9 +832,13 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const [domainFilter, setDomainFilter] = useState("all");
   const [showArchived, setShowArchived] = useState(false);
   const [showDone, setShowDone] = useState(false);
-  const [calendarView, setCalendarView] = useState<View>(Views.WEEK);
-  const [calendarDate, setCalendarDate] = useState(new Date());
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [creatingEvent, setCreatingEvent] = useState(false);
+  const [calendarDomainKey, setCalendarDomainKey] = useState("personal");
+  const [draftAttendees, setDraftAttendees] = useState<RoutedEvent["attendees"]>([]);
+  const [draftOrganizations, setDraftOrganizations] = useState<RoutedEvent["organizations"]>([]);
+  const [contactOptions, setContactOptions] = useState<RoutedContact[]>([]);
+  const [organizationOptions, setOrganizationOptions] = useState<RoutedEntity[]>([]);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [busy, setBusy] = useState(false);
   const [contactQuery, setContactQuery] = useState("");
@@ -819,22 +856,30 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       }),
     [items, showArchived, showDone],
   );
-  const selectedItem =
-    visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0] ?? null;
+  const selectedItem = creatingEvent
+    ? null
+    : visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0] ?? null;
   const calendarItems = useMemo(
     () =>
       visibleItems
         .filter((item): item is RoutedEvent => "start_at" in item && Boolean(item.start_at))
         .map((item) => {
-          const start = new Date(item.start_at!);
-          const end = item.end_at ? new Date(item.end_at) : new Date(start.getTime() + 60 * 60 * 1000);
-          return {
+          const color = calendarColors[item.domain_key ?? "global"] ?? calendarColors.global;
+          const calendarEvent: EventInput & { extendedProps: { resource: RoutedEvent } } = {
             id: item.id,
             title: item.title,
-            start,
-            end,
-            resource: item,
+            start: item.start_at!,
+            end: item.end_at ?? undefined,
+            allDay: item.all_day,
+            backgroundColor: color,
+            borderColor: color,
+            textColor: "#ffffff",
+            extendedProps: { resource: item },
           };
+          if (item.recurrence_rule) {
+            calendarEvent.rrule = calendarRecurrence(item);
+          }
+          return calendarEvent;
         }),
     [visibleItems],
   );
@@ -843,7 +888,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   );
 
   const refreshItems = useCallback(async () => {
-    const params = new URLSearchParams({ limit: "100" });
+    const params = new URLSearchParams({ limit: surface === "calendar" ? "500" : "100" });
     if (supportsDomainFilter && domainFilter !== "all") {
       params.set("domain_key", domainFilter);
     }
@@ -869,30 +914,69 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
 
   useEffect(() => {
     setDraft(routedDraftFor(selectedItem));
+    if (selectedItem && "attendees" in selectedItem) {
+      setDraftAttendees(selectedItem.attendees);
+      setDraftOrganizations(selectedItem.organizations);
+      setCalendarDomainKey(selectedItem.domain_key ?? "personal");
+    }
   }, [selectedItem]);
+
+  useEffect(() => {
+    if (surface !== "calendar") return;
+    Promise.all([
+      apiJson<{ contacts: RoutedContact[] }>("/memory/routed-objects/contacts?limit=500"),
+      apiJson<{ entities: RoutedEntity[] }>("/memory/routed-objects/entities?limit=500"),
+    ])
+      .then(([contacts, organizations]) => {
+        setContactOptions(contacts.contacts);
+        setOrganizationOptions(organizations.entities);
+      })
+      .catch(() => undefined);
+  }, [surface]);
 
   const updateDraft = (key: string, value: string) => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
 
   const saveSelected = async () => {
-    if (!selectedItem) return;
+    if (!selectedItem && !(surface === "calendar" && creatingEvent)) return;
     setBusy(true);
     try {
-      await apiJson(`${config.endpoint}/${selectedItem.id}`, {
-        method: "PATCH",
+      const calendarUpdates = surface === "calendar"
+        ? {
+            ...draft,
+            start_at: calendarApiValue(draft.start_at ?? ""),
+            end_at: calendarApiValue(draft.end_at ?? ""),
+            all_day: draft.all_day === "true",
+            attendees: draftAttendees,
+            organizations: draftOrganizations,
+          }
+        : null;
+      const response = await apiJson<{ event?: RoutedEvent }>(
+        selectedItem ? `${config.endpoint}/${selectedItem.id}` : config.endpoint,
+        {
+        method: selectedItem ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          updates: Object.fromEntries(
-            Object.entries(draft).map(([key, value]) => [
-              key,
-              key === "aliases"
-                ? value.split(",").map((alias) => alias.trim()).filter(Boolean)
-                : value.trim() || null,
-            ]),
-          ),
+          ...(selectedItem
+            ? {
+                updates: calendarUpdates ?? Object.fromEntries(
+                  Object.entries(draft).map(([key, value]) => [
+                    key,
+                    key === "aliases"
+                      ? value.split(",").map((alias) => alias.trim()).filter(Boolean)
+                      : value.trim() || null,
+                  ]),
+                ),
+              }
+            : {
+                ...calendarUpdates,
+                domain_key: calendarDomainKey,
+              }),
         }),
       });
+      if (response.event) setSelectedId(response.event.id);
+      setCreatingEvent(false);
       setStatusMessage(`${config.title} item saved.`);
       await refreshItems();
     } catch (error) {
@@ -902,23 +986,22 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     }
   };
 
-  const updateCalendarTiming = async ({
-    event,
-    start,
-    end,
-  }: EventInteractionArgs<CalendarSurfaceEvent>) => {
-    const nextStart = start instanceof Date ? start : new Date(start);
-    const nextEnd = end instanceof Date ? end : new Date(end);
+  const updateCalendarTiming = async (info: EventDropArg | EventResizeDoneArg) => {
+    const nextStart = info.event.start;
+    const defaultDuration = info.event.allDay ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+    const nextEnd = info.event.end ?? (nextStart ? new Date(nextStart.getTime() + defaultDuration) : null);
+    const eventId = info.event.id;
+    if (!nextStart || !nextEnd) return;
     if (Number.isNaN(nextStart.getTime()) || Number.isNaN(nextEnd.getTime())) {
       setStatusMessage("Calendar update failed: invalid date or time.");
       return;
     }
 
-    setSelectedId(event.id);
+    setSelectedId(eventId);
     setBusy(true);
     setItems((current) =>
       current.map((item) =>
-        item.id === event.id && "start_at" in item
+        item.id === eventId && "start_at" in item
           ? {
               ...item,
               start_at: nextStart.toISOString(),
@@ -928,13 +1011,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       ),
     );
     try {
-      await apiJson(`${config.endpoint}/${event.id}`, {
+      await apiJson(`${config.endpoint}/${eventId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           updates: {
             start_at: nextStart.toISOString(),
             end_at: nextEnd.toISOString(),
+            all_day: info.event.allDay,
           },
         }),
       });
@@ -946,6 +1030,58 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const beginNewEvent = (start = new Date(), end = new Date(start.getTime() + 60 * 60 * 1000)) => {
+    setCreatingEvent(true);
+    setSelectedId(null);
+    setDraft({
+      title: "",
+      summary: "",
+      start_at: calendarInputValue(start.toISOString()),
+      end_at: calendarInputValue(end.toISOString()),
+      timezone: "America/New_York",
+      all_day: "false",
+      recurrence_rule: "",
+      location: "",
+      conferencing_url: "",
+      status: "scheduled",
+    });
+    setDraftAttendees([]);
+    setDraftOrganizations([]);
+    setCalendarDomainKey(domainFilter === "all" ? "personal" : domainFilter);
+  };
+
+  const selectCalendarRange = (selection: DateSelectArg) => {
+    beginNewEvent(selection.start, selection.end);
+    setDraft((current) => ({ ...current, all_day: selection.allDay ? "true" : "false" }));
+  };
+
+  const addCalendarAttendee = (contactId: string) => {
+    const contact = contactOptions.find((item) => item.id === contactId);
+    if (!contact || draftAttendees.some((item) => item.contact_id === contact.id)) return;
+    setDraftAttendees((current) => [
+      ...current,
+      {
+        id: null,
+        contact_id: contact.id,
+        name: contact.name,
+        email: contact.email,
+        attendee_type: "required",
+        response_status: "needs_action",
+        is_organizer: false,
+        is_user: false,
+      },
+    ]);
+  };
+
+  const addCalendarOrganization = (organizationId: string) => {
+    const organization = organizationOptions.find((item) => item.id === organizationId);
+    if (!organization || draftOrganizations.some((item) => item.id === organization.id)) return;
+    setDraftOrganizations((current) => [
+      ...current,
+      { id: organization.id, name: organization.name, role: "related" },
+    ]);
   };
 
   const archiveSelected = async () => {
@@ -1031,7 +1167,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   };
 
   return (
-    <div className="routed-object-workspace">
+    <div className={surface === "calendar" ? "routed-object-workspace calendar-workspace" : "routed-object-workspace"}>
       {(surface === "contacts" || surface === "organizations") && <ContactHydrationPanel surface={surface} />}
       <section className="memory-panel routed-object-list-panel" aria-labelledby={`${surface}-heading`}>
         <div className="section-heading">
@@ -1039,9 +1175,16 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             <p className="eyebrow">{config.eyebrow}</p>
             <h3 id={`${surface}-heading`}>{config.title}</h3>
           </div>
-          <button className="icon-button" onClick={refreshItems} title={`Refresh ${config.title}`}>
-            <RefreshCw size={18} />
-          </button>
+          <div className="section-heading-actions">
+            {surface === "calendar" && (
+              <button className="planner-action" type="button" onClick={() => beginNewEvent()}>
+                <Plus size={17} /> New event
+              </button>
+            )}
+            <button className="icon-button" onClick={refreshItems} title={`Refresh ${config.title}`}>
+              <RefreshCw size={18} />
+            </button>
+          </div>
         </div>
 
         {supportsDomainFilter && (
@@ -1058,6 +1201,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 ))}
             </select>
           </label>
+        )}
+
+        {surface === "calendar" && domainFilter === "all" && (
+          <div className="calendar-legend" aria-label="Calendar domain colors">
+            {Object.entries(domainLabels).filter(([key]) => key !== "global").map(([key, label]) => (
+              <span key={key}><i style={{ backgroundColor: calendarColors[key] ?? calendarColors.global }} />{label}</span>
+            ))}
+          </div>
         )}
 
         {(surface === "contacts" || surface === "organizations") && (
@@ -1101,30 +1252,49 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
 
         {surface === "calendar" && (
           <div className="calendar-shell">
-            <DragAndDropCalendar
-              localizer={calendarLocalizer}
+            <FullCalendar
+              plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin, rrulePlugin]}
               events={calendarItems}
-              startAccessor="start"
-              endAccessor="end"
-              view={calendarView}
-              date={calendarDate}
-              views={[Views.MONTH, Views.WEEK, Views.DAY, Views.AGENDA]}
-              onView={(view) => setCalendarView(view)}
-              onNavigate={(date) => setCalendarDate(date)}
-              onSelectEvent={(event) => setSelectedId(event.id)}
-              onEventDrop={updateCalendarTiming}
-              onEventResize={updateCalendarTiming}
-              draggableAccessor={() => !busy}
-              resizableAccessor={() => !busy}
-              resizable
-              eventPropGetter={(event) => ({
-                className:
-                  event.resource.status === "done"
-                    ? "calendar-event-done"
-                    : event.resource.status === "archived"
-                      ? "calendar-event-archived"
-                      : "",
-              })}
+              initialView={window.innerWidth < 720 ? "timeGridDay" : "timeGridWeek"}
+              headerToolbar={{
+                left: "prev,next today",
+                center: "title",
+                right: "dayGridMonth,timeGridWeek,timeGridDay,listWeek",
+              }}
+              buttonText={{ today: "Today", month: "Month", week: "Week", day: "Day", list: "Agenda" }}
+              editable={!busy}
+              selectable={!busy}
+              selectMirror
+              nowIndicator
+              dayMaxEvents
+              allDaySlot
+              slotMinTime="06:00:00"
+              slotMaxTime="22:00:00"
+              scrollTime="08:00:00"
+              eventTimeFormat={{ hour: "numeric", minute: "2-digit", meridiem: "short" }}
+              slotLabelFormat={{ hour: "numeric", minute: "2-digit", meridiem: "short" }}
+              height="auto"
+              select={selectCalendarRange}
+              eventClick={(info) => {
+                setCreatingEvent(false);
+                setSelectedId(info.event.id);
+              }}
+              eventDrop={updateCalendarTiming}
+              eventResize={updateCalendarTiming}
+              eventClassNames={(info) => {
+                const item = info.event.extendedProps.resource as RoutedEvent | undefined;
+                return [
+                  item?.status === "done" ? "calendar-event-done" : "",
+                  item?.status === "archived" ? "calendar-event-archived" : "",
+                  item?.conflicts?.length ? "calendar-event-conflict" : "",
+                ].filter(Boolean);
+              }}
+              eventContent={(info) => (
+                <div className="calendar-event-content">
+                  <strong>{info.timeText}</strong>
+                  <span>{info.event.title}</span>
+                </div>
+              )}
             />
           </div>
         )}
@@ -1136,7 +1306,10 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               <button
                 className={item.id === selectedItem?.id ? "routed-object-row active" : "routed-object-row"}
                 key={item.id}
-                onClick={() => setSelectedId(item.id)}
+                onClick={() => {
+                  setCreatingEvent(false);
+                  setSelectedId(item.id);
+                }}
                 type="button"
               >
                 <CalendarDays size={18} />
@@ -1149,7 +1322,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           </div>
         )}
 
-        <div className="routed-object-list">
+        {surface !== "calendar" && <div className="routed-object-list">
           {visibleItems.map((item) => (
             <button
               className={item.id === selectedItem?.id ? "routed-object-row active" : "routed-object-row"}
@@ -1161,9 +1334,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               <span>
                 <strong>{routedObjectTitle(item)}</strong>
                 <small>
-                  {surface === "calendar" && "start_at" in item
-                    ? `${formatDateOnly(item.start_at)} / ${item.status}`
-                    : surface === "todos" && "due_at" in item
+                  {surface === "todos" && "due_at" in item
                       ? `${domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"} / ${item.status} / ${item.priority}`
                       : (surface === "contacts" || surface === "organizations") && "match_reasons" in item && item.match_reasons?.length
                         ? item.match_reasons.join(" / ")
@@ -1173,22 +1344,32 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             </button>
           ))}
           {visibleItems.length === 0 && <p className="empty-state">{config.empty}</p>}
-        </div>
+        </div>}
       </section>
 
       <section className="memory-panel routed-object-detail-panel" aria-labelledby={`${surface}-detail`}>
         <div className="section-heading">
           <div>
             <p className="eyebrow">Details</p>
-            <h3 id={`${surface}-detail`}>{selectedItem ? routedObjectTitle(selectedItem) : config.title}</h3>
+            <h3 id={`${surface}-detail`}>
+              {creatingEvent ? "New event" : selectedItem ? routedObjectTitle(selectedItem) : config.title}
+            </h3>
           </div>
           <Icon size={18} />
         </div>
 
-        {selectedItem ? (
+        {selectedItem || (surface === "calendar" && creatingEvent) ? (
           <div className="routed-object-detail">
-            {"attendees" in selectedItem && (
+            {surface === "calendar" && (creatingEvent || (selectedItem && "attendees" in selectedItem)) && (
               <>
+                <label>
+                  Calendar
+                  <select value={calendarDomainKey} onChange={(event) => setCalendarDomainKey(event.target.value)} disabled={!creatingEvent}>
+                    {Object.entries(domainLabels).filter(([key]) => key !== "global").map(([key, label]) => (
+                      <option key={key} value={key}>{label}</option>
+                    ))}
+                  </select>
+                </label>
                 <label>
                   Title
                   <input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} />
@@ -1200,29 +1381,104 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 <div className="two-column-fields">
                   <label>
                     Start
-                    <input value={draft.start_at ?? ""} onChange={(event) => updateDraft("start_at", event.target.value)} />
+                    <input type="datetime-local" value={draft.start_at ?? ""} onChange={(event) => updateDraft("start_at", event.target.value)} />
                   </label>
                   <label>
                     End
-                    <input value={draft.end_at ?? ""} onChange={(event) => updateDraft("end_at", event.target.value)} />
+                    <input type="datetime-local" value={draft.end_at ?? ""} onChange={(event) => updateDraft("end_at", event.target.value)} />
                   </label>
                 </div>
+                <div className="two-column-fields">
+                  <label>
+                    Timezone
+                    <select value={draft.timezone ?? "America/New_York"} onChange={(event) => updateDraft("timezone", event.target.value)}>
+                      <option value="America/New_York">Eastern</option>
+                      <option value="America/Chicago">Central</option>
+                      <option value="America/Denver">Mountain</option>
+                      <option value="America/Los_Angeles">Pacific</option>
+                      <option value="UTC">UTC</option>
+                    </select>
+                  </label>
+                  <label>
+                    Repeat
+                    <select value={draft.recurrence_rule ?? ""} onChange={(event) => updateDraft("recurrence_rule", event.target.value)}>
+                      <option value="">Does not repeat</option>
+                      <option value="FREQ=DAILY">Daily</option>
+                      <option value="FREQ=WEEKLY">Weekly</option>
+                      <option value="FREQ=MONTHLY">Monthly</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="toggle-row calendar-all-day">
+                  <input type="checkbox" checked={draft.all_day === "true"} onChange={(event) => updateDraft("all_day", event.target.checked ? "true" : "false")} />
+                  All day
+                </label>
                 <label>
                   Location
                   <input value={draft.location ?? ""} onChange={(event) => updateDraft("location", event.target.value)} />
                 </label>
                 <label>
-                  Status
-                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
+                  Meeting link
+                  <input value={draft.conferencing_url ?? ""} onChange={(event) => updateDraft("conferencing_url", event.target.value)} placeholder="Google Meet, Teams, or Zoom URL" />
                 </label>
-                <details>
-                  <summary>Attendees and supporting content</summary>
-                  <pre>{safeJson({ attendees: selectedItem.attendees, supporting_refs: selectedItem.supporting_refs })}</pre>
-                </details>
+                <label>
+                  Status
+                  <select value={draft.status ?? "scheduled"} onChange={(event) => updateDraft("status", event.target.value)}>
+                    <option value="scheduled">Scheduled</option>
+                    <option value="tentative">Tentative</option>
+                    <option value="done">Completed</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                </label>
+                <section className="calendar-link-editor">
+                  <h4>Attendees</h4>
+                  <select defaultValue="" onChange={(event) => { addCalendarAttendee(event.target.value); event.target.value = ""; }}>
+                    <option value="">Add a contact</option>
+                    {contactOptions.filter((contact) => !draftAttendees.some((attendee) => attendee.contact_id === contact.id)).map((contact) => (
+                      <option key={contact.id} value={contact.id}>{contact.name}{contact.email ? ` / ${contact.email}` : ""}</option>
+                    ))}
+                  </select>
+                  <div className="calendar-chip-list">
+                    {draftAttendees.map((attendee, index) => (
+                      <span className="calendar-chip" key={attendee.contact_id ?? `${attendee.name}-${index}`}>
+                        <Users size={14} /> {attendee.name}
+                        <button type="button" onClick={() => setDraftAttendees((current) => current.filter((_, itemIndex) => itemIndex !== index))} title={`Remove ${attendee.name}`}><X size={13} /></button>
+                      </span>
+                    ))}
+                  </div>
+                </section>
+                <section className="calendar-link-editor">
+                  <h4>Organizations</h4>
+                  <select defaultValue="" onChange={(event) => { addCalendarOrganization(event.target.value); event.target.value = ""; }}>
+                    <option value="">Link an organization</option>
+                    {organizationOptions.filter((organization) => !draftOrganizations.some((item) => item.id === organization.id)).map((organization) => (
+                      <option key={organization.id} value={organization.id}>{organization.name}</option>
+                    ))}
+                  </select>
+                  <div className="calendar-chip-list">
+                    {draftOrganizations.map((organization) => (
+                      <span className="calendar-chip organization" key={organization.id}>
+                        <Building2 size={14} /> {organization.name}
+                        <button type="button" onClick={() => setDraftOrganizations((current) => current.filter((item) => item.id !== organization.id))} title={`Remove ${organization.name}`}><X size={13} /></button>
+                      </span>
+                    ))}
+                  </div>
+                </section>
+                {selectedItem && "attendees" in selectedItem && selectedItem.conflicts.length > 0 && (
+                  <section className="calendar-conflicts">
+                    <h4><CircleAlert size={16} /> Scheduling conflicts</h4>
+                    {selectedItem.conflicts.map((conflict) => (
+                      <button type="button" key={conflict.id} onClick={() => setSelectedId(conflict.id)}>
+                        <strong>{conflict.title}</strong>
+                        <span>{formatDateTime(conflict.start_at)} / {domainLabels[conflict.domain_key ?? "global"] ?? conflict.domain_key}</span>
+                      </button>
+                    ))}
+                  </section>
+                )}
               </>
             )}
 
-            {"todo_type" in selectedItem && (
+            {selectedItem && "todo_type" in selectedItem && (
               <>
                 <label>
                   Title
@@ -1259,7 +1515,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               </>
             )}
 
-            {"email" in selectedItem && (
+            {selectedItem && "email" in selectedItem && (
               <>
                 <label>
                   Name
@@ -1326,6 +1582,17 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     ))}
                   </section>
                 )}
+                {selectedItem.upcoming_events.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>Upcoming meetings</h4>
+                    {selectedItem.upcoming_events.map((event) => (
+                      <div className="contact-evidence-row" key={event.id}>
+                        <strong>{event.title}</strong>
+                        <span>{formatDateTime(event.start_at)}{event.location ? ` / ${event.location}` : ""}</span>
+                      </div>
+                    ))}
+                  </section>
+                )}
                 {selectedItem.relationships.length > 0 && (
                   <section className="contact-intelligence-section">
                     <h4>Relationships</h4>
@@ -1357,7 +1624,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               </>
             )}
 
-            {"website" in selectedItem && !("email" in selectedItem) && (
+            {selectedItem && "website" in selectedItem && !("email" in selectedItem) && (
               <>
                 <label>
                   Name
@@ -1383,6 +1650,17 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   Status
                   <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
                 </label>
+                {selectedItem.identifiers.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>Identifiers</h4>
+                    {selectedItem.identifiers.map((identifier) => (
+                      <div className="contact-evidence-row" key={identifier.id}>
+                        <strong>{identifier.value}</strong>
+                        <span>{identifier.type.replace(/_/g, " ")}</span>
+                      </div>
+                    ))}
+                  </section>
+                )}
                 {selectedItem.contacts.length > 0 && (
                   <section className="contact-intelligence-section">
                     <h4>People</h4>
@@ -1402,6 +1680,29 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                         <strong>{interaction.contact_name} / {formatDateTime(interaction.occurred_at)}</strong>
                         <span>{[interaction.domain_key, interaction.channel, interaction.interaction_type].filter(Boolean).join(" / ")}</span>
                         <p>{interaction.summary}</p>
+                      </div>
+                    ))}
+                  </section>
+                )}
+                {selectedItem.relationships.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>Connected organizations</h4>
+                    {selectedItem.relationships.map((relationship) => (
+                      <div className="contact-evidence-row" key={relationship.id}>
+                        <strong>{relationship.organization}</strong>
+                        <span>{relationship.relationship_type.replace(/_/g, " ")} / {relationship.direction}</span>
+                        <p>{relationship.description}</p>
+                      </div>
+                    ))}
+                  </section>
+                )}
+                {selectedItem.events.length > 0 && (
+                  <section className="contact-intelligence-section">
+                    <h4>Calendar</h4>
+                    {selectedItem.events.map((event) => (
+                      <div className="contact-evidence-row" key={event.id}>
+                        <strong>{event.title}</strong>
+                        <span>{formatDateTime(event.start_at)} / {event.role}</span>
                       </div>
                     ))}
                   </section>
@@ -1432,7 +1733,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               </>
             )}
 
-            {"content" in selectedItem && (
+            {selectedItem && "content" in selectedItem && (
               <>
                 <label>
                   Title
@@ -1450,7 +1751,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             )}
 
             <div className="routed-detail-actions">
-              {(surface === "calendar" || surface === "todos" || surface === "ideas") && selectedItem.status !== "done" && (
+              {selectedItem && (surface === "calendar" || surface === "todos" || surface === "ideas") && selectedItem.status !== "done" && (
                 <button className="planner-action" onClick={markSelectedDone} disabled={busy}>
                   <CheckCircle2 size={16} />
                   Done
@@ -1459,13 +1760,15 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               <button className="planner-action" onClick={saveSelected} disabled={busy}>
                 Save
               </button>
-              <button className="danger-action" onClick={archiveSelected} disabled={busy}>
-                <Trash2 size={16} />
-                Archive
-              </button>
+              {selectedItem && (
+                <button className="danger-action" onClick={archiveSelected} disabled={busy}>
+                  <Trash2 size={16} />
+                  Archive
+                </button>
+              )}
             </div>
 
-            <div className="routed-object-meta">
+            {selectedItem && <div className="routed-object-meta">
               <div className="preview-meta">
                 <span>{domainLabels[routedObjectDomain(selectedItem) ?? "global"] ?? routedObjectDomain(selectedItem) ?? "Global"}</span>
                 <span>Created {formatDateTime(selectedItem.created_at)}</span>
@@ -1483,7 +1786,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 <summary>Source refs</summary>
                 <pre>{safeJson(selectedItem.source_refs)}</pre>
               </details>
-            </div>
+            </div>}
             <p className="memory-status">{statusMessage}</p>
           </div>
         ) : (
@@ -5822,7 +6125,7 @@ State exactly what the agent should produce. Include tool calls, routed candidat
 
 function MemoryWorkspace() {
   const [domains, setDomains] = useState<DropboxDomain[]>(dropboxDomainDefaults);
-  const [selectedDomain, setSelectedDomain] = useState("ophi");
+  const [selectedDomain, setSelectedDomain] = useState("perti-laboratories");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previews, setPreviews] = useState<MemoryPreview[]>([]);
   const [pending, setPending] = useState<PendingProposal[]>([]);

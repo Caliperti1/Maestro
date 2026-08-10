@@ -3,14 +3,15 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.time import home_isoformat
+from app.core.time import ensure_aware_utc, home_isoformat, home_timezone
 from app.db.models import (
     Artifact,
     CalendarEvent,
@@ -29,6 +30,7 @@ from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
+from app.memory.calendar_intelligence import CalendarIntelligenceService
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.contact_hydration import ContactHydrationError, ContactHydrationService
 from app.memory.dropbox import MemoryDropboxProcessor
@@ -76,6 +78,21 @@ class PromoteRoutedItemsRequest(BaseModel):
 
 class UpdateRoutedObjectRequest(BaseModel):
     updates: dict[str, Any]
+
+
+class CreateCalendarEventRequest(BaseModel):
+    domain_key: str
+    title: str = Field(min_length=1, max_length=240)
+    summary: str | None = None
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    timezone: str = "America/New_York"
+    all_day: bool = False
+    recurrence_rule: str | None = None
+    location: str | None = None
+    conferencing_url: str | None = None
+    attendees: list[dict[str, Any]] = Field(default_factory=list)
+    organizations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MergeContactRequest(BaseModel):
@@ -311,6 +328,7 @@ def run_routed_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
     report = RoutedHygieneService(db).run_once()
     return {
         "aliases_backfilled": report.aliases_backfilled,
+        "organization_identifiers_backfilled": report.organization_identifiers_backfilled,
         "aliases_pruned": report.aliases_pruned,
         "display_fields_canonicalized": report.display_fields_canonicalized,
         "duplicates_merged": report.duplicates_merged,
@@ -322,7 +340,9 @@ def run_routed_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
 def list_calendar_events(
     domain_key: str | None = None,
     status: str | None = None,
-    limit: int = 50,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    limit: int = Query(default=500, ge=1, le=2000),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
@@ -332,8 +352,56 @@ def list_calendar_events(
         query = query.where(CalendarEvent.domain_id == domain_id)
     if status is not None:
         query = query.where(CalendarEvent.status == status)
+    if start_at is not None:
+        query = query.where(or_(CalendarEvent.end_at.is_(None), CalendarEvent.end_at >= start_at))
+    if end_at is not None:
+        query = query.where(CalendarEvent.start_at < end_at)
     events = db.scalars(query.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(limit)).all()
+    calendar = CalendarIntelligenceService(db)
+    for event in events:
+        calendar.ensure_links(event)
+    db.commit()
     return {"events": [_calendar_event_payload(db, event) for event in events]}
+
+
+@router.post("/routed-objects/events")
+def create_calendar_event(
+    body: CreateCalendarEventRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, body.domain_key)
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="Event title cannot be empty.")
+    start_at = _ensure_aware(body.start_at)
+    end_at = _ensure_aware(body.end_at)
+    _validate_calendar_window(start_at, end_at, body.timezone)
+    event = CalendarEvent(
+        domain_id=domain_id,
+        title=title,
+        summary=body.summary,
+        start_at=start_at,
+        end_at=end_at,
+        timezone=body.timezone,
+        all_day=body.all_day,
+        recurrence_rule=body.recurrence_rule,
+        location=body.location,
+        conferencing_url=body.conferencing_url,
+        attendees=[],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={"source": "maestro_calendar_ui"},
+        status="scheduled",
+        metadata_={"created_in_ui": True},
+    )
+    db.add(event)
+    db.flush()
+    calendar = CalendarIntelligenceService(db)
+    calendar.replace_attendees(event, body.attendees, commit=False)
+    calendar.replace_organizations(event, body.organizations, commit=False)
+    db.commit()
+    db.refresh(event)
+    return {"event": _calendar_event_payload(db, event)}
 
 
 @router.patch("/routed-objects/events/{event_id}")
@@ -342,6 +410,15 @@ def update_calendar_event(
     body: UpdateRoutedObjectRequest,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    if "title" in body.updates and not str(body.updates.get("title") or "").strip():
+        raise HTTPException(status_code=422, detail="Event title cannot be empty.")
+    current = db.get(CalendarEvent, event_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    proposed_start = _coerce_calendar_datetime(body.updates.get("start_at")) if "start_at" in body.updates else current.start_at
+    proposed_end = _coerce_calendar_datetime(body.updates.get("end_at")) if "end_at" in body.updates else current.end_at
+    proposed_timezone = str(body.updates.get("timezone") or current.timezone)
+    _validate_calendar_window(proposed_start, proposed_end, proposed_timezone)
     try:
         event = RoutedEditService(db).update_event(event_id, body.updates)
     except ValueError as exc:
@@ -1113,22 +1190,43 @@ def _routed_item_payload(db: Session, item: RoutedItem) -> dict[str, Any]:
 
 
 def _calendar_event_payload(db: Session, event: CalendarEvent) -> dict[str, Any]:
-    return {
-        "id": str(event.id),
-        "domain_key": _domain_key_for_id(db, event.domain_id),
-        "title": event.title,
-        "summary": event.summary,
-        "start_at": home_isoformat(event.start_at),
-        "end_at": home_isoformat(event.end_at),
-        "location": event.location,
-        "attendees": event.attendees,
-        "supporting_refs": event.supporting_refs,
-        "source_refs": event.source_refs,
-        "provenance": event.provenance,
-        "status": event.status,
-        "metadata": event.metadata_,
-        "created_at": event.created_at.isoformat() if event.created_at else None,
-    }
+    return CalendarIntelligenceService(db).event_payload(event)
+
+
+def _ensure_aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=home_timezone())
+
+
+def _coerce_calendar_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return _ensure_aware(value)
+    if isinstance(value, str):
+        try:
+            return _ensure_aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Expected an ISO calendar date/time.") from exc
+    raise HTTPException(status_code=422, detail="Expected an ISO calendar date/time.")
+
+
+def _validate_calendar_window(
+    start_at: datetime | None,
+    end_at: datetime | None,
+    timezone_name: str,
+) -> None:
+    try:
+        ZoneInfo(timezone_name)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Unknown timezone: {timezone_name}") from exc
+    if (
+        start_at is not None
+        and end_at is not None
+        and ensure_aware_utc(end_at) <= ensure_aware_utc(start_at)
+    ):
+        raise HTTPException(status_code=422, detail="Event end must be after its start.")
 
 
 def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:

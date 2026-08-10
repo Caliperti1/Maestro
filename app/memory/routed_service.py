@@ -34,13 +34,16 @@ from app.db.models import (
     EntityDomainNote,
     Idea,
     OrganizationAlias,
+    OrganizationIdentifier,
+    OrganizationRelationship,
     RoutedItem,
     RoutedObjectChangeLog,
     RoutedObjectLink,
     Todo,
 )
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
-from app.memory.organization_intelligence import OrganizationEmbeddingService
+from app.memory.calendar_intelligence import CalendarIntelligenceService
+from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
 from app.memory.routed_resolver import (
     RoutedObjectResolver,
     contact_aliases_for,
@@ -163,11 +166,33 @@ class RoutedMemoryService:
                 ContactIntelligenceService(self.session).contact_payload(item, domain_id=domain_id)
                 for item in self._contacts(domain_id, query, limit)
             ]
+        organization_service = OrganizationIntelligenceService(self.session)
+        if query:
+            organization_results = organization_service.search(
+                query_text or "",
+                domain_id=domain_id,
+                limit=limit,
+            )
+            organizations = [
+                {
+                    **result.payload,
+                    "retrieval_score": result.score,
+                    "match_reasons": result.match_reasons,
+                    "semantic_similarity": result.semantic_similarity,
+                }
+                for result in organization_results
+            ]
+        else:
+            organizations = [
+                organization_service.organization_payload(item, domain_id=domain_id)
+                for item in self._entities(domain_id, query, limit)
+            ]
+        calendar = CalendarIntelligenceService(self.session)
         return {
-            "events": [self._event_payload(item) for item in self._events(domain_id, query, limit)],
+            "events": [calendar.event_payload(item) for item in self._events(domain_id, query, limit)],
             "todos": [self._todo_payload(item) for item in self._todos(domain_id, query, limit)],
             "contacts": contacts,
-            "entities": [self._entity_payload(item) for item in self._entities(domain_id, query, limit)],
+            "entities": organizations,
             "ideas": [self._idea_payload(item) for item in self._ideas(domain_id, query, limit)],
             "decisions": [self._decision_payload(item) for item in self._decisions(domain_id, query, limit)],
         }
@@ -223,7 +248,13 @@ class RoutedMemoryService:
                 summary=_event_summary_from_item(item),
                 start_at=start_at,
                 end_at=_datetime_from_metadata(item.metadata_, "end_at"),
+                timezone=_string_from_metadata(item.metadata_, "timezone") or "America/New_York",
+                all_day=bool((item.metadata_ or {}).get("all_day", False)),
+                recurrence_rule=_string_from_metadata(item.metadata_, "recurrence_rule"),
                 location=_string_from_metadata(item.metadata_, "location"),
+                conferencing_url=_string_from_metadata(item.metadata_, "conferencing_url"),
+                organizer_name=_string_from_metadata(item.metadata_, "organizer_name"),
+                organizer_email=_string_from_metadata(item.metadata_, "organizer_email"),
                 attendees=attendees,
                 supporting_refs=item.source_refs,
                 source_refs=item.source_refs,
@@ -242,9 +273,18 @@ class RoutedMemoryService:
             event.metadata_ = {**(event.metadata_ or {}), **self._canonical_metadata(item)}
             if start_at and not event.start_at:
                 event.start_at = start_at
+            end_at = _datetime_from_metadata(item.metadata_, "end_at")
+            if end_at and not event.end_at:
+                event.end_at = end_at
             if not event.location:
                 event.location = _string_from_metadata(item.metadata_, "location")
             event.attendees = _merge_attendees(event.attendees, attendees)
+        calendar = CalendarIntelligenceService(self.session)
+        calendar.replace_attendees(event, event.attendees, commit=False)
+        organizations = (item.metadata_ or {}).get("organizations") or []
+        if organizations:
+            calendar.replace_organizations(event, organizations, commit=False)
+        calendar.materialize_contact_interactions(event, commit=False)
         return self._link(item, "event", event.id, action)
 
     def _find_matching_event(
@@ -403,6 +443,7 @@ class RoutedMemoryService:
         entity = self._upsert_entity(_entity_name_from_item(item), item)
         self._upsert_entity_domain_note(entity, item)
         self._upsert_organization_aliases(entity, item)
+        self._upsert_organization_relationships(entity, item)
         embedding_status = OrganizationEmbeddingService(self.session).upsert(entity)
         entity.metadata_ = {**(entity.metadata_ or {}), "embedding_status": embedding_status}
         return self._link(item, "entity", entity.id, "upserted")
@@ -438,6 +479,7 @@ class RoutedMemoryService:
     def _upsert_entity(self, name: str, item: RoutedItem) -> Entity:
         name = _organization_name_from_identifier(name)
         normalized = _normalize_key(name)
+        identifiers = _organization_identifiers_from_item(item)
         resolution_action = (
             _string_from_metadata(item.metadata_, "resolution_action")
             if item.route_type in {"entity", "organization"}
@@ -452,6 +494,21 @@ class RoutedMemoryService:
             entity = self.session.get(Entity, existing_object_id)
             if entity is None:
                 raise ValueError("Explicit organization update target was not found.")
+        elif identifiers:
+            identifier = self.session.scalar(
+                select(OrganizationIdentifier).where(
+                    or_(
+                        *(
+                            (OrganizationIdentifier.identifier_type == identifier_type)
+                            & (OrganizationIdentifier.normalized_value == normalized_value)
+                            for identifier_type, _, normalized_value in identifiers
+                        )
+                    )
+                )
+            )
+            entity = self.session.get(Entity, identifier.entity_id) if identifier is not None else None
+            if entity is None:
+                entity = self.session.scalar(select(Entity).where(Entity.normalized_name == normalized))
         else:
             entity = self.session.scalar(select(Entity).where(Entity.normalized_name == normalized))
         if entity is None:
@@ -471,7 +528,33 @@ class RoutedMemoryService:
             entity.summary = _append_note(entity.summary, item.content)
             entity.source_refs = _merge_source_refs(entity.source_refs, item.source_refs)
             entity.metadata_ = {**(entity.metadata_ or {}), **self._canonical_metadata(item)}
+        self._upsert_organization_identifiers(entity, identifiers, item)
         return entity
+
+    def _upsert_organization_identifiers(
+        self,
+        entity: Entity,
+        identifiers: list[tuple[str, str, str]],
+        item: RoutedItem,
+    ) -> None:
+        for identifier_type, value, normalized_value in identifiers:
+            existing = self.session.scalar(
+                select(OrganizationIdentifier).where(
+                    OrganizationIdentifier.identifier_type == identifier_type,
+                    OrganizationIdentifier.normalized_value == normalized_value,
+                )
+            )
+            if existing is None:
+                self.session.add(
+                    OrganizationIdentifier(
+                        entity_id=entity.id,
+                        identifier_type=identifier_type,
+                        value=value,
+                        normalized_value=normalized_value,
+                        source_refs=item.source_refs,
+                        metadata_={"routed_item_id": str(item.id)},
+                    )
+                )
 
     def _upsert_organization_aliases(self, entity: Entity, item: RoutedItem) -> None:
         aliases = {entity.name}
@@ -496,6 +579,59 @@ class RoutedMemoryService:
                         metadata_={"routed_item_id": str(item.id)},
                     )
                 )
+
+    def _upsert_organization_relationships(self, entity: Entity, item: RoutedItem) -> None:
+        metadata = item.metadata_ or {}
+        raw_relationships = metadata.get("relationships") or []
+        if not isinstance(raw_relationships, list):
+            return
+        for raw in raw_relationships:
+            if not isinstance(raw, dict):
+                continue
+            related_name = str(raw.get("organization") or raw.get("name") or "").strip()
+            related_id = _uuid_from_value(raw.get("organization_id") or raw.get("related_entity_id"))
+            related = self.session.get(Entity, related_id) if related_id else None
+            if related is None and related_name:
+                related = self._find_organization_by_name_or_alias(related_name)
+            if related is None or related.id == entity.id:
+                continue
+            relationship_type = str(raw.get("relationship_type") or "associated_with").strip()
+            existing = self.session.scalar(
+                select(OrganizationRelationship).where(
+                    OrganizationRelationship.entity_id == entity.id,
+                    OrganizationRelationship.related_entity_id == related.id,
+                    OrganizationRelationship.domain_id == item.domain_id,
+                    OrganizationRelationship.relationship_type == relationship_type,
+                )
+            )
+            if existing is None:
+                self.session.add(
+                    OrganizationRelationship(
+                        entity_id=entity.id,
+                        related_entity_id=related.id,
+                        domain_id=item.domain_id,
+                        relationship_type=relationship_type,
+                        description=str(raw.get("description") or ""),
+                        confidence=float(raw.get("confidence") or 0.8),
+                        source_refs=item.source_refs,
+                        metadata_={"routed_item_id": str(item.id)},
+                    )
+                )
+            else:
+                existing.description = existing.description or str(raw.get("description") or "")
+                existing.source_refs = _merge_source_refs(existing.source_refs, item.source_refs)
+
+    def _find_organization_by_name_or_alias(self, name: str) -> Entity | None:
+        normalized = _normalize_key(name)
+        entity = self.session.scalar(
+            select(Entity).where(Entity.normalized_name == normalized, Entity.status != "archived")
+        )
+        if entity is not None:
+            return entity
+        alias = self.session.scalar(
+            select(OrganizationAlias).where(OrganizationAlias.normalized_alias == normalized)
+        )
+        return self.session.get(Entity, alias.entity_id) if alias is not None else None
 
     def _upsert_contact_domain_note(self, contact: Contact, item: RoutedItem) -> None:
         note = self.session.scalar(
@@ -1375,6 +1511,37 @@ def _organization_name_from_identifier(name: str) -> str:
     return " ".join(word.upper() if len(word) <= 3 else word.capitalize() for word in words) or cleaned
 
 
+def _organization_identifiers_from_item(item: RoutedItem) -> list[tuple[str, str, str]]:
+    metadata = item.metadata_ or {}
+    raw_values: list[tuple[str, str]] = []
+    for key, identifier_type in (
+        ("website", "website"),
+        ("email_domain", "email_domain"),
+        ("sender_email_domain", "email_domain"),
+        ("domain", "web_domain"),
+    ):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            raw_values.append((identifier_type, value))
+    website = str(metadata.get("website") or "").strip()
+    if website:
+        host = website.lower().removeprefix("https://").removeprefix("http://").split("/", 1)[0]
+        host = host.removeprefix("www.")
+        if host:
+            raw_values.append(("web_domain", host))
+    identifiers: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for identifier_type, value in raw_values:
+        normalized = value.strip().lower().rstrip("/")
+        if identifier_type in {"email_domain", "web_domain"}:
+            normalized = normalized.removeprefix("www.")
+        key = (identifier_type, normalized)
+        if normalized and key not in seen:
+            identifiers.append((identifier_type, value, normalized))
+            seen.add(key)
+    return identifiers
+
+
 def _datetime_from_metadata(metadata: dict[str, Any], key: str) -> datetime | None:
     value = metadata.get(key)
     if not value:
@@ -1508,6 +1675,15 @@ def _uuid_from_metadata(metadata: dict[str, Any], key: str) -> uuid.UUID | None:
     try:
         return uuid.UUID(str(value))
     except ValueError:
+        return None
+
+
+def _uuid_from_value(value: Any) -> uuid.UUID | None:
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError):
         return None
 
 

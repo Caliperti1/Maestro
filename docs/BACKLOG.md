@@ -11,7 +11,7 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Maestro web UI is reachable from a phone while the Mac is running.
 - User can chat with Maestro from the web UI.
 - System persists users, domains, agents, conversations, tasks, reports, artifacts, tool calls, and memory in Postgres.
-- Default domains exist: Personal, Maestro Development, Praxis, Ophi, USMA, Personal IRAD Projects, and L3.
+- Default domains exist: Personal, Maestro Development, Praxis, Perti Laboratories, USMA, and L3.
 - Domain agents can produce task logs and reports.
 - Agents can propose memory, and the Memory Curator can auto-write low-impact canonical memory.
 - Very high-impact memory can be queued for user approval.
@@ -119,7 +119,7 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Add Alembic config.
 - Add local Postgres setup instructions.
 - Apply initial migration.
-- Seed default domains: Personal, Maestro Development, Praxis, Ophi, USMA, Personal IRAD Projects, L3.
+- Seed default domains: Personal, Maestro Development, Praxis, Perti Laboratories, USMA, L3.
 
 ### 2.2 Core repositories
 
@@ -309,9 +309,9 @@ Each domain brief should return:
 - Personal Chief of Staff stub.
 - Maestro Development CTO/Introspection stub.
 - Praxis CGO/CTO stub.
-- Ophi Research/Product stub.
+- Perti Laboratories Research/Product stub.
 - USMA Teaching/Admin stub.
-- Personal IRAD Project stub.
+- Perti Laboratories project scaffolding stub.
 - L3 stub.
 
 ### 6.4 Standup interaction loop
@@ -426,7 +426,7 @@ Each domain brief should return:
 
 - Completed: add a persisted Gmail History poller that emits idempotent exact-message events,
   exposes health/reset controls, and supports replay with the original event payload.
-- Add per-domain email workflow templates so Praxis, Ophi, Maestro Development, and Personal can
+- Add per-domain email workflow templates so Praxis, Perti Laboratories, Maestro Development, and Personal can
   reuse the same triage pattern with different credentials, skills, and notification policies.
 - Add domain policy controls for safe autonomous email writes such as marking obvious spam read.
 

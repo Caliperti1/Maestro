@@ -62,7 +62,7 @@ PUT /agents/tools/connections
 
 Tool connections are domain-scoped. Agents receive permission to use a shared tool, then the
 runtime resolves the matching domain tool connection when it builds the tool manifest. For example,
-the Gmail read tool should be one shared capability, while Praxis, Ophi, and Personal each have
+the Gmail read tool should be one shared capability, while Praxis, Perti Laboratories, and Personal each have
 their own Gmail credential/config connection. Secret-like config keys such as `api_key`, `token`,
 `secret`, and `password` are redacted in API responses. This is still an MVP scaffold; a hardened
 local secret store or keychain integration should replace raw database storage before sensitive
@@ -134,7 +134,7 @@ Expected:
 - assembled prompt includes Praxis domain context
 - assembled prompt includes the Praxis agent role prompt
 - memory context is scoped to Praxis
-- unrelated Ophi/L3 domain context is absent
+- unrelated Perti Laboratories/L3 domain context is absent
 - tool manifest only includes tools allowed for the agent
 
 ### Run Once

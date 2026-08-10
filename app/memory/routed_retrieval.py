@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.time import home_timezone
@@ -16,9 +16,12 @@ from app.db.models import (
     Entity,
     Idea,
     OrganizationAlias,
+    OrganizationIdentifier,
+    OrganizationRelationship,
     Todo,
 )
 from app.memory.routed_hygiene import RoutedHygieneService
+from app.memory.calendar_intelligence import CalendarIntelligenceService
 from app.memory.routed_resolver import contact_aliases_for
 from app.memory.routed_service import RoutedMemoryService
 
@@ -186,14 +189,32 @@ class RoutedEditService:
         event = self.session.get(CalendarEvent, event_id)
         if event is None:
             raise ValueError("Event not found.")
-        for key in ("title", "summary", "location", "status"):
+        for key in (
+            "title",
+            "summary",
+            "location",
+            "status",
+            "timezone",
+            "recurrence_rule",
+            "conferencing_url",
+            "organizer_name",
+            "organizer_email",
+        ):
             if key in updates:
                 setattr(event, key, updates[key])
+        if "all_day" in updates:
+            event.all_day = bool(updates["all_day"])
         for key in ("start_at", "end_at"):
             if key in updates:
                 setattr(event, key, _parse_optional_datetime(updates[key]))
         if "metadata" in updates and isinstance(updates["metadata"], dict):
             event.metadata_ = {**(event.metadata_ or {}), **updates["metadata"]}
+        calendar = CalendarIntelligenceService(self.session)
+        if "attendees" in updates:
+            calendar.replace_attendees(event, updates["attendees"], commit=False)
+        if "organizations" in updates:
+            calendar.replace_organizations(event, updates["organizations"], commit=False)
+        calendar.materialize_contact_interactions(event, commit=False)
         self.session.commit()
         self.session.refresh(event)
         return event
@@ -225,11 +246,82 @@ class RoutedEditService:
                 setattr(entity, key, updates[key])
         if "aliases" in updates:
             self._replace_organization_aliases(entity, updates["aliases"])
+        if "identifiers" in updates:
+            self._replace_organization_identifiers(entity, updates["identifiers"])
+        if "relationships" in updates:
+            self._replace_organization_relationships(entity, updates["relationships"])
         if "metadata" in updates and isinstance(updates["metadata"], dict):
             entity.metadata_ = {**(entity.metadata_ or {}), **updates["metadata"]}
         self.session.commit()
         self.session.refresh(entity)
         return entity
+
+    def _replace_organization_identifiers(self, entity: Entity, values: Any) -> None:
+        rows = values if isinstance(values, list) else []
+        requested: dict[tuple[str, str], tuple[str, str]] = {}
+        for raw in rows:
+            data = raw if isinstance(raw, dict) else {"type": "other", "value": str(raw)}
+            identifier_type = str(data.get("type") or data.get("identifier_type") or "other").strip()
+            value = str(data.get("value") or "").strip()
+            normalized = _normalize_identifier(identifier_type, value)
+            if value and normalized:
+                requested[(identifier_type, normalized)] = (identifier_type, value)
+        existing_rows = self.session.scalars(
+            select(OrganizationIdentifier).where(OrganizationIdentifier.entity_id == entity.id)
+        ).all()
+        for row in existing_rows:
+            if (row.identifier_type, row.normalized_value) not in requested:
+                self.session.delete(row)
+        for (identifier_type, normalized), (_, value) in requested.items():
+            conflict = self.session.scalar(
+                select(OrganizationIdentifier).where(
+                    OrganizationIdentifier.identifier_type == identifier_type,
+                    OrganizationIdentifier.normalized_value == normalized,
+                )
+            )
+            if conflict is not None and conflict.entity_id != entity.id:
+                raise ValueError(f"{identifier_type} '{value}' belongs to another organization.")
+            if conflict is None:
+                self.session.add(
+                    OrganizationIdentifier(
+                        entity_id=entity.id,
+                        identifier_type=identifier_type,
+                        value=value,
+                        normalized_value=normalized,
+                        source_refs=[],
+                        metadata_={"edited_in_ui": True},
+                    )
+                )
+
+    def _replace_organization_relationships(self, entity: Entity, values: Any) -> None:
+        rows = values if isinstance(values, list) else []
+        self.session.execute(
+            delete(OrganizationRelationship).where(OrganizationRelationship.entity_id == entity.id)
+        )
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            related_id = raw.get("organization_id") or raw.get("related_entity_id")
+            if not related_id:
+                continue
+            try:
+                related_uuid = uuid.UUID(str(related_id))
+            except ValueError:
+                continue
+            if related_uuid == entity.id or self.session.get(Entity, related_uuid) is None:
+                continue
+            self.session.add(
+                OrganizationRelationship(
+                    entity_id=entity.id,
+                    related_entity_id=related_uuid,
+                    domain_id=_uuid_or_none(raw.get("domain_id")),
+                    relationship_type=str(raw.get("relationship_type") or "associated_with"),
+                    description=str(raw.get("description") or ""),
+                    confidence=float(raw.get("confidence") or 0.8),
+                    source_refs=[],
+                    metadata_={"edited_in_ui": True},
+                )
+            )
 
     def _replace_organization_aliases(self, entity: Entity, aliases: Any) -> None:
         requested = [str(value).strip() for value in (aliases or []) if str(value).strip()]
@@ -304,6 +396,22 @@ def _parse_optional_datetime(value: Any) -> datetime | None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=home_timezone())
     raise ValueError("Expected an ISO datetime string.")
+
+
+def _normalize_identifier(identifier_type: str, value: str) -> str:
+    normalized = value.strip().lower().rstrip("/")
+    if identifier_type in {"email_domain", "web_domain"}:
+        normalized = normalized.removeprefix("www.")
+    return normalized
+
+
+def _uuid_or_none(value: Any) -> uuid.UUID | None:
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        return None
 
 
 def _alias_values(value: Any) -> list[str]:

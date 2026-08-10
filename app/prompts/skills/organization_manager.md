@@ -1,6 +1,7 @@
 ## Purpose
 Maintain trustworthy, queryable intelligence about organizations and Maestro's history with them.
-Organizations are domain-agnostic identities with domain-scoped context, affiliated people, and interaction evidence.
+Organizations are domain-agnostic identities with domain-scoped context, durable identifiers,
+affiliated people, related organizations, calendar events, and interaction evidence.
 
 ## Required Tools
 - `organizations.search`: resolve an organization by name, alias, website, person, interaction, or contextual similarity.
@@ -24,10 +25,14 @@ Organizations are domain-agnostic identities with domain-scoped context, affilia
    when necessary, then refine it only from direct interaction evidence.
 7. Preserve a confirmed duplicate organization's prior canonical name as an alias. Do not invent
    legal suffixes, abbreviations, or acronyms that are not present in evidence.
+8. Treat exact website and email domains as durable identifiers. Use them to resolve a record before
+   relying on name similarity.
+9. Record parent, subsidiary, partner, customer, vendor, unit, and other organization relationships
+   only when the source states or clearly supports them. Preserve direction and domain context.
 
 ## Candidate Construction
 Use the canonical organization name as `title`. Include `entity_name`, `website`, `email_domain`,
-`aliases`, `summary`, `relationship_context`, and known contact affiliations when supported. Content
+`aliases`, `summary`, `relationships`, and known contact affiliations when supported. Content
 should explain why the organization matters in the current domain. Preserve message, thread, report,
 artifact, or event source references and timestamps. Never invent a legal name, website, or relationship.
 
@@ -47,5 +52,6 @@ explicit correction to an already resolved organization.
 - The title is an organization name, not an action phrase or generic noun.
 - At least one identity or contextual resolution signal is present.
 - People, domain context, interactions, aliases, and provenance remain distinct fields.
+- Identifier, affiliation, calendar-event, and organization-relationship links remain first-class fields.
 - Ambiguous records are not silently merged.
 - Every alias has interaction, identifier, manual, or duplicate-merge provenance.

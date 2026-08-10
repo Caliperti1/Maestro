@@ -47,7 +47,7 @@ def test_list_agents_returns_seeded_runtime_specs(session: Session, tmp_path: Pa
 def test_prompt_package_endpoint_returns_scoped_prompt(session: Session, tmp_path: Path) -> None:
     seed_default_domains(session)
     praxis = DomainRepository(session).get_by_key("praxis")
-    ophi = DomainRepository(session).get_by_key("ophi")
+    ophi = DomainRepository(session).get_by_key("perti-laboratories")
     assert praxis is not None
     assert ophi is not None
     session.add_all(
@@ -66,7 +66,7 @@ def test_prompt_package_endpoint_returns_scoped_prompt(session: Session, tmp_pat
                 scope="domain",
                 domain_id=ophi.id,
                 memory_type="fact",
-                title="Ophi unrelated context",
+                title="Perti Laboratories unrelated context",
                 content="This must not leak into Praxis prompt packages.",
                 impact_level="medium",
                 importance=1.0,
@@ -90,7 +90,7 @@ def test_prompt_package_endpoint_returns_scoped_prompt(session: Session, tmp_pat
     payload = response.json()["prompt_package"]
     assert payload["agent"]["domain_key"] == "praxis"
     assert "Praxis partner call" in payload["assembled_prompt"]
-    assert "Ophi unrelated context" not in payload["assembled_prompt"]
+    assert "Perti Laboratories unrelated context" not in payload["assembled_prompt"]
     assert payload["memory_context"]["included_count"] >= 1
 
 

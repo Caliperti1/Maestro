@@ -2758,7 +2758,7 @@ def test_maestro_api_respond_treats_standalone_followup_as_new_workflow(
         "/maestro/respond",
         json={
             "active_plan_id": first_plan["parent_task_id"],
-            "message": "Prepare an Ophi research workflow.",
+            "message": "Prepare an Perti Laboratories research workflow.",
         },
     )
 
@@ -2783,7 +2783,7 @@ def test_maestro_api_respond_deletes_active_workflow_instead_of_refining(
     first_plan = first_response.json()["plan"]
     second_response = client.post(
         "/maestro/respond",
-        json={"message": "Prepare an Ophi research workflow."},
+        json={"message": "Prepare an Perti Laboratories research workflow."},
     )
     second_plan = second_response.json()["plan"]
 

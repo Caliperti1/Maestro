@@ -6,10 +6,12 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import case, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    CalendarEvent,
+    CalendarEventOrganization,
     Contact,
     ContactInteraction,
     ContactOrganizationAffiliation,
@@ -18,6 +20,8 @@ from app.db.models import (
     EntityDomainNote,
     OrganizationAlias,
     OrganizationEmbedding,
+    OrganizationIdentifier,
+    OrganizationRelationship,
 )
 from app.memory.contact_intelligence import _cosine_similarity
 from app.memory.embeddings import EmbeddingClient, build_embedding_client
@@ -137,6 +141,13 @@ class OrganizationIntelligenceService:
                 .order_by(OrganizationAlias.source.desc(), OrganizationAlias.normalized_alias)
             )
         )
+        identifiers = list(
+            self.session.scalars(
+                select(OrganizationIdentifier)
+                .where(OrganizationIdentifier.entity_id == organization.id)
+                .order_by(OrganizationIdentifier.identifier_type, OrganizationIdentifier.normalized_value)
+            )
+        )
         note_statement = select(EntityDomainNote, Domain).join(
             Domain, Domain.id == EntityDomainNote.domain_id, isouter=True
         ).where(EntityDomainNote.entity_id == organization.id)
@@ -177,6 +188,50 @@ class OrganizationIntelligenceService:
                     interaction_statement.order_by(ContactInteraction.occurred_at.desc()).limit(interaction_limit)
                 ).all()
             )
+        relationship_statement = (
+            select(OrganizationRelationship, Entity, Domain)
+            .join(
+                Entity,
+                Entity.id
+                == case(
+                    (
+                        OrganizationRelationship.entity_id == organization.id,
+                        OrganizationRelationship.related_entity_id,
+                    ),
+                    else_=OrganizationRelationship.entity_id,
+                ),
+            )
+            .join(Domain, Domain.id == OrganizationRelationship.domain_id, isouter=True)
+            .where(
+                or_(
+                    OrganizationRelationship.entity_id == organization.id,
+                    OrganizationRelationship.related_entity_id == organization.id,
+                ),
+                OrganizationRelationship.status == "active",
+            )
+        )
+        if domain_id is not None:
+            relationship_statement = relationship_statement.where(
+                or_(
+                    OrganizationRelationship.domain_id == domain_id,
+                    OrganizationRelationship.domain_id.is_(None),
+                )
+            )
+        relationship_rows = self.session.execute(relationship_statement).all()
+        event_statement = (
+            select(CalendarEventOrganization, CalendarEvent, Domain)
+            .join(CalendarEvent, CalendarEvent.id == CalendarEventOrganization.event_id)
+            .join(Domain, Domain.id == CalendarEvent.domain_id, isouter=True)
+            .where(
+                CalendarEventOrganization.entity_id == organization.id,
+                CalendarEvent.status.notin_(["archived", "cancelled"]),
+            )
+        )
+        if domain_id is not None:
+            event_statement = event_statement.where(CalendarEvent.domain_id == domain_id)
+        events = self.session.execute(
+            event_statement.order_by(CalendarEvent.start_at.desc()).limit(20)
+        ).all()
         return {
             "id": str(organization.id),
             "name": organization.name,
@@ -190,6 +245,14 @@ class OrganizationIntelligenceService:
             "alias_records": [
                 {"id": str(alias.id), "alias": alias.alias, "source": alias.source}
                 for alias in aliases
+            ],
+            "identifiers": [
+                {
+                    "id": str(identifier.id),
+                    "type": identifier.identifier_type,
+                    "value": identifier.value,
+                }
+                for identifier in identifiers
             ],
             "domain_notes": [
                 {
@@ -225,6 +288,30 @@ class OrganizationIntelligenceService:
                 }
                 for interaction, contact, domain in interactions
             ],
+            "relationships": [
+                {
+                    "id": str(relationship.id),
+                    "organization_id": str(related.id),
+                    "organization": related.name,
+                    "domain_key": domain.key if domain else None,
+                    "relationship_type": relationship.relationship_type,
+                    "description": relationship.description,
+                    "confidence": relationship.confidence,
+                    "direction": "outbound" if relationship.entity_id == organization.id else "inbound",
+                }
+                for relationship, related, domain in relationship_rows
+            ],
+            "events": [
+                {
+                    "id": str(event.id),
+                    "title": event.title,
+                    "domain_key": domain.key if domain else None,
+                    "start_at": event.start_at.isoformat() if event.start_at else None,
+                    "status": event.status,
+                    "role": link.role,
+                }
+                for link, event, domain in events
+            ],
             "created_at": organization.created_at.isoformat() if organization.created_at else None,
         }
 
@@ -244,6 +331,27 @@ class OrganizationIntelligenceService:
                 )
             )
         )
+        visible_ids.update(
+            self.session.scalars(
+                select(CalendarEventOrganization.entity_id)
+                .join(CalendarEvent, CalendarEvent.id == CalendarEventOrganization.event_id)
+                .where(CalendarEvent.domain_id == domain_id)
+            )
+        )
+        visible_ids.update(
+            self.session.scalars(
+                select(OrganizationRelationship.entity_id).where(
+                    OrganizationRelationship.domain_id == domain_id
+                )
+            )
+        )
+        visible_ids.update(
+            self.session.scalars(
+                select(OrganizationRelationship.related_entity_id).where(
+                    OrganizationRelationship.domain_id == domain_id
+                )
+            )
+        )
         return list(self.session.scalars(statement.where(Entity.id.in_(visible_ids))).all()) if visible_ids else []
 
     def _score(
@@ -257,7 +365,12 @@ class OrganizationIntelligenceService:
         if not query:
             return OrganizationSearchResult(organization, 0.5, ["recent organization"], semantic_similarity, payload)
         normalized_query = _normalize(query)
-        identity_values = [organization.name, organization.website or "", *(payload["aliases"] or [])]
+        identity_values = [
+            organization.name,
+            organization.website or "",
+            *(payload["aliases"] or []),
+            *(item["value"] for item in payload["identifiers"]),
+        ]
         normalized_identities = {_normalize(value) for value in identity_values if value}
         reasons: list[str] = []
         score = 0.0
@@ -274,6 +387,10 @@ class OrganizationIntelligenceService:
                 organization.summary or "",
                 " ".join(f"{item['name']} {item['role']}" for item in payload["contacts"]),
                 " ".join(item["summary"] for item in payload["interactions"]),
+                " ".join(
+                    f"{item['organization']} {item['relationship_type']} {item['description']}"
+                    for item in payload["relationships"]
+                ),
                 " ".join(str(item["notes"] or "") for item in payload["domain_notes"]),
             ]
         )
@@ -322,6 +439,9 @@ def organization_profile_text(session: Session, organization: Entity) -> str:
         [
             f"Name: {organization.name}",
             f"Aliases: {', '.join(payload['aliases'])}",
+            "Identifiers: " + "; ".join(
+                f"{item['type']}={item['value']}" for item in payload["identifiers"]
+            ),
             f"Website: {organization.website or ''}",
             f"Summary: {organization.summary or ''}",
             "Contacts: " + "; ".join(
@@ -329,6 +449,11 @@ def organization_profile_text(session: Session, organization: Entity) -> str:
                 for item in payload["contacts"]
             ),
             "Interactions: " + "; ".join(item["summary"] for item in payload["interactions"]),
+            "Organization relationships: " + "; ".join(
+                f"{item['relationship_type']} {item['organization']}: {item['description']}"
+                for item in payload["relationships"]
+            ),
+            "Events: " + "; ".join(item["title"] for item in payload["events"]),
             "Domain notes: " + "; ".join(str(item["notes"] or "") for item in payload["domain_notes"]),
         ]
     )

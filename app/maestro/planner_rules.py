@@ -4,9 +4,8 @@ DOMAIN_HINTS: dict[str, list[str]] = {
     "personal": ["personal", "calendar", "family", "life", "preference"],
     "maestro-development": ["maestro", "orchestrator", "agent", "memory", "system", "code"],
     "praxis": ["praxis", "partner", "tactical innovation", "transition", "training"],
-    "ophi": ["ophi", "product", "market", "research"],
+    "perti-laboratories": ["perti", "product", "software", "market", "research", "irad", "prototype"],
     "usma": ["usma", "cadet", "class", "teaching", "academic"],
-    "personal-irad-projects": ["irad", "prototype", "project"],
     "l3": ["l3"],
 }
 

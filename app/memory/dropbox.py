@@ -50,6 +50,7 @@ class MemoryDropboxProcessor:
 
     def ensure_directories(self) -> list[Path]:
         seed_default_domains(self.session)
+        self._migrate_legacy_domain_directories()
         domain_keys = ["global"] + [
             domain.key for domain in DomainRepository(self.session).list_active()
         ]
@@ -60,6 +61,25 @@ class MemoryDropboxProcessor:
                 path.mkdir(parents=True, exist_ok=True)
                 created.append(path)
         return created
+
+    def _migrate_legacy_domain_directories(self) -> None:
+        target = self.root / "perti-laboratories"
+        for legacy_key in ("ophi", "personal-irad-projects"):
+            legacy = self.root / legacy_key
+            if not legacy.exists():
+                continue
+            target.mkdir(parents=True, exist_ok=True)
+            for source in legacy.rglob("*"):
+                if not source.is_file():
+                    continue
+                destination = target / source.relative_to(legacy)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    destination = destination.with_name(
+                        f"{destination.stem}-{legacy_key}{destination.suffix}"
+                    )
+                shutil.move(str(source), destination)
+            shutil.rmtree(legacy)
 
     def process_once(self) -> list[DropboxProcessResult]:
         self.ensure_directories()

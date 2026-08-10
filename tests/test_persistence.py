@@ -36,6 +36,9 @@ def test_default_domain_seed_is_idempotent(session: Session) -> None:
     assert len(second_seed) == len(DEFAULT_DOMAINS)
     assert len(active_domains) == len(DEFAULT_DOMAINS)
     assert domain_repo.get_by_key("maestro-development") is not None
+    assert domain_repo.get_by_key("perti-laboratories").name == "Perti Laboratories"
+    assert domain_repo.get_by_key("ophi") is None
+    assert domain_repo.get_by_key("personal-irad-projects") is None
 
 
 def test_core_repositories_create_and_read(session: Session) -> None:
@@ -227,7 +230,7 @@ def test_scheduler_persists_workflow_run_queue_and_parallel_batches(session: Ses
                         "stage_index": 1,
                         "position": 2,
                         "status": "pending",
-                        "domain_key": "ophi",
+                        "domain_key": "perti-laboratories",
                         "objective": "Check product implications.",
                     },
                     {
@@ -387,7 +390,7 @@ def test_scheduler_enqueues_event_triggered_workflows_with_filters(session: Sess
     ignored = SchedulerService(session).enqueue_event_workflows(
         event_type="gmail.message.received",
         event_id="msg-ignored",
-        event_payload={"domain_key": "ophi", "labels": {"primary": True}},
+        event_payload={"domain_key": "perti-laboratories", "labels": {"primary": True}},
     )
     runs = SchedulerService(session).enqueue_event_workflows(
         event_type="gmail.message.received",
