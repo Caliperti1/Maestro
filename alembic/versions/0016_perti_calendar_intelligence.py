@@ -54,6 +54,7 @@ def upgrade() -> None:
         sa.text("SELECT id FROM domains WHERE key = 'personal-irad-projects'")
     ).scalar_one_or_none()
     if perti_id is not None and irad_id is not None:
+        _merge_tool_connections(connection, perti_id=perti_id, irad_id=irad_id)
         for table in DOMAIN_TABLES:
             connection.execute(
                 sa.text(f"UPDATE {table} SET domain_id = :perti_id WHERE domain_id = :irad_id"),
@@ -205,6 +206,58 @@ def upgrade() -> None:
         "uq_contact_calendar_interaction",
         "contact_interactions",
         ["contact_id", "calendar_event_id"],
+    )
+
+
+def _merge_tool_connections(
+    connection: sa.engine.Connection,
+    *,
+    perti_id: uuid.UUID,
+    irad_id: uuid.UUID,
+) -> None:
+    """Preserve tool history and configuration when both domains use the same tool."""
+    parameters = {"perti_id": perti_id, "irad_id": irad_id}
+    connection.execute(
+        sa.text(
+            """
+            UPDATE tool_calls AS calls
+            SET tool_connection_id = target.id
+            FROM tool_connections AS source
+            JOIN tool_connections AS target
+              ON target.domain_id = :perti_id
+             AND target.tool_key = source.tool_key
+            WHERE source.domain_id = :irad_id
+              AND calls.tool_connection_id = source.id
+            """
+        ),
+        parameters,
+    )
+    connection.execute(
+        sa.text(
+            """
+            UPDATE tool_connections AS target
+            SET config = source.config || target.config,
+                is_active = source.is_active OR target.is_active,
+                updated_at = now()
+            FROM tool_connections AS source
+            WHERE target.domain_id = :perti_id
+              AND source.domain_id = :irad_id
+              AND target.tool_key = source.tool_key
+            """
+        ),
+        parameters,
+    )
+    connection.execute(
+        sa.text(
+            """
+            DELETE FROM tool_connections AS source
+            USING tool_connections AS target
+            WHERE source.domain_id = :irad_id
+              AND target.domain_id = :perti_id
+              AND source.tool_key = target.tool_key
+            """
+        ),
+        parameters,
     )
 
 
