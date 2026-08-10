@@ -4,7 +4,7 @@ human-readable events while preserving domain ownership, contact links, organiza
 
 ## Use When
 - A source contains a meeting, call, appointment, travel window, ceremony, deadline with a time, or event summary.
-- Chris asks Maestro to add, move, complete, cancel, or inspect an event.
+- Chris asks Maestro to add, move, cancel, restore, or inspect an event.
 - New evidence changes an existing event's time, location, attendees, or purpose.
 
 ## Do Not Use When
@@ -25,16 +25,20 @@ human-readable events while preserving domain ownership, contact links, organiza
 2. Populate `event_title`, `summary`, `start_at`, `end_at`, `timezone`, `all_day`, `recurrence_rule`,
    `location`, `conferencing_url`, `organizer_name`, `organizer_email`, `attendees`, and `organizations`
    when supported by the source.
-3. Attendees should include known `contact_id`, name, email, organizer status, and response status. Include
+3. Inspect visible text, HTML link targets, and metadata aliases such as `join_url`, `meeting_link`,
+   `hangoutLink`, and `onlineMeetingUrl`. Store the complete Meet, Zoom, Teams, Webex, or equivalent
+   URL in `conferencing_url`; a provider name in `location` is not a substitute for the link.
+4. Attendees should include known `contact_id`, name, email, organizer status, and response status. Include
    an unresolved name/email when no contact exists; the routed service will resolve or retain it safely.
-4. Organizations should include a known organization ID or an exact supported name and its role in the event.
-5. Infer a conventional one-hour duration only when a meeting is clear and no duration is supplied. Do not
+5. Organizations should include a known organization ID or an exact supported name and its role in the event.
+6. Infer a conventional one-hour duration only when a meeting is clear and no duration is supplied. Do not
    invent dates, participants, locations, recurrence, or relationships.
-6. Include source refs for the message, report, artifact, or user turn that created or changed the event.
+7. Include source refs for the message, report, artifact, or user turn that created or changed the event.
 
 ## Contact History
 - Future scheduled events are shown as upcoming meetings on linked contact profiles.
-- Once an event occurs or is marked complete, Maestro creates one meeting interaction for each linked contact.
+- Once an event occurs, Maestro creates one meeting interaction for each linked contact.
+- Calendar events are scheduled, tentative, cancelled, or archived. They are not todos and are never marked done.
 - Do not separately create duplicate contact interactions for the same calendar event.
 
 ## Output Contract

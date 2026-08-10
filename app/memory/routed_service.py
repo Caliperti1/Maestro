@@ -42,7 +42,10 @@ from app.db.models import (
     Todo,
 )
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
-from app.memory.calendar_intelligence import CalendarIntelligenceService
+from app.memory.calendar_intelligence import (
+    CalendarIntelligenceService,
+    conferencing_url_from_values,
+)
 from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
 from app.memory.routed_resolver import (
     RoutedObjectResolver,
@@ -235,6 +238,7 @@ class RoutedMemoryService:
         start_at = _datetime_from_metadata(item.metadata_, "start_at")
         event_title = _event_title_from_item(item)
         attendees = self._event_attendees_from_item(item)
+        conferencing_url = conferencing_url_from_values(item.metadata_, item.content, item.title)
         decision = self.resolver.resolve_event(item, start_at=start_at)
         self._attach_resolution(item, decision)
         event = self.session.get(CalendarEvent, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
@@ -252,14 +256,14 @@ class RoutedMemoryService:
                 all_day=bool((item.metadata_ or {}).get("all_day", False)),
                 recurrence_rule=_string_from_metadata(item.metadata_, "recurrence_rule"),
                 location=_string_from_metadata(item.metadata_, "location"),
-                conferencing_url=_string_from_metadata(item.metadata_, "conferencing_url"),
+                conferencing_url=conferencing_url,
                 organizer_name=_string_from_metadata(item.metadata_, "organizer_name"),
                 organizer_email=_string_from_metadata(item.metadata_, "organizer_email"),
                 attendees=attendees,
                 supporting_refs=item.source_refs,
                 source_refs=item.source_refs,
                 provenance=self._provenance(item),
-                status=item.status if item.status not in {"open", "needs_input"} else "scheduled",
+                status=_calendar_status(item.status),
                 metadata_=self._canonical_metadata(item),
             )
             self.session.add(event)
@@ -278,6 +282,8 @@ class RoutedMemoryService:
                 event.end_at = end_at
             if not event.location:
                 event.location = _string_from_metadata(item.metadata_, "location")
+            if not event.conferencing_url:
+                event.conferencing_url = conferencing_url
             event.attendees = _merge_attendees(event.attendees, attendees)
         calendar = CalendarIntelligenceService(self.session)
         calendar.replace_attendees(event, event.attendees, commit=False)
@@ -1184,6 +1190,7 @@ def _deterministic_event_enrichment(item: RoutedItem) -> dict[str, Any]:
         "duration_minutes": duration_minutes,
         "attendees": attendees,
         "location": _location_from_text(text),
+        "conferencing_url": conferencing_url_from_values(metadata, text),
     }
 
 
@@ -1244,6 +1251,13 @@ def _ollama_enrichment(item: RoutedItem, deterministic: dict[str, Any]) -> dict[
             "start_at",
             "end_at",
             "location",
+            "conferencing_url",
+            "timezone",
+            "all_day",
+            "recurrence_rule",
+            "organizer_name",
+            "organizer_email",
+            "organizations",
             "attendees",
             "name",
             "contact_name",
@@ -1654,6 +1668,10 @@ def _string_from_metadata(metadata: dict[str, Any], key: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _calendar_status(value: str | None) -> str:
+    return value if value in {"scheduled", "tentative", "cancelled", "archived"} else "scheduled"
 
 
 def _emails_from_metadata(metadata: dict[str, Any], key: str) -> list[str]:

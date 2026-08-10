@@ -57,6 +57,7 @@ from app.memory.routed_service import RoutedMemoryService
 from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
 
 router = APIRouter(prefix="/memory", tags=["memory"])
+CALENDAR_EVENT_STATUSES = {"scheduled", "tentative", "cancelled", "archived"}
 
 
 class RejectProposalRequest(BaseModel):
@@ -412,6 +413,11 @@ def update_calendar_event(
 ) -> dict[str, Any]:
     if "title" in body.updates and not str(body.updates.get("title") or "").strip():
         raise HTTPException(status_code=422, detail="Event title cannot be empty.")
+    if "status" in body.updates and body.updates.get("status") not in CALENDAR_EVENT_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail="Event status must be scheduled, tentative, cancelled, or archived.",
+        )
     current = db.get(CalendarEvent, event_id)
     if current is None:
         raise HTTPException(status_code=404, detail="Event not found.")

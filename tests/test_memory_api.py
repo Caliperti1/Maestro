@@ -217,7 +217,7 @@ def test_calendar_create_links_contacts_organizations_and_reports_conflicts(
     )
 
 
-def test_calendar_completed_event_materializes_one_contact_interaction(
+def test_calendar_past_event_materializes_one_contact_interaction(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -248,17 +248,25 @@ def test_calendar_completed_event_materializes_one_contact_interaction(
     assert created.status_code == 200
     event_id = created.json()["event"]["id"]
 
-    updated = client.patch(
-        f"/memory/routed-objects/events/{event_id}",
-        json={"updates": {"status": "done"}},
-    )
-    assert updated.status_code == 200
     interactions = session.scalars(
         select(ContactInteraction).where(ContactInteraction.calendar_event_id == uuid.UUID(event_id))
     ).all()
     assert len(interactions) == 1
     assert interactions[0].contact_id == contact.id
     assert interactions[0].summary == "Reviewed partnership milestones."
+
+    rejected = client.patch(
+        f"/memory/routed-objects/events/{event_id}",
+        json={"updates": {"status": "done"}},
+    )
+    assert rejected.status_code == 422
+
+    cancelled = client.patch(
+        f"/memory/routed-objects/events/{event_id}",
+        json={"updates": {"status": "cancelled"}},
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["event"]["status"] == "cancelled"
 
 
 def test_organization_intelligence_resolves_identifiers_and_relationships(
@@ -994,7 +1002,10 @@ def test_routed_memory_service_enriches_event_fields_from_messy_text(
         domain_id=praxis.id,
         route_type="event",
         title="Capture event/calendar context",
-        content="Meeting with Chris F at 12 over Google Meet about the Praxis finance plan.",
+        content=(
+            "Meeting with Chris F at 12 over Google Meet about the Praxis finance plan. "
+            "Join at https://meet.google.com/abc-defg-hij?hs=224."
+        ),
         priority="normal",
         status="open",
         source_refs=[{"type": "test", "id": "messy-event"}],
@@ -1012,8 +1023,63 @@ def test_routed_memory_service_enriches_event_fields_from_messy_text(
     assert event.end_at is not None
     assert (event.end_at - event.start_at).total_seconds() == 3600
     assert event.location == "Google Meet"
+    assert event.conferencing_url == "https://meet.google.com/abc-defg-hij?hs=224"
     assert event.attendees == [{"name": "Chris F", "contact_id": str(contact.id)}]
     assert routed_item.metadata_["enrichment_source"] == "routed_item_enricher"
+
+
+def test_routed_memory_service_maps_join_url_to_conferencing_url(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Project Plan Review",
+        content="Meet with Ben over Microsoft Teams.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "gmail_message", "message_id": "meeting-link"}],
+        metadata_={
+            "join_url": "https://dod.teams.microsoft.us/meet/993833865306?p=example",
+            "location": "Microsoft Teams",
+        },
+    )
+    session.add(routed_item)
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([routed_item])
+
+    event = session.query(CalendarEvent).one()
+    assert event.conferencing_url == (
+        "https://dod.teams.microsoft.us/meet/993833865306?p=example"
+    )
+
+
+def test_calendar_listing_backfills_conferencing_url_from_summary(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    event = CalendarEvent(
+        title="Partner sync",
+        summary="Join via Zoom: https://example.zoom.us/j/123456789?pwd=abc.",
+        source_refs=[],
+        supporting_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(event)
+    session.commit()
+
+    response = _client(session, tmp_path).get("/memory/routed-objects/events")
+
+    assert response.status_code == 200
+    assert response.json()["events"][0]["conferencing_url"] == (
+        "https://example.zoom.us/j/123456789?pwd=abc"
+    )
 
 
 def test_routed_memory_service_prefers_explicit_event_and_todo_dates(

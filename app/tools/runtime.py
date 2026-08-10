@@ -4443,6 +4443,7 @@ def _gmail_message_payload(message: dict[str, Any], *, max_body_chars: int) -> d
     headers = _gmail_headers(payload)
     body = _gmail_body_text(payload) if max_body_chars > 0 else ""
     google_links = _google_workspace_links(body)
+    conferencing_links = _conferencing_links(body)
     attachments = _gmail_attachments(payload)
     return {
         "message_id": message.get("id"),
@@ -4460,6 +4461,7 @@ def _gmail_message_payload(message: dict[str, Any], *, max_body_chars: int) -> d
         "body_text": body[:max_body_chars] if max_body_chars > 0 else "",
         "body_truncated": len(body) > max_body_chars if max_body_chars > 0 else False,
         "google_workspace_links": google_links,
+        "conferencing_links": conferencing_links,
         "meeting_notes": [
             link for link in google_links if _looks_like_meeting_notes_link(link)
         ],
@@ -4579,6 +4581,34 @@ def _google_workspace_links(text: str) -> list[dict[str, str]]:
         }
         if item not in links:
             links.append(item)
+    return links
+
+
+def _conferencing_links(text: str) -> list[dict[str, str]]:
+    providers = {
+        "meet.google.com": "google_meet",
+        "zoom.us": "zoom",
+        "teams.microsoft.com": "microsoft_teams",
+        "teams.microsoft.us": "microsoft_teams",
+        "teams.live.com": "microsoft_teams",
+        "webex.com": "webex",
+        "meet.jit.si": "jitsi",
+        "whereby.com": "whereby",
+    }
+    links: list[dict[str, str]] = []
+    for match in re.finditer(r"https?://[^\s<>)\"']+", text, re.IGNORECASE):
+        url = html.unescape(match.group(0)).rstrip(".,;:!?]}")
+        lowered = url.lower()
+        provider = next((name for host, name in providers.items() if host in lowered), None)
+        if provider is None or any(item["url"] == url for item in links):
+            continue
+        links.append(
+            {
+                "url": url,
+                "provider": provider,
+                "context": text[max(0, match.start() - 100) : min(len(text), match.end() + 100)],
+            }
+        )
     return links
 
 

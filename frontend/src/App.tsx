@@ -9,6 +9,7 @@ import {
   CircleAlert,
   Clock3,
   Database,
+  ExternalLink,
   FileText,
   HardDriveUpload,
   Inbox,
@@ -847,14 +848,15 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
 
   const supportsDomainFilter = surface === "calendar" || surface === "contacts" || surface === "todos" || surface === "organizations" || surface === "ideas";
   const supportsLifecycleFilters = surface === "calendar" || surface === "todos" || surface === "ideas";
+  const supportsDoneFilter = surface === "todos" || surface === "ideas";
   const visibleItems = useMemo(
     () =>
       items.filter((item) => {
         if (!showArchived && item.status === "archived") return false;
-        if (!showDone && item.status === "done") return false;
+        if (supportsDoneFilter && !showDone && item.status === "done") return false;
         return true;
       }),
-    [items, showArchived, showDone],
+    [items, showArchived, showDone, supportsDoneFilter],
   );
   const selectedItem = creatingEvent
     ? null
@@ -871,9 +873,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             start: item.start_at!,
             end: item.end_at ?? undefined,
             allDay: item.all_day,
-            backgroundColor: color,
+            backgroundColor: item.status === "cancelled" ? "#f3f4f6" : color,
             borderColor: color,
-            textColor: "#ffffff",
+            textColor: item.status === "cancelled" ? "#667085" : "#ffffff",
             extendedProps: { resource: item },
           };
           if (item.recurrence_rule) {
@@ -1111,7 +1113,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   };
 
   const markSelectedDone = async () => {
-    if (!selectedItem || !(surface === "calendar" || surface === "todos" || surface === "ideas")) return;
+    if (!selectedItem || !(surface === "todos" || surface === "ideas")) return;
     setBusy(true);
     try {
       await apiJson(`${config.endpoint}/${selectedItem.id}`, {
@@ -1123,6 +1125,24 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       await refreshItems();
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Done update failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setSelectedEventStatus = async (status: "scheduled" | "cancelled") => {
+    if (!selectedItem || surface !== "calendar") return;
+    setBusy(true);
+    try {
+      await apiJson(`${config.endpoint}/${selectedItem.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates: { status } }),
+      });
+      setStatusMessage(status === "cancelled" ? "Event cancelled. The time is now free." : "Event restored.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Event status update failed.");
     } finally {
       setBusy(false);
     }
@@ -1239,14 +1259,16 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               />
               Show archived
             </label>
-            <label className="toggle-row">
-              <input
-                type="checkbox"
-                checked={showDone}
-                onChange={(event) => setShowDone(event.target.checked)}
-              />
-              Show done
-            </label>
+            {supportsDoneFilter && (
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={showDone}
+                  onChange={(event) => setShowDone(event.target.checked)}
+                />
+                Show done
+              </label>
+            )}
           </div>
         )}
 
@@ -1284,7 +1306,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               eventClassNames={(info) => {
                 const item = info.event.extendedProps.resource as RoutedEvent | undefined;
                 return [
-                  item?.status === "done" ? "calendar-event-done" : "",
+                  item?.status === "cancelled" ? "calendar-event-cancelled" : "",
                   item?.status === "archived" ? "calendar-event-archived" : "",
                   item?.conflicts?.length ? "calendar-event-conflict" : "",
                 ].filter(Boolean);
@@ -1421,12 +1443,16 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   Meeting link
                   <input value={draft.conferencing_url ?? ""} onChange={(event) => updateDraft("conferencing_url", event.target.value)} placeholder="Google Meet, Teams, or Zoom URL" />
                 </label>
+                {draft.conferencing_url && /^https?:\/\//i.test(draft.conferencing_url) && (
+                  <a className="calendar-meeting-link" href={draft.conferencing_url} target="_blank" rel="noreferrer">
+                    <ExternalLink size={15} /> Open meeting
+                  </a>
+                )}
                 <label>
                   Status
                   <select value={draft.status ?? "scheduled"} onChange={(event) => updateDraft("status", event.target.value)}>
                     <option value="scheduled">Scheduled</option>
                     <option value="tentative">Tentative</option>
-                    <option value="done">Completed</option>
                     <option value="cancelled">Cancelled</option>
                   </select>
                 </label>
@@ -1751,10 +1777,22 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             )}
 
             <div className="routed-detail-actions">
-              {selectedItem && (surface === "calendar" || surface === "todos" || surface === "ideas") && selectedItem.status !== "done" && (
+              {selectedItem && (surface === "todos" || surface === "ideas") && selectedItem.status !== "done" && (
                 <button className="planner-action" onClick={markSelectedDone} disabled={busy}>
                   <CheckCircle2 size={16} />
                   Done
+                </button>
+              )}
+              {selectedItem && surface === "calendar" && selectedItem.status !== "cancelled" && selectedItem.status !== "archived" && (
+                <button className="danger-action" onClick={() => setSelectedEventStatus("cancelled")} disabled={busy}>
+                  <X size={16} />
+                  Cancel event
+                </button>
+              )}
+              {selectedItem && surface === "calendar" && selectedItem.status === "cancelled" && (
+                <button className="planner-action" onClick={() => setSelectedEventStatus("scheduled")} disabled={busy}>
+                  <RefreshCw size={16} />
+                  Restore event
                 </button>
               )}
               <button className="planner-action" onClick={saveSelected} disabled={busy}>

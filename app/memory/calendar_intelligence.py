@@ -1,9 +1,11 @@
 """Calendar aggregation, attendee linkage, conflicts, and contact interaction materialization."""
 
+import html
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
@@ -29,6 +31,14 @@ class CalendarIntelligenceService:
         self.session = session
 
     def ensure_links(self, event: CalendarEvent) -> None:
+        if not event.conferencing_url:
+            event.conferencing_url = conferencing_url_from_values(
+                event.metadata_,
+                event.summary,
+                event.location,
+                event.supporting_refs,
+                event.source_refs,
+            )
         has_attendees = self.session.scalar(
             select(CalendarEventAttendee.id).where(CalendarEventAttendee.event_id == event.id).limit(1)
         )
@@ -143,7 +153,7 @@ class CalendarIntelligenceService:
         if event.start_at is None:
             return 0
         start_at = _aware(event.start_at)
-        occurred = start_at <= datetime.now(UTC) or event.status in {"done", "completed"}
+        occurred = start_at <= datetime.now(UTC)
         if not occurred:
             return 0
         created = 0
@@ -345,6 +355,66 @@ class CalendarIntelligenceService:
     def _domain_key(self, domain_id: uuid.UUID | None) -> str | None:
         domain = self.session.get(Domain, domain_id) if domain_id else None
         return domain.key if domain else None
+
+
+_CONFERENCING_METADATA_KEYS = (
+    "conferencing_url",
+    "conference_url",
+    "join_url",
+    "meeting_link",
+    "meeting_url",
+    "hangout_link",
+    "hangoutLink",
+    "online_meeting_url",
+    "onlineMeetingUrl",
+    "video_conference_url",
+)
+_CONFERENCING_HOST_MARKERS = (
+    "meet.google.com",
+    "zoom.us",
+    "teams.microsoft.com",
+    "teams.microsoft.us",
+    "teams.live.com",
+    "webex.com",
+    "meet.jit.si",
+    "whereby.com",
+)
+
+
+def conferencing_url_from_values(*values: Any) -> str | None:
+    """Return the first explicit or recognizable conferencing URL in structured evidence."""
+    for value in values:
+        candidate = _conferencing_url_from_value(value)
+        if candidate:
+            return candidate
+    return None
+
+
+def _conferencing_url_from_value(value: Any, *, explicit: bool = False) -> str | None:
+    if isinstance(value, dict):
+        for key in _CONFERENCING_METADATA_KEYS:
+            candidate = _conferencing_url_from_value(value.get(key), explicit=True)
+            if candidate:
+                return candidate
+        for nested in value.values():
+            candidate = _conferencing_url_from_value(nested)
+            if candidate:
+                return candidate
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for nested in value:
+            candidate = _conferencing_url_from_value(nested)
+            if candidate:
+                return candidate
+        return None
+    if not isinstance(value, str):
+        return None
+    for match in re.finditer(r"https?://[^\s<>\"']+", html.unescape(value), re.IGNORECASE):
+        candidate = match.group(0).rstrip(".,;:!?)]}")
+        hostname = (urlsplit(candidate).hostname or "").lower()
+        if explicit or any(marker in hostname for marker in _CONFERENCING_HOST_MARKERS):
+            return candidate
+    return None
 
 
 def _attendee_identity(attendee: dict[str, Any]) -> tuple[str | None, str | None]:
