@@ -518,6 +518,7 @@ def _prompt_package_payload(package) -> dict[str, Any]:
         "agent": _agent_payload(package.agent),
         "task_instruction": package.task_instruction,
         "global_context": package.global_context,
+        "identity_grounding": package.identity_grounding,
         "domain_context": package.domain_context,
         "role_prompt": package.role_prompt,
         "user_context": package.user_context,

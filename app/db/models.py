@@ -2,7 +2,17 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import Uuid
@@ -43,6 +53,48 @@ class Domain(TimestampMixin, Base):
 
     agents: Mapped[list["Agent"]] = relationship(back_populates="domain")
     memory_items: Mapped[list["MemoryItem"]] = relationship(back_populates="domain")
+
+
+class IdentityNode(TimestampMixin, Base):
+    """Authoritative identity or organizational anchor used to ground prompts."""
+
+    __tablename__ = "identity_nodes"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(200), unique=True, nullable=False, index=True)
+    node_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="SET NULL"), index=True
+    )
+    is_authoritative: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class IdentityRelationship(TimestampMixin, Base):
+    """Current, sourced relationship between two authoritative identity nodes."""
+
+    __tablename__ = "identity_relationships"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(240), unique=True, nullable=False, index=True)
+    subject_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("identity_nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    object_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("identity_nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    relationship_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
 class Agent(TimestampMixin, Base):
@@ -841,6 +893,43 @@ class SeedPackage(TimestampMixin, Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class SourceRegistration(TimestampMixin, Base):
+    __tablename__ = "source_registrations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    key: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    source_system: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    adapter_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+
+class SourceCheckpoint(TimestampMixin, Base):
+    __tablename__ = "source_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_registration_id",
+            "cursor_key",
+            name="uq_source_checkpoints_registration_cursor",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_registration_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("source_registrations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    cursor_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    cursor_value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="ready", nullable=False, index=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
 class Artifact(Base):
     __tablename__ = "artifacts"
 
@@ -862,6 +951,45 @@ class Artifact(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class IngestionRecord(TimestampMixin, Base):
+    __tablename__ = "ingestion_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_registration_id",
+            "external_id",
+            "source_version",
+            name="uq_ingestion_records_source_object_version",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_registration_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("source_registrations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    seed_package_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("seed_packages.id", ondelete="SET NULL"), index=True
+    )
+    artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("artifacts.id", ondelete="SET NULL"), index=True
+    )
+    external_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(40), default="processing", nullable=False, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
 class ScheduledRun(TimestampMixin, Base):

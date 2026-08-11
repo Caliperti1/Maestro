@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models import Artifact, MemoryEmbedding, MemoryItem, MemoryLink, SeedPackage
 from app.memory.embeddings import EmbeddingClient, build_embedding_client
+from app.memory.ingestion import IngestionTarget, memory_allowed_for_target
 
 RetrievalAudience = Literal["maestro", "agent"]
 RetrievalMode = Literal["broad", "balanced", "strict"]
@@ -36,6 +37,7 @@ class MemoryRetrievalQuery:
     include_links: bool = True
     use_semantic: bool = True
     mode: RetrievalMode = "balanced"
+    egress_target: IngestionTarget = "human"
     limit: int = 12
 
 
@@ -72,6 +74,7 @@ class MemoryRetrievalResult:
     results: list[RetrievedMemory]
     total_visible: int
     filtered_count: int
+    policy_filtered_count: int
     semantic_status: str
 
 
@@ -85,6 +88,7 @@ class MemoryContextBundleRequest:
     memory_types: set[str] | None = None
     min_importance: float | None = None
     use_semantic: bool = True
+    egress_target: IngestionTarget = "human"
     max_items: int = 12
     max_chars: int = 4000
 
@@ -117,6 +121,7 @@ class MemoryContextBundle:
     rendered_text: str
     total_visible: int
     filtered_count: int
+    policy_filtered_count: int
     retrieved_count: int
     included_count: int
     dropped_count: int
@@ -136,7 +141,12 @@ class MemoryRetrievalService:
 
     def retrieve(self, query: MemoryRetrievalQuery) -> MemoryRetrievalResult:
         self._validate_query(query)
-        visible_memories = self._visible_memories(query)
+        all_visible_memories = self._visible_memories(query)
+        visible_memories = [
+            memory
+            for memory in all_visible_memories
+            if self._memory_allowed_for_query(memory, query)
+        ]
         semantic_scores, semantic_status = self._semantic_scores(visible_memories, query)
         scored = [
             self._score_memory(memory, query, semantic_scores.get(memory.id))
@@ -152,6 +162,7 @@ class MemoryRetrievalService:
             results=limited,
             total_visible=len(visible_memories),
             filtered_count=len(scored) - len(filtered),
+            policy_filtered_count=len(all_visible_memories) - len(visible_memories),
             semantic_status=semantic_status,
         )
 
@@ -174,6 +185,7 @@ class MemoryRetrievalService:
             rendered_text=rendered_text,
             total_visible=result.total_visible,
             filtered_count=result.filtered_count,
+            policy_filtered_count=result.policy_filtered_count,
             retrieved_count=len(result.results),
             included_count=included_count,
             dropped_count=max(0, len(result.results) - included_count),
@@ -189,6 +201,8 @@ class MemoryRetrievalService:
             raise MemoryRetrievalError("Retrieval limit must be at least 1.")
         if query.mode not in {"broad", "balanced", "strict"}:
             raise MemoryRetrievalError("Retrieval mode must be broad, balanced, or strict.")
+        if query.egress_target not in {"human", "local", "external"}:
+            raise MemoryRetrievalError("Egress target must be human, local, or external.")
 
     def _validate_context_bundle_request(self, request: MemoryContextBundleRequest) -> None:
         if request.profile not in _CONTEXT_PROFILES:
@@ -202,6 +216,8 @@ class MemoryRetrievalService:
             raise MemoryRetrievalError("Context bundle max_items must be at least 1.")
         if request.max_chars < 200:
             raise MemoryRetrievalError("Context bundle max_chars must be at least 200.")
+        if request.egress_target not in {"human", "local", "external"}:
+            raise MemoryRetrievalError("Egress target must be human, local, or external.")
 
     def _context_retrieval_query(
         self,
@@ -223,6 +239,7 @@ class MemoryRetrievalService:
             include_links=bool(profile["include_links"]),
             use_semantic=request.use_semantic,
             mode=profile["mode"],  # type: ignore[arg-type]
+            egress_target=request.egress_target,
             limit=max(request.max_items * 4, request.max_items),
         )
 
@@ -328,6 +345,13 @@ class MemoryRetrievalService:
         statement = statement.where(self._visibility_predicate(query))
         return list(self.session.scalars(statement).all())
 
+    def _memory_allowed_for_query(
+        self,
+        memory: MemoryItem,
+        query: MemoryRetrievalQuery,
+    ) -> bool:
+        return memory_allowed_for_target(memory.metadata_, query.egress_target)
+
     def _active_predicates(self):
         now = datetime.now(UTC)
         return (
@@ -377,7 +401,7 @@ class MemoryRetrievalService:
         score = importance_score * (0.18 if has_query else 0.55)
         reasons.append(f"importance {importance_score:.2f}")
 
-        recency_score = self._recency_score(memory.created_at)
+        recency_score = self._recency_score(self._source_timestamp(memory))
         score += recency_score * (0.08 if has_query else 0.15)
         reasons.append(f"recency {recency_score:.2f}")
 
@@ -473,6 +497,15 @@ class MemoryRetrievalService:
         age_days = max(0.0, (now - created_at).total_seconds() / 86400)
         return 1 / (1 + math.log1p(age_days))
 
+    def _source_timestamp(self, memory: MemoryItem) -> datetime | None:
+        value = (memory.metadata_ or {}).get("source_timestamp")
+        if isinstance(value, str) and value.strip():
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        return memory.created_at
+
     def _impact_score(self, impact_level: str) -> float:
         return {
             "very_high": 1.0,
@@ -551,7 +584,11 @@ class MemoryRetrievalService:
                 )
             )
         ).all()
-        visible_by_id = {memory.id: memory for memory in self._visible_memories(query)}
+        visible_by_id = {
+            memory.id: memory
+            for memory in self._visible_memories(query)
+            if self._memory_allowed_for_query(memory, query)
+        }
         links_by_memory: dict[uuid.UUID, list[RetrievedMemoryLink]] = {
             result.memory.id: [] for result in results
         }

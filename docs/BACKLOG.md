@@ -27,6 +27,33 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
   links to run-log/provenance, generated artifacts, and explicit follow-up sections so reports are
   pleasant for Chris to read and reliable for agents to retrieve.
 
+## Context And Retrieval Program
+
+### Ingestion control plane
+
+- [x] Add normalized context envelopes and a reusable source-adapter contract.
+- [x] Add source registrations, pull-source checkpoints, and an idempotent ingestion ledger.
+- [x] Standardize provenance and source timestamps across seed packages, artifacts, memories,
+  proposals, and routed items.
+- [x] Preserve sanitized USMA/L3 source classification while using the standard memory models.
+- [x] Retire superseded memory from active retrieval while retaining its history and links.
+- [x] Add stale-ingestion recovery and Memory UI health indicators.
+- [ ] Add a ChatGPT export adapter with stable conversation and message IDs.
+- [ ] Add a repository observer adapter with full-baseline and commit-aware incremental modes.
+- [ ] Converge Gmail, Calendar, Drive, and GitHub memory outputs on the ingestion ledger.
+- [ ] Add reviewed USMA and L3 Markdown/JSON context-drop manifests.
+
+### Identity grounding and expert retrieval
+
+- [x] Add an authoritative Chris identity, alias, role, ownership, employment, and organization graph.
+- [x] Build a small cached grounding packet used by Maestro and every agent prompt.
+- [ ] Add query/domain routing before federated retrieval.
+- [ ] Federate durable memory, routed objects, reports, run logs, and source evidence.
+- [ ] Rank by semantic fit, validity, domain, source time, trust, and relationship distance.
+- [ ] Add policy-aware reranking and context compression.
+- [ ] Build retrieval evaluations for identity, domain expertise, cross-domain synthesis, provenance,
+  current truth, and restricted-context isolation.
+
 ---
 
 ## Milestone 0: Repository Foundation

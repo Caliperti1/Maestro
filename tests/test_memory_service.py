@@ -411,6 +411,9 @@ def test_semantic_supersede_writes_new_memory_and_links_old(session: Session) ->
     assert link.source_memory_id == result.memory_item.id
     assert link.target_memory_id == existing.id
     assert link.relation_type == "supersedes"
+    session.refresh(existing)
+    assert existing.valid_until is not None
+    assert existing.metadata_["superseded_by"] == str(result.memory_item.id)
 
 
 def test_semantic_conflict_creates_pending_approval_proposal(session: Session) -> None:

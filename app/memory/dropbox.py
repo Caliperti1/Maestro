@@ -3,21 +3,27 @@ import json
 import shutil
 import time
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Artifact, Domain, RoutedItem, SeedPackage
+from app.db.models import Artifact, Domain, IngestionRecord, RoutedItem, SeedPackage
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal
-from app.llm import LLMMemoryEvaluator, LLMMemoryExtractor, OpenAILLMClient
+from app.llm import LLMMemoryEvaluator, LLMMemoryExtractor, OllamaLLMClient, OpenAILLMClient
 from app.memory import LLMMemoryCurator, StagedMemorySource
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES, extract_dropbox_text
 from app.memory.embeddings import MemoryEmbeddingService
+from app.memory.ingestion import (
+    ContextEnvelope,
+    IngestionLedgerService,
+    envelope_for_file,
+    policy_for_domain,
+)
 from app.memory.service import MemoryCandidate, MemoryWriteResult
 
 DROPBOX_SUBDIRS = ("inbox", "processing", "processed", "failed", "previews")
@@ -47,6 +53,7 @@ class MemoryDropboxProcessor:
         self.session = session
         self.root = root or Path(get_settings().memory_dropbox_root)
         self.curator = curator
+        self._curators: dict[str, LLMMemoryCurator] = {}
 
     def ensure_directories(self) -> list[Path]:
         seed_default_domains(self.session)
@@ -54,8 +61,18 @@ class MemoryDropboxProcessor:
         domain_keys = ["global"] + [
             domain.key for domain in DomainRepository(self.session).list_active()
         ]
+        domains_by_key = self._domains_by_key()
         created: list[Path] = []
         for domain_key in domain_keys:
+            domain = domains_by_key.get(domain_key)
+            IngestionLedgerService(self.session).ensure_registration(
+                key=f"dropbox:{domain_key}",
+                source_system="manual_dropbox",
+                display_name=f"{domain_key} context dropbox",
+                adapter_type="filesystem_dropbox",
+                domain=domain,
+                policy=policy_for_domain(domain_key),
+            )
             for subdir in DROPBOX_SUBDIRS:
                 path = self.root / domain_key / subdir
                 path.mkdir(parents=True, exist_ok=True)
@@ -83,6 +100,7 @@ class MemoryDropboxProcessor:
 
     def process_once(self) -> list[DropboxProcessResult]:
         self.ensure_directories()
+        self._recover_stale_processing()
         results: list[DropboxProcessResult] = []
         for domain_key, domain in self._domains_by_key().items():
             inbox = self.root / domain_key / "inbox"
@@ -110,13 +128,36 @@ class MemoryDropboxProcessor:
     ) -> DropboxProcessResult:
         seed_package: SeedPackage | None = None
         artifact: Artifact | None = None
+        ingestion_record: IngestionRecord | None = None
         preview_path: Path | None = None
         original_path = original_path or path
         try:
+            envelope = envelope_for_file(
+                path,
+                domain_key=domain_key,
+            )
+            ledger = IngestionLedgerService(self.session)
+            claim = ledger.claim(envelope, domain=domain)
+            ingestion_record = claim.record
+            if not claim.should_process:
+                destination = self._move_file(path, domain_key=domain_key, status="processed")
+                return DropboxProcessResult(
+                    source_path=path,
+                    destination_path=destination,
+                    preview_path=None,
+                    status="duplicate",
+                )
             seed_package, artifact = self._record_source_artifact(
                 path,
                 domain,
                 original_path=original_path,
+                envelope=envelope,
+                ingestion_record=ingestion_record,
+            )
+            ledger.attach_staging(
+                ingestion_record,
+                seed_package=seed_package,
+                artifact=artifact,
             )
             content, extraction_metadata = extract_dropbox_text(path)
             self._update_source_artifact_extraction_metadata(
@@ -135,11 +176,14 @@ class MemoryDropboxProcessor:
                     "dropbox_domain": domain_key,
                     "seed_package_id": str(seed_package.id),
                     "artifact_id": str(artifact.id),
-                    "original_path": str(path),
+                    "ingestion_record_id": str(ingestion_record.id),
+                    "original_path": str(original_path),
+                    "source_policy": envelope.policy.as_dict(),
+                    **envelope.provenance(),
                     **extraction_metadata,
                 },
             )
-            curator = self._curator()
+            curator = self._curator(envelope)
             preview = curator.preview_source(source, domain_key=domain_key)
             preview_path = self._write_preview(
                 original_path,
@@ -169,6 +213,7 @@ class MemoryDropboxProcessor:
             seed_package.status = "processed"
             seed_package.processed_at = datetime.now(UTC)
             self.session.commit()
+            ledger.mark_processed(ingestion_record, processed_path=destination)
             return DropboxProcessResult(
                 source_path=path,
                 destination_path=destination,
@@ -198,6 +243,12 @@ class MemoryDropboxProcessor:
                         "failed_path": str(destination),
                     }
                 self.session.commit()
+            if ingestion_record is not None:
+                IngestionLedgerService(self.session).mark_failed(
+                    ingestion_record,
+                    error=str(exc),
+                    failed_path=destination,
+                )
             self._write_failure(destination, str(exc))
             return DropboxProcessResult(
                 source_path=path,
@@ -213,16 +264,28 @@ class MemoryDropboxProcessor:
             domains[domain.key] = domain
         return domains
 
-    def _curator(self) -> LLMMemoryCurator:
-        if self.curator is None:
-            llm_client = OpenAILLMClient()
-            self.curator = LLMMemoryCurator(
+    def _curator(self, envelope: ContextEnvelope) -> LLMMemoryCurator:
+        if self.curator is not None:
+            return self.curator
+        policy_key = envelope.policy.egress_policy
+        if policy_key not in self._curators:
+            if policy_key == "local_only":
+                settings = get_settings()
+                model = settings.llm_qwen_model_profile.removeprefix("ollama:").strip()
+                llm_client = OllamaLLMClient(
+                    model=model or "qwen3:8b",
+                    base_url=settings.embedding_base_url,
+                    timeout_seconds=settings.ollama_llm_timeout_seconds,
+                )
+            else:
+                llm_client = OpenAILLMClient()
+            self._curators[policy_key] = LLMMemoryCurator(
                 self.session,
                 LLMMemoryExtractor(llm_client, self.session),
                 semantic_evaluator=LLMMemoryEvaluator(llm_client, self.session),
                 embedding_service=MemoryEmbeddingService(self.session),
             )
-        return self.curator
+        return self._curators[policy_key]
 
     def _record_source_artifact(
         self,
@@ -230,6 +293,8 @@ class MemoryDropboxProcessor:
         domain: Domain | None,
         *,
         original_path: Path | None = None,
+        envelope: ContextEnvelope,
+        ingestion_record: IngestionRecord,
         extraction_metadata: dict[str, Any] | None = None,
     ) -> tuple[SeedPackage, Artifact]:
         metadata = extraction_metadata or {}
@@ -243,6 +308,9 @@ class MemoryDropboxProcessor:
                 "original_path": str(original_path),
                 "processing_path": str(path),
                 "suffix": path.suffix.lower(),
+                "ingestion_record_id": str(ingestion_record.id),
+                "source_policy": envelope.policy.as_dict(),
+                **envelope.provenance(),
                 **metadata,
             },
         )
@@ -259,6 +327,9 @@ class MemoryDropboxProcessor:
                 "dropbox": True,
                 "original_path": str(original_path),
                 "processing_path": str(path),
+                "ingestion_record_id": str(ingestion_record.id),
+                "source_policy": envelope.policy.as_dict(),
+                **envelope.provenance(),
                 **metadata,
             },
         )
@@ -267,6 +338,26 @@ class MemoryDropboxProcessor:
         self.session.refresh(seed_package)
         self.session.refresh(artifact)
         return seed_package, artifact
+
+    def _recover_stale_processing(self) -> None:
+        stale_after = timedelta(minutes=30)
+        IngestionLedgerService(self.session).recover_stale(stale_after=stale_after)
+        cutoff = datetime.now(UTC) - stale_after
+        for domain_key in self._domains_by_key():
+            processing_dir = self.root / domain_key / "processing"
+            if not processing_dir.exists():
+                continue
+            for path in processing_dir.iterdir():
+                if not self._is_supported_file(path):
+                    continue
+                modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+                if modified_at >= cutoff:
+                    continue
+                destination = self._move_file(path, domain_key=domain_key, status="failed")
+                self._write_failure(
+                    destination,
+                    "Recovered stale file after interrupted memory ingestion.",
+                )
 
     def _update_source_artifact_extraction_metadata(
         self,

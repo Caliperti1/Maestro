@@ -34,6 +34,7 @@ from app.db.repositories import AgentRepository, DomainRepository, SkillReposito
 from app.db.seed import seed_default_domains
 from app.llm.client import LLMClient, OllamaLLMClient, OpenAILLMClient
 from app.llm.telemetry import record_llm_call
+from app.maestro.identity_grounding import IdentityGroundingService
 from app.memory.retrieval import (
     MemoryContextBundle,
     MemoryContextBundleRequest,
@@ -176,6 +177,7 @@ class PromptPackage:
     task_instruction: str
     caller: PromptCaller
     global_context: str
+    identity_grounding: str
     domain_context: str
     role_prompt: str
     user_context: str | None
@@ -960,11 +962,17 @@ class PromptAggregationService:
                 agent_id=spec.id,
                 query_text=query_text,
                 use_semantic=request.use_semantic,
+                egress_target=_egress_target_for_model_profile(
+                    request.model_profile or spec.model_profile
+                ),
                 max_items=request.max_memory_items,
                 max_chars=request.max_memory_chars,
             )
         )
         global_context = self.registry.get_global_context().context
+        identity_grounding = IdentityGroundingService(self.session).build_packet(
+            domain_key=domain.key
+        ).rendered_text
         output_contract = _DEFAULT_OUTPUT_CONTRACT
         prompt_task_instruction = _compact_task_instruction_for_prompt(request.task_instruction)
         skill_manifest = _scoped_skill_manifest(spec.allowed_skills, request.required_skills)
@@ -973,6 +981,7 @@ class PromptAggregationService:
             task_instruction=request.task_instruction,
             caller=request.caller,
             global_context=global_context,
+            identity_grounding=identity_grounding,
             domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
             role_prompt=spec.role_prompt,
             user_context=request.user_context,
@@ -983,6 +992,7 @@ class PromptAggregationService:
             workflow_run_id=request.workflow_run_id,
             assembled_prompt=self._render_prompt(
                 global_context=global_context,
+                identity_grounding=identity_grounding,
                 domain_context=domain.description or _DOMAIN_CONTEXTS.get(spec.domain_key, ""),
                 role_prompt=spec.role_prompt,
                 task_instruction=prompt_task_instruction,
@@ -999,6 +1009,7 @@ class PromptAggregationService:
         self,
         *,
         global_context: str,
+        identity_grounding: str,
         domain_context: str,
         role_prompt: str,
         task_instruction: str,
@@ -1010,7 +1021,7 @@ class PromptAggregationService:
     ) -> str:
         sections = [
             ("Global Maestro Context", global_context),
-            ("Maestro User Identity", _user_identity_context()),
+            ("Authoritative Identity", identity_grounding),
             ("Domain Context", domain_context),
             ("Agent Role", role_prompt),
             ("Task", task_instruction),
@@ -1066,6 +1077,7 @@ class PromptAggregationService:
                 "run_id": run_id,
                 "caller": request.caller,
                 "query_text": request.query_text,
+                "model_profile": request.model_profile or package.agent.model_profile,
                 "memory_query_text": package.memory_context.request.query_text,
                 "execute_llm": execute_llm,
                 "stage_interaction": stage_interaction,
@@ -3712,25 +3724,13 @@ def _tool_planning_prompt_brief(package: PromptPackage) -> str:
     tools = ", ".join(tool.key for tool in package.tool_manifest) or "none"
     sections = [
         ("Agent", f"{package.agent.name} ({package.agent.key}) in {package.agent.domain_key}"),
-        ("Maestro User Identity", _user_identity_context()),
+        ("Authoritative Identity", package.identity_grounding),
         ("Role", _truncate_text(package.role_prompt or package.agent.role_summary, 700)),
         ("Task", _compact_task_instruction_for_prompt(package.task_instruction)),
         ("Memory Summary", _truncate_text(package.memory_context.rendered_text, 1200)),
         ("Allowed Tool Keys", _truncate_text(tools, 1200)),
     ]
     return "\n\n".join(f"## {title}\n{body}".strip() for title, body in sections if body)
-
-
-def _user_identity_context() -> str:
-    settings = get_settings()
-    return (
-        f"The Maestro user is {settings.user_full_name} ({settings.user_email}). "
-        f"Address him as {settings.user_display_name}. Keep him distinct from other people "
-        "with the same first name, and preserve full identities when assigning ownership. "
-        "Classify response-needed and action-required states from this user's perspective; "
-        "actions owned only by another person are informational to him unless they create a "
-        "material risk or explicitly require his awareness."
-    )
 
 
 def _compact_tool_safety(tool_key: str) -> dict[str, Any]:
@@ -3762,6 +3762,7 @@ def _llm_call_metadata(llm_client: LLMClient) -> dict[str, Any]:
 def _prompt_section_sizes(package: PromptPackage) -> dict[str, int]:
     return {
         "global_context": len(package.global_context),
+        "identity_grounding": len(package.identity_grounding),
         "domain_context": len(package.domain_context),
         "role_prompt": len(package.role_prompt),
         "task_instruction": len(package.task_instruction),
@@ -3944,6 +3945,11 @@ def _llm_client_for_model_profile(model_profile: str | None) -> LLMClient:
         model = profile.removeprefix("openai:").strip()
         return OpenAILLMClient(provider="openai", model=model or None)
     return OpenAILLMClient(model=profile)
+
+
+def _egress_target_for_model_profile(model_profile: str | None) -> str:
+    profile = (model_profile or "default").strip().lower()
+    return "local" if profile.startswith("ollama:") else "external"
 
 
 def _scoped_skill_manifest(

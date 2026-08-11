@@ -113,6 +113,20 @@ def test_memory_status_and_upload(session: Session, tmp_path: Path) -> None:
     assert (tmp_path / "perti-laboratories" / "inbox" / "note.md").is_file()
 
 
+def test_ingestion_status_lists_registered_sources(session: Session, tmp_path: Path) -> None:
+    MemoryDropboxProcessor(session, root=tmp_path).ensure_directories()
+    client = _client(session, tmp_path)
+
+    response = client.get("/memory/ingestion/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_registrations"] == 7
+    assert payload["records"] == {}
+    assert payload["duplicates_skipped"] == 0
+    assert payload["recent"] == []
+
+
 def test_memory_dropbox_consolidates_legacy_perti_directories(
     session: Session,
     tmp_path: Path,

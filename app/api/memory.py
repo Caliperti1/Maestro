@@ -20,10 +20,12 @@ from app.db.models import (
     DecisionRecord,
     Entity,
     Idea,
+    IngestionRecord,
     MemoryItem,
     MemoryProposal,
     RoutedItem,
     SeedPackage,
+    SourceRegistration,
     Todo,
 )
 from app.db.repositories import DomainRepository
@@ -34,6 +36,7 @@ from app.memory.calendar_intelligence import CalendarIntelligenceService
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.contact_hydration import ContactHydrationError, ContactHydrationService
 from app.memory.dropbox import MemoryDropboxProcessor
+from app.memory.ingestion import IngestionLedgerService
 from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.retrieval import (
     MemoryContextBundle,
@@ -141,6 +144,57 @@ def get_dropbox_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         "root": str(root),
         "domains": [_domain_status(root, key) for key in _domain_keys(db)],
     }
+
+
+@router.get("/ingestion/status")
+def get_ingestion_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    service = IngestionLedgerService(db)
+    recent = db.execute(
+        select(IngestionRecord, SourceRegistration)
+        .join(
+            SourceRegistration,
+            SourceRegistration.id == IngestionRecord.source_registration_id,
+        )
+        .order_by(IngestionRecord.created_at.desc())
+        .limit(12)
+    ).all()
+    return {
+        **service.status(),
+        "recent": [
+            _ingestion_record_payload(record, registration) for record, registration in recent
+        ],
+    }
+
+
+@router.get("/ingestion/records")
+def list_ingestion_records(
+    status: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = (
+        select(IngestionRecord, SourceRegistration)
+        .join(
+            SourceRegistration,
+            SourceRegistration.id == IngestionRecord.source_registration_id,
+        )
+        .order_by(IngestionRecord.created_at.desc())
+        .limit(max(1, min(limit, 200)))
+    )
+    if status:
+        statement = statement.where(IngestionRecord.status == status)
+    rows = db.execute(statement).all()
+    return {
+        "records": [
+            _ingestion_record_payload(record, registration) for record, registration in rows
+        ]
+    }
+
+
+@router.post("/ingestion/recover")
+def recover_stale_ingestion(db: Session = Depends(get_db)) -> dict[str, Any]:
+    recovered = IngestionLedgerService(db).recover_stale()
+    return {"status": "recovered", "recovered_count": recovered}
 
 
 @router.post("/dropbox/{domain_key}/upload")
@@ -913,6 +967,7 @@ def retrieve_memory(
     include_links: bool = True,
     use_semantic: bool = True,
     mode: str = "balanced",
+    egress_target: str = "human",
     limit: int = 12,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -933,6 +988,7 @@ def retrieve_memory(
                 include_links=include_links,
                 use_semantic=use_semantic,
                 mode=mode,  # type: ignore[arg-type]
+                egress_target=egress_target,  # type: ignore[arg-type]
                 limit=limit,
             )
         )
@@ -951,10 +1007,12 @@ def retrieve_memory(
             "include_links": include_links,
             "use_semantic": use_semantic,
             "mode": mode,
+            "egress_target": egress_target,
             "limit": limit,
         },
         "total_visible": result.total_visible,
         "filtered_count": result.filtered_count,
+        "policy_filtered_count": result.policy_filtered_count,
         "semantic_status": result.semantic_status,
         "results": [_retrieved_memory_payload(db, retrieved) for retrieved in result.results],
     }
@@ -970,6 +1028,7 @@ def build_memory_context_bundle(
     memory_type: list[str] | None = Query(default=None),
     min_importance: float | None = None,
     use_semantic: bool = True,
+    egress_target: str = "human",
     max_items: int = 12,
     max_chars: int = 4000,
     db: Session = Depends(get_db),
@@ -988,6 +1047,7 @@ def build_memory_context_bundle(
                 memory_types=set(memory_type) if memory_type else None,
                 min_importance=min_importance,
                 use_semantic=use_semantic,
+                egress_target=egress_target,  # type: ignore[arg-type]
                 max_items=max_items,
                 max_chars=max_chars,
             )
@@ -1475,12 +1535,14 @@ def _context_bundle_payload(
         "memory_type": sorted(request.memory_types or []),
         "min_importance": request.min_importance,
         "use_semantic": request.use_semantic,
+        "egress_target": request.egress_target,
         "semantic_status": bundle.semantic_status,
         "max_items": request.max_items,
         "max_chars": bundle.max_chars,
         "used_chars": bundle.used_chars,
         "total_visible": bundle.total_visible,
         "filtered_count": bundle.filtered_count,
+        "policy_filtered_count": bundle.policy_filtered_count,
         "retrieved_count": bundle.retrieved_count,
         "included_count": bundle.included_count,
         "dropped_count": bundle.dropped_count,
@@ -1493,6 +1555,33 @@ def _context_bundle_payload(
         },
         "sections": [_context_section_payload(db, section) for section in bundle.sections],
         "rendered_text": bundle.rendered_text,
+    }
+
+
+def _ingestion_record_payload(
+    record: IngestionRecord,
+    registration: SourceRegistration,
+) -> dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "source_registration_key": registration.key,
+        "source_system": registration.source_system,
+        "external_id": record.external_id,
+        "source_version": record.source_version,
+        "content_hash": record.content_hash,
+        "content_type": record.content_type,
+        "source_timestamp": (
+            record.source_timestamp.isoformat() if record.source_timestamp else None
+        ),
+        "status": record.status,
+        "attempt_count": record.attempt_count,
+        "duplicate_count": record.duplicate_count,
+        "last_error": record.last_error,
+        "policy": record.policy,
+        "seed_package_id": str(record.seed_package_id) if record.seed_package_id else None,
+        "artifact_id": str(record.artifact_id) if record.artifact_id else None,
+        "created_at": record.created_at.isoformat(),
+        "processed_at": record.processed_at.isoformat() if record.processed_at else None,
     }
 
 

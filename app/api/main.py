@@ -21,7 +21,9 @@ from app.api.workflow_outputs import router as workflow_outputs_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
+from app.db.seed import seed_default_domains
 from app.maestro.gmail_trigger import GmailTriggerService, gmail_trigger_worker_settings
+from app.maestro.identity_grounding import IdentityGroundingService
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.contact_hydration import ContactHydrationService
@@ -37,6 +39,9 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        with SessionLocal() as session:
+            seed_default_domains(session)
+            IdentityGroundingService(session).seed_defaults()
         worker_tasks.extend(
             [
                 asyncio.create_task(_scheduler_worker_loop()),

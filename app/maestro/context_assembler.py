@@ -13,8 +13,10 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import Artifact, Domain, Report, WorkflowRunLogEntry
+from app.memory.ingestion import memory_allowed_for_target
 from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
 from app.memory.routed_retrieval import RoutedRetrievalService
+from app.maestro.identity_grounding import IdentityGroundingService
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class MaestroContextAssembler:
     ) -> MaestroContextBundle:
         domain = self._domain(domain_key)
         sections = {
+            "identity": self._identity_section(domain_key=domain.key if domain else domain_key),
             "memory": self._memory_section(
                 query_text=query_text,
                 domain=domain,
@@ -85,6 +88,15 @@ class MaestroContextAssembler:
             max_chars=max_chars,
         )
 
+    def _identity_section(self, *, domain_key: str | None) -> dict[str, Any]:
+        packet = IdentityGroundingService(self.session).build_packet(domain_key=domain_key)
+        return {
+            "status": "ok",
+            "nodes": packet.nodes,
+            "relationships": packet.relationships,
+            "rendered_text": packet.rendered_text,
+        }
+
     def _domain(self, domain_key: str | None) -> Domain | None:
         if not domain_key:
             return None
@@ -105,6 +117,7 @@ class MaestroContextAssembler:
                     domain_id=domain.id if domain else None,
                     query_text=query_text,
                     use_semantic=True,
+                    egress_target="external",
                     max_items=8,
                     max_chars=max_chars,
                 )
@@ -133,6 +146,7 @@ class MaestroContextAssembler:
                 query_text=query_text,
                 limit=10,
                 max_chars=max_chars,
+                egress_target="external",
             )
             fallback_used = False
             if query_text and not bundle.rendered_text.strip():
@@ -141,6 +155,7 @@ class MaestroContextAssembler:
                     query_text=None,
                     limit=10,
                     max_chars=max_chars,
+                    egress_target="external",
                 )
                 fallback_used = True
         except Exception as exc:
@@ -164,9 +179,18 @@ class MaestroContextAssembler:
                 select(Report).order_by(Report.created_at.desc()).limit(limit * 3),
                 query_text=query_text,
                 columns=(Report.title, Report.summary, Report.body_markdown),
-            ).where(or_(Report.domain_id == domain.id, Report.domain_id.is_(None)) if domain else True)
+            ).where(
+                or_(Report.domain_id == domain.id, Report.domain_id.is_(None))
+                if domain
+                else True
+            )
         ).all()
-        reports = [report for report in reports if not _report_is_archived(report)][:limit]
+        reports = [
+            report
+            for report in reports
+            if not _report_is_archived(report)
+            and memory_allowed_for_target(report.structured_data, "external")
+        ][:limit]
         return {
             "status": "ok",
             "items": [
@@ -193,16 +217,27 @@ class MaestroContextAssembler:
             self._text_filtered(
                 select(WorkflowRunLogEntry)
                 .where(WorkflowRunLogEntry.status != "archived")
-                .order_by(WorkflowRunLogEntry.run_completed_at.desc(), WorkflowRunLogEntry.created_at.desc())
+                .order_by(
+                    WorkflowRunLogEntry.run_completed_at.desc(),
+                    WorkflowRunLogEntry.created_at.desc(),
+                )
                 .limit(limit),
                 query_text=query_text,
                 columns=(WorkflowRunLogEntry.title, WorkflowRunLogEntry.summary),
             ).where(
-                or_(WorkflowRunLogEntry.domain_id == domain.id, WorkflowRunLogEntry.domain_id.is_(None))
+                or_(
+                    WorkflowRunLogEntry.domain_id == domain.id,
+                    WorkflowRunLogEntry.domain_id.is_(None),
+                )
                 if domain
                 else True
             )
         ).all()
+        entries = [
+            entry
+            for entry in entries
+            if memory_allowed_for_target(entry.metadata_, "external")
+        ]
         return {
             "status": "ok",
             "items": [
@@ -235,6 +270,11 @@ class MaestroContextAssembler:
                 columns=(Artifact.name, Artifact.uri, Artifact.artifact_type),
             )
         ).all()
+        artifacts = [
+            artifact
+            for artifact in artifacts
+            if memory_allowed_for_target(artifact.metadata_, "external")
+        ]
         return {
             "status": "ok",
             "items": [
@@ -261,6 +301,9 @@ class MaestroContextAssembler:
 
     def _render(self, sections: dict[str, Any], *, max_chars: int) -> str:
         blocks: list[str] = []
+        identity_text = str(sections.get("identity", {}).get("rendered_text") or "").strip()
+        if identity_text:
+            blocks.append(f"## Authoritative Identity\n{identity_text}")
         memory_text = str(sections.get("memory", {}).get("rendered_text") or "").strip()
         if memory_text:
             blocks.append(f"## Durable Memory\n{memory_text}")

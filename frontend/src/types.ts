@@ -221,6 +221,24 @@ export type DropboxDomain = {
   previews: number;
 };
 
+export type IngestionHealth = {
+  source_registrations: number;
+  records: Record<string, number>;
+  duplicates_skipped: number;
+  recent: Array<{
+    id: string;
+    source_registration_key: string;
+    external_id: string;
+    status: string;
+    attempt_count: number;
+    last_error: string | null;
+    policy: {
+      sensitivity?: string;
+      egress_policy?: string;
+    };
+  }>;
+};
+
 export type MemoryPreview = {
   domain_key: string;
   filename: string;
