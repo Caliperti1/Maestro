@@ -473,3 +473,97 @@ def test_context_bundle_respects_item_and_character_budgets(session: Session) ->
     assert bundle.used_chars <= bundle.max_chars
     assert bundle.dropped_count > 0
     assert all(len(snippet.excerpt) < len(snippet.memory.content) for snippet in snippets)
+
+
+def test_external_context_excludes_local_only_memory(session: Session) -> None:
+    praxis_id, _ = _domain_ids(session)
+    _memory(
+        session,
+        domain_id=praxis_id,
+        title="Externally usable Praxis context",
+        content="Praxis is Chris Aliperti's company.",
+        importance=0.9,
+    )
+    restricted = _memory(
+        session,
+        domain_id=praxis_id,
+        title="Sanitized restricted obligation",
+        content="Chris has a restricted work deadline Thursday.",
+        importance=0.9,
+        metadata={
+            "source_policy": {
+                "sensitivity": "sanitized_work_context",
+                "egress_policy": "local_only",
+            }
+        },
+    )
+
+    external = MemoryRetrievalService(session).build_context_bundle(
+        MemoryContextBundleRequest(
+            profile="agent_prompt",
+            audience="agent",
+            domain_id=praxis_id,
+            query_text="Chris work context",
+            use_semantic=False,
+            egress_target="external",
+            max_chars=2000,
+        )
+    )
+    local = MemoryRetrievalService(session).build_context_bundle(
+        MemoryContextBundleRequest(
+            profile="agent_prompt",
+            audience="agent",
+            domain_id=praxis_id,
+            query_text="Chris work context",
+            use_semantic=False,
+            egress_target="local",
+            max_chars=2000,
+        )
+    )
+
+    assert str(restricted.id) not in external.rendered_text
+    assert external.policy_filtered_count == 1
+    assert str(restricted.id) in local.rendered_text
+    assert local.policy_filtered_count == 0
+
+
+def test_external_context_excludes_restricted_domain_memory_without_new_metadata(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    usma = DomainRepository(session).get_by_key("usma")
+    assert usma is not None
+    restricted = _memory(
+        session,
+        domain_id=usma.id,
+        title="Legacy USMA context",
+        content="A sanitized obligation created before source policies existed.",
+        importance=0.9,
+    )
+
+    external = MemoryRetrievalService(session).build_context_bundle(
+        MemoryContextBundleRequest(
+            profile="agent_prompt",
+            audience="agent",
+            domain_id=usma.id,
+            query_text="sanitized obligation",
+            use_semantic=False,
+            egress_target="external",
+            max_chars=2000,
+        )
+    )
+    local = MemoryRetrievalService(session).build_context_bundle(
+        MemoryContextBundleRequest(
+            profile="agent_prompt",
+            audience="agent",
+            domain_id=usma.id,
+            query_text="sanitized obligation",
+            use_semantic=False,
+            egress_target="local",
+            max_chars=2000,
+        )
+    )
+
+    assert str(restricted.id) not in external.rendered_text
+    assert external.policy_filtered_count == 1
+    assert str(restricted.id) in local.rendered_text

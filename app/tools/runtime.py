@@ -3027,11 +3027,26 @@ class MemoryContextBundleToolAdapter:
             memory_type_set = {str(item).strip() for item in memory_types if str(item).strip()}
         else:
             memory_type_set = None
-        capabilities = context.agent.capabilities if isinstance(context.agent.capabilities, dict) else {}
+        capabilities = (
+            context.agent.capabilities if isinstance(context.agent.capabilities, dict) else {}
+        )
+        task_payload = (
+            context.task.input_payload if isinstance(context.task.input_payload, dict) else {}
+        )
+        model_profile = str(
+            payload.get("model_profile")
+            or task_payload.get("model_profile")
+            or capabilities.get("model_profile")
+            or "default"
+        )
         try:
             bundle = MemoryRetrievalService(context.session).build_context_bundle(
                 MemoryContextBundleRequest(
-                    profile=str(payload.get("profile") or capabilities.get("memory_profile") or "agent_prompt"),  # type: ignore[arg-type]
+                    profile=str(
+                        payload.get("profile")
+                        or capabilities.get("memory_profile")
+                        or "agent_prompt"
+                    ),  # type: ignore[arg-type]
                     audience=str(payload.get("audience") or "agent"),  # type: ignore[arg-type]
                     domain_id=domain.id,
                     agent_id=context.agent.id,
@@ -3039,8 +3054,15 @@ class MemoryContextBundleToolAdapter:
                     memory_types=memory_type_set,
                     min_importance=_optional_float(payload.get("min_importance")),
                     use_semantic=_optional_bool(payload.get("use_semantic"), default=True),
-                    max_items=_bounded_int(payload.get("max_items"), default=12, minimum=1, maximum=40),
-                    max_chars=_bounded_int(payload.get("max_chars"), default=4000, minimum=200, maximum=12000),
+                    egress_target=(
+                        "local" if model_profile.lower().startswith("ollama:") else "external"
+                    ),
+                    max_items=_bounded_int(
+                        payload.get("max_items"), default=12, minimum=1, maximum=40
+                    ),
+                    max_chars=_bounded_int(
+                        payload.get("max_chars"), default=4000, minimum=200, maximum=12000
+                    ),
                 )
             )
         except MemoryRetrievalError as exc:
@@ -3965,6 +3987,7 @@ def _memory_context_bundle_payload(
             "query_text": request.query_text,
             "included_count": bundle.included_count,
             "semantic_status": bundle.semantic_status,
+            "policy_filtered_count": bundle.policy_filtered_count,
         },
         "profile": request.profile,
         "audience": request.audience,
@@ -3974,12 +3997,14 @@ def _memory_context_bundle_payload(
         "memory_type": sorted(request.memory_types or []),
         "min_importance": request.min_importance,
         "use_semantic": request.use_semantic,
+        "egress_target": request.egress_target,
         "semantic_status": bundle.semantic_status,
         "max_items": request.max_items,
         "max_chars": bundle.max_chars,
         "used_chars": bundle.used_chars,
         "total_visible": bundle.total_visible,
         "filtered_count": bundle.filtered_count,
+        "policy_filtered_count": bundle.policy_filtered_count,
         "retrieved_count": bundle.retrieved_count,
         "included_count": bundle.included_count,
         "dropped_count": bundle.dropped_count,

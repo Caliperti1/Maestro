@@ -15,6 +15,8 @@ chat responses toward persistent execution.
 - Domain-aware agent registry with editable global/domain/agent prompts.
 - Prompt aggregation with scoped memory retrieval.
 - Durable memory ingestion from drag-and-drop dropbox folders.
+- Context ingestion ledger with source registrations, checkpoints, provenance, idempotency, and
+  local-only egress enforcement for sanitized USMA/L3 context.
 - Routed operational stores for contacts, events, todos, organizations, decisions, RFIs, and ideas.
 - Scheduler and queue foundation for manual, recurring, and trigger-shaped workflows.
 - Background scheduler worker that can be toggled from the UI.
@@ -47,7 +49,8 @@ flowchart LR
     Tools --> External["GitHub / Gmail / Codex / Local App"]
 
     Maestro --> Artifacts["Workflow Artifacts"]
-    Artifacts --> Dropbox["Memory Dropbox"]
+    Artifacts --> Gateway["Context Gateway"]
+    Gateway --> Dropbox["Staging + Ingestion Ledger"]
     Dropbox --> Curator["Memory Curator"]
     Curator --> DurableMemory["Durable Memory"]
     Curator --> Routed["Routed Operational Stores"]
@@ -120,13 +123,15 @@ Relevant code:
 
 ### Durable Memory
 
-Durable memory is the RAG-style context layer. Files, workflow artifacts, and interaction packages
-enter a dropbox, get parsed into candidate memories, are evaluated/deduplicated, and are written to
-memory or held as proposals depending on impact and confidence.
+Durable memory is the RAG-style context layer. Source adapters normalize evidence through the
+Context Gateway, which records source identity, provenance, policy, checkpoints, and idempotency.
+Staged evidence is parsed into candidate memories, evaluated/deduplicated, and written to memory or
+held as proposals depending on impact and confidence. The curator still decides durable truth.
 
 Relevant code:
 
 - `app/memory/dropbox.py`
+- `app/memory/ingestion.py`
 - `app/memory/llm_curator.py`
 - `app/memory/service.py`
 - `app/memory/retrieval.py`
@@ -134,6 +139,7 @@ Relevant code:
 - `docs/MEMORY_SERVICE.md`
 - `docs/MEMORY_DROPBOX.md`
 - `docs/MEMORY_CURATOR.md`
+- `docs/CONTEXT_INGESTION.md`
 
 ### Routed Operational Objects
 

@@ -1,0 +1,17 @@
+flowchart TD
+    Sources[Context Sources] --> Adapters[Source Adapters]
+    Adapters --> Envelope[Normalized Context Envelope]
+    Envelope --> Policy{Policy and Egress}
+    Policy --> Ledger[Ingestion Ledger and Checkpoint]
+    Ledger -->|Duplicate version| Skip[Skip Processing]
+    Ledger -->|New or changed| Stage[Seed Package and Raw Artifact]
+    Stage --> Curator[Memory Curator]
+    Curator --> Memory[Canonical Memory]
+    Curator --> Proposals[Memory Proposals]
+    Curator --> Routed[Routed Operational Objects]
+    Memory --> Retrieval[Policy-Aware Retrieval]
+    Routed --> Retrieval
+    Retrieval -->|Human or local model| Local[Full Authorized Context]
+    Retrieval -->|External model| External[External-Allowed Context Only]
+    Curator --> Archive[Processed Source Archive]
+    Ledger --> Health[Ingestion Health and Recovery]

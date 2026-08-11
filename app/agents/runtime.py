@@ -960,6 +960,9 @@ class PromptAggregationService:
                 agent_id=spec.id,
                 query_text=query_text,
                 use_semantic=request.use_semantic,
+                egress_target=_egress_target_for_model_profile(
+                    request.model_profile or spec.model_profile
+                ),
                 max_items=request.max_memory_items,
                 max_chars=request.max_memory_chars,
             )
@@ -1066,6 +1069,7 @@ class PromptAggregationService:
                 "run_id": run_id,
                 "caller": request.caller,
                 "query_text": request.query_text,
+                "model_profile": request.model_profile or package.agent.model_profile,
                 "memory_query_text": package.memory_context.request.query_text,
                 "execute_llm": execute_llm,
                 "stage_interaction": stage_interaction,
@@ -3944,6 +3948,11 @@ def _llm_client_for_model_profile(model_profile: str | None) -> LLMClient:
         model = profile.removeprefix("openai:").strip()
         return OpenAILLMClient(provider="openai", model=model or None)
     return OpenAILLMClient(model=profile)
+
+
+def _egress_target_for_model_profile(model_profile: str | None) -> str:
+    profile = (model_profile or "default").strip().lower()
+    return "local" if profile.startswith("ollama:") else "external"
 
 
 def _scoped_skill_manifest(

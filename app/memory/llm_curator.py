@@ -238,6 +238,24 @@ class LLMMemoryCurator:
             source_ref["id"] = str(source.source_id)
         if source.uri is not None:
             source_ref["uri"] = source.uri
+        for key in (
+            "source_registration_key",
+            "source_system",
+            "source_version",
+            "source_timestamp",
+            "ingested_at",
+            "content_hash",
+            "transfer_method",
+            "sensitivity",
+            "trust_level",
+            "egress_policy",
+        ):
+            value = source.metadata.get(key)
+            if value is not None:
+                source_ref[key] = value
+        external_id = source.metadata.get("source_id")
+        if external_id is not None:
+            source_ref["external_id"] = external_id
         return source_ref
 
 

@@ -59,6 +59,7 @@ import type {
   DomainContext,
   DropboxDomain,
   GmailTriggerStatus,
+  IngestionHealth,
   MaestroPlan,
   MaestroRespond,
   MaestroRun,
@@ -6183,9 +6184,18 @@ function MemoryWorkspace() {
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [lastProcessSummary, setLastProcessSummary] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [ingestionHealth, setIngestionHealth] = useState<IngestionHealth | null>(null);
 
   const refreshMemory = useCallback(async () => {
-    const [statusResult, previewResult, pendingResult, itemResult, sourceResult, artifactResult] =
+    const [
+      statusResult,
+      previewResult,
+      pendingResult,
+      itemResult,
+      sourceResult,
+      artifactResult,
+      ingestionResult,
+    ] =
       await Promise.allSettled([
         apiJson<{ domains: DropboxDomain[] }>("/memory/dropbox/status"),
         apiJson<{ previews: MemoryPreview[] }>("/memory/dropbox/previews"),
@@ -6193,6 +6203,7 @@ function MemoryWorkspace() {
         apiJson<{ items: MemoryItem[] }>("/memory/items?limit=8"),
         apiJson<{ sources: MemorySource[] }>("/memory/sources?limit=8"),
         apiJson<{ artifacts: MemoryArtifact[] }>("/memory/artifacts?limit=12"),
+        apiJson<IngestionHealth>("/memory/ingestion/status"),
       ]);
     if (statusResult.status !== "fulfilled") {
       throw statusResult.reason;
@@ -6212,6 +6223,9 @@ function MemoryWorkspace() {
     setItems(itemResponse.items);
     setSources(sourceResponse.sources);
     setArtifacts(artifactResponse.artifacts);
+    if (ingestionResult.status === "fulfilled") {
+      setIngestionHealth(ingestionResult.value);
+    }
     if (artifactResult.status === "rejected") {
       setStatusMessage("Memory loaded. Restart the backend to enable run artifact audit.");
     }
@@ -6428,6 +6442,20 @@ function MemoryWorkspace() {
           <span>Failed {selectedDomainStatus?.failed ?? 0}</span>
           <span>Previews {selectedDomainStatus?.previews ?? 0}</span>
         </div>
+        {ingestionHealth && (
+          <div className="ingestion-health" aria-label="Ingestion health">
+            <div className="dropbox-stats">
+              <span>Sources {ingestionHealth.source_registrations}</span>
+              <span>Tracked {Object.values(ingestionHealth.records).reduce((a, b) => a + b, 0)}</span>
+              <span>Duplicates skipped {ingestionHealth.duplicates_skipped}</span>
+              <span>Failures {ingestionHealth.records.failed ?? 0}</span>
+            </div>
+            <p className="memory-status">
+              USMA and L3 context drops are curated locally and withheld from external model
+              prompts.
+            </p>
+          </div>
+        )}
         {lastProcessSummary && <p className="memory-status">{lastProcessSummary}</p>}
         <p className="memory-status">{statusMessage}</p>
       </section>

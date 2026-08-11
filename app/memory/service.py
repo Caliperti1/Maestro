@@ -548,6 +548,16 @@ class MemoryService:
         }.get(evaluation.decision)
         if relation_type is None:
             return
+        if relation_type == "supersedes":
+            superseded = self.session.get(MemoryItem, evaluation.related_memory_id)
+            if superseded is not None and superseded.valid_until is None:
+                now = datetime.now(UTC)
+                superseded.valid_until = now
+                superseded.metadata_ = {
+                    **(superseded.metadata_ or {}),
+                    "superseded_by": str(memory_item.id),
+                    "superseded_at": now.isoformat(),
+                }
         self.session.add(
             MemoryLink(
                 source_memory_id=memory_item.id,

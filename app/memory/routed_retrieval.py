@@ -21,6 +21,7 @@ from app.db.models import (
     Todo,
 )
 from app.memory.routed_hygiene import RoutedHygieneService
+from app.memory.ingestion import IngestionTarget, payload_allowed_for_target
 from app.memory.calendar_intelligence import (
     CalendarIntelligenceService,
     conferencing_url_from_values,
@@ -54,12 +55,17 @@ class RoutedRetrievalService:
         query_text: str | None = None,
         limit: int = 12,
         max_chars: int = 3000,
+        egress_target: IngestionTarget = "human",
     ) -> RoutedContextBundle:
         stores = RoutedMemoryService(self.session).build_context_bundle(
             domain_id=domain_id,
             query_text=query_text,
             limit=limit,
         )
+        stores = {
+            key: [item for item in items if payload_allowed_for_target(item, egress_target)]
+            for key, items in stores.items()
+        }
         rendered = self._render(stores, max_chars=max_chars)
         return RoutedContextBundle(
             query_text=query_text,
