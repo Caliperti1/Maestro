@@ -40,6 +40,11 @@ from app.memory.retrieval import (
     MemoryContextBundleRequest,
     MemoryRetrievalService,
 )
+from app.memory.federated_retrieval import (
+    FederatedContextBundle,
+    FederatedRetrievalRequest,
+    FederatedRetrievalService,
+)
 from app.prompts import load_prompt
 from app.tools.runtime import (
     ToolExecutionRequest,
@@ -182,6 +187,7 @@ class PromptPackage:
     role_prompt: str
     user_context: str | None
     memory_context: MemoryContextBundle
+    federated_context: FederatedContextBundle
     tool_manifest: list[ToolManifestItem]
     skill_manifest: list[SkillManifestItem]
     output_contract: dict[str, Any]
@@ -969,6 +975,20 @@ class PromptAggregationService:
                 max_chars=request.max_memory_chars,
             )
         )
+        federated_context = FederatedRetrievalService(self.session).retrieve(
+            FederatedRetrievalRequest(
+                query_text=query_text,
+                audience="agent",
+                domain_id=domain.id,
+                agent_id=spec.id,
+                egress_target=_egress_target_for_model_profile(
+                    request.model_profile or spec.model_profile
+                ),
+                max_items=request.max_memory_items,
+                max_chars=request.max_memory_chars,
+                use_semantic=request.use_semantic,
+            )
+        )
         global_context = self.registry.get_global_context().context
         identity_grounding = IdentityGroundingService(self.session).build_packet(
             domain_key=domain.key
@@ -986,6 +1006,7 @@ class PromptAggregationService:
             role_prompt=spec.role_prompt,
             user_context=request.user_context,
             memory_context=memory_context,
+            federated_context=federated_context,
             tool_manifest=spec.allowed_tools,
             skill_manifest=skill_manifest,
             output_contract=output_contract,
@@ -997,7 +1018,7 @@ class PromptAggregationService:
                 role_prompt=spec.role_prompt,
                 task_instruction=prompt_task_instruction,
                 user_context=request.user_context,
-                memory_text=memory_context.rendered_text,
+                memory_text=federated_context.rendered_text or memory_context.rendered_text,
                 tools=spec.allowed_tools,
                 skills=skill_manifest,
                 output_contract=output_contract,

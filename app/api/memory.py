@@ -38,6 +38,12 @@ from app.memory.contact_hydration import ContactHydrationError, ContactHydration
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.ingestion import IngestionLedgerService
 from app.memory.embeddings import MemoryEmbeddingService
+from app.memory.federated_retrieval import (
+    FederatedIndexService,
+    FederatedRetrievalRequest,
+    FederatedRetrievalService,
+    federated_bundle_payload,
+)
 from app.memory.retrieval import (
     MemoryContextBundle,
     MemoryContextBundleRequest,
@@ -1016,6 +1022,51 @@ def retrieve_memory(
         "semantic_status": result.semantic_status,
         "results": [_retrieved_memory_payload(db, retrieved) for retrieved in result.results],
     }
+
+
+@router.get("/federated-retrieve")
+def retrieve_federated_context(
+    query_text: str,
+    audience: str = "maestro",
+    domain_key: str | None = None,
+    agent_id: uuid.UUID | None = None,
+    store: list[str] | None = Query(default=None),
+    egress_target: str = "external",
+    use_semantic: bool = True,
+    max_items: int = 12,
+    max_chars: int = 5000,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if audience not in {"maestro", "agent"}:
+        raise HTTPException(status_code=400, detail="audience must be maestro or agent.")
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    try:
+        bundle = FederatedRetrievalService(db).retrieve(
+            FederatedRetrievalRequest(
+                query_text=query_text,
+                audience=audience,  # type: ignore[arg-type]
+                domain_id=domain_id,
+                agent_id=agent_id,
+                egress_target=egress_target,  # type: ignore[arg-type]
+                stores=set(store) if store else None,
+                use_semantic=use_semantic,
+                max_items=max_items,
+                max_chars=max_chars,
+            )
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return federated_bundle_payload(bundle)
+
+
+@router.post("/federated-index/sync")
+def sync_federated_index(
+    embed_missing: bool = True,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = FederatedIndexService(db).sync(embed_missing=embed_missing)
+    db.commit()
+    return result.__dict__
 
 
 @router.get("/context-bundle")

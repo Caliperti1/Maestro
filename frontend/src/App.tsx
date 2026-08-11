@@ -73,7 +73,7 @@ import type {
   MemorySource,
   PendingProposal,
   PromptPackage,
-  RetrievedMemory,
+  FederatedRetrievedDocument,
   RoutedEvent,
   RoutedContact,
   RoutedEntity,
@@ -6173,11 +6173,11 @@ function MemoryWorkspace() {
   const [artifacts, setArtifacts] = useState<MemoryArtifact[]>([]);
   const [sourceTargetDomain, setSourceTargetDomain] = useState("personal");
   const [selectedPreviewFilename, setSelectedPreviewFilename] = useState<string | null>(null);
-  const [retrievalDomain, setRetrievalDomain] = useState("praxis");
+  const [retrievalDomain, setRetrievalDomain] = useState("");
   const [retrievalQuery, setRetrievalQuery] = useState("");
   const [retrievalMode, setRetrievalMode] = useState<"balanced" | "strict" | "broad">("balanced");
   const [semanticRetrieval, setSemanticRetrieval] = useState(true);
-  const [retrievalResults, setRetrievalResults] = useState<RetrievedMemory[]>([]);
+  const [retrievalResults, setRetrievalResults] = useState<FederatedRetrievedDocument[]>([]);
   const [retrievalTotal, setRetrievalTotal] = useState(0);
   const [retrievalFiltered, setRetrievalFiltered] = useState(0);
   const [semanticStatus, setSemanticStatus] = useState("not requested");
@@ -6347,23 +6347,25 @@ function MemoryWorkspace() {
     try {
       const params = new URLSearchParams({
         audience: "maestro",
-        domain_key: retrievalDomain,
-        mode: retrievalMode,
         use_semantic: semanticRetrieval ? "true" : "false",
-        limit: "8",
+        max_items: "10",
+        max_chars: "5000",
       });
+      if (retrievalDomain) {
+        params.set("domain_key", retrievalDomain);
+      }
       if (retrievalQuery.trim()) {
         params.set("query_text", retrievalQuery.trim());
       }
       const response = await apiJson<{
-        total_visible: number;
-        filtered_count: number;
+        dropped_count: number;
+        policy_filtered_count: number;
         semantic_status: string;
-        results: RetrievedMemory[];
-      }>(`/memory/retrieve?${params.toString()}`);
+        results: FederatedRetrievedDocument[];
+      }>(`/memory/federated-retrieve?${params.toString()}`);
       setRetrievalResults(response.results);
-      setRetrievalTotal(response.total_visible);
-      setRetrievalFiltered(response.filtered_count);
+      setRetrievalTotal(response.results.length + response.dropped_count);
+      setRetrievalFiltered(response.dropped_count + response.policy_filtered_count);
       setSemanticStatus(response.semantic_status);
       setStatusMessage(`Retrieved ${response.results.length} memories.`);
     } catch (error) {
@@ -6397,6 +6399,7 @@ function MemoryWorkspace() {
               value={selectedDomain}
               onChange={(event) => setSelectedDomain(event.target.value)}
             >
+              <option value="">All domains</option>
               {domains.map((domain) => (
                 <option key={domain.key} value={domain.key}>
                   {domainLabels[domain.key] ?? domain.key}
@@ -6666,25 +6669,26 @@ function MemoryWorkspace() {
           {retrievalResults.map((item) => (
             <article className="memory-row" key={item.id}>
               <span>
-                {item.domain_key} / {item.scope} / score {item.score.toFixed(2)}
+                {item.domain_key ?? "global"} / {item.store} / score {item.score.toFixed(2)}
               </span>
               <h4>{item.title}</h4>
               <p>{item.content}</p>
               <div className="preview-meta">
-                <span>relevance {(item.query_relevance * 100).toFixed(0)}%</span>
+                <span>lexical {(item.lexical_score * 100).toFixed(0)}%</span>
                 <span>
                   semantic{" "}
                   {item.semantic_similarity === null
                     ? "n/a"
                     : `${(item.semantic_similarity * 100).toFixed(0)}%`}
                 </span>
-                <span>importance {(item.importance * 100).toFixed(0)}%</span>
+                <span>trust {(item.trust_score * 100).toFixed(0)}%</span>
+                <span>recency {(item.recency_score * 100).toFixed(0)}%</span>
               </div>
               <p className="evaluation-note">{item.score_reasons.join(" | ")}</p>
               <div className="preview-meta">
-                <span>{item.provenance.source_refs.length} source refs</span>
-                <span>{item.provenance.artifact ? "artifact" : "no artifact"}</span>
-                <span>{item.links.length} links</span>
+                <span>{item.document_key}</span>
+                <span>{item.source_timestamp ? new Date(item.source_timestamp).toLocaleDateString() : "no source date"}</span>
+                <span>{String(item.policy.egress_policy ?? "external_allowed")}</span>
               </div>
             </article>
           ))}

@@ -661,6 +661,27 @@ export type RetrievedMemory = MemoryItem & {
   }>;
 };
 
+export type FederatedRetrievedDocument = {
+  id: string;
+  document_key: string;
+  store: string;
+  source_id: string;
+  domain_key: string | null;
+  title: string;
+  content: string;
+  score: number;
+  lexical_score: number;
+  semantic_similarity: number | null;
+  recency_score: number;
+  score_reasons: string[];
+  source_timestamp: string | null;
+  trust_score: number;
+  importance: number;
+  policy: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+};
+
 export type AgentTool = {
   key: string;
   name: string;

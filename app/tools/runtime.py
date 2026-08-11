@@ -53,6 +53,11 @@ from app.memory.retrieval import (
     MemoryRetrievalError,
     MemoryRetrievalService,
 )
+from app.memory.federated_retrieval import (
+    FederatedRetrievalRequest,
+    FederatedRetrievalService,
+    federated_bundle_payload,
+)
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
 from app.memory.routed_hygiene import RoutedHygieneService
@@ -3039,35 +3044,38 @@ class MemoryContextBundleToolAdapter:
             or capabilities.get("model_profile")
             or "default"
         )
-        try:
-            bundle = MemoryRetrievalService(context.session).build_context_bundle(
-                MemoryContextBundleRequest(
-                    profile=str(
-                        payload.get("profile")
-                        or capabilities.get("memory_profile")
-                        or "agent_prompt"
-                    ),  # type: ignore[arg-type]
-                    audience=str(payload.get("audience") or "agent"),  # type: ignore[arg-type]
-                    domain_id=domain.id,
-                    agent_id=context.agent.id,
-                    query_text=query_text or None,
-                    memory_types=memory_type_set,
-                    min_importance=_optional_float(payload.get("min_importance")),
-                    use_semantic=_optional_bool(payload.get("use_semantic"), default=True),
-                    egress_target=(
-                        "local" if model_profile.lower().startswith("ollama:") else "external"
-                    ),
-                    max_items=_bounded_int(
-                        payload.get("max_items"), default=12, minimum=1, maximum=40
-                    ),
-                    max_chars=_bounded_int(
-                        payload.get("max_chars"), default=4000, minimum=200, maximum=12000
-                    ),
-                )
+        bundle = FederatedRetrievalService(context.session).retrieve(
+            FederatedRetrievalRequest(
+                query_text=query_text or context.task.objective,
+                audience="agent",
+                domain_id=domain.id,
+                agent_id=context.agent.id,
+                egress_target=("local" if model_profile.lower().startswith("ollama:") else "external"),
+                max_items=_bounded_int(payload.get("max_items"), default=12, minimum=1, maximum=40),
+                max_chars=_bounded_int(payload.get("max_chars"), default=4000, minimum=200, maximum=12000),
+                use_semantic=_optional_bool(payload.get("use_semantic"), default=True),
             )
-        except MemoryRetrievalError as exc:
-            raise ToolExecutionError(str(exc)) from exc
-        return _memory_context_bundle_payload(bundle, domain_key=domain.key)
+        )
+        result = federated_bundle_payload(bundle)
+        result.update({
+            "summary": {
+                "type": "memory_context_bundle",
+                "domain_key": domain.key,
+                "query_text": query_text,
+                "included_count": len(bundle.results),
+                "semantic_status": bundle.semantic_status,
+                "policy_filtered_count": bundle.policy_filtered_count,
+            },
+            "profile": str(payload.get("profile") or capabilities.get("memory_profile") or "agent_prompt"),
+            "audience": "agent",
+            "domain_key": domain.key,
+            "included_count": len(bundle.results),
+            "retrieved_count": len(bundle.results) + bundle.dropped_count,
+            "total_visible": len(bundle.results) + bundle.dropped_count,
+            "filtered_count": bundle.dropped_count,
+            "max_chars": bundle.request.max_chars,
+        })
+        return result
 
 
 class ReportRetrievalToolAdapter:

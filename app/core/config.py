@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     maestro_topic_resolver_base_url: str = "http://localhost:11434"
     maestro_topic_resolver_timeout_seconds: float = 10.0
     maestro_topic_resolver_confidence_threshold: float = 0.72
+    retrieval_router_provider: str = "ollama"
+    retrieval_router_model: str = "qwen3:8b"
+    retrieval_router_base_url: str = "http://localhost:11434"
+    retrieval_router_timeout_seconds: float = 15.0
     scheduler_worker_autorun: bool = False
     scheduler_worker_interval_seconds: int = 30
     scheduler_worker_claim_limit: int = 4
