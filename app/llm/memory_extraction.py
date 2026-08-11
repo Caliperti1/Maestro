@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.llm.client import LLMClient, LLMClientError
 from app.llm.telemetry import record_llm_call
+from app.maestro.identity_grounding import IdentityGroundingService
 from app.prompts import load_prompt
 
 ExtractedScope = Literal["global", "maestro_session", "domain", "agent"]
@@ -139,9 +140,18 @@ class LLMMemoryExtractor:
         task_id: uuid.UUID | None = None,
         workflow_run_id: str | uuid.UUID | None = None,
     ) -> ExtractedMemoryResponse:
+        identity_context = (
+            IdentityGroundingService(self.session)
+            .build_packet(domain_key=domain_key)
+            .rendered_text
+            if self.session is not None
+            else ""
+        )
         input_text = f"""\
 Domain key: {domain_key}
 Domain context: {_domain_context(domain_key)}
+Authoritative identity context:
+{identity_context}
 Source title: {source_title}
 
 Source:
@@ -164,6 +174,7 @@ Source:
                 prompt_sections={
                     "source": len(source_text),
                     "domain_context": len(_domain_context(domain_key)),
+                    "identity_grounding": len(identity_context),
                 },
                 metadata={"source_title": source_title, "domain_key": domain_key},
             )

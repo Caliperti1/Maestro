@@ -57,7 +57,7 @@ def test_dropbox_tracks_provenance_and_skips_identical_source_version(
     assert IngestionLedgerService(session).status()["duplicates_skipped"] == 1
 
 
-def test_restricted_dropbox_policy_reaches_memory_and_provenance(
+def test_sanitized_dropbox_policy_reaches_memory_and_provenance(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -85,24 +85,24 @@ def test_restricted_dropbox_policy_reaches_memory_and_provenance(
 
     assert result[0].status == "processed"
     memory = session.query(MemoryItem).one()
-    assert memory.metadata_["source_policy"]["egress_policy"] == "local_only"
+    assert memory.metadata_["source_policy"]["egress_policy"] == "external_allowed"
     assert memory.metadata_["source_system"] == "manual_dropbox"
     assert memory.metadata_["source_timestamp"]
     source_ref = memory.metadata_["source_refs"][0]
     assert source_ref["external_id"] == "maestro_context.md"
     assert source_ref["sensitivity"] == "sanitized_work_context"
-    assert source_ref["egress_policy"] == "local_only"
+    assert source_ref["egress_policy"] == "external_allowed"
 
 
-def test_restricted_dropbox_selects_local_curator(session: Session, tmp_path: Path) -> None:
+def test_sanitized_dropbox_uses_standard_external_model_policy(tmp_path: Path) -> None:
     source = tmp_path / "context.md"
-    source.write_text("Sanitized local-only context.", encoding="utf-8")
+    source.write_text("Sanitized work context.", encoding="utf-8")
+
     envelope = envelope_for_file(source, domain_key="usma")
-    processor = MemoryDropboxProcessor(session, root=tmp_path)
 
-    curator = processor._curator(envelope)
-
-    assert curator.extractor.llm_client.provider == "ollama"
+    assert envelope.policy.egress_policy == "external_allowed"
+    assert envelope.policy.sensitivity == "sanitized_work_context"
+    assert envelope.policy.transfer_method == "sanitized_context_drop"
 
 
 def test_changed_file_version_is_reprocessed(session: Session, tmp_path: Path) -> None:

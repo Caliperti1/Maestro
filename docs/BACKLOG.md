@@ -35,7 +35,7 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - [x] Add source registrations, pull-source checkpoints, and an idempotent ingestion ledger.
 - [x] Standardize provenance and source timestamps across seed packages, artifacts, memories,
   proposals, and routed items.
-- [x] Default sanitized USMA/L3 context to local-only curation and block it from external prompts.
+- [x] Preserve sanitized USMA/L3 source classification while using the standard memory models.
 - [x] Retire superseded memory from active retrieval while retaining its history and links.
 - [x] Add stale-ingestion recovery and Memory UI health indicators.
 - [ ] Add a ChatGPT export adapter with stable conversation and message IDs.
@@ -45,8 +45,8 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 
 ### Identity grounding and expert retrieval
 
-- [ ] Add an authoritative Chris identity, alias, role, ownership, employment, and organization graph.
-- [ ] Build a small cached grounding packet used by Maestro and every agent prompt.
+- [x] Add an authoritative Chris identity, alias, role, ownership, employment, and organization graph.
+- [x] Build a small cached grounding packet used by Maestro and every agent prompt.
 - [ ] Add query/domain routing before federated retrieval.
 - [ ] Federate durable memory, routed objects, reports, run logs, and source evidence.
 - [ ] Rank by semantic fit, validity, domain, source time, trust, and relationship distance.

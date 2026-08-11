@@ -16,6 +16,7 @@ from app.db.models import Artifact, Domain, Report, WorkflowRunLogEntry
 from app.memory.ingestion import memory_allowed_for_target
 from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
 from app.memory.routed_retrieval import RoutedRetrievalService
+from app.maestro.identity_grounding import IdentityGroundingService
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class MaestroContextAssembler:
     ) -> MaestroContextBundle:
         domain = self._domain(domain_key)
         sections = {
+            "identity": self._identity_section(domain_key=domain.key if domain else domain_key),
             "memory": self._memory_section(
                 query_text=query_text,
                 domain=domain,
@@ -85,6 +87,15 @@ class MaestroContextAssembler:
             used_chars=len(rendered),
             max_chars=max_chars,
         )
+
+    def _identity_section(self, *, domain_key: str | None) -> dict[str, Any]:
+        packet = IdentityGroundingService(self.session).build_packet(domain_key=domain_key)
+        return {
+            "status": "ok",
+            "nodes": packet.nodes,
+            "relationships": packet.relationships,
+            "rendered_text": packet.rendered_text,
+        }
 
     def _domain(self, domain_key: str | None) -> Domain | None:
         if not domain_key:
@@ -128,13 +139,6 @@ class MaestroContextAssembler:
         domain: Domain | None,
         max_chars: int,
     ) -> dict[str, Any]:
-        if domain is not None and domain.key in {"usma", "l3"}:
-            return {
-                "status": "local_only",
-                "rendered_text": "",
-                "stores": {},
-                "message": "Restricted domain context requires a local-model conversation path.",
-            }
         try:
             service = RoutedRetrievalService(self.session)
             bundle = service.build_context_bundle(
@@ -170,8 +174,6 @@ class MaestroContextAssembler:
         domain: Domain | None,
         limit: int,
     ) -> dict[str, Any]:
-        if domain is not None and domain.key in {"usma", "l3"}:
-            return {"status": "local_only", "items": []}
         reports = self.session.scalars(
             self._text_filtered(
                 select(Report).order_by(Report.created_at.desc()).limit(limit * 3),
@@ -211,8 +213,6 @@ class MaestroContextAssembler:
         domain: Domain | None,
         limit: int,
     ) -> dict[str, Any]:
-        if domain is not None and domain.key in {"usma", "l3"}:
-            return {"status": "local_only", "items": []}
         entries = self.session.scalars(
             self._text_filtered(
                 select(WorkflowRunLogEntry)
@@ -301,6 +301,9 @@ class MaestroContextAssembler:
 
     def _render(self, sections: dict[str, Any], *, max_chars: int) -> str:
         blocks: list[str] = []
+        identity_text = str(sections.get("identity", {}).get("rendered_text") or "").strip()
+        if identity_text:
+            blocks.append(f"## Authoritative Identity\n{identity_text}")
         memory_text = str(sections.get("memory", {}).get("rendered_text") or "").strip()
         if memory_text:
             blocks.append(f"## Durable Memory\n{memory_text}")

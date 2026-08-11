@@ -9,7 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Artifact, Domain, MemoryEmbedding, MemoryItem, MemoryLink, SeedPackage
+from app.db.models import Artifact, MemoryEmbedding, MemoryItem, MemoryLink, SeedPackage
 from app.memory.embeddings import EmbeddingClient, build_embedding_client
 from app.memory.ingestion import IngestionTarget, memory_allowed_for_target
 
@@ -138,7 +138,6 @@ class MemoryRetrievalService:
     def __init__(self, session: Session, *, embedding_client: EmbeddingClient | None = None):
         self.session = session
         self.embedding_client = embedding_client
-        self._domain_egress_cache: dict[uuid.UUID, bool] = {}
 
     def retrieve(self, query: MemoryRetrievalQuery) -> MemoryRetrievalResult:
         self._validate_query(query)
@@ -351,16 +350,7 @@ class MemoryRetrievalService:
         memory: MemoryItem,
         query: MemoryRetrievalQuery,
     ) -> bool:
-        if not memory_allowed_for_target(memory.metadata_, query.egress_target):
-            return False
-        if query.egress_target != "external" or memory.domain_id is None:
-            return True
-        if memory.domain_id not in self._domain_egress_cache:
-            domain = self.session.get(Domain, memory.domain_id)
-            self._domain_egress_cache[memory.domain_id] = bool(
-                domain is None or domain.key not in {"usma", "l3"}
-            )
-        return self._domain_egress_cache[memory.domain_id]
+        return memory_allowed_for_target(memory.metadata_, query.egress_target)
 
     def _active_predicates(self):
         now = datetime.now(UTC)

@@ -73,16 +73,20 @@ The initial policy profiles are:
 | Praxis | business confidential | user provided | external allowed |
 | Perti Laboratories | business confidential | user provided | external allowed |
 | Maestro Development | business confidential | user provided | external allowed |
-| USMA | sanitized work context | user reviewed | local only |
-| L3 | sanitized work context | user reviewed | local only |
+| USMA | sanitized work context | user reviewed | external allowed |
+| L3 | sanitized work context | user reviewed | external allowed |
 
-`local_only` is enforced twice:
+USMA and L3 evidence is sanitized before it reaches Maestro, so it follows the same configured
+curation and retrieval path as other domains. Its source classification remains attached for
+provenance and future policy decisions. The generic `local_only` policy remains available for an
+individual source that must never enter a cloud-bound prompt; when selected it is enforced during
+curation and retrieval.
 
-1. The dropbox curator uses the configured local Ollama model and never falls back to a cloud model.
-2. Memory and routed-object retrieval exclude the derived context from cloud-bound prompt bundles.
-
-Human audit and local-model retrieval can still inspect it. A future policy engine can add finer
-rules for summarization, artifact creation, specific agents, or approved external providers.
+The standard dropbox path currently uses the configured cloud memory model (Terra by default) for
+extraction and candidate evaluation. Canonical memories use the configured Ollama embedding model
+(`nomic-embed-text` by default) for semantic retrieval. Model reasoning and embeddings are separate
+steps: the model extracts and evaluates meaning, while the embedding encodes the final memory for
+similarity search.
 
 ## Durable Truth And History
 

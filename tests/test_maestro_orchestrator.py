@@ -2136,7 +2136,9 @@ def test_maestro_context_bundle_combines_memory_reports_runs_routed_and_artifact
     assert "Praxis Partner Briefing Report" in rendered
     assert "Praxis partner briefing workflow" in rendered
     assert "Praxis partner briefing artifact" in rendered
+    assert "Praxis Defense is Chris Aliperti's company" in rendered
     assert payload["sections"]["memory"]["included_count"] >= 1
+    assert payload["sections"]["identity"]["relationships"]
     assert payload["sections"]["reports"]["items"][0]["id"] == str(report.id)
 
 

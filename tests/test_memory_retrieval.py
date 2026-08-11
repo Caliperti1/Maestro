@@ -527,13 +527,13 @@ def test_external_context_excludes_local_only_memory(session: Session) -> None:
     assert local.policy_filtered_count == 0
 
 
-def test_external_context_excludes_restricted_domain_memory_without_new_metadata(
+def test_external_context_allows_sanitized_domain_memory_without_local_only_policy(
     session: Session,
 ) -> None:
     seed_default_domains(session)
     usma = DomainRepository(session).get_by_key("usma")
     assert usma is not None
-    restricted = _memory(
+    sanitized = _memory(
         session,
         domain_id=usma.id,
         title="Legacy USMA context",
@@ -564,6 +564,6 @@ def test_external_context_excludes_restricted_domain_memory_without_new_metadata
         )
     )
 
-    assert str(restricted.id) not in external.rendered_text
-    assert external.policy_filtered_count == 1
-    assert str(restricted.id) in local.rendered_text
+    assert str(sanitized.id) in external.rendered_text
+    assert external.policy_filtered_count == 0
+    assert str(sanitized.id) in local.rendered_text

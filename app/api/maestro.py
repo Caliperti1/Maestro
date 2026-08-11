@@ -22,6 +22,7 @@ from app.maestro.channel import (
     is_global_channel_message,
 )
 from app.maestro.context_assembler import MaestroContextAssembler, maestro_context_payload
+from app.maestro.identity_grounding import IdentityGroundingService
 from app.maestro.intent_classifier import (
     classify_active_message_with_local_llm,
     resolve_topic_with_local_llm,
@@ -90,6 +91,23 @@ def build_maestro_context_bundle(
         max_chars=max_chars,
     )
     return maestro_context_payload(bundle)
+
+
+@router.get("/identity-graph")
+def get_identity_graph(
+    domain_key: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    packet = IdentityGroundingService(db).build_packet(
+        domain_key=domain_key,
+        force_refresh=True,
+    )
+    return {
+        "domain_key": packet.domain_key,
+        "nodes": packet.nodes,
+        "relationships": packet.relationships,
+        "rendered_text": packet.rendered_text,
+    }
 
 
 class MaestroToolRejectBody(BaseModel):

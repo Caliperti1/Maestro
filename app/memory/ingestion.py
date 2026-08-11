@@ -99,8 +99,7 @@ def policy_for_domain(domain_key: str) -> SourcePolicy:
             sensitivity="sanitized_work_context",
             trust_level="user_reviewed",
             transfer_method="sanitized_context_drop",
-            egress_policy="local_only",
-            requires_human_review=True,
+            egress_policy="external_allowed",
         )
     if domain_key in {"praxis", "perti-laboratories", "maestro-development"}:
         return SourcePolicy(

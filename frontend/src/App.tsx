@@ -6451,8 +6451,8 @@ function MemoryWorkspace() {
               <span>Failures {ingestionHealth.records.failed ?? 0}</span>
             </div>
             <p className="memory-status">
-              USMA and L3 context drops are curated locally and withheld from external model
-              prompts.
+              Source policy and provenance travel with derived memory and are enforced during
+              prompt assembly.
             </p>
           </div>
         )}

@@ -55,6 +55,48 @@ class Domain(TimestampMixin, Base):
     memory_items: Mapped[list["MemoryItem"]] = relationship(back_populates="domain")
 
 
+class IdentityNode(TimestampMixin, Base):
+    """Authoritative identity or organizational anchor used to ground prompts."""
+
+    __tablename__ = "identity_nodes"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(200), unique=True, nullable=False, index=True)
+    node_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("entities.id", ondelete="SET NULL"), index=True
+    )
+    is_authoritative: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class IdentityRelationship(TimestampMixin, Base):
+    """Current, sourced relationship between two authoritative identity nodes."""
+
+    __tablename__ = "identity_relationships"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(240), unique=True, nullable=False, index=True)
+    subject_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("identity_nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    object_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("identity_nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    relationship_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
 class Agent(TimestampMixin, Base):
     __tablename__ = "agents"
 
