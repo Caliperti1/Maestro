@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     embedding_api_key: str | None = None
     embedding_dimensions: int | None = None
     memory_embedding_best_effort: bool = True
+    memory_hygiene_autorun: bool = True
+    memory_hygiene_interval_seconds: Annotated[int, Field(ge=300, le=604800)] = 21600
     routed_resolver_llm_provider: str = "ollama"
     routed_resolver_llm_model: str = "llama3.1:8b"
     routed_resolver_llm_base_url: str = "http://localhost:11434"

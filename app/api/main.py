@@ -27,6 +27,7 @@ from app.maestro.identity_grounding import IdentityGroundingService
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.contact_hydration import ContactHydrationService
+from app.memory.hygiene import DurableMemoryHygieneService
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
                 asyncio.create_task(_gmail_trigger_worker_loop()),
                 asyncio.create_task(_memory_dropbox_worker_loop()),
                 asyncio.create_task(_contact_hydration_worker_loop()),
+                asyncio.create_task(_memory_hygiene_worker_loop()),
             ]
         )
         try:
@@ -102,7 +104,24 @@ def _process_scheduler_work_once() -> int:
                 execute_llm=bool(worker_settings["execute_llm"]),
                 auto_tool_loop=bool(worker_settings["auto_tool_loop"]),
             )
-        return int(worker_settings["interval_seconds"])
+    return int(worker_settings["interval_seconds"])
+
+
+async def _memory_hygiene_worker_loop() -> None:
+    while True:
+        settings = get_settings()
+        await asyncio.sleep(max(300, settings.memory_hygiene_interval_seconds))
+        if not settings.memory_hygiene_autorun:
+            continue
+        try:
+            await asyncio.to_thread(_process_memory_hygiene_once)
+        except Exception:
+            logger.exception("Durable memory hygiene heartbeat failed.")
+
+
+def _process_memory_hygiene_once() -> None:
+    with SessionLocal() as session:
+        DurableMemoryHygieneService(session).run()
 
 
 async def _gmail_trigger_worker_loop() -> None:

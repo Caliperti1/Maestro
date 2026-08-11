@@ -332,6 +332,22 @@ class RetrievalDocument(TimestampMixin, Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
+class MemoryHygieneRun(TimestampMixin, Base):
+    __tablename__ = "memory_hygiene_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    status: Mapped[str] = mapped_column(String(40), default="running", nullable=False, index=True)
+    scanned_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    embedding_backfilled_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    provenance_repaired_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duplicate_merged_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    proposal_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class ToolConnection(TimestampMixin, Base):
     __tablename__ = "tool_connections"
     __table_args__ = (UniqueConstraint("domain_id", "tool_key", name="uq_tool_connections_domain_tool"),)

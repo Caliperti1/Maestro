@@ -22,6 +22,7 @@ from app.db.models import (
     Idea,
     IngestionRecord,
     MemoryItem,
+    MemoryHygieneRun,
     MemoryProposal,
     RoutedItem,
     SeedPackage,
@@ -38,6 +39,8 @@ from app.memory.contact_hydration import ContactHydrationError, ContactHydration
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.ingestion import IngestionLedgerService
 from app.memory.embeddings import MemoryEmbeddingService
+from app.memory.chatgpt_import import ChatGPTExportImporter
+from app.memory.hygiene import DurableMemoryHygieneService
 from app.memory.federated_retrieval import (
     FederatedIndexService,
     FederatedRetrievalRequest,
@@ -847,6 +850,39 @@ def backfill_organization_embeddings(
     result = OrganizationEmbeddingService(db).backfill(limit=limit)
     db.commit()
     return result
+
+
+@router.post("/hygiene/run")
+def run_durable_memory_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
+    run = DurableMemoryHygieneService(db).run()
+    return _memory_hygiene_payload(run)
+
+
+@router.get("/hygiene/runs")
+def list_durable_memory_hygiene_runs(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    runs = db.scalars(select(MemoryHygieneRun).order_by(MemoryHygieneRun.started_at.desc()).limit(limit)).all()
+    return {"runs": [_memory_hygiene_payload(run) for run in runs]}
+
+
+@router.post("/imports/chatgpt")
+async def import_chatgpt_export(
+    file: UploadFile = File(...),
+    domain_key: str = "personal",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    filename = Path(file.filename or "conversations.json").name
+    if not filename.lower().endswith((".json", ".zip")):
+        raise HTTPException(status_code=400, detail="Upload a ChatGPT export ZIP or conversations.json.")
+    if DomainRepository(db).get_by_key(domain_key) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown domain: {domain_key}")
+    try:
+        result = ChatGPTExportImporter(db).import_bytes(await file.read(), filename=filename, default_domain_key=domain_key)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.__dict__
 
 
 @router.get("/routed-objects/ideas")
@@ -1675,3 +1711,19 @@ def _metadata_reclassified(
     updated["reclassification_history"] = history
     updated["dropbox_domain"] = target_domain_key
     return updated
+
+
+def _memory_hygiene_payload(run: MemoryHygieneRun) -> dict[str, Any]:
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "scanned_count": run.scanned_count,
+        "embedding_backfilled_count": run.embedding_backfilled_count,
+        "provenance_repaired_count": run.provenance_repaired_count,
+        "duplicate_merged_count": run.duplicate_merged_count,
+        "proposal_count": run.proposal_count,
+        "error_message": run.error_message,
+        "details": run.details,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    }
