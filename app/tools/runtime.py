@@ -63,6 +63,7 @@ from app.memory.organization_intelligence import OrganizationEmbeddingService, O
 from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_service import RoutedMemoryService
+from app.memory.context_gateway import ToolEvidenceLedgerService
 
 
 class ToolExecutionError(ValueError):
@@ -186,6 +187,7 @@ class ToolExecutionService:
             tool_call.completed_at = datetime.now(UTC)
             self.session.commit()
             self.session.refresh(tool_call)
+            self._record_external_evidence(tool_call=tool_call, domain=domain)
             return ToolExecutionResult(
                 tool_key=request.tool_key,
                 status=tool_call.status,
@@ -300,6 +302,8 @@ class ToolExecutionService:
         }
         self.session.commit()
         self.session.refresh(tool_call)
+        if tool_call.status == "complete":
+            self._record_external_evidence(tool_call=tool_call, domain=domain)
         return ToolExecutionResult(
             tool_key=request.tool_key,
             status=tool_call.status,
@@ -438,6 +442,19 @@ class ToolExecutionService:
         )
         if str(permission or "use") not in {"use", "read", "write", "admin"}:
             raise ToolExecutionError(f"Agent {agent.key} has invalid permission for {tool_key}.")
+
+    def _record_external_evidence(self, *, tool_call: ToolCall, domain: Domain) -> None:
+        try:
+            ToolEvidenceLedgerService(self.session).record(
+                tool_call_id=str(tool_call.id),
+                tool_key=tool_call.tool_name,
+                domain=domain,
+                output=tool_call.output_payload if isinstance(tool_call.output_payload, dict) else None,
+                task_id=str(tool_call.task_id),
+            )
+        except Exception:
+            # Evidence accounting must not turn a successful external action into a failed tool call.
+            return
 
     def _connection_for(self, domain: Domain, tool_key: str) -> ToolConnection | None:
         provider_key = _provider_key(tool_key)

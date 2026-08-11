@@ -1,3 +1,4 @@
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from app.db.models import (
     Contact,
     ContactHydrationJob,
     DecisionRecord,
+    Domain,
     Entity,
     Idea,
     IngestionRecord,
@@ -40,7 +42,14 @@ from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.ingestion import IngestionLedgerService
 from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.chatgpt_import import ChatGPTExportImporter
+from app.memory.context_gateway import (
+    ContextGatewayService,
+    GatewayItem,
+    parse_sanitized_context_manifest,
+)
 from app.memory.hygiene import DurableMemoryHygieneService
+from app.memory.ingestion import SourcePolicy
+from app.memory.repository_observer import RepositoryObserverService
 from app.memory.federated_retrieval import (
     FederatedIndexService,
     FederatedRetrievalRequest,
@@ -106,6 +115,17 @@ class CreateCalendarEventRequest(BaseModel):
     conferencing_url: str | None = None
     attendees: list[dict[str, Any]] = Field(default_factory=list)
     organizations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RepositorySourceRequest(BaseModel):
+    key: str = Field(min_length=3, max_length=200)
+    domain_key: str
+    path: str
+    display_name: str | None = None
+
+
+class RepositoryObservationRequest(BaseModel):
+    force_full: bool = False
 
 
 class MergeContactRequest(BaseModel):
@@ -204,6 +224,107 @@ def list_ingestion_records(
 def recover_stale_ingestion(db: Session = Depends(get_db)) -> dict[str, Any]:
     recovered = IngestionLedgerService(db).recover_stale()
     return {"status": "recovered", "recovered_count": recovered}
+
+
+@router.get("/ingestion/sources")
+def list_context_sources(db: Session = Depends(get_db)) -> dict[str, Any]:
+    registrations = db.scalars(select(SourceRegistration).order_by(SourceRegistration.display_name)).all()
+    domains = {domain.id: domain.key for domain in db.scalars(select(Domain)).all()}
+    return {
+        "sources": [
+            {
+                "id": str(source.id),
+                "key": source.key,
+                "source_system": source.source_system,
+                "display_name": source.display_name,
+                "adapter_type": source.adapter_type,
+                "domain_key": domains.get(source.domain_id),
+                "policy": source.policy,
+                "config": source.config,
+                "is_active": source.is_active,
+            }
+            for source in registrations
+        ]
+    }
+
+
+@router.post("/ingestion/sources/repositories")
+def register_repository_source(
+    body: RepositorySourceRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain = DomainRepository(db).get_by_key(body.domain_key)
+    if domain is None:
+        raise HTTPException(status_code=404, detail=f"Unknown domain: {body.domain_key}")
+    try:
+        registration = RepositoryObserverService(db).register(
+            key=body.key,
+            path=body.path,
+            domain=domain,
+            display_name=body.display_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": str(registration.id), "key": registration.key, "config": registration.config}
+
+
+@router.post("/ingestion/sources/repositories/{source_key}/observe")
+def observe_repository_source(
+    source_key: str,
+    body: RepositoryObservationRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    registration = db.scalar(select(SourceRegistration).where(SourceRegistration.key == source_key))
+    if registration is None:
+        raise HTTPException(status_code=404, detail=f"Unknown source: {source_key}")
+    try:
+        result = RepositoryObserverService(db).observe(registration, force_full=body.force_full)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": result.status,
+        "repository_key": result.repository_key,
+        "commit": result.commit,
+        "previous_commit": result.previous_commit,
+        "mode": result.mode,
+        "changed_files": result.changed_files,
+        "gateway": result.gateway.__dict__ if result.gateway else None,
+    }
+
+
+@router.post("/ingestion/sanitized-context")
+async def ingest_sanitized_context(
+    file: UploadFile = File(...),
+    domain_key: str = "usma",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain = DomainRepository(db).get_by_key(domain_key)
+    if domain is None or domain_key not in {"usma", "l3"}:
+        raise HTTPException(status_code=404, detail="Sanitized context destination must be usma or l3.")
+    try:
+        text = (await file.read()).decode("utf-8")
+        metadata, body = parse_sanitized_context_manifest(text, expected_domain=domain_key)
+        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        source_timestamp = datetime.fromisoformat(metadata["reviewed_at"].replace("Z", "+00:00"))
+        result = ContextGatewayService(db).ingest(
+            GatewayItem(
+                source_registration_key=f"sanitized-context:{domain_key}",
+                source_system=metadata["source_system"],
+                external_id=metadata.get("source_id") or Path(file.filename or "context.md").name,
+                source_version=content_hash,
+                content_type="sanitized_context_manifest",
+                domain_key=domain_key,
+                title=metadata.get("title") or f"{domain.name} sanitized context",
+                content=text,
+                source_timestamp=source_timestamp,
+                policy=SourcePolicy(sensitivity="sanitized_work_context", trust_level="user_reviewed", transfer_method="sanitized_context_drop", egress_policy="external_allowed"),
+                metadata={"reviewed_by": metadata["reviewed_by"], "contains_restricted": False, "body_chars": len(body)},
+            ),
+            domain=domain,
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.__dict__
 
 
 @router.post("/dropbox/{domain_key}/upload")
