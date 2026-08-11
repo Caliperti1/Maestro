@@ -1,3 +1,4 @@
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -18,10 +19,12 @@ from app.db.models import (
     Contact,
     ContactHydrationJob,
     DecisionRecord,
+    Domain,
     Entity,
     Idea,
     IngestionRecord,
     MemoryItem,
+    MemoryHygieneRun,
     MemoryProposal,
     RoutedItem,
     SeedPackage,
@@ -38,6 +41,21 @@ from app.memory.contact_hydration import ContactHydrationError, ContactHydration
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.ingestion import IngestionLedgerService
 from app.memory.embeddings import MemoryEmbeddingService
+from app.memory.chatgpt_import import ChatGPTExportImporter
+from app.memory.context_gateway import (
+    ContextGatewayService,
+    GatewayItem,
+    parse_sanitized_context_manifest,
+)
+from app.memory.hygiene import DurableMemoryHygieneService
+from app.memory.ingestion import SourcePolicy
+from app.memory.repository_observer import RepositoryObserverService
+from app.memory.federated_retrieval import (
+    FederatedIndexService,
+    FederatedRetrievalRequest,
+    FederatedRetrievalService,
+    federated_bundle_payload,
+)
 from app.memory.retrieval import (
     MemoryContextBundle,
     MemoryContextBundleRequest,
@@ -97,6 +115,17 @@ class CreateCalendarEventRequest(BaseModel):
     conferencing_url: str | None = None
     attendees: list[dict[str, Any]] = Field(default_factory=list)
     organizations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RepositorySourceRequest(BaseModel):
+    key: str = Field(min_length=3, max_length=200)
+    domain_key: str
+    path: str
+    display_name: str | None = None
+
+
+class RepositoryObservationRequest(BaseModel):
+    force_full: bool = False
 
 
 class MergeContactRequest(BaseModel):
@@ -195,6 +224,107 @@ def list_ingestion_records(
 def recover_stale_ingestion(db: Session = Depends(get_db)) -> dict[str, Any]:
     recovered = IngestionLedgerService(db).recover_stale()
     return {"status": "recovered", "recovered_count": recovered}
+
+
+@router.get("/ingestion/sources")
+def list_context_sources(db: Session = Depends(get_db)) -> dict[str, Any]:
+    registrations = db.scalars(select(SourceRegistration).order_by(SourceRegistration.display_name)).all()
+    domains = {domain.id: domain.key for domain in db.scalars(select(Domain)).all()}
+    return {
+        "sources": [
+            {
+                "id": str(source.id),
+                "key": source.key,
+                "source_system": source.source_system,
+                "display_name": source.display_name,
+                "adapter_type": source.adapter_type,
+                "domain_key": domains.get(source.domain_id),
+                "policy": source.policy,
+                "config": source.config,
+                "is_active": source.is_active,
+            }
+            for source in registrations
+        ]
+    }
+
+
+@router.post("/ingestion/sources/repositories")
+def register_repository_source(
+    body: RepositorySourceRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain = DomainRepository(db).get_by_key(body.domain_key)
+    if domain is None:
+        raise HTTPException(status_code=404, detail=f"Unknown domain: {body.domain_key}")
+    try:
+        registration = RepositoryObserverService(db).register(
+            key=body.key,
+            path=body.path,
+            domain=domain,
+            display_name=body.display_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": str(registration.id), "key": registration.key, "config": registration.config}
+
+
+@router.post("/ingestion/sources/repositories/{source_key}/observe")
+def observe_repository_source(
+    source_key: str,
+    body: RepositoryObservationRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    registration = db.scalar(select(SourceRegistration).where(SourceRegistration.key == source_key))
+    if registration is None:
+        raise HTTPException(status_code=404, detail=f"Unknown source: {source_key}")
+    try:
+        result = RepositoryObserverService(db).observe(registration, force_full=body.force_full)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": result.status,
+        "repository_key": result.repository_key,
+        "commit": result.commit,
+        "previous_commit": result.previous_commit,
+        "mode": result.mode,
+        "changed_files": result.changed_files,
+        "gateway": result.gateway.__dict__ if result.gateway else None,
+    }
+
+
+@router.post("/ingestion/sanitized-context")
+async def ingest_sanitized_context(
+    file: UploadFile = File(...),
+    domain_key: str = "usma",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain = DomainRepository(db).get_by_key(domain_key)
+    if domain is None or domain_key not in {"usma", "l3"}:
+        raise HTTPException(status_code=404, detail="Sanitized context destination must be usma or l3.")
+    try:
+        text = (await file.read()).decode("utf-8")
+        metadata, body = parse_sanitized_context_manifest(text, expected_domain=domain_key)
+        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        source_timestamp = datetime.fromisoformat(metadata["reviewed_at"].replace("Z", "+00:00"))
+        result = ContextGatewayService(db).ingest(
+            GatewayItem(
+                source_registration_key=f"sanitized-context:{domain_key}",
+                source_system=metadata["source_system"],
+                external_id=metadata.get("source_id") or Path(file.filename or "context.md").name,
+                source_version=content_hash,
+                content_type="sanitized_context_manifest",
+                domain_key=domain_key,
+                title=metadata.get("title") or f"{domain.name} sanitized context",
+                content=text,
+                source_timestamp=source_timestamp,
+                policy=SourcePolicy(sensitivity="sanitized_work_context", trust_level="user_reviewed", transfer_method="sanitized_context_drop", egress_policy="external_allowed"),
+                metadata={"reviewed_by": metadata["reviewed_by"], "contains_restricted": False, "body_chars": len(body)},
+            ),
+            domain=domain,
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.__dict__
 
 
 @router.post("/dropbox/{domain_key}/upload")
@@ -843,6 +973,39 @@ def backfill_organization_embeddings(
     return result
 
 
+@router.post("/hygiene/run")
+def run_durable_memory_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
+    run = DurableMemoryHygieneService(db).run()
+    return _memory_hygiene_payload(run)
+
+
+@router.get("/hygiene/runs")
+def list_durable_memory_hygiene_runs(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    runs = db.scalars(select(MemoryHygieneRun).order_by(MemoryHygieneRun.started_at.desc()).limit(limit)).all()
+    return {"runs": [_memory_hygiene_payload(run) for run in runs]}
+
+
+@router.post("/imports/chatgpt")
+async def import_chatgpt_export(
+    file: UploadFile = File(...),
+    domain_key: str = "personal",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    filename = Path(file.filename or "conversations.json").name
+    if not filename.lower().endswith((".json", ".zip")):
+        raise HTTPException(status_code=400, detail="Upload a ChatGPT export ZIP or conversations.json.")
+    if DomainRepository(db).get_by_key(domain_key) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown domain: {domain_key}")
+    try:
+        result = ChatGPTExportImporter(db).import_bytes(await file.read(), filename=filename, default_domain_key=domain_key)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.__dict__
+
+
 @router.get("/routed-objects/ideas")
 def list_ideas(
     domain_key: str | None = None,
@@ -1016,6 +1179,51 @@ def retrieve_memory(
         "semantic_status": result.semantic_status,
         "results": [_retrieved_memory_payload(db, retrieved) for retrieved in result.results],
     }
+
+
+@router.get("/federated-retrieve")
+def retrieve_federated_context(
+    query_text: str,
+    audience: str = "maestro",
+    domain_key: str | None = None,
+    agent_id: uuid.UUID | None = None,
+    store: list[str] | None = Query(default=None),
+    egress_target: str = "external",
+    use_semantic: bool = True,
+    max_items: int = 12,
+    max_chars: int = 5000,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if audience not in {"maestro", "agent"}:
+        raise HTTPException(status_code=400, detail="audience must be maestro or agent.")
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    try:
+        bundle = FederatedRetrievalService(db).retrieve(
+            FederatedRetrievalRequest(
+                query_text=query_text,
+                audience=audience,  # type: ignore[arg-type]
+                domain_id=domain_id,
+                agent_id=agent_id,
+                egress_target=egress_target,  # type: ignore[arg-type]
+                stores=set(store) if store else None,
+                use_semantic=use_semantic,
+                max_items=max_items,
+                max_chars=max_chars,
+            )
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return federated_bundle_payload(bundle)
+
+
+@router.post("/federated-index/sync")
+def sync_federated_index(
+    embed_missing: bool = True,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = FederatedIndexService(db).sync(embed_missing=embed_missing)
+    db.commit()
+    return result.__dict__
 
 
 @router.get("/context-bundle")
@@ -1624,3 +1832,19 @@ def _metadata_reclassified(
     updated["reclassification_history"] = history
     updated["dropbox_domain"] = target_domain_key
     return updated
+
+
+def _memory_hygiene_payload(run: MemoryHygieneRun) -> dict[str, Any]:
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "scanned_count": run.scanned_count,
+        "embedding_backfilled_count": run.embedding_backfilled_count,
+        "provenance_repaired_count": run.provenance_repaired_count,
+        "duplicate_merged_count": run.duplicate_merged_count,
+        "proposal_count": run.proposal_count,
+        "error_message": run.error_message,
+        "details": run.details,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    }

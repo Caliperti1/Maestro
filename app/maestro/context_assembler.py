@@ -14,6 +14,11 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Artifact, Domain, Report, WorkflowRunLogEntry
 from app.memory.ingestion import memory_allowed_for_target
+from app.memory.federated_retrieval import (
+    FederatedRetrievalRequest,
+    FederatedRetrievalService,
+    federated_bundle_payload,
+)
 from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
 from app.memory.routed_retrieval import RoutedRetrievalService
 from app.maestro.identity_grounding import IdentityGroundingService
@@ -48,6 +53,11 @@ class MaestroContextAssembler:
         domain = self._domain(domain_key)
         sections = {
             "identity": self._identity_section(domain_key=domain.key if domain else domain_key),
+            "federated": self._federated_section(
+                query_text=query_text,
+                domain=domain,
+                max_chars=max_chars - 700,
+            ),
             "memory": self._memory_section(
                 query_text=query_text,
                 domain=domain,
@@ -87,6 +97,30 @@ class MaestroContextAssembler:
             used_chars=len(rendered),
             max_chars=max_chars,
         )
+
+    def _federated_section(
+        self,
+        *,
+        query_text: str | None,
+        domain: Domain | None,
+        max_chars: int,
+    ) -> dict[str, Any]:
+        if not query_text:
+            return {"status": "skipped", "rendered_text": "", "results": []}
+        try:
+            bundle = FederatedRetrievalService(self.session).retrieve(
+                FederatedRetrievalRequest(
+                    query_text=query_text,
+                    audience="maestro",
+                    domain_id=domain.id if domain else None,
+                    egress_target="external",
+                    max_items=14,
+                    max_chars=max_chars,
+                )
+            )
+        except Exception as exc:
+            return {"status": "unavailable", "error": str(exc), "rendered_text": "", "results": []}
+        return {"status": bundle.semantic_status, **federated_bundle_payload(bundle)}
 
     def _identity_section(self, *, domain_key: str | None) -> dict[str, Any]:
         packet = IdentityGroundingService(self.session).build_packet(domain_key=domain_key)
@@ -304,6 +338,11 @@ class MaestroContextAssembler:
         identity_text = str(sections.get("identity", {}).get("rendered_text") or "").strip()
         if identity_text:
             blocks.append(f"## Authoritative Identity\n{identity_text}")
+        federated_text = str(sections.get("federated", {}).get("rendered_text") or "").strip()
+        if federated_text:
+            blocks.append(f"## Retrieved Context\n{federated_text}")
+            blocks.append("## Web Search\nUse `web.search` if the answer needs current external information.")
+            return "\n\n".join(blocks).strip()[:max_chars]
         memory_text = str(sections.get("memory", {}).get("rendered_text") or "").strip()
         if memory_text:
             blocks.append(f"## Durable Memory\n{memory_text}")

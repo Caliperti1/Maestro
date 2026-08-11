@@ -301,6 +301,53 @@ class MemoryEmbedding(TimestampMixin, Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
+class RetrievalDocument(TimestampMixin, Base):
+    """Search projection shared by Maestro's otherwise independent context stores."""
+
+    __tablename__ = "retrieval_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    document_key: Mapped[str] = mapped_column(String(500), unique=True, nullable=False, index=True)
+    store: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(320), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
+    source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    trust_score: Mapped[float] = mapped_column(Float, default=0.7, nullable=False)
+    importance: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    relationship_weight: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    embedding_provider: Mapped[str | None] = mapped_column(String(80))
+    embedding_model: Mapped[str | None] = mapped_column(String(160))
+    embedding_dimensions: Mapped[int | None] = mapped_column(Integer)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector())
+    policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class MemoryHygieneRun(TimestampMixin, Base):
+    __tablename__ = "memory_hygiene_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    status: Mapped[str] = mapped_column(String(40), default="running", nullable=False, index=True)
+    scanned_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    embedding_backfilled_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    provenance_repaired_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duplicate_merged_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    proposal_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class ToolConnection(TimestampMixin, Base):
     __tablename__ = "tool_connections"
     __table_args__ = (UniqueConstraint("domain_id", "tool_key", name="uq_tool_connections_domain_tool"),)

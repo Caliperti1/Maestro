@@ -38,20 +38,20 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - [x] Preserve sanitized USMA/L3 source classification while using the standard memory models.
 - [x] Retire superseded memory from active retrieval while retaining its history and links.
 - [x] Add stale-ingestion recovery and Memory UI health indicators.
-- [ ] Add a ChatGPT export adapter with stable conversation and message IDs.
-- [ ] Add a repository observer adapter with full-baseline and commit-aware incremental modes.
-- [ ] Converge Gmail, Calendar, Drive, and GitHub memory outputs on the ingestion ledger.
-- [ ] Add reviewed USMA and L3 Markdown/JSON context-drop manifests.
+- [x] Add a ChatGPT export adapter with stable conversation and message IDs.
+- [x] Add a repository observer adapter with full-baseline and commit-aware incremental modes.
+- [x] Converge Gmail, Calendar, Drive, and GitHub memory outputs on the ingestion ledger.
+- [x] Add reviewed USMA and L3 Markdown context-drop manifests.
 
 ### Identity grounding and expert retrieval
 
 - [x] Add an authoritative Chris identity, alias, role, ownership, employment, and organization graph.
 - [x] Build a small cached grounding packet used by Maestro and every agent prompt.
-- [ ] Add query/domain routing before federated retrieval.
-- [ ] Federate durable memory, routed objects, reports, run logs, and source evidence.
-- [ ] Rank by semantic fit, validity, domain, source time, trust, and relationship distance.
-- [ ] Add policy-aware reranking and context compression.
-- [ ] Build retrieval evaluations for identity, domain expertise, cross-domain synthesis, provenance,
+- [x] Add query/domain routing before federated retrieval.
+- [x] Federate durable memory, routed objects, reports, run logs, and source evidence.
+- [x] Rank by semantic fit, validity, domain, source time, trust, and relationship evidence.
+- [x] Add policy-aware reranking and context compression.
+- [x] Build retrieval evaluations for identity, domain expertise, cross-domain synthesis, provenance,
   current truth, and restricted-context isolation.
 
 ---

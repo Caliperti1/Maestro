@@ -563,6 +563,13 @@ def _prompt_package_payload(package) -> dict[str, Any]:
             ],
             "rendered_text": package.memory_context.rendered_text,
         },
+        "federated_context": {
+            "semantic_status": package.federated_context.semantic_status,
+            "store_counts": package.federated_context.store_counts,
+            "used_chars": package.federated_context.used_chars,
+            "dropped_count": package.federated_context.dropped_count,
+            "rendered_text": package.federated_context.rendered_text,
+        },
         "assembled_prompt": package.assembled_prompt,
     }
 

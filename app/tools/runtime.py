@@ -53,11 +53,17 @@ from app.memory.retrieval import (
     MemoryRetrievalError,
     MemoryRetrievalService,
 )
+from app.memory.federated_retrieval import (
+    FederatedRetrievalRequest,
+    FederatedRetrievalService,
+    federated_bundle_payload,
+)
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
 from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_service import RoutedMemoryService
+from app.memory.context_gateway import ToolEvidenceLedgerService
 
 
 class ToolExecutionError(ValueError):
@@ -181,6 +187,7 @@ class ToolExecutionService:
             tool_call.completed_at = datetime.now(UTC)
             self.session.commit()
             self.session.refresh(tool_call)
+            self._record_external_evidence(tool_call=tool_call, domain=domain)
             return ToolExecutionResult(
                 tool_key=request.tool_key,
                 status=tool_call.status,
@@ -295,6 +302,8 @@ class ToolExecutionService:
         }
         self.session.commit()
         self.session.refresh(tool_call)
+        if tool_call.status == "complete":
+            self._record_external_evidence(tool_call=tool_call, domain=domain)
         return ToolExecutionResult(
             tool_key=request.tool_key,
             status=tool_call.status,
@@ -433,6 +442,19 @@ class ToolExecutionService:
         )
         if str(permission or "use") not in {"use", "read", "write", "admin"}:
             raise ToolExecutionError(f"Agent {agent.key} has invalid permission for {tool_key}.")
+
+    def _record_external_evidence(self, *, tool_call: ToolCall, domain: Domain) -> None:
+        try:
+            ToolEvidenceLedgerService(self.session).record(
+                tool_call_id=str(tool_call.id),
+                tool_key=tool_call.tool_name,
+                domain=domain,
+                output=tool_call.output_payload if isinstance(tool_call.output_payload, dict) else None,
+                task_id=str(tool_call.task_id),
+            )
+        except Exception:
+            # Evidence accounting must not turn a successful external action into a failed tool call.
+            return
 
     def _connection_for(self, domain: Domain, tool_key: str) -> ToolConnection | None:
         provider_key = _provider_key(tool_key)
@@ -1598,7 +1620,55 @@ class GoogleWorkspaceToolAdapter:
             return self._meet_conference_records_list(payload, token=token)
         if self.key == "google.meet.conference_records.get":
             return self._meet_conference_record_get(payload, token=token)
+        if self.key == "google.calendar.events.list":
+            return self._calendar_events_list(context.connection, payload, token=token)
+        if self.key == "google.calendar.event.get":
+            return self._calendar_event_get(context.connection, payload, token=token)
+        if self.key == "google.calendar.event.create":
+            return self._calendar_event_write(context.connection, payload, token=token, method="POST")
+        if self.key == "google.calendar.event.update":
+            return self._calendar_event_write(context.connection, payload, token=token, method="PATCH")
+        if self.key == "google.calendar.event.delete":
+            return self._calendar_event_delete(context.connection, payload, token=token)
         raise ToolExecutionError(f"Unsupported Google Workspace tool: {self.key}")
+
+    def _calendar_events_list(self, connection: ToolConnection | None, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        calendar_id = _google_calendar_id(connection, payload)
+        params: dict[str, Any] = {
+            "maxResults": _bounded_int(payload.get("max_results"), default=50, minimum=1, maximum=250),
+            "singleEvents": "true",
+            "orderBy": "startTime",
+        }
+        for payload_key, api_key in (("time_min", "timeMin"), ("time_max", "timeMax"), ("query", "q"), ("page_token", "pageToken")):
+            if payload.get(payload_key):
+                params[api_key] = str(payload[payload_key])
+        response = _google_api_json("GET", "https://www.googleapis.com", f"/calendar/v3/calendars/{quote(calendar_id, safe='')}/events", token=token, params=params)
+        events = response.get("items") if isinstance(response.get("items"), list) else []
+        return {"calendar_id": calendar_id, "events": events, "next_page_token": response.get("nextPageToken"), "summary": {"type": "google_calendar_events", "calendar_id": calendar_id, "event_count": len(events), "has_more": bool(response.get("nextPageToken"))}}
+
+    def _calendar_event_get(self, connection: ToolConnection | None, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        calendar_id = _google_calendar_id(connection, payload)
+        event_id = _required_string(payload, "event_id")
+        event = _google_api_json("GET", "https://www.googleapis.com", f"/calendar/v3/calendars/{quote(calendar_id, safe='')}/events/{quote(event_id, safe='')}", token=token)
+        return {"calendar_id": calendar_id, "event": event, "summary": {"type": "google_calendar_event", "calendar_id": calendar_id, "event_id": event.get("id") or event_id, "title": event.get("summary"), "status": event.get("status")}}
+
+    def _calendar_event_write(self, connection: ToolConnection | None, payload: dict[str, Any], *, token: str, method: str) -> dict[str, Any]:
+        calendar_id = _google_calendar_id(connection, payload)
+        event = payload.get("event") if isinstance(payload.get("event"), dict) else {key: value for key, value in payload.items() if key not in {"calendar_id", "event_id"}}
+        if not event.get("summary"):
+            raise ToolExecutionError("Google Calendar event writes require event.summary.")
+        path = f"/calendar/v3/calendars/{quote(calendar_id, safe='')}/events"
+        if method == "PATCH":
+            event_id = _required_string(payload, "event_id")
+            path += f"/{quote(event_id, safe='')}"
+        response = _google_api_json(method, "https://www.googleapis.com", path, token=token, params={"sendUpdates": str(payload.get("send_updates") or "none")}, body=event)
+        return {"calendar_id": calendar_id, "event": response, "write_status": "created" if method == "POST" else "updated", "summary": {"type": "google_calendar_event_write", "calendar_id": calendar_id, "event_id": response.get("id"), "title": response.get("summary"), "write_status": "created" if method == "POST" else "updated"}}
+
+    def _calendar_event_delete(self, connection: ToolConnection | None, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
+        calendar_id = _google_calendar_id(connection, payload)
+        event_id = _required_string(payload, "event_id")
+        _google_api_json("DELETE", "https://www.googleapis.com", f"/calendar/v3/calendars/{quote(calendar_id, safe='')}/events/{quote(event_id, safe='')}", token=token, params={"sendUpdates": str(payload.get("send_updates") or "none")})
+        return {"calendar_id": calendar_id, "event_id": event_id, "write_status": "deleted", "summary": {"type": "google_calendar_event_delete", "calendar_id": calendar_id, "event_id": event_id}}
 
     def _drive_file_get(self, payload: dict[str, Any], *, token: str) -> dict[str, Any]:
         file_id = _google_file_id(payload)
@@ -3039,35 +3109,38 @@ class MemoryContextBundleToolAdapter:
             or capabilities.get("model_profile")
             or "default"
         )
-        try:
-            bundle = MemoryRetrievalService(context.session).build_context_bundle(
-                MemoryContextBundleRequest(
-                    profile=str(
-                        payload.get("profile")
-                        or capabilities.get("memory_profile")
-                        or "agent_prompt"
-                    ),  # type: ignore[arg-type]
-                    audience=str(payload.get("audience") or "agent"),  # type: ignore[arg-type]
-                    domain_id=domain.id,
-                    agent_id=context.agent.id,
-                    query_text=query_text or None,
-                    memory_types=memory_type_set,
-                    min_importance=_optional_float(payload.get("min_importance")),
-                    use_semantic=_optional_bool(payload.get("use_semantic"), default=True),
-                    egress_target=(
-                        "local" if model_profile.lower().startswith("ollama:") else "external"
-                    ),
-                    max_items=_bounded_int(
-                        payload.get("max_items"), default=12, minimum=1, maximum=40
-                    ),
-                    max_chars=_bounded_int(
-                        payload.get("max_chars"), default=4000, minimum=200, maximum=12000
-                    ),
-                )
+        bundle = FederatedRetrievalService(context.session).retrieve(
+            FederatedRetrievalRequest(
+                query_text=query_text or context.task.objective,
+                audience="agent",
+                domain_id=domain.id,
+                agent_id=context.agent.id,
+                egress_target=("local" if model_profile.lower().startswith("ollama:") else "external"),
+                max_items=_bounded_int(payload.get("max_items"), default=12, minimum=1, maximum=40),
+                max_chars=_bounded_int(payload.get("max_chars"), default=4000, minimum=200, maximum=12000),
+                use_semantic=_optional_bool(payload.get("use_semantic"), default=True),
             )
-        except MemoryRetrievalError as exc:
-            raise ToolExecutionError(str(exc)) from exc
-        return _memory_context_bundle_payload(bundle, domain_key=domain.key)
+        )
+        result = federated_bundle_payload(bundle)
+        result.update({
+            "summary": {
+                "type": "memory_context_bundle",
+                "domain_key": domain.key,
+                "query_text": query_text,
+                "included_count": len(bundle.results),
+                "semantic_status": bundle.semantic_status,
+                "policy_filtered_count": bundle.policy_filtered_count,
+            },
+            "profile": str(payload.get("profile") or capabilities.get("memory_profile") or "agent_prompt"),
+            "audience": "agent",
+            "domain_key": domain.key,
+            "included_count": len(bundle.results),
+            "retrieved_count": len(bundle.results) + bundle.dropped_count,
+            "total_visible": len(bundle.results) + bundle.dropped_count,
+            "filtered_count": bundle.dropped_count,
+            "max_chars": bundle.request.max_chars,
+        })
+        return result
 
 
 class ReportRetrievalToolAdapter:
@@ -3211,6 +3284,11 @@ def default_tool_adapters() -> dict[str, ToolAdapter]:
                 "google.sheets.values.get",
                 "google.meet.conference_records.list",
                 "google.meet.conference_records.get",
+                "google.calendar.events.list",
+                "google.calendar.event.get",
+                "google.calendar.event.create",
+                "google.calendar.event.update",
+                "google.calendar.event.delete",
             )
         }
     )
@@ -4239,6 +4317,21 @@ def _gmail_user_id(connection: ToolConnection | None, payload: dict[str, Any]) -
     if not user_id:
         user_id = str(_connection_config(connection).get("user_id") or "me").strip()
     return user_id or "me"
+
+
+def _google_calendar_id(connection: ToolConnection | None, payload: dict[str, Any]) -> str:
+    return str(
+        payload.get("calendar_id")
+        or _connection_config(connection).get("calendar_id")
+        or "primary"
+    ).strip() or "primary"
+
+
+def _required_string(payload: dict[str, Any], key: str) -> str:
+    value = str(payload.get(key) or "").strip()
+    if not value:
+        raise ToolExecutionError(f"Tool request requires {key}.")
+    return value
 
 
 def _gmail_api_json(

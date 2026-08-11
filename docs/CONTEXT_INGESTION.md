@@ -25,9 +25,8 @@ Source adapter
   -> processed source archive
 ```
 
-The current filesystem dropbox is the first adapter. Future ChatGPT, Gmail, Google Drive, GitHub,
-repository observer, and sanitized work-context adapters should terminate at the same envelope and
-ledger boundary.
+The filesystem dropbox, ChatGPT export importer, repository observer, sanitized work-context
+adapter, and Google/GitHub tool evidence now terminate at the same envelope and ledger boundary.
 
 ## Normalized Context Envelope
 
@@ -101,6 +100,11 @@ The Memory UI shows registered sources, tracked records, duplicates, and failure
 - `GET /memory/ingestion/status`
 - `GET /memory/ingestion/records`
 - `POST /memory/ingestion/recover`
+- `POST /memory/imports/chatgpt`
+- `POST /memory/ingestion/sanitized-context`
+- `POST /memory/ingestion/sources/repositories`
+- `POST /memory/ingestion/sources/repositories/{source_key}/observe`
+- `POST /memory/hygiene/run`
 
 The background dropbox worker recovers ingestion records and source files left in `processing` for
 more than 30 minutes. Failed records can be retried by placing the same source version back in its
@@ -140,19 +144,16 @@ Markdown directly; a later exporter can generate the same fields plus a signed h
 
 See the transfer recommendations below before adding automated email or network delivery.
 
-## Planned Adapters
+## Implemented Adapters
 
-1. ChatGPT export importer with stable conversation/message IDs and incremental exports.
-2. Repository observer that produces current-state reports from commits, issues, PRs, tests, and
-   documentation changes.
-3. USMA and L3 sanitized Markdown/JSON context-drop adapters.
-4. Existing Gmail, Calendar, Drive, and GitHub sources routed through this ledger rather than
-   maintaining independent memory terminal paths.
+1. ChatGPT export importer with stable conversation IDs, content versions, and incremental exports.
+2. Local repository observer with full-baseline and commit-aware incremental state reports.
+3. Reviewed USMA and L3 sanitized Markdown context manifests.
+4. Gmail, Calendar, Drive, and GitHub tool-result evidence accounting.
 
-## Retrieval And Grounding Follow-On
+## Retrieval And Grounding
 
-Ingestion alone does not ensure that Maestro understands Chris's world. The next memory program
-should add:
+Ingestion alone does not ensure that Maestro understands Chris's world. Maestro now adds:
 
 1. An authoritative identity and ownership graph for Chris, aliases, roles, companies, employment,
    and domain relationships. Praxis and Perti Laboratories must be represented as Chris's companies,
@@ -164,7 +165,8 @@ should add:
    with temporal and relationship expansion.
 5. Source-aware ranking using semantic similarity, current validity, domain fit, trust, source time,
    and relationship distance.
-6. Optional local or cloud reranking and context compression, subject to the source egress policy.
+6. Policy-aware ranking and bounded context compression. LLM reranking remains optional if
+   evaluation data shows it materially improves results.
 7. Retrieval evaluations that verify identity grounding, domain expertise, cross-domain questions,
    current-truth selection, provenance, and restricted-data isolation.
 

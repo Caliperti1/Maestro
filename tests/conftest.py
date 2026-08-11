@@ -15,6 +15,8 @@ def disable_live_local_classifiers(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "")
     monkeypatch.setenv("MAESTRO_INTENT_CLASSIFIER_PROVIDER", "none")
     monkeypatch.setenv("MAESTRO_TOPIC_RESOLVER_PROVIDER", "none")
+    monkeypatch.setenv("RETRIEVAL_ROUTER_PROVIDER", "none")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "none")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
