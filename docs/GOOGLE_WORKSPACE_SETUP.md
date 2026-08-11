@@ -14,6 +14,7 @@ Enable these APIs in the Google Cloud project:
 - Google Slides API
 - Google Sheets API
 - Google Meet API
+- Google Calendar API
 
 ## OAuth Client
 
@@ -38,6 +39,7 @@ https://www.googleapis.com/auth/documents
 https://www.googleapis.com/auth/presentations
 https://www.googleapis.com/auth/spreadsheets
 https://www.googleapis.com/auth/meetings.space.readonly
+https://www.googleapis.com/auth/calendar
 ```
 
 Scope intent:
@@ -63,6 +65,12 @@ Use domain-prefixed env vars so each domain can have separate credentials:
 PRAXIS_GOOGLE_CLIENT_ID=
 PRAXIS_GOOGLE_CLIENT_SECRET=
 PRAXIS_GOOGLE_CLIENT_REFRESH_TOKEN=
+PERSONAL_GOOGLE_CLIENT_ID=
+PERSONAL_GOOGLE_CLIENT_SECRET=
+PERSONAL_GOOGLE_CLIENT_REFRESH_TOKEN=
+PERTI_GOOGLE_CLIENT_ID=
+PERTI_GOOGLE_CLIENT_SECRET=
+PERTI_GOOGLE_CLIENT_REFRESH_TOKEN=
 ```
 
 ## Maestro Tool Connection
@@ -80,6 +88,10 @@ In the Tools tab, select `Google Workspace`, choose the domain, set auth type to
 ```
 
 Restart the backend after changing `.env`.
+
+Personal and Perti Laboratories connections are seeded automatically with these environment
+variable names. They remain separate OAuth identities even if the same Google Cloud OAuth client
+ID/secret is reused. Generate one refresh token while signed into each intended Google account.
 
 ## Current Tools
 
@@ -100,6 +112,11 @@ Current tools are read-first except approved Gmail mutations:
 - `google.sheets.values.get`
 - `google.meet.conference_records.list`
 - `google.meet.conference_records.get`
+- `google.calendar.events.list`
+- `google.calendar.event.get`
+- `google.calendar.event.create` (approval required)
+- `google.calendar.event.update` (approval required)
+- `google.calendar.event.delete` (approval required)
 
 `drive.file` alone is not sufficient for email triage over arbitrary shared links. Google limits
 that scope to files Maestro created or files explicitly opened through the OAuth application. If a

@@ -319,6 +319,56 @@ class AgentRegistryService:
         self._ensure_research_agents_can_search_web()
         return created_or_existing
 
+    def ensure_domain_provider_connections(self) -> None:
+        self._ensure_domain_provider_connections()
+
+    def _ensure_domain_provider_connections(self) -> None:
+        domain_repo = DomainRepository(self.session)
+        for domain_key, prefix in (("personal", "PERSONAL"), ("perti-laboratories", "PERTI")):
+            domain = domain_repo.get_by_key(domain_key)
+            if domain is None:
+                continue
+            defaults = (
+                (
+                    "google",
+                    f"{domain.name} Google Workspace",
+                    "oauth",
+                    {
+                        "user_id": "me",
+                        "calendar_id": "primary",
+                        "client_id_env": f"{prefix}_GOOGLE_CLIENT_ID",
+                        "client_secret_env": f"{prefix}_GOOGLE_CLIENT_SECRET",
+                        "refresh_token_env": f"{prefix}_GOOGLE_CLIENT_REFRESH_TOKEN",
+                    },
+                ),
+                (
+                    "github",
+                    f"{domain.name} GitHub",
+                    "token",
+                    {"env_token_name": f"{prefix}_GITHUB_TOKEN"},
+                ),
+            )
+            for tool_key, display_name, auth_type, config in defaults:
+                existing = self.session.scalar(
+                    select(ToolConnection).where(
+                        ToolConnection.domain_id == domain.id,
+                        ToolConnection.tool_key == tool_key,
+                    )
+                )
+                if existing is not None:
+                    continue
+                self.session.add(
+                    ToolConnection(
+                        domain_id=domain.id,
+                        tool_key=tool_key,
+                        display_name=display_name,
+                        auth_type=auth_type,
+                        config=config,
+                        is_active=True,
+                    )
+                )
+        self.session.commit()
+
     def _ensure_internal_default_tools(self) -> None:
         changed = False
         for agent in self.session.scalars(select(Agent).where(Agent.is_active.is_(True))).all():
@@ -3262,6 +3312,31 @@ _TOOL_SAFETY_POLICIES = {
         "auto_executable": True,
         "reason": "Read-only Google Meet conference record retrieval.",
     },
+    "google.calendar.events.list": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Calendar event listing.",
+    },
+    "google.calendar.event.get": {
+        "level": "safe_read",
+        "auto_executable": True,
+        "reason": "Read-only Google Calendar event retrieval.",
+    },
+    "google.calendar.event.create": {
+        "level": "external_calendar_write",
+        "auto_executable": False,
+        "reason": "Creates an external calendar event and requires Chris approval.",
+    },
+    "google.calendar.event.update": {
+        "level": "external_calendar_write",
+        "auto_executable": False,
+        "reason": "Changes an external calendar event and requires Chris approval.",
+    },
+    "google.calendar.event.delete": {
+        "level": "external_calendar_write",
+        "auto_executable": False,
+        "reason": "Deletes an external calendar event and requires Chris approval.",
+    },
     "codex.task.run": {
         "level": "branch_sandbox_code_execution",
         "auto_executable": True,
@@ -3575,6 +3650,26 @@ _TOOL_DESCRIPTIONS = {
     "google.meet.conference_records.get": {
         "name": "Google Meet Conference Record Read",
         "description": "Read a Google Meet conference record visible to the authorized domain account.",
+    },
+    "google.calendar.events.list": {
+        "name": "Google Calendar Events",
+        "description": "List events in the authorized domain Google Calendar.",
+    },
+    "google.calendar.event.get": {
+        "name": "Google Calendar Event",
+        "description": "Read one event from the authorized domain Google Calendar.",
+    },
+    "google.calendar.event.create": {
+        "name": "Create Google Calendar Event",
+        "description": "Create a Google Calendar event after Chris approves the external write.",
+    },
+    "google.calendar.event.update": {
+        "name": "Update Google Calendar Event",
+        "description": "Update a Google Calendar event after Chris approves the external write.",
+    },
+    "google.calendar.event.delete": {
+        "name": "Delete Google Calendar Event",
+        "description": "Delete a Google Calendar event after Chris approves the external write.",
     },
     "codex": {
         "name": "Codex",
@@ -4096,7 +4191,70 @@ Call `routed.item.create` with route_type `task`, title, description/content, pr
 ]
 
 
+def _connected_domain_tool_permissions(domain_name: str) -> dict[str, Any]:
+    permissions: dict[str, Any] = {
+        "memory.context_bundle": {"permission": "read", "description": f"Retrieve {domain_name}-scoped context."},
+        "reports.search": {"permission": "read", "description": f"Search prior {domain_name} reports."},
+        "reports.get": {"permission": "read", "description": f"Read prior {domain_name} reports."},
+        "artifact.stage_interaction": {"permission": "write", "description": "Stage completed interaction artifacts for curation."},
+        "llm.gateway": {"permission": "use", "description": "Use Maestro's shared LLM gateway."},
+        "web.search": {"permission": "read", "description": "Research current external information with citations."},
+        "routed.item.create": {"permission": "write", "description": "Create domain routed candidates."},
+        "workflow.notification.create": {"permission": "write", "description": "Notify Chris when attention is warranted."},
+    }
+    reads = (
+        "gmail.message.search", "gmail.message.list_recent", "gmail.message.get", "gmail.thread.get",
+        "google.drive.file.get", "google.drive.folder.list", "google.drive.file.export",
+        "google.docs.get", "google.slides.get", "google.sheets.get", "google.sheets.values.get",
+        "google.meet.conference_records.list", "google.meet.conference_records.get",
+        "google.calendar.events.list", "google.calendar.event.get",
+        "github.read", "github.repo.get", "github.repo.list", "github.file.get", "github.file.search",
+        "github.issue.search", "github.issue.get", "github.pr.search", "github.pr.get",
+        "github.pr.diff", "github.pr.checks",
+    )
+    writes = (
+        "gmail.draft.create", "gmail.message.modify",
+        "google.calendar.event.create", "google.calendar.event.update", "google.calendar.event.delete",
+        "github.repo.create", "github.issue.create", "github.issue.comment", "github.issue.update", "github.pr.merge",
+    )
+    permissions.update({key: {"permission": "read", "description": f"Authorized {domain_name} read tool."} for key in reads})
+    permissions.update({key: {"permission": "use", "description": f"Approval-gated {domain_name} write tool."} for key in writes})
+    return permissions
+
+
 _SEED_AGENTS = [
+    {
+        "domain_key": "personal",
+        "key": "personal-operations-agent",
+        "name": "Personal Operations Agent",
+        "agent_type": "domain_agent",
+        "role_summary": "Manages Chris's personal email, calendar, files, projects, contacts, and reminders.",
+        "role_prompt": load_prompt("agents/personal_operations_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "tool_permissions": _connected_domain_tool_permissions("Personal"),
+        "skill_permissions": {
+            "email_triage": {"permission": "use"}, "contact_manager": {"permission": "use"},
+            "to_do_manager": {"permission": "use"}, "calendar_manager": {"permission": "use"},
+            "organization_manager": {"permission": "use"},
+        },
+    },
+    {
+        "domain_key": "perti-laboratories",
+        "key": "perti-operations-agent",
+        "name": "Perti Laboratories Operations Agent",
+        "agent_type": "domain_agent",
+        "role_summary": "Operates Perti Laboratories email, calendar, files, repositories, product work, and company follow-through.",
+        "role_prompt": load_prompt("agents/perti_operations_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "tool_permissions": _connected_domain_tool_permissions("Perti Laboratories"),
+        "skill_permissions": {
+            "email_triage": {"permission": "use"}, "contact_manager": {"permission": "use"},
+            "to_do_manager": {"permission": "use"}, "calendar_manager": {"permission": "use"},
+            "organization_manager": {"permission": "use"},
+        },
+    },
     {
         "domain_key": "praxis",
         "key": "praxis-planning-agent",

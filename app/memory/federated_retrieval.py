@@ -199,7 +199,10 @@ class RetrievalQueryRouter:
         }
         stores.extend(store for store, words in hints.items() if terms & words)
         if len(stores) == 2:
-            stores.extend(["contacts", "organizations", "events", "todos", "reports"])
+            stores.extend([
+                "contacts", "organizations", "events", "todos", "ideas", "decisions",
+                "reports", "run_log", "artifacts",
+            ])
         matched_domains = [domain for domain in domains if domain.replace("-", " ") in query.lower()]
         return RetrievalQueryPlan(
             domains=[forced_domain] if forced_domain else matched_domains,
@@ -356,7 +359,11 @@ class FederatedRetrievalService:
         domains = self.session.scalars(select(Domain).where(Domain.is_active.is_(True))).all()
         by_key = {domain.key: domain for domain in domains}
         forced_domain = next((domain.key for domain in domains if domain.id == request_data.domain_id), None)
-        plan = RetrievalQueryRouter().route(query_text=request_data.query_text, available_domains=list(by_key), forced_domain=forced_domain if request_data.audience == "agent" else None)
+        plan = RetrievalQueryRouter().route(
+            query_text=request_data.query_text,
+            available_domains=list(by_key),
+            forced_domain=forced_domain,
+        )
         domain_ids = {by_key[key].id for key in plan.domains if key in by_key}
         stores = set(plan.stores) & (request_data.stores or STORE_NAMES)
         query = select(RetrievalDocument).where(RetrievalDocument.status.not_in({"inactive", "archived", "superseded"}))
@@ -491,7 +498,8 @@ def _cosine(left, right):
     if not left or not right or len(left) != len(right):
         return 0.0
     denominator = math.sqrt(sum(v * v for v in left)) * math.sqrt(sum(v * v for v in right))
-    return sum(a * b for a, b in zip(left, right, strict=False)) / denominator if denominator else 0.0
+    value = sum(float(a) * float(b) for a, b in zip(left, right, strict=False)) / float(denominator) if denominator else 0.0
+    return float(value)
 
 
 def _recency(value: datetime | None, now: datetime):

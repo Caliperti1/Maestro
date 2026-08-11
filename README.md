@@ -14,6 +14,8 @@ chat responses toward persistent execution.
 - Plan-first orchestration for complex requests.
 - Domain-aware agent registry with editable global/domain/agent prompts.
 - Prompt aggregation with scoped memory retrieval.
+- Federated, explainable retrieval across durable memory, contacts, organizations, events, todos,
+  decisions, ideas, reports, run logs, artifacts, and authoritative identity.
 - Durable memory ingestion from drag-and-drop dropbox folders.
 - Context ingestion ledger with source registrations, checkpoints, provenance, idempotency, and
   local-only egress enforcement for sanitized USMA/L3 context.
@@ -22,6 +24,10 @@ chat responses toward persistent execution.
 - Background scheduler worker that can be toggled from the UI.
 - Tool runtime with approval gates, domain credential resolution, and agent permissions.
 - GitHub, Gmail, Codex, and app reload tool foundations.
+- Domain-isolated Google Workspace (including Calendar) and GitHub connections for Personal and
+  Perti Laboratories.
+- Incremental ChatGPT export ingestion, sanitized context manifests, repository observation, and
+  scheduled durable-memory hygiene.
 - Canonical workflow artifacts staged for memory curation at workflow completion.
 - Resumable historical Gmail hydration for contact and organization intelligence with shadow review.
 - Cross-domain calendar with linked contacts/organizations, conflict detection, and completed-meeting history.
@@ -44,7 +50,7 @@ flowchart LR
     Worker --> Agents
 
     Agents --> Prompt["Prompt Aggregator"]
-    Prompt --> Retrieval["Memory Retrieval"]
+    Prompt --> Retrieval["Federated Context Retrieval"]
     Agents --> Tools["Tool Runtime"]
     Tools --> External["GitHub / Gmail / Codex / Local App"]
 
@@ -112,7 +118,7 @@ actions, and normalizes tool outputs.
 Current tool families include:
 
 - GitHub repository, issue, pull request, file, checks, and merge operations.
-- Gmail read/search/thread/draft/modify foundations.
+- Gmail plus Google Drive, Docs, Slides, Sheets, Meet, and Calendar operations.
 - Codex task execution in isolated worktrees.
 - Local app reload/update operations.
 

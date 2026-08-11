@@ -18,6 +18,7 @@ from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
 from app.api.scheduler import router as scheduler_router
 from app.api.workflow_outputs import router as workflow_outputs_router
+from app.agents.runtime import AgentRegistryService
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
         with SessionLocal() as session:
             seed_default_domains(session)
             IdentityGroundingService(session).seed_defaults()
+            AgentRegistryService(session).ensure_domain_provider_connections()
         worker_tasks.extend(
             [
                 asyncio.create_task(_scheduler_worker_loop()),

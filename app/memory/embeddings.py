@@ -74,6 +74,14 @@ class OllamaEmbeddingClient:
         return _validate_embedding(legacy_body.get("embedding"))
 
 
+class DisabledEmbeddingClient:
+    provider = "none"
+    model = "disabled"
+
+    def embed(self, text: str) -> list[float]:
+        raise EmbeddingError("Embedding generation is disabled.")
+
+
 class OpenAICompatibleEmbeddingClient:
     def __init__(
         self,
@@ -171,6 +179,8 @@ class MemoryEmbeddingService:
 
 def build_embedding_client() -> EmbeddingClient:
     settings = get_settings()
+    if settings.embedding_provider == "none":
+        return DisabledEmbeddingClient()
     if settings.embedding_provider == "ollama":
         return OllamaEmbeddingClient()
     if settings.embedding_provider in {"openai", "openai_compatible", "openrouter"}:
