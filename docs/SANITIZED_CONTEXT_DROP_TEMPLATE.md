@@ -15,6 +15,8 @@ sensitivity: sanitized_work_context
 transfer_method: manual_approved_transfer
 reviewed_by: Chris Aliperti
 reviewed_at: 2026-08-11T17:05:00-04:00
+review_status: reviewed
+contains_restricted: false
 contains_cui: false
 contains_classified: false
 contains_proprietary_technical_data: false

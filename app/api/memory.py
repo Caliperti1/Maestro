@@ -47,6 +47,7 @@ from app.memory.context_gateway import (
     GatewayItem,
     parse_sanitized_context_manifest,
 )
+from app.memory.context_mailbox import ContextMailboxError, ContextMailboxService
 from app.memory.hygiene import DurableMemoryHygieneService
 from app.memory.ingestion import SourcePolicy
 from app.memory.repository_observer import RepositoryObserverService
@@ -189,10 +190,24 @@ def get_ingestion_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     ).all()
     return {
         **service.status(),
+        "context_mailbox": ContextMailboxService(db).status(),
         "recent": [
             _ingestion_record_payload(record, registration) for record, registration in recent
         ],
     }
+
+
+@router.get("/ingestion/context-mailbox/status")
+def get_context_mailbox_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return ContextMailboxService(db).status()
+
+
+@router.post("/ingestion/context-mailbox/poll")
+def poll_context_mailbox(db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        return ContextMailboxService(db).poll_once()
+    except ContextMailboxError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/ingestion/records")

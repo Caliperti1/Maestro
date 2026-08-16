@@ -78,6 +78,33 @@ class Settings(BaseSettings):
     gmail_trigger_autorun: bool = False
     gmail_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     gmail_trigger_page_size: Annotated[int, Field(ge=1, le=500)] = 100
+    context_mailbox_autorun: bool = True
+    context_mailbox_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
+    context_mailbox_page_size: Annotated[int, Field(ge=1, le=100)] = 25
+    maestro_intake_email: str | None = None
+    maestro_intake_google_client_id: str | None = None
+    maestro_intake_google_client_secret: str | None = None
+    maestro_intake_google_refresh_token: str | None = None
+    maestro_intake_allowed_senders: str = ""
+
+    @property
+    def context_mailbox_configured(self) -> bool:
+        return all(
+            (
+                self.maestro_intake_email,
+                self.maestro_intake_google_client_id,
+                self.maestro_intake_google_client_secret,
+                self.maestro_intake_google_refresh_token,
+            )
+        )
+
+    @property
+    def context_mailbox_allowed_senders(self) -> set[str]:
+        return {
+            address.strip().lower()
+            for address in self.maestro_intake_allowed_senders.split(",")
+            if address.strip()
+        }
 
     @property
     def cors_origins(self) -> list[str]:

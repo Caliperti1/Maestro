@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -114,6 +115,10 @@ def policy_for_domain(domain_key: str) -> SourcePolicy:
     )
 
 
+_EMBEDDED_ENVELOPE_PREFIX = "<!-- maestro-context-envelope "
+_EMBEDDED_ENVELOPE_SUFFIX = " -->"
+
+
 def envelope_for_file(
     path: Path,
     *,
@@ -121,6 +126,9 @@ def envelope_for_file(
     source_timestamp: datetime | None = None,
     policy: SourcePolicy | None = None,
 ) -> ContextEnvelope:
+    embedded = _embedded_envelope(path, expected_domain_key=domain_key)
+    if embedded is not None:
+        return embedded
     content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     timestamp = source_timestamp or datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
     source_policy = policy or policy_for_domain(domain_key)
@@ -135,6 +143,75 @@ def envelope_for_file(
         source_timestamp=timestamp,
         artifact_uri=str(path),
         policy=source_policy,
+    )
+
+
+def embed_context_envelope(envelope: ContextEnvelope, content: str) -> str:
+    payload = {
+        "source_registration_key": envelope.source_registration_key,
+        "source_system": envelope.source_system,
+        "external_id": envelope.external_id,
+        "source_version": envelope.source_version,
+        "content_hash": envelope.content_hash,
+        "content_type": envelope.content_type,
+        "domain_key": envelope.domain_key,
+        "source_timestamp": (
+            envelope.source_timestamp.isoformat() if envelope.source_timestamp else None
+        ),
+        "policy": envelope.policy.as_dict(),
+        "metadata": envelope.metadata,
+    }
+    header = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return f"{_EMBEDDED_ENVELOPE_PREFIX}{header}{_EMBEDDED_ENVELOPE_SUFFIX}\n{content}"
+
+
+def strip_context_envelope(content: str) -> str:
+    if not content.startswith(_EMBEDDED_ENVELOPE_PREFIX):
+        return content
+    _, separator, remainder = content.partition("\n")
+    return remainder if separator else ""
+
+
+def _embedded_envelope(path: Path, *, expected_domain_key: str) -> ContextEnvelope | None:
+    if path.suffix.lower() not in {".md", ".txt"}:
+        return None
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        first_line = handle.readline().rstrip("\n")
+    if not (
+        first_line.startswith(_EMBEDDED_ENVELOPE_PREFIX)
+        and first_line.endswith(_EMBEDDED_ENVELOPE_SUFFIX)
+    ):
+        return None
+    raw = first_line[len(_EMBEDDED_ENVELOPE_PREFIX) : -len(_EMBEDDED_ENVELOPE_SUFFIX)]
+    payload = json.loads(raw)
+    domain_key = str(payload.get("domain_key") or "")
+    if domain_key != expected_domain_key:
+        raise ValueError("Embedded context envelope domain does not match its staging inbox.")
+    policy_payload = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+    source_timestamp = payload.get("source_timestamp")
+    return ContextEnvelope(
+        source_registration_key=str(payload["source_registration_key"]),
+        source_system=str(payload["source_system"]),
+        external_id=str(payload["external_id"]),
+        source_version=str(payload["source_version"]),
+        content_hash=str(payload["content_hash"]),
+        content_type=str(payload["content_type"]),
+        domain_key=domain_key,
+        source_timestamp=(
+            datetime.fromisoformat(str(source_timestamp).replace("Z", "+00:00"))
+            if source_timestamp
+            else None
+        ),
+        artifact_uri=str(path),
+        policy=SourcePolicy(
+            sensitivity=str(policy_payload.get("sensitivity") or "personal"),
+            trust_level=str(policy_payload.get("trust_level") or "user_provided"),
+            transfer_method=str(policy_payload.get("transfer_method") or "context_gateway"),
+            egress_policy=str(policy_payload.get("egress_policy") or "external_allowed"),
+            retention=str(policy_payload.get("retention") or "durable_source"),
+            requires_human_review=bool(policy_payload.get("requires_human_review", False)),
+        ),
+        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
     )
 
 
@@ -217,7 +294,13 @@ class IngestionLedgerService:
             self.session.refresh(registration)
         return registration
 
-    def claim(self, envelope: ContextEnvelope, *, domain: Domain | None) -> IngestionClaim:
+    def claim(
+        self,
+        envelope: ContextEnvelope,
+        *,
+        domain: Domain | None,
+        resume_staged: bool = False,
+    ) -> IngestionClaim:
         registration = self.session.scalar(
             select(SourceRegistration).where(
                 SourceRegistration.key == envelope.source_registration_key
@@ -239,7 +322,10 @@ class IngestionLedgerService:
                 IngestionRecord.source_version == envelope.source_version,
             )
         )
-        if record is not None and record.status in {"processed", "duplicate", "processing"}:
+        duplicate_statuses = {"processed", "duplicate", "processing"}
+        if not resume_staged:
+            duplicate_statuses.add("staged")
+        if record is not None and record.status in duplicate_statuses:
             metadata = dict(record.metadata_ or {})
             metadata["last_duplicate_at"] = datetime.now(UTC).isoformat()
             record.metadata_ = metadata
@@ -319,6 +405,13 @@ class IngestionLedgerService:
         record.processed_at = datetime.now(UTC)
         record.last_error = None
         record.metadata_ = {**(record.metadata_ or {}), "processed_path": str(processed_path)}
+        self.session.commit()
+
+    def mark_staged(self, record: IngestionRecord, *, staged_path: Path) -> None:
+        record.status = "staged"
+        record.processing_started_at = None
+        record.last_error = None
+        record.metadata_ = {**(record.metadata_ or {}), "staged_path": str(staged_path)}
         self.session.commit()
 
     def mark_failed(self, record: IngestionRecord, *, error: str, failed_path: Path) -> None:

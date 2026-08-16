@@ -23,6 +23,7 @@ from app.memory.ingestion import (
     IngestionLedgerService,
     envelope_for_file,
     policy_for_domain,
+    strip_context_envelope,
 )
 from app.memory.service import MemoryCandidate, MemoryWriteResult
 
@@ -137,7 +138,7 @@ class MemoryDropboxProcessor:
                 domain_key=domain_key,
             )
             ledger = IngestionLedgerService(self.session)
-            claim = ledger.claim(envelope, domain=domain)
+            claim = ledger.claim(envelope, domain=domain, resume_staged=True)
             ingestion_record = claim.record
             if not claim.should_process:
                 destination = self._move_file(path, domain_key=domain_key, status="processed")
@@ -160,6 +161,7 @@ class MemoryDropboxProcessor:
                 artifact=artifact,
             )
             content, extraction_metadata = extract_dropbox_text(path)
+            content = strip_context_envelope(content)
             self._update_source_artifact_extraction_metadata(
                 seed_package=seed_package,
                 artifact=artifact,

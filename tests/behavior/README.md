@@ -9,6 +9,7 @@
 - [005 Contact Intelligence](005_contact_intelligence.md)
 - [006 Historical Contact Hydration](006_historical_contact_hydration.md)
 - [007 Memory Intelligence And Connected Domains](007_memory_intelligence_and_connected_domains.md)
+- [008 Context Mailbox Ingestion](008_context_mailbox_ingestion.md)
 
 This directory tracks end-to-end behavioral tests that are not fully automated yet. Use these
 matrices while manually testing Maestro through the UI and backend logs.

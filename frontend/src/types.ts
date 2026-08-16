@@ -225,6 +225,19 @@ export type IngestionHealth = {
   source_registrations: number;
   records: Record<string, number>;
   duplicates_skipped: number;
+  context_mailbox?: {
+    configured: boolean;
+    enabled: boolean;
+    mailbox?: string | null;
+    interval_seconds: number;
+    page_size: number;
+    allowed_sender_count: number;
+    status: string;
+    last_polled_at?: string | null;
+    last_success_at?: string | null;
+    last_error?: string | null;
+    last_counts: Record<string, number>;
+  };
   recent: Array<{
     id: string;
     source_registration_key: string;
