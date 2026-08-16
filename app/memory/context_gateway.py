@@ -14,7 +14,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import Domain, IngestionRecord
-from app.memory.ingestion import ContextEnvelope, IngestionLedgerService, SourcePolicy
+from app.memory.ingestion import (
+    ContextEnvelope,
+    IngestionLedgerService,
+    SourcePolicy,
+    embed_context_envelope,
+)
 
 
 @dataclass(frozen=True)
@@ -78,8 +83,8 @@ class ContextGatewayService:
         if not claim.should_process:
             return GatewayIngestResult("duplicate", None, str(claim.record.id), claim.duplicate_status)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(item.content, encoding="utf-8")
-        ledger.mark_processed(claim.record, processed_path=destination)
+        destination.write_text(embed_context_envelope(envelope, item.content), encoding="utf-8")
+        ledger.mark_staged(claim.record, staged_path=destination)
         return GatewayIngestResult("staged", str(destination), str(claim.record.id))
 
 

@@ -100,6 +100,8 @@ The Memory UI shows registered sources, tracked records, duplicates, and failure
 - `GET /memory/ingestion/status`
 - `GET /memory/ingestion/records`
 - `POST /memory/ingestion/recover`
+- `GET /memory/ingestion/context-mailbox/status`
+- `POST /memory/ingestion/context-mailbox/poll`
 - `POST /memory/imports/chatgpt`
 - `POST /memory/ingestion/sanitized-context`
 - `POST /memory/ingestion/sources/repositories`
@@ -150,6 +152,33 @@ See the transfer recommendations below before adding automated email or network 
 2. Local repository observer with full-baseline and commit-aware incremental state reports.
 3. Reviewed USMA and L3 sanitized Markdown context manifests.
 4. Gmail, Calendar, Drive, and GitHub tool-result evidence accounting.
+5. Dedicated Gmail context mailbox intake for ChatGPT and approved cross-environment handoffs.
+
+## Dedicated Context Mailbox
+
+The dedicated mailbox is a transport adapter, not a second memory system:
+
+```text
+allowlisted sender -> Gmail intake -> Context Gateway -> domain inbox -> Memory Curator
+```
+
+Messages must use `[MAESTRO-CONTEXT][SOURCE][DOMAIN]` at the start of the subject and declare
+`source_system`, `source_id`, `source_timestamp`, and `domain` near the top of the body. The stable
+`source_id` identifies the source object; a hash of normalized content identifies its version.
+Resending unchanged content is therefore harmless, while a corrected handoff is reconsidered.
+
+The adapter preserves Gmail message/thread IDs, sender, source timestamps, raw message evidence,
+attachment hashes, policy, and transfer method through canonical memory provenance. Supported
+attachments are archived and text-extracted into the staged evidence. Gmail labels expose terminal
+transport state:
+
+- `Maestro/Processed`: staged successfully or recognized as an unchanged duplicate.
+- `Maestro/Quarantine`: sender or handoff contract was not trusted.
+- `Maestro/Failed`: a trusted handoff could not be staged and may be retried after repair.
+
+Processed mail is archived and marked read. Quarantined or failed mail stays out of memory. The
+background worker polls automatically, and the Memory Manager provides a manual **Check mailbox**
+control plus health and counts. See `docs/CONTEXT_MAILBOX_SETUP.md` for configuration and format.
 
 ## Retrieval And Grounding
 

@@ -131,6 +131,8 @@ Relevant code:
 
 Durable memory is the RAG-style context layer. Source adapters normalize evidence through the
 Context Gateway, which records source identity, provenance, policy, checkpoints, and idempotency.
+Approved external context can also enter through the dedicated Gmail intake adapter; see
+`docs/CONTEXT_MAILBOX_SETUP.md` for its allowlist, message contract, labels, and health controls.
 Staged evidence is parsed into candidate memories, evaluated/deduplicated, and written to memory or
 held as proposals depending on impact and confidence. The curator still decides durable truth.
 

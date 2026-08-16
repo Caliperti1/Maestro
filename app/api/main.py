@@ -28,6 +28,7 @@ from app.maestro.identity_grounding import IdentityGroundingService
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.contact_hydration import ContactHydrationService
+from app.memory.context_mailbox import ContextMailboxService
 from app.memory.hygiene import DurableMemoryHygieneService
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ def create_app() -> FastAPI:
                 asyncio.create_task(_scheduler_worker_loop()),
                 asyncio.create_task(_gmail_trigger_worker_loop()),
                 asyncio.create_task(_memory_dropbox_worker_loop()),
+                asyncio.create_task(_context_mailbox_worker_loop()),
                 asyncio.create_task(_contact_hydration_worker_loop()),
                 asyncio.create_task(_memory_hygiene_worker_loop()),
             ]
@@ -172,6 +174,30 @@ def _process_memory_dropbox_once() -> None:
                 len(results),
                 ", ".join(result.status for result in results),
             )
+
+
+async def _context_mailbox_worker_loop() -> None:
+    while True:
+        settings = get_settings()
+        interval_seconds = settings.context_mailbox_interval_seconds
+        try:
+            interval_seconds = await asyncio.to_thread(_process_context_mailbox_once)
+        except Exception:
+            logger.exception("Context mailbox worker heartbeat failed.")
+        await asyncio.sleep(max(10, interval_seconds))
+
+
+def _process_context_mailbox_once() -> int:
+    """Poll the dedicated context mailbox without occupying FastAPI's event loop."""
+    settings = get_settings()
+    if not (settings.context_mailbox_autorun and settings.context_mailbox_configured):
+        return settings.context_mailbox_interval_seconds
+    with SessionLocal() as session:
+        result = ContextMailboxService(session, settings=settings).poll_once()
+        counts = result["counts"]
+        if counts.get("staged") or counts.get("quarantined") or counts.get("failed"):
+            logger.info("Context mailbox poll completed: %s", counts)
+    return settings.context_mailbox_interval_seconds
 
 
 async def _contact_hydration_worker_loop() -> None:

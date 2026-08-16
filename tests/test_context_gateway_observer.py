@@ -1,4 +1,5 @@
 import subprocess
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -11,7 +12,7 @@ from app.memory.context_gateway import (
     ToolEvidenceLedgerService,
     parse_sanitized_context_manifest,
 )
-from app.memory.ingestion import SourcePolicy
+from app.memory.ingestion import SourcePolicy, envelope_for_file, strip_context_envelope
 from app.memory.repository_observer import RepositoryObserverService
 
 
@@ -43,7 +44,14 @@ def test_context_gateway_is_idempotent(session, tmp_path):
 
     assert first.status == "staged"
     assert second.status == "duplicate"
-    assert len(list((tmp_path / domain.key / "inbox").glob("*.md"))) == 1
+    files = list((tmp_path / domain.key / "inbox").glob("*.md"))
+    assert len(files) == 1
+    envelope = envelope_for_file(files[0], domain_key=domain.key)
+    assert envelope.external_id == "object-1"
+    assert envelope.source_system == "test"
+    assert strip_context_envelope(files[0].read_text()) == item.content
+    record = session.get(IngestionRecord, uuid.UUID(first.ingestion_record_id))
+    assert record is not None and record.status == "staged"
 
 
 def test_repository_observer_baseline_then_incremental(session, tmp_path):

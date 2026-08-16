@@ -14,6 +14,7 @@ import {
   HardDriveUpload,
   Inbox,
   ListTodo,
+  Mail,
   Menu,
   MessageSquareText,
   PanelLeftClose,
@@ -6285,6 +6286,27 @@ function MemoryWorkspace() {
     }
   };
 
+  const pollContextMailbox = async () => {
+    setBusy(true);
+    try {
+      const result = await apiJson<{
+        counts: Record<string, number>;
+      }>("/memory/ingestion/context-mailbox/poll", { method: "POST" });
+      const staged = result.counts.staged ?? 0;
+      const duplicate = result.counts.duplicate ?? 0;
+      const quarantined = result.counts.quarantined ?? 0;
+      const failed = result.counts.failed ?? 0;
+      setStatusMessage(
+        `Mailbox checked: ${staged} staged, ${duplicate} duplicate, ${quarantined} quarantined, ${failed} failed.`,
+      );
+      await refreshMemory();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Mailbox check failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const decideProposal = async (proposalId: string, action: "approve" | "reject") => {
     setBusy(true);
     try {
@@ -6429,6 +6451,10 @@ function MemoryWorkspace() {
             <Sparkles size={17} />
             {busy ? "Working..." : "Process inbox"}
           </button>
+          <button className="planner-action" onClick={pollContextMailbox} disabled={busy}>
+            <Mail size={17} />
+            Check mailbox
+          </button>
         </div>
 
         {busy && (
@@ -6457,6 +6483,18 @@ function MemoryWorkspace() {
               Source policy and provenance travel with derived memory and are enforced during
               prompt assembly.
             </p>
+            {ingestionHealth.context_mailbox && (
+              <p className="memory-status">
+                Context mailbox {ingestionHealth.context_mailbox.mailbox ?? "not configured"}: {" "}
+                {ingestionHealth.context_mailbox.status}
+                {ingestionHealth.context_mailbox.last_counts.staged !== undefined &&
+                  ` / last check ${ingestionHealth.context_mailbox.last_counts.staged ?? 0} staged, ${
+                    ingestionHealth.context_mailbox.last_counts.quarantined ?? 0
+                  } quarantined, ${ingestionHealth.context_mailbox.last_counts.failed ?? 0} failed`}
+                {ingestionHealth.context_mailbox.last_error &&
+                  ` / ${ingestionHealth.context_mailbox.last_error}`}
+              </p>
+            )}
           </div>
         )}
         {lastProcessSummary && <p className="memory-status">{lastProcessSummary}</p>}

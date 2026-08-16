@@ -101,3 +101,44 @@ def test_disabled_gmail_trigger_heartbeat_does_not_poll(monkeypatch) -> None:
     )
 
     assert main._process_gmail_triggers_once() == 41
+
+
+def test_context_mailbox_heartbeat_polls_when_configured(monkeypatch) -> None:
+    calls: list[bool] = []
+
+    class _Settings:
+        context_mailbox_autorun = True
+        context_mailbox_configured = True
+        context_mailbox_interval_seconds = 37
+
+    class _FakeMailbox:
+        def __init__(self, session, *, settings):
+            assert isinstance(session, _FakeSession)
+            assert isinstance(settings, _Settings)
+
+        def poll_once(self):
+            calls.append(True)
+            return {"counts": {"staged": 0, "quarantined": 0, "failed": 0}}
+
+    monkeypatch.setattr(main, "SessionLocal", _FakeSession)
+    monkeypatch.setattr(main, "get_settings", _Settings)
+    monkeypatch.setattr(main, "ContextMailboxService", _FakeMailbox)
+
+    assert main._process_context_mailbox_once() == 37
+    assert calls == [True]
+
+
+def test_context_mailbox_heartbeat_remains_idle_when_unconfigured(monkeypatch) -> None:
+    class _Settings:
+        context_mailbox_autorun = True
+        context_mailbox_configured = False
+        context_mailbox_interval_seconds = 43
+
+    monkeypatch.setattr(main, "get_settings", _Settings)
+    monkeypatch.setattr(
+        main,
+        "ContextMailboxService",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must remain idle")),
+    )
+
+    assert main._process_context_mailbox_once() == 43

@@ -42,6 +42,8 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - [x] Add a repository observer adapter with full-baseline and commit-aware incremental modes.
 - [x] Converge Gmail, Calendar, Drive, and GitHub memory outputs on the ingestion ledger.
 - [x] Add reviewed USMA and L3 Markdown context-drop manifests.
+- [x] Add a dedicated allowlisted Gmail context-intake adapter with labels, health, attachment
+  extraction, and source-version idempotency.
 
 ### Identity grounding and expert retrieval
 

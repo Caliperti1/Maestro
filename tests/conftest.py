@@ -17,6 +17,7 @@ def disable_live_local_classifiers(monkeypatch):
     monkeypatch.setenv("MAESTRO_TOPIC_RESOLVER_PROVIDER", "none")
     monkeypatch.setenv("RETRIEVAL_ROUTER_PROVIDER", "none")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "none")
+    monkeypatch.setenv("CONTEXT_MAILBOX_AUTORUN", "false")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
