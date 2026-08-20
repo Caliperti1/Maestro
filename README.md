@@ -10,8 +10,11 @@ chat responses toward persistent execution.
 
 ## Current MVP Capabilities
 
-- Single Maestro chat channel with persistent conversation history.
-- Plan-first orchestration for complex requests.
+- Single Maestro chat channel with persistent conversation history and explicit Knowledge / Build
+  workflow modes.
+- Knowledge mode for cross-domain retrieval, conversation, and bounded direct updates to routed
+  objects and existing durable workflows.
+- Deliberate plan-first orchestration in Build workflow mode for delegated agent work.
 - Domain-aware agent registry with editable global/domain/agent prompts.
 - Prompt aggregation with scoped memory retrieval.
 - Federated, explainable retrieval across durable memory, contacts, organizations, events, todos,
@@ -75,10 +78,24 @@ The UI is centered on one broad Maestro conversation rather than many narrow wor
 can still preserve prior sessions and workflow context, but the main channel is where approvals,
 RFIs, notifications, direct answers, and workflow progress surface.
 
+The channel has two explicit operating modes:
+
+- **Knowledge** is the default. Maestro retrieves across authorized memory, reports, run logs, and
+  routed stores, answers directly, and can make bounded canonical changes such as updating a contact,
+  creating a recurring event, or pausing an existing durable workflow. This path cannot create tasks,
+  queue work, or delegate to agents.
+- **Build workflow** deliberately enters orchestration. Maestro creates or refines a proposed plan,
+  shows it for approval, and only then queues subordinate agent work. After approval or dismissal,
+  the UI returns to Knowledge mode.
+
+Approvals and RFI answers remain available from either mode because they resume a specific existing
+workflow rather than create new work.
+
 Relevant code:
 
 - `app/api/maestro.py`
 - `app/maestro/channel.py`
+- `app/maestro/knowledge.py`
 - `app/maestro/orchestrator.py`
 
 ### Orchestration

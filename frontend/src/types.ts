@@ -966,10 +966,19 @@ export type MaestroRun = {
 export type MaestroRespond = {
   kind: "chat_only" | "planned" | "refined" | "rfi_answered" | "routed" | "pending";
   classification: string;
+  interaction_mode?: "knowledge" | "workflow_builder";
   message: string;
   plan: MaestroPlan | null;
   chat_plan: MaestroPlan | null;
   active_plan: MaestroPlan | null;
+  action_results?: Array<{
+    action_type: string;
+    status: string;
+    message: string;
+    object_type: string | null;
+    object_id: string | null;
+  }>;
+  workflow_suggestion?: string | null;
   channel_context?: {
     scope: string;
     topic_id?: string | null;
