@@ -102,7 +102,6 @@ import {
   definitionQueueItems,
   formatDateOnly,
   formatDateTime,
-  messageReferencesActivePlan,
   previewTime,
   routedObjectDomain,
   routedObjectTitle,
@@ -2102,8 +2101,11 @@ export function App() {
   const [maestroPlan, setMaestroPlan] = useState<MaestroPlan | null>(null);
   const [maestroRun, setMaestroRun] = useState<MaestroRun | null>(null);
   const [maestroStatus, setMaestroStatus] = useState("Ready");
-  const [executeMaestroLLM, setExecuteMaestroLLM] = useState(true);
-  const [autoMaestroToolLoop, setAutoMaestroToolLoop] = useState(true);
+  const [maestroInteractionMode, setMaestroInteractionMode] = useState<
+    "knowledge" | "workflow_builder"
+  >("knowledge");
+  const executeMaestroLLM = true;
+  const autoMaestroToolLoop = true;
   const [maestroBusy, setMaestroBusy] = useState(false);
   const [busyToolCallId, setBusyToolCallId] = useState<string | null>(null);
   const [expandedWorkflowNodeId, setExpandedWorkflowNodeId] = useState<string | null>(null);
@@ -2247,7 +2249,8 @@ export function App() {
       ? (candidate as Record<string, unknown>)
       : null;
   }, [maestroPlan]);
-  const showPlanPreview = shouldShowPlanPreview(maestroPlan);
+  const showPlanPreview =
+    maestroInteractionMode === "workflow_builder" && shouldShowPlanPreview(maestroPlan);
   const showInlineRunPreview = shouldShowInlineRunPreview(maestroRun);
 
   const scheduledWorkflowDefinitions = useMemo(
@@ -2930,6 +2933,7 @@ export function App() {
           message,
           active_plan_id: run.parent_task_id,
           conversation_id: run.conversation_id ?? activeConversationId,
+          interaction_mode: "workflow_builder",
         }),
       });
       if (response.conversation) {
@@ -2978,7 +2982,7 @@ export function App() {
       content: draftMessage.trim(),
     };
     const activePlanId =
-      maestroPlan && messageReferencesActivePlan(outgoingMessage.content)
+      maestroInteractionMode === "workflow_builder" && maestroPlan
         ? maestroPlan.parent_task_id
         : null;
     setMaestroBusy(true);
@@ -3013,6 +3017,7 @@ export function App() {
           message: outgoingMessage.content,
           active_plan_id: activePlanId,
           conversation_id: activeConversationId,
+          interaction_mode: maestroInteractionMode,
         }),
       });
       if (response.kind === "pending") {
@@ -3020,7 +3025,11 @@ export function App() {
         return;
       }
       const responsePlan = response.plan ?? response.active_plan ?? null;
-      setMaestroPlan(shouldShowPlanPreview(responsePlan) ? responsePlan : null);
+      setMaestroPlan(
+        maestroInteractionMode === "workflow_builder" && shouldShowPlanPreview(responsePlan)
+          ? responsePlan
+          : null,
+      );
       setMaestroRun(null);
       if (response.conversation) setActiveConversationId(response.conversation.id);
       if (response.conversation?.messages?.length) {
@@ -3036,7 +3045,13 @@ export function App() {
         ]);
       }
       setMaestroStatus(
-        response.kind === "chat_only"
+        response.classification === "knowledge_action"
+          ? "Knowledge updated."
+          : response.classification === "knowledge_chat"
+            ? response.workflow_suggestion
+              ? "This request needs Build workflow mode."
+              : "Answered from Maestro knowledge."
+        : response.kind === "chat_only"
           ? "Answered directly."
           : response.kind === "rfi_answered"
             ? "RFI answer applied."
@@ -3085,6 +3100,7 @@ export function App() {
       );
       setMaestroRun(shouldShowInlineRunPreview(response.run) ? response.run : null);
       setMaestroPlan(null);
+      setMaestroInteractionMode("knowledge");
       setChatMessages((messages) => {
         const alreadyShown = messages.some((message) => message.content === response.run.chat_summary);
         if (alreadyShown) return messages;
@@ -3140,6 +3156,7 @@ export function App() {
       setMaestroPlan(null);
       setMaestroRun(null);
       setExpandedWorkflowNodeId(null);
+      setMaestroInteractionMode("knowledge");
       await Promise.all([
         pollActiveChannel().catch(() => undefined),
         loadSchedulerDashboard().catch(() => undefined),
@@ -3641,7 +3658,11 @@ export function App() {
                       event.currentTarget.style.height = "auto";
                     }
                   }}
-                  placeholder="Ask Maestro to plan and coordinate..."
+                  placeholder={
+                    maestroInteractionMode === "knowledge"
+                      ? "Ask Maestro about your world or update it..."
+                      : "Describe the workflow outcome, schedule, and constraints..."
+                  }
                   aria-label="Message Maestro"
                   rows={1}
                 />
@@ -3656,23 +3677,32 @@ export function App() {
               </form>
 
               <div className="maestro-status-row">
-                <label className="toggle-row">
-                  <input
-                    type="checkbox"
-                    checked={executeMaestroLLM}
-                    onChange={(event) => setExecuteMaestroLLM(event.target.checked)}
-                  />
-                  Execute LLM
-                </label>
-                <label className="toggle-row">
-                  <input
-                    type="checkbox"
-                    checked={autoMaestroToolLoop}
-                    onChange={(event) => setAutoMaestroToolLoop(event.target.checked)}
-                    disabled={!executeMaestroLLM}
-                  />
-                  Let agents plan safe tools
-                </label>
+                <div className="maestro-mode-control" role="group" aria-label="Maestro interaction mode">
+                  <button
+                    type="button"
+                    className={maestroInteractionMode === "knowledge" ? "active" : ""}
+                    aria-pressed={maestroInteractionMode === "knowledge"}
+                    onClick={() => {
+                      setMaestroInteractionMode("knowledge");
+                      setMaestroStatus("Knowledge mode: reason, retrieve, and update your world.");
+                    }}
+                  >
+                    <Database size={15} />
+                    Knowledge
+                  </button>
+                  <button
+                    type="button"
+                    className={maestroInteractionMode === "workflow_builder" ? "active" : ""}
+                    aria-pressed={maestroInteractionMode === "workflow_builder"}
+                    onClick={() => {
+                      setMaestroInteractionMode("workflow_builder");
+                      setMaestroStatus("Build workflow mode: plan and delegate agent work.");
+                    }}
+                  >
+                    <Sparkles size={15} />
+                    Build workflow
+                  </button>
+                </div>
                 <span>
                   {conductingMessage}
                 </span>

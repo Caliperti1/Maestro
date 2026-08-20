@@ -10,6 +10,7 @@
 - [006 Historical Contact Hydration](006_historical_contact_hydration.md)
 - [007 Memory Intelligence And Connected Domains](007_memory_intelligence_and_connected_domains.md)
 - [008 Context Mailbox Ingestion](008_context_mailbox_ingestion.md)
+- [009 Explicit Knowledge And Workflow Modes](009_explicit_knowledge_and_workflow_modes.md)
 
 This directory tracks end-to-end behavioral tests that are not fully automated yet. Use these
 matrices while manually testing Maestro through the UI and backend logs.
@@ -40,6 +41,8 @@ remove it rather than carrying UI/code bloat forward.
 Current operating-model checks:
 
 - Main chat remains the primary place Chris talks to Maestro.
+- Main chat defaults to Knowledge mode; subordinate workflow planning only begins after Chris selects
+  Build workflow.
 - Active/durable workflows are inspected from the Workflows surface.
 - Completed workflow history is inspected from Run Log.
 - Human/agent-readable workflow output is inspected from Reports.

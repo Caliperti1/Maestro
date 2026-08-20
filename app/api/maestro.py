@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 import asyncio
 import json
 import logging
@@ -23,6 +23,7 @@ from app.maestro.channel import (
 )
 from app.maestro.context_assembler import MaestroContextAssembler, maestro_context_payload
 from app.maestro.identity_grounding import IdentityGroundingService
+from app.maestro.knowledge import MaestroKnowledgeService, knowledge_fallback
 from app.maestro.intent_classifier import (
     classify_active_message_with_local_llm,
     resolve_topic_with_local_llm,
@@ -49,6 +50,9 @@ class MaestroRespondBody(BaseModel):
     message: str
     active_plan_id: uuid.UUID | None = None
     conversation_id: uuid.UUID | None = None
+    # Legacy API callers retain the old classifier path. The UI always sends one of the two
+    # explicit modes and defaults to Knowledge.
+    interaction_mode: Literal["knowledge", "workflow_builder", "legacy_auto"] = "legacy_auto"
 
 
 class MaestroRunBody(BaseModel):
@@ -198,15 +202,6 @@ def _respond_to_maestro_sync(
             "channel_context": topic_context,
             "conversation": _conversation_payload(db, conversation),
         }
-    planner_message = _message_with_topic_context(
-        db,
-        conversation,
-        body.message,
-        topic_context=topic_context,
-        current_message_id=user_message.id,
-    )
-    message_understanding = _understand_message_without_active_plan(body.message)
-    planner_message = _message_with_intent_context(planner_message, message_understanding)
     if _is_scheduled_workflow_status_question(body.message):
         response_message = _scheduled_workflow_status_response(db)
         _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
@@ -220,40 +215,92 @@ def _respond_to_maestro_sync(
             "channel_context": topic_context,
             "conversation": _conversation_payload(db, conversation),
         }
+    if _is_session_restart_message(normalized_message):
+        response_message = _restart_maestro_session_response(
+            db,
+            service=MaestroOrchestratorService(db),
+            conversation=conversation,
+            message=body.message,
+        )
+        restart_context = _current_topic_context(conversation)
+        restart_metadata = {"topic_id": restart_context.get("topic_id")} if restart_context.get("topic_id") else {}
+        _record_session_message(db, conversation, "maestro", response_message, metadata=restart_metadata)
+        return {
+            "kind": "chat_only",
+            "classification": "restart_session",
+            "interaction_mode": body.interaction_mode,
+            "message": response_message,
+            "plan": None,
+            "chat_plan": None,
+            "active_plan": None,
+            "action_results": [],
+            "workflow_suggestion": None,
+            "channel_context": restart_context,
+            "conversation": _conversation_payload(db, conversation),
+        }
+    if body.interaction_mode == "knowledge" and body.active_plan_id is None:
+        try:
+            knowledge = MaestroKnowledgeService(db).respond(
+                body.message,
+                conversation_id=conversation.id,
+                message_id=user_message.id,
+            )
+        except (LLMClientError, OSError, ValueError):
+            knowledge = knowledge_fallback(body.message)
+        response_metadata = {
+            **message_metadata,
+            "interaction_mode": "knowledge",
+            "action_results": [result.payload() for result in knowledge.action_results],
+            "workflow_suggestion": knowledge.workflow_suggestion,
+        }
+        _record_session_message(db, conversation, "maestro", knowledge.message, metadata=response_metadata)
+        return {
+            "kind": "chat_only",
+            "classification": "knowledge_action" if knowledge.action_results else "knowledge_chat",
+            "interaction_mode": "knowledge",
+            "message": knowledge.message,
+            "plan": None,
+            "chat_plan": None,
+            "active_plan": None,
+            "action_results": [result.payload() for result in knowledge.action_results],
+            "workflow_suggestion": knowledge.workflow_suggestion,
+            "channel_context": topic_context,
+            "conversation": _conversation_payload(db, conversation),
+        }
+    planner_message = _message_with_topic_context(
+        db,
+        conversation,
+        body.message,
+        topic_context=topic_context,
+        current_message_id=user_message.id,
+    )
+    message_understanding = _understand_message_without_active_plan(body.message)
+    planner_message = _message_with_intent_context(planner_message, message_understanding)
     try:
         service = MaestroOrchestratorService(db)
-        active_plan_id = None if topic_context.get("scope") in {"new_topic", "global_system"} else body.active_plan_id
+        active_plan_id = (
+            None
+            if topic_context.get("scope") in {"new_topic", "global_system"}
+            else body.active_plan_id
+        )
         response_active_plan: MaestroPlan | None = None
-        if _is_session_restart_message(normalized_message):
-            response_message = _restart_maestro_session_response(
-                db,
-                service=service,
-                conversation=conversation,
-                message=body.message,
-            )
-            restart_context = _current_topic_context(conversation)
-            restart_metadata = {"topic_id": restart_context.get("topic_id")} if restart_context.get("topic_id") else {}
-            _record_session_message(db, conversation, "maestro", response_message, metadata=restart_metadata)
-            return {
-                "kind": "chat_only",
-                "classification": "restart_session",
-                "message": response_message,
-                "plan": None,
-                "chat_plan": None,
-                "active_plan": None,
-                "channel_context": restart_context,
-                "conversation": _conversation_payload(db, conversation),
-            }
-        if active_plan_id is None and _is_pure_chat_understanding(message_understanding):
+        if (
+            body.interaction_mode == "legacy_auto"
+            and active_plan_id is None
+            and _is_pure_chat_understanding(message_understanding)
+        ):
             response_message = _direct_chat_response(db, body.message)
             _record_session_message(db, conversation, "maestro", response_message, metadata=message_metadata)
             return {
                 "kind": "chat_only",
                 "classification": "direct_chat",
+                "interaction_mode": "legacy_auto",
                 "message": response_message,
                 "plan": None,
                 "chat_plan": None,
                 "active_plan": None,
+                "action_results": [],
+                "workflow_suggestion": None,
                 "channel_context": topic_context,
                 "conversation": _conversation_payload(db, conversation),
             }
@@ -290,7 +337,12 @@ def _respond_to_maestro_sync(
                     "channel_context": topic_context,
                     "conversation": _conversation_payload(db, conversation),
                 }
-            classification = _classify_active_session_message(body.message, active_plan)
+            classification = (
+                "refine"
+                if body.interaction_mode == "workflow_builder"
+                and (active_task is None or active_task.status == "proposed")
+                else _classify_active_session_message(body.message, active_plan)
+            )
             if classification == "new_workflow":
                 plan = service.create_plan(
                     planner_message,
@@ -382,10 +434,13 @@ def _respond_to_maestro_sync(
     return {
         "kind": kind,
         "classification": classification,
+        "interaction_mode": body.interaction_mode,
         "message": response_message,
         "plan": None if plan.is_chat_only else _plan_payload(plan),
         "chat_plan": _plan_payload(plan) if plan.is_chat_only else None,
         "active_plan": _plan_payload(response_active_plan) if response_active_plan is not None else None,
+        "action_results": [],
+        "workflow_suggestion": None,
         "channel_context": topic_context,
         "conversation": _conversation_payload(db, conversation),
     }
