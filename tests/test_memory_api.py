@@ -1,6 +1,6 @@
-from pathlib import Path
-from datetime import UTC, datetime
 import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -16,25 +16,24 @@ from app.db.models import (
     Contact,
     ContactAlias,
     ContactDomainNote,
-    ContactRelationship,
     ContactInteraction,
+    ContactRelationship,
     Entity,
     MemoryItem,
     MemoryProposal,
-    RoutedItem,
     OrganizationIdentifier,
     OrganizationRelationship,
+    RoutedItem,
     SeedPackage,
     Todo,
 )
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
+from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_resolver import RoutedObjectResolver
-from app.memory.routed_retrieval import RoutedRetrievalService
 from app.memory.routed_service import RoutedMemoryService
-from app.memory.dropbox import MemoryDropboxProcessor
 
 
 def test_todo_resolver_matches_retry_from_same_source_with_rephrased_title(
@@ -99,9 +98,12 @@ def test_memory_status_and_upload(session: Session, tmp_path: Path) -> None:
     assert status.status_code == 200
     assert status.json()["root"] == str(tmp_path)
     assert any(domain["key"] == "perti-laboratories" for domain in status.json()["domains"])
-    assert next(domain for domain in status.json()["domains"] if domain["key"] == "perti-laboratories")[
-        "processing"
-    ] == 0
+    assert (
+        next(
+            domain for domain in status.json()["domains"] if domain["key"] == "perti-laboratories"
+        )["processing"]
+        == 0
+    )
 
     upload = client.post(
         "/memory/dropbox/perti-laboratories/upload",
@@ -133,7 +135,9 @@ def test_memory_dropbox_consolidates_legacy_perti_directories(
 ) -> None:
     (tmp_path / "ophi" / "inbox").mkdir(parents=True)
     (tmp_path / "personal-irad-projects" / "inbox").mkdir(parents=True)
-    (tmp_path / "ophi" / "inbox" / "product.md").write_text("Ophi product context", encoding="utf-8")
+    (tmp_path / "ophi" / "inbox" / "product.md").write_text(
+        "Ophi product context", encoding="utf-8"
+    )
     (tmp_path / "personal-irad-projects" / "inbox" / "research.md").write_text(
         "Personal research context",
         encoding="utf-8",
@@ -263,7 +267,9 @@ def test_calendar_past_event_materializes_one_contact_interaction(
     event_id = created.json()["event"]["id"]
 
     interactions = session.scalars(
-        select(ContactInteraction).where(ContactInteraction.calendar_event_id == uuid.UUID(event_id))
+        select(ContactInteraction).where(
+            ContactInteraction.calendar_event_id == uuid.UUID(event_id)
+        )
     ).all()
     assert len(interactions) == 1
     assert interactions[0].contact_id == contact.id
@@ -334,7 +340,11 @@ def test_organization_intelligence_resolves_identifiers_and_relationships(
     assert response.status_code == 200
     organization = response.json()["entities"][0]
     assert organization["name"] == "Example Corp"
-    assert {item["type"] for item in organization["identifiers"]} == {"website", "web_domain", "email_domain"}
+    assert {item["type"] for item in organization["identifiers"]} == {
+        "website",
+        "web_domain",
+        "email_domain",
+    }
     assert organization["relationships"][0]["organization"] == "Example Holdings"
     assert session.query(OrganizationIdentifier).count() == 3
     assert session.query(OrganizationRelationship).count() == 1
@@ -582,6 +592,40 @@ def test_routed_objects_api_returns_canonical_stores(
     assert bundle.json()["todos"][0]["title"] == "Draft partner follow-up"
     assert contacts.json()["contacts"][0]["name"] == "Jane Smith"
     assert todos.json()["todos"][0]["domain_key"] == "praxis"
+
+
+def test_routed_context_returns_recurring_event_for_requested_date(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    l3 = DomainRepository(session).get_by_key("l3")
+    assert l3 is not None
+    session.add(
+        CalendarEvent(
+            domain_id=l3.id,
+            title="Collaborative Autonomy Standup",
+            start_at=datetime(2026, 8, 24, 15, 0, tzinfo=UTC),
+            end_at=datetime(2026, 8, 24, 15, 30, tzinfo=UTC),
+            timezone="America/New_York",
+            recurrence_rule="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH;UNTIL=20261231T235959Z",
+            status="scheduled",
+            attendees=[],
+            supporting_refs=[],
+            source_refs=[],
+            provenance={"created_from": "test"},
+            metadata_={},
+        )
+    )
+    session.commit()
+
+    response = _client(session, tmp_path).get(
+        "/memory/routed-objects?domain_key=l3&query_text=2026-08-31"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["events"][0]["title"] == "Collaborative Autonomy Standup"
+    assert response.json()["events"][0]["recurrence_rule"].endswith("20261231T235959Z")
 
 
 def test_routed_memory_service_dedupes_contacts_and_links_entities(
@@ -928,7 +972,10 @@ def test_routed_memory_service_extracts_contact_relationship(
     relationship = session.query(ContactRelationship).one()
     assert relationship.description == "works with"
     assert relationship.contact_id == session.query(Contact).filter_by(name="Ben Daniels").one().id
-    assert relationship.related_contact_id == session.query(Contact).filter_by(name="Jane Smith").one().id
+    assert (
+        relationship.related_contact_id
+        == session.query(Contact).filter_by(name="Jane Smith").one().id
+    )
 
 
 def test_routed_memory_service_dedupes_events(session: Session, tmp_path: Path) -> None:
@@ -1067,9 +1114,7 @@ def test_routed_memory_service_maps_join_url_to_conferencing_url(
     RoutedMemoryService(session).promote_items([routed_item])
 
     event = session.query(CalendarEvent).one()
-    assert event.conferencing_url == (
-        "https://dod.teams.microsoft.us/meet/993833865306?p=example"
-    )
+    assert event.conferencing_url == ("https://dod.teams.microsoft.us/meet/993833865306?p=example")
 
 
 def test_calendar_listing_backfills_conferencing_url_from_summary(
@@ -1444,10 +1489,13 @@ def test_routed_hygiene_cleans_identifier_names_and_synthetic_aliases(
     assert contact.email == "william.r.rollins2.mil@army.mil"
     assert entity.name == "Praxis Defense"
     assert report.aliases_pruned >= 2
-    assert session.scalar(select(ContactAlias).where(ContactAlias.normalized_alias == "w r")) is None
-    assert session.scalar(
-        select(ContactAlias).where(ContactAlias.normalized_alias == "will rollins")
-    ) is not None
+    assert (
+        session.scalar(select(ContactAlias).where(ContactAlias.normalized_alias == "w r")) is None
+    )
+    assert (
+        session.scalar(select(ContactAlias).where(ContactAlias.normalized_alias == "will rollins"))
+        is not None
+    )
 
 
 def test_routed_hygiene_merges_contact_with_email_embedded_in_display_name(
@@ -1562,7 +1610,9 @@ def test_routed_hygiene_merges_high_confidence_duplicates(
         provenance={},
         metadata_={},
     )
-    session.add_all([first_contact, second_contact, first_event, second_event, first_todo, second_todo])
+    session.add_all(
+        [first_contact, second_contact, first_event, second_event, first_todo, second_todo]
+    )
     session.commit()
 
     report = RoutedHygieneService(session).run_once()
@@ -1574,8 +1624,12 @@ def test_routed_hygiene_merges_high_confidence_duplicates(
     assert len([contact for contact in contacts if contact.status != "archived"]) == 2
     assert len([event for event in events if event.status != "archived"]) == 1
     assert len([todo for todo in todos if todo.status != "archived"]) == 1
-    assert "Second event note" in next(event for event in events if event.status != "archived").summary
-    assert "Second todo note" in next(todo for todo in todos if todo.status != "archived").description
+    assert (
+        "Second event note" in next(event for event in events if event.status != "archived").summary
+    )
+    assert (
+        "Second todo note" in next(todo for todo in todos if todo.status != "archived").description
+    )
 
 
 def test_archive_memory_item_endpoint_hides_from_default_list(

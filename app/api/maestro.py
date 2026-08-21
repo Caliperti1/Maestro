@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased
 
+from app.core.config import get_settings
 from app.db.models import Conversation, Domain, Message, RoutedItem, RuntimeSetting, Task, Todo, ToolCall
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
@@ -252,6 +253,8 @@ def _respond_to_maestro_sync(
             "interaction_mode": "knowledge",
             "action_results": [result.payload() for result in knowledge.action_results],
             "workflow_suggestion": knowledge.workflow_suggestion,
+            "pending_clarification": knowledge.pending_clarification,
+            "knowledge_iterations": knowledge.iterations,
         }
         _record_session_message(db, conversation, "maestro", knowledge.message, metadata=response_metadata)
         return {
@@ -264,6 +267,8 @@ def _respond_to_maestro_sync(
             "active_plan": None,
             "action_results": [result.payload() for result in knowledge.action_results],
             "workflow_suggestion": knowledge.workflow_suggestion,
+            "pending_clarification": knowledge.pending_clarification,
+            "knowledge_iterations": knowledge.iterations,
             "channel_context": topic_context,
             "conversation": _conversation_payload(db, conversation),
         }

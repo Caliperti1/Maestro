@@ -365,7 +365,10 @@ class FederatedRetrievalService:
             forced_domain=forced_domain,
         )
         domain_ids = {by_key[key].id for key in plan.domains if key in by_key}
-        stores = set(plan.stores) & (request_data.stores or STORE_NAMES)
+        # An explicit store selection is an execution constraint, not merely a hint to the router.
+        stores = set(request_data.stores) if request_data.stores is not None else set(plan.stores)
+        if request_data.stores is not None:
+            plan.stores = sorted(stores)
         query = select(RetrievalDocument).where(RetrievalDocument.status.not_in({"inactive", "archived", "superseded"}))
         if request_data.audience == "agent":
             if request_data.domain_id is None:

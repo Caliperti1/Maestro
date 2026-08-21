@@ -25,6 +25,7 @@ from app.db.models import (
     Domain,
     Entity,
     Idea,
+    Message,
     OrganizationAlias,
     RoutedItem,
     Todo,
@@ -33,7 +34,13 @@ from app.db.models import (
 from app.db.repositories import DomainRepository
 from app.llm.client import OpenAILLMClient
 from app.maestro.context_assembler import MaestroContextAssembler
+from app.maestro.knowledge_tools import (
+    READ_ACTIONS,
+    KnowledgeActionResult,
+    KnowledgeReadToolService,
+)
 from app.maestro.scheduler import SchedulerService
+from app.memory.calendar_recurrence import normalize_recurrence_rule
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.organization_intelligence import (
     OrganizationEmbeddingService,
@@ -43,8 +50,9 @@ from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_service import RoutedMemoryService
 from app.prompts import load_prompt
 
-
 ALLOWED_ACTIONS = {
+    "context.search",
+    "web.search",
     "calendar.create",
     "calendar.update",
     "contact.create",
@@ -58,24 +66,7 @@ ALLOWED_ACTIONS = {
     "workflow.update",
     "workflow.archive",
 }
-
-
-@dataclass(frozen=True)
-class KnowledgeActionResult:
-    action_type: str
-    status: str
-    message: str
-    object_type: str | None = None
-    object_id: str | None = None
-
-    def payload(self) -> dict[str, Any]:
-        return {
-            "action_type": self.action_type,
-            "status": self.status,
-            "message": self.message,
-            "object_type": self.object_type,
-            "object_id": self.object_id,
-        }
+MAX_KNOWLEDGE_ACTION_ROUNDS = 4
 
 
 @dataclass(frozen=True)
@@ -83,6 +74,7 @@ class KnowledgeTurn:
     message: str
     actions: list[dict[str, Any]]
     workflow_suggestion: str | None = None
+    pending_clarification: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +82,8 @@ class KnowledgeResponse:
     message: str
     action_results: list[KnowledgeActionResult]
     workflow_suggestion: str | None = None
+    pending_clarification: str | None = None
+    iterations: int = 1
 
 
 class KnowledgePlanner(Protocol):
@@ -119,15 +113,23 @@ class LLMKnowledgePlanner:
                 if isinstance(item, dict) and (parsed := _parse_action(item)) is not None
             ],
             workflow_suggestion=_optional_text(payload.get("workflow_suggestion")),
+            pending_clarification=_optional_text(payload.get("pending_clarification")),
         )
 
 
 class MaestroKnowledgeService:
     """Answers from context and executes only the explicit Knowledge-mode action allowlist."""
 
-    def __init__(self, session: Session, *, planner: KnowledgePlanner | None = None):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        planner: KnowledgePlanner | None = None,
+        web_client: OpenAILLMClient | None = None,
+    ):
         self.session = session
         self.planner = planner
+        self.web_client = web_client
 
     def respond(
         self,
@@ -146,32 +148,172 @@ class MaestroKnowledgeService:
             artifact_limit=4,
         )
         workflow_context = self._workflow_context_text()
-        context_text = "\n\n".join(part for part in (context.rendered_text, workflow_context) if part)
+        conversation_context = self._conversation_context_text(
+            conversation_id=conversation_id,
+            current_message_id=message_id,
+        )
+        context_text = "\n\n".join(
+            part for part in (conversation_context, context.rendered_text, workflow_context) if part
+        )
         now = datetime.now(UTC)
         planner = self.planner or LLMKnowledgePlanner()
-        turn = planner.plan(message=message, context_text=context_text, now=now)
-        results = [
-            self._execute(
-                action,
-                conversation_id=conversation_id,
-                message_id=message_id,
-                now=now,
-            )
-            for action in turn.actions
+        validation_source = "\n".join(part for part in (conversation_context, message) if part)
+        turn, results, iterations = self._run_action_loop(
+            planner=planner,
+            message=message,
+            context_text=context_text,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            now=now,
+            validation_source=validation_source,
+        )
+        result_lines = [
+            result.message for result in results if result.status not in {"completed", "skipped"}
         ]
-        result_lines = [result.message for result in results if result.status != "completed"]
         if result_lines:
             response_message = "I need one more detail before I can safely finish that change."
             response_message += "\n\n" + "\n".join(f"- {line}" for line in result_lines)
         else:
             response_message = turn.message or "I handled that."
-        if turn.workflow_suggestion and turn.workflow_suggestion.lower() not in response_message.lower():
+        if (
+            turn.workflow_suggestion
+            and turn.workflow_suggestion.lower() not in response_message.lower()
+        ):
             response_message = f"{response_message}\n\n{turn.workflow_suggestion}"
         return KnowledgeResponse(
             message=response_message,
             action_results=results,
             workflow_suggestion=turn.workflow_suggestion,
+            pending_clarification=turn.pending_clarification,
+            iterations=iterations,
         )
+
+    def _run_action_loop(
+        self,
+        *,
+        planner: KnowledgePlanner,
+        message: str,
+        context_text: str,
+        conversation_id: uuid.UUID | None,
+        message_id: uuid.UUID | None,
+        now: datetime,
+        validation_source: str,
+    ) -> tuple[KnowledgeTurn, list[KnowledgeActionResult], int]:
+        results: list[KnowledgeActionResult] = []
+        execution_blocks: list[str] = []
+        completed_writes: set[str] = set()
+        turn = KnowledgeTurn(message="", actions=[])
+        iterations = 0
+        for round_number in range(1, MAX_KNOWLEDGE_ACTION_ROUNDS + 1):
+            iterations += 1
+            turn = planner.plan(
+                message=message,
+                context_text=self._loop_context(context_text, execution_blocks),
+                now=now,
+            )
+            if not turn.actions or turn.pending_clarification:
+                return turn, results, iterations
+            actions = turn.actions
+            reads = [action for action in actions if action.get("type") in READ_ACTIONS]
+            if reads:
+                actions = reads
+            round_results: list[KnowledgeActionResult] = []
+            executed = 0
+            for action in actions:
+                action_type = str(action.get("type") or "")
+                signature = _action_signature(action)
+                if action_type not in READ_ACTIONS and signature in completed_writes:
+                    round_results.append(
+                        KnowledgeActionResult(
+                            action_type,
+                            "skipped",
+                            "The identical write already completed in this Knowledge turn.",
+                        )
+                    )
+                    continue
+                result = self._execute(
+                    action,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    now=now,
+                    source_message=validation_source,
+                )
+                executed += 1
+                round_results.append(result)
+                if action_type not in READ_ACTIONS and result.status == "completed":
+                    completed_writes.add(signature)
+            results.extend(round_results)
+            execution_blocks.append(_render_action_results(round_number, round_results))
+            execution_blocks = _bounded_execution_blocks(execution_blocks)
+            if any(result.status == "needs_clarification" for result in round_results):
+                return turn, results, iterations
+            if executed == 0:
+                return turn, results, iterations
+
+        iterations += 1
+        final_context = self._loop_context(context_text, execution_blocks)
+        final_context += (
+            "\n\n## Execution boundary\n"
+            "The immediate-action limit has been reached. Emit no more actions. Give Chris a "
+            "grounded conversational summary of completed results, failures, and anything still open."
+        )
+        turn = planner.plan(message=message, context_text=final_context, now=now)
+        return (
+            KnowledgeTurn(
+                message=turn.message,
+                actions=[],
+                workflow_suggestion=turn.workflow_suggestion,
+                pending_clarification=turn.pending_clarification,
+            ),
+            results,
+            iterations,
+        )
+
+    def _loop_context(self, base_context: str, execution_blocks: list[str]) -> str:
+        if not execution_blocks:
+            return base_context
+        return f"{base_context}\n\n" + "\n\n".join(execution_blocks)
+
+    def _conversation_context_text(
+        self,
+        *,
+        conversation_id: uuid.UUID | None,
+        current_message_id: uuid.UUID | None,
+    ) -> str:
+        if conversation_id is None:
+            return ""
+        statement = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(10)
+        )
+        messages = list(reversed(list(self.session.scalars(statement).all())))
+        lines: list[str] = []
+        pending: str | None = None
+        for item in messages:
+            if current_message_id is not None and item.id == current_message_id:
+                continue
+            role = "Chris" if item.sender_type == "user" else "Maestro"
+            lines.append(f"{role}: {item.content.strip()}")
+            candidate = (item.metadata_ or {}).get("pending_clarification")
+            if item.sender_type == "maestro" and candidate:
+                pending = str(candidate).strip()
+            elif (
+                item.sender_type == "maestro"
+                and (item.metadata_ or {}).get("interaction_mode") == "knowledge"
+            ):
+                pending = None
+        if not lines:
+            return ""
+        blocks = ["## Recent conversation\n" + "\n".join(lines)]
+        if pending:
+            blocks.append(
+                "## Pending clarification\n"
+                f"Maestro was waiting for Chris to answer: {pending}\n"
+                "Interpret a terse reply against this pending question before treating it as a new request."
+            )
+        return "\n\n".join(blocks)
 
     def _workflow_context_text(self) -> str:
         definitions = SchedulerService(self.session).list_definitions()
@@ -193,6 +335,7 @@ class MaestroKnowledgeService:
         conversation_id: uuid.UUID | None,
         message_id: uuid.UUID | None,
         now: datetime,
+        source_message: str,
     ) -> KnowledgeActionResult:
         action_type = str(action.get("type") or "").strip()
         arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
@@ -210,6 +353,14 @@ class MaestroKnowledgeService:
             "acted_at": now.isoformat(),
         }
         try:
+            if action_type in READ_ACTIONS:
+                return KnowledgeReadToolService(
+                    self.session,
+                    domain_resolver=self._domain,
+                    web_client=self.web_client,
+                ).execute(action_type, arguments)
+            if action_type.startswith("calendar."):
+                arguments = _normalize_calendar_arguments(arguments, source_message=source_message)
             if action_type.endswith(".create"):
                 return self._create(action_type, arguments, provenance)
             if action_type == "workflow.update":
@@ -222,7 +373,9 @@ class MaestroKnowledgeService:
             return KnowledgeActionResult(action_type, "needs_clarification", str(exc))
         except Exception:
             self.session.rollback()
-            return KnowledgeActionResult(action_type, "failed", "I could not apply that change safely.")
+            return KnowledgeActionResult(
+                action_type, "failed", "I could not apply that change safely."
+            )
 
     def _create(
         self,
@@ -294,14 +447,22 @@ class MaestroKnowledgeService:
             priority=str(arguments.get("priority") or "normal"),
             status="open",
             source_refs=[provenance],
-            metadata_={**metadata, "knowledge_mode": True, "provenance": provenance},
+            metadata_={
+                **metadata,
+                "knowledge_mode": True,
+                "provenance": provenance,
+                "enriched_at": provenance["acted_at"],
+                "enrichment_source": "knowledge_mode_validated",
+            },
         )
         self.session.add(item)
         self.session.flush()
         promoted = RoutedMemoryService(self.session).promote_item(item)
         self.session.commit()
         if promoted is None:
-            raise ValueError("That item was recognized as Chris himself and was not added as a contact.")
+            raise ValueError(
+                "That item was recognized as Chris himself and was not added as a contact."
+            )
         return KnowledgeActionResult(
             action_type,
             "completed",
@@ -317,13 +478,24 @@ class MaestroKnowledgeService:
         provenance: dict[str, Any],
     ) -> KnowledgeActionResult:
         object_type = action_type.split(".", 1)[0]
-        target = arguments.get("target") or arguments.get("id") or arguments.get("name") or arguments.get("title")
+        target = (
+            arguments.get("target")
+            or arguments.get("id")
+            or arguments.get("name")
+            or arguments.get("title")
+        )
         if not target:
             raise ValueError(f"I need to know which {object_type} you want me to update.")
         object_id = self._resolve_object(object_type, str(target), arguments.get("domain_key"))
-        updates = arguments.get("updates") if isinstance(arguments.get("updates"), dict) else {
-            key: value for key, value in arguments.items() if key not in {"target", "id", "domain_key"}
-        }
+        updates = (
+            arguments.get("updates")
+            if isinstance(arguments.get("updates"), dict)
+            else {
+                key: value
+                for key, value in arguments.items()
+                if key not in {"target", "id", "domain_key"}
+            }
+        )
         updates["metadata"] = {
             **(updates.get("metadata") if isinstance(updates.get("metadata"), dict) else {}),
             "last_knowledge_edit": provenance,
@@ -368,7 +540,9 @@ class MaestroKnowledgeService:
         arguments: dict[str, Any],
         provenance: dict[str, Any],
     ) -> KnowledgeActionResult:
-        definition = self._resolve_workflow(str(arguments.get("target") or arguments.get("id") or ""))
+        definition = self._resolve_workflow(
+            str(arguments.get("target") or arguments.get("id") or "")
+        )
         updates = arguments.get("updates") if isinstance(arguments.get("updates"), dict) else {}
         allowed = {
             "name",
@@ -381,7 +555,9 @@ class MaestroKnowledgeService:
         }
         unknown = set(updates) - allowed
         if unknown:
-            raise ValueError(f"Knowledge mode cannot edit workflow fields: {', '.join(sorted(unknown))}.")
+            raise ValueError(
+                f"Knowledge mode cannot edit workflow fields: {', '.join(sorted(unknown))}."
+            )
         if not updates:
             raise ValueError("Tell me what should change on that workflow.")
         if "trigger_config" in updates and not isinstance(updates["trigger_config"], dict):
@@ -399,17 +575,27 @@ class MaestroKnowledgeService:
         definition.is_active = bool(updates.get("is_active", definition.is_active))
         self.session.commit()
         return KnowledgeActionResult(
-            "workflow.update", "completed", f"Updated workflow '{definition.name}'.", "workflow", str(definition.id)
+            "workflow.update",
+            "completed",
+            f"Updated workflow '{definition.name}'.",
+            "workflow",
+            str(definition.id),
         )
 
     def _archive_workflow(self, arguments: dict[str, Any]) -> KnowledgeActionResult:
-        definition = self._resolve_workflow(str(arguments.get("target") or arguments.get("id") or ""))
+        definition = self._resolve_workflow(
+            str(arguments.get("target") or arguments.get("id") or "")
+        )
         SchedulerService(self.session).archive_definition(
             definition.id,
             reason=str(arguments.get("reason") or "Archived from Maestro Knowledge mode."),
         )
         return KnowledgeActionResult(
-            "workflow.archive", "completed", f"Archived workflow '{definition.name}'.", "workflow", str(definition.id)
+            "workflow.archive",
+            "completed",
+            f"Archived workflow '{definition.name}'.",
+            "workflow",
+            str(definition.id),
         )
 
     def _domain(self, key: Any, *, required: bool) -> Domain | None:
@@ -454,7 +640,10 @@ class MaestroKnowledgeService:
             )
             exact = self.session.scalars(
                 select(Contact).where(
-                    or_(func.lower(Contact.email) == target.lower(), Contact.normalized_name == normalized),
+                    or_(
+                        func.lower(Contact.email) == target.lower(),
+                        Contact.normalized_name == normalized,
+                    ),
                     Contact.status != "archived",
                 )
             ).all()
@@ -498,7 +687,9 @@ class MaestroKnowledgeService:
                 ]
         else:
             title_field = model.title
-            query = select(model).where(func.lower(title_field) == target.lower(), model.status != "archived")
+            query = select(model).where(
+                func.lower(title_field) == target.lower(), model.status != "archived"
+            )
             if domain is not None:
                 query = query.where(model.domain_id == domain.id)
             exact = list(self.session.scalars(query))
@@ -589,11 +780,12 @@ def _knowledge_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["message", "actions", "workflow_suggestion"],
+        "required": ["message", "actions", "workflow_suggestion", "pending_clarification"],
         "properties": {
             "message": {"type": "string"},
             "actions": {"type": "array", "items": action, "maxItems": 8},
             "workflow_suggestion": {"type": ["string", "null"]},
+            "pending_clarification": {"type": ["string", "null"]},
         },
     }
 
@@ -616,6 +808,130 @@ def _parse_datetime(value: Any) -> datetime | None:
 def _optional_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _action_signature(action: dict[str, Any]) -> str:
+    arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+    return json.dumps(
+        {"type": str(action.get("type") or ""), "arguments": arguments},
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _render_action_results(
+    round_number: int,
+    results: list[KnowledgeActionResult],
+) -> str:
+    payload = [result.payload() for result in results]
+    rendered = json.dumps(payload, indent=2, default=str)
+    if len(rendered) > 6500:
+        rendered = rendered[:6500] + "\n... [result payload truncated]"
+    return (
+        f"## Immediate action results: round {round_number}\n"
+        "These are authoritative results from Maestro's own services. Reason over them before "
+        "choosing another action. Do not repeat a completed write.\n"
+        f"{rendered}"
+    )
+
+
+def _bounded_execution_blocks(blocks: list[str], *, max_chars: int = 14000) -> list[str]:
+    retained: list[str] = []
+    used = 0
+    for block in reversed(blocks):
+        addition = len(block) + (2 if retained else 0)
+        if retained and used + addition > max_chars:
+            break
+        retained.append(block[-max_chars:] if not retained and len(block) > max_chars else block)
+        used += min(addition, max_chars)
+    return list(reversed(retained))
+
+
+def _normalize_calendar_arguments(
+    arguments: dict[str, Any],
+    *,
+    source_message: str,
+) -> dict[str, Any]:
+    normalized = dict(arguments)
+    updates = normalized.get("updates") if isinstance(normalized.get("updates"), dict) else None
+    schedule = dict(updates) if updates is not None else normalized
+    start_at = _parse_datetime(schedule.get("start_at"))
+    end_at = _parse_datetime(schedule.get("end_at"))
+    explicit_range = _time_range_from_message(source_message, anchor=start_at)
+    if explicit_range is not None:
+        start_at, end_at = explicit_range
+    if start_at is not None:
+        schedule["start_at"] = start_at.isoformat()
+    if end_at is not None:
+        schedule["end_at"] = end_at.isoformat()
+    if start_at is not None and end_at is not None and end_at <= start_at:
+        raise ValueError("The event end time must be after its start time.")
+    recurrence = schedule.get("recurrence_rule")
+    if recurrence and start_at is None:
+        raise ValueError("A recurring event needs a first start date and time.")
+    if recurrence:
+        schedule["recurrence_rule"] = normalize_recurrence_rule(
+            str(recurrence),
+            start_at=start_at,
+            source_text=source_message,
+        )
+    if updates is not None:
+        normalized["updates"] = schedule
+    return normalized
+
+
+def _time_range_from_message(
+    message: str,
+    *,
+    anchor: datetime | None,
+) -> tuple[datetime, datetime] | None:
+    if anchor is None:
+        return None
+    matches = list(
+        re.finditer(
+            r"(?<!\d)(\d{1,2}(?::?\d{2})?)(?:\s*(am|pm))?\s*"
+            r"(?:-|–|—|to|until|through)\s*(\d{1,2}(?::?\d{2})?)"
+            r"(?:\s*(am|pm))?(?!\d)",
+            message,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not matches:
+        return None
+    match = matches[-1]
+    start_hour, start_minute = _clock_parts(match.group(1))
+    end_hour, end_minute = _clock_parts(match.group(3))
+    start_meridiem = (match.group(2) or match.group(4) or "").lower()
+    end_meridiem = (match.group(4) or match.group(2) or "").lower()
+    if start_meridiem and end_meridiem:
+        start_hour = _hour_with_meridiem(start_hour, start_meridiem)
+        end_hour = _hour_with_meridiem(end_hour, end_meridiem)
+    elif anchor.hour >= 12 and start_hour < 12:
+        start_hour += 12
+        end_hour += 12
+    start = anchor.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+    end = anchor.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+    return start, end
+
+
+def _clock_parts(value: str) -> tuple[int, int]:
+    digits = value.replace(":", "")
+    if ":" in value:
+        hour_text, minute_text = value.split(":", 1)
+    elif len(digits) > 2:
+        hour_text, minute_text = digits[:-2], digits[-2:]
+    else:
+        hour_text, minute_text = digits, "0"
+    hour, minute = int(hour_text), int(minute_text)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError("I could not interpret the requested event time range.")
+    return hour, minute
+
+
+def _hour_with_meridiem(hour: int, meridiem: str) -> int:
+    if not 1 <= hour <= 12:
+        raise ValueError("A time with AM or PM must use an hour from 1 through 12.")
+    return (hour % 12) + (12 if meridiem == "pm" else 0)
 
 
 def _parse_action(payload: dict[str, Any]) -> dict[str, Any] | None:

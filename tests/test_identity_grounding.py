@@ -94,3 +94,26 @@ def test_agent_prompt_and_maestro_context_receive_authoritative_grounding(
     assert "Praxis Defense is Chris Aliperti's company" in maestro_bundle.rendered_text
     assert maestro_bundle.sections["identity"]["relationships"]
     assert session.query(IdentityRelationship).count() >= 1
+
+
+def test_maestro_context_render_keeps_routed_objects_with_federated_results(
+    session: Session,
+) -> None:
+    rendered = MaestroContextAssembler(session)._render(
+        {
+            "identity": {"rendered_text": "Chris Aliperti owns Praxis."},
+            "federated": {"rendered_text": "Praxis is Chris's company."},
+            "memory": {"rendered_text": ""},
+            "routed_objects": {
+                "rendered_text": "Events:\n- Collaborative Autonomy Standup (2026-08-24T11:00:00-04:00)"
+            },
+            "reports": {"items": []},
+            "run_log": {"items": []},
+            "artifacts": {"items": []},
+        },
+        max_chars=3000,
+    )
+
+    assert "## Retrieved Context" in rendered
+    assert "## Routed Objects" in rendered
+    assert "Collaborative Autonomy Standup" in rendered

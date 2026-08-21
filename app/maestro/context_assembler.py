@@ -5,7 +5,6 @@ reports, run history, and artifact metadata. This service builds one compact bun
 passed to direct chat or the planner without forcing those callers to know each retrieval store.
 """
 
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,15 +12,15 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import Artifact, Domain, Report, WorkflowRunLogEntry
-from app.memory.ingestion import memory_allowed_for_target
+from app.maestro.identity_grounding import IdentityGroundingService
 from app.memory.federated_retrieval import (
     FederatedRetrievalRequest,
     FederatedRetrievalService,
     federated_bundle_payload,
 )
+from app.memory.ingestion import memory_allowed_for_target
 from app.memory.retrieval import MemoryContextBundleRequest, MemoryRetrievalService
 from app.memory.routed_retrieval import RoutedRetrievalService
-from app.maestro.identity_grounding import IdentityGroundingService
 
 
 @dataclass(frozen=True)
@@ -56,7 +55,7 @@ class MaestroContextAssembler:
             "federated": self._federated_section(
                 query_text=query_text,
                 domain=domain,
-                max_chars=max_chars - 700,
+                max_chars=min(2800, max_chars - 700),
             ),
             "memory": self._memory_section(
                 query_text=query_text,
@@ -214,9 +213,7 @@ class MaestroContextAssembler:
                 query_text=query_text,
                 columns=(Report.title, Report.summary, Report.body_markdown),
             ).where(
-                or_(Report.domain_id == domain.id, Report.domain_id.is_(None))
-                if domain
-                else True
+                or_(Report.domain_id == domain.id, Report.domain_id.is_(None)) if domain else True
             )
         ).all()
         reports = [
@@ -268,9 +265,7 @@ class MaestroContextAssembler:
             )
         ).all()
         entries = [
-            entry
-            for entry in entries
-            if memory_allowed_for_target(entry.metadata_, "external")
+            entry for entry in entries if memory_allowed_for_target(entry.metadata_, "external")
         ]
         return {
             "status": "ok",
@@ -338,17 +333,16 @@ class MaestroContextAssembler:
         identity_text = str(sections.get("identity", {}).get("rendered_text") or "").strip()
         if identity_text:
             blocks.append(f"## Authoritative Identity\n{identity_text}")
-        federated_text = str(sections.get("federated", {}).get("rendered_text") or "").strip()
-        if federated_text:
-            blocks.append(f"## Retrieved Context\n{federated_text}")
-            blocks.append("## Web Search\nUse `web.search` if the answer needs current external information.")
-            return "\n\n".join(blocks).strip()[:max_chars]
-        memory_text = str(sections.get("memory", {}).get("rendered_text") or "").strip()
-        if memory_text:
-            blocks.append(f"## Durable Memory\n{memory_text}")
         routed_text = str(sections.get("routed_objects", {}).get("rendered_text") or "").strip()
         if routed_text:
             blocks.append(f"## Routed Objects\n{routed_text}")
+        federated_text = str(sections.get("federated", {}).get("rendered_text") or "").strip()
+        if federated_text:
+            blocks.append(f"## Retrieved Context\n{federated_text}")
+        else:
+            memory_text = str(sections.get("memory", {}).get("rendered_text") or "").strip()
+            if memory_text:
+                blocks.append(f"## Durable Memory\n{memory_text}")
         report_lines = [
             f"- {item['title']}: {item.get('summary') or item.get('report_type')}"
             for item in sections.get("reports", {}).get("items", [])
@@ -367,7 +361,9 @@ class MaestroContextAssembler:
         ]
         if artifact_lines:
             blocks.append("## Artifacts\n" + "\n".join(artifact_lines))
-        blocks.append("## Web Search\nUse `web.search` if the answer needs current external information.")
+        blocks.append(
+            "## Web Search\nUse `web.search` if the answer needs current external information."
+        )
         rendered = "\n\n".join(blocks).strip()
         return rendered[:max_chars]
 

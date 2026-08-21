@@ -83,3 +83,30 @@ def test_index_archives_removed_and_retrieval_filters_expired_or_local_only(sess
     assert sync.projected == 2
     assert not bundle.results
     assert bundle.policy_filtered_count == 1
+
+
+def test_explicit_store_selection_overrides_query_router_hints(session):
+    praxis = _domain(session, "praxis")
+    session.add(
+        Report(
+            domain_id=praxis.id,
+            title="Jane Smith briefing",
+            report_type="research",
+            summary="Jane owns the next partner call.",
+            body_markdown="Current partner context.",
+            structured_data={},
+        )
+    )
+    session.commit()
+
+    bundle = FederatedRetrievalService(session).retrieve(
+        FederatedRetrievalRequest(
+            query_text="Who is the Jane Smith contact?",
+            domain_id=praxis.id,
+            stores={"reports"},
+            use_semantic=False,
+        )
+    )
+
+    assert [result.document.store for result in bundle.results] == ["reports"]
+    assert bundle.plan.stores == ["reports"]

@@ -977,8 +977,10 @@ export type MaestroRespond = {
     message: string;
     object_type: string | null;
     object_id: string | null;
+    data?: Record<string, unknown> | null;
   }>;
   workflow_suggestion?: string | null;
+  knowledge_iterations?: number;
   channel_context?: {
     scope: string;
     topic_id?: string | null;
