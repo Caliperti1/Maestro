@@ -2188,6 +2188,15 @@ h4 {
   white-space: nowrap;
 }
 
+.calendar-event-title {
+  font-weight: 650;
+}
+
+.calendar-event-time {
+  font-size: 0.62rem;
+  opacity: 0.82;
+}
+
 .calendar-shell .calendar-event-cancelled {
   text-decoration: line-through;
   opacity: 0.72;

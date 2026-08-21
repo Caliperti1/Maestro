@@ -1493,8 +1493,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 }}
                 eventContent={(info) => (
                   <div className="calendar-event-content">
-                    <strong>{info.timeText}</strong>
-                    <span>{info.event.title}</span>
+                    <strong className="calendar-event-title">{info.event.title}</strong>
+                    {info.timeText && <span className="calendar-event-time">{info.timeText}</span>}
                   </div>
                 )}
               />
