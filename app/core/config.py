@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     calendar_trigger_autorun: bool = False
     calendar_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     calendar_trigger_page_size: Annotated[int, Field(ge=1, le=2500)] = 250
+    todo_agent_worker_autorun: bool = True
+    todo_agent_worker_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
+    todo_agent_worker_claim_limit: Annotated[int, Field(ge=1, le=20)] = 2
+    routed_hygiene_autorun: bool = True
+    routed_hygiene_interval_seconds: Annotated[int, Field(ge=300, le=86400)] = 3600
     context_mailbox_autorun: bool = True
     context_mailbox_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     context_mailbox_page_size: Annotated[int, Field(ge=1, le=100)] = 25

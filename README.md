@@ -34,6 +34,8 @@ chat responses toward persistent execution.
 - Canonical workflow artifacts staged for memory curation at workflow completion.
 - Resumable historical Gmail hydration for contact and organization intelligence with shadow review.
 - Cross-domain calendar with linked contacts/organizations, conflict detection, and completed-meeting history.
+- Scheduled routed tasks projected onto the calendar, with duration estimates and completion state.
+- Optional agent-owned todos that become linked one-time background workflows and report back through Maestro.
 - React/Vite frontend for Maestro chat, memory, domains, agents, tools, and queue surfaces.
 
 ## System Shape

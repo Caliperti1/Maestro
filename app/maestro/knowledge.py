@@ -410,14 +410,23 @@ class MaestroKnowledgeService:
             and value not in (None, "", [])
         }
         if route_type == "task":
+            agent_task = bool(arguments.get("agent_task", False))
             todo = Todo(
                 domain_id=domain.id if domain else None,
                 title=title,
                 description=content,
-                todo_type="reminder",
-                owner_type="user",
-                owner_ref=get_settings().user_display_name,
+                todo_type="task",
+                owner_type="maestro" if agent_task else "user",
+                owner_ref="Maestro" if agent_task else get_settings().user_display_name,
                 due_at=_parse_datetime(arguments.get("due_at")),
+                estimated_minutes=(
+                    int(arguments["estimated_minutes"])
+                    if arguments.get("estimated_minutes") not in (None, "")
+                    else None
+                ),
+                scheduled_start_at=_parse_datetime(arguments.get("scheduled_start_at")),
+                agent_task=agent_task,
+                agent_task_status="pending" if agent_task else "not_agent",
                 priority=str(arguments.get("priority") or "normal"),
                 status="open",
                 source_refs=[provenance],
@@ -425,6 +434,12 @@ class MaestroKnowledgeService:
                 metadata_={**metadata, "knowledge_mode": True},
             )
             self.session.add(todo)
+            self.session.flush()
+            from app.memory.todo_scheduling import TodoSchedulingService
+
+            if todo.estimated_minutes is None:
+                todo.estimated_minutes = TodoSchedulingService(self.session).estimate_minutes(todo)
+            TodoSchedulingService(self.session).sync_projection(todo, commit=False)
             self.session.commit()
             return KnowledgeActionResult(
                 action_type,

@@ -1683,11 +1683,14 @@ def test_routed_hygiene_merges_high_confidence_duplicates(
 
     report = RoutedHygieneService(session).run_once()
 
-    assert report.duplicates_merged == 2
+    assert report.duplicates_merged == 3
     contacts = session.query(Contact).all()
     events = session.query(CalendarEvent).all()
     todos = session.query(Todo).all()
-    assert len([contact for contact in contacts if contact.status != "archived"]) == 2
+    assert len([contact for contact in contacts if contact.status != "archived"]) == 1
+    assert "Second note" in next(
+        contact for contact in contacts if contact.status != "archived"
+    ).summary
     assert len([event for event in events if event.status != "archived"]) == 1
     assert len([todo for todo in todos if todo.status != "archived"]) == 1
     assert (

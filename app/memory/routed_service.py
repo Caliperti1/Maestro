@@ -212,6 +212,9 @@ class RoutedMemoryService:
 
     def _promote_todo(self, item: RoutedItem) -> RoutedPromotionResult:
         due_at = _datetime_from_metadata(item.metadata_, "due_at")
+        scheduled_start_at = _datetime_from_metadata(item.metadata_, "scheduled_start_at")
+        estimated_minutes = _integer_from_metadata(item.metadata_, "estimated_minutes")
+        agent_task = _boolean_from_metadata(item.metadata_, "agent_task")
         decision = self.resolver.resolve_todo(item, due_at=due_at)
         self._attach_resolution(item, decision)
         todo = (
@@ -220,16 +223,20 @@ class RoutedMemoryService:
             else None
         )
         action = "updated" if todo is not None else "created"
-        owner_ref = get_settings().user_display_name if item.route_type == "human_input" else None
+        owner_ref = "Maestro" if agent_task else get_settings().user_display_name
         if todo is None:
             todo = Todo(
                 domain_id=item.domain_id,
                 title=item.title,
                 description=item.content,
                 todo_type="human_input" if item.route_type == "human_input" else item.route_type,
-                owner_type="user" if item.route_type == "human_input" else "maestro",
+                owner_type="maestro" if agent_task else "user",
                 owner_ref=owner_ref,
                 due_at=due_at,
+                estimated_minutes=estimated_minutes,
+                scheduled_start_at=scheduled_start_at,
+                agent_task=agent_task,
+                agent_task_status="pending" if agent_task else "not_agent",
                 priority=item.priority,
                 status="needs_input" if item.route_type == "human_input" else "open",
                 source_refs=item.source_refs,
@@ -244,8 +251,21 @@ class RoutedMemoryService:
             todo.metadata_ = {**(todo.metadata_ or {}), **self._canonical_metadata(item)}
             if due_at and not todo.due_at:
                 todo.due_at = due_at
+            if scheduled_start_at:
+                todo.scheduled_start_at = scheduled_start_at
+            if estimated_minutes:
+                todo.estimated_minutes = estimated_minutes
+            if agent_task:
+                todo.agent_task = True
+                if todo.agent_task_status == "not_agent":
+                    todo.agent_task_status = "pending"
             if _priority_rank(item.priority) > _priority_rank(todo.priority):
                 todo.priority = item.priority
+        from app.memory.todo_scheduling import TodoSchedulingService
+
+        if todo.estimated_minutes is None:
+            todo.estimated_minutes = TodoSchedulingService(self.session).estimate_minutes(todo)
+        TodoSchedulingService(self.session).sync_projection(todo, commit=False)
         return self._link(item, "todo", todo.id, action)
 
     def _promote_event(self, item: RoutedItem) -> RoutedPromotionResult:
@@ -304,9 +324,8 @@ class RoutedMemoryService:
                     else None
                 ),
                 scheduling_effect=_calendar_scheduling_effect(item.metadata_, item_kind),
-                blocks_time=item_kind != "context_window" and bool(
-                    (item.metadata_ or {}).get("blocks_time", True)
-                ),
+                blocks_time=item_kind != "context_window"
+                and bool((item.metadata_ or {}).get("blocks_time", True)),
                 location=_string_from_metadata(item.metadata_, "location"),
                 conferencing_url=conferencing_url,
                 organizer_name=_string_from_metadata(item.metadata_, "organizer_name"),
@@ -345,9 +364,7 @@ class RoutedMemoryService:
                 if event.item_kind == "context_window"
                 else None
             )
-            event.scheduling_effect = _calendar_scheduling_effect(
-                item.metadata_, event.item_kind
-            )
+            event.scheduling_effect = _calendar_scheduling_effect(item.metadata_, event.item_kind)
             event.blocks_time = event.item_kind != "context_window" and bool(
                 (item.metadata_ or {}).get("blocks_time", event.blocks_time)
             )
@@ -360,7 +377,9 @@ class RoutedMemoryService:
                 event.location = _string_from_metadata(item.metadata_, "location")
             if external_sync or not event.conferencing_url:
                 event.conferencing_url = conferencing_url
-            event.attendees = attendees if external_sync else _merge_attendees(event.attendees, attendees)
+            event.attendees = (
+                attendees if external_sync else _merge_attendees(event.attendees, attendees)
+            )
             if external_sync:
                 event.timezone = _string_from_metadata(item.metadata_, "timezone") or event.timezone
                 event.all_day = bool((item.metadata_ or {}).get("all_day", False))
@@ -617,6 +636,15 @@ class RoutedMemoryService:
                 )
         else:
             entity = self.session.scalar(select(Entity).where(Entity.normalized_name == normalized))
+        if entity is None and resolution_action != "update":
+            decision = self.resolver.resolve_organization(
+                item,
+                name=name,
+                identifiers=identifiers,
+            )
+            self._attach_resolution(item, decision)
+            if decision.action == "update_existing" and decision.object_id:
+                entity = self.session.get(Entity, decision.object_id)
         if entity is None:
             entity = Entity(
                 name=name.strip() or item.title,
@@ -1231,6 +1259,12 @@ class RoutedMemoryService:
             "todo_type": item.todo_type,
             "owner_type": item.owner_type,
             "due_at": item.due_at.isoformat() if item.due_at else None,
+            "estimated_minutes": item.estimated_minutes,
+            "scheduled_start_at": item.scheduled_start_at.isoformat()
+            if item.scheduled_start_at
+            else None,
+            "agent_task": item.agent_task,
+            "agent_task_status": item.agent_task_status,
             "priority": item.priority,
             "status": item.status,
             "metadata": item.metadata_,
@@ -1845,6 +1879,23 @@ def _time_from_text(text: str) -> time | None:
     return None
 
 
+def _integer_from_metadata(metadata: dict[str, Any], key: str) -> int | None:
+    value = (metadata or {}).get(key)
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _boolean_from_metadata(metadata: dict[str, Any], key: str) -> bool:
+    value = (metadata or {}).get(key)
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _duration_minutes_from_text(text: str) -> int:
     match = re.search(
         r"\b(?:for|duration)\s+(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b", text, re.IGNORECASE
@@ -1853,7 +1904,7 @@ def _duration_minutes_from_text(text: str) -> int:
         return 60
     value = int(match.group(1))
     unit = match.group(2).lower()
-    if unit.startswith("hour") or unit.startswith("hr"):
+    if unit.startswith(("hour", "hr")):
         return max(15, min(value * 60, 8 * 60))
     return max(15, min(value, 8 * 60))
 

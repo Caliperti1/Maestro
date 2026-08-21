@@ -379,6 +379,9 @@ export type RoutedEvent = {
   all_day: boolean;
   recurrence_rule: string | null;
   item_kind: "event" | "scheduled_todo" | "context_window";
+  todo_id: string | null;
+  todo_status: string | null;
+  estimated_minutes: number | null;
   context_type: "availability" | "childcare" | "energy" | "household" | "location" | "routine" | null;
   scheduling_effect: "hard" | "informational" | "prefer" | "prefer_avoid" | "strongly_avoid";
   blocks_time: boolean;
@@ -426,6 +429,13 @@ export type RoutedTodo = {
   owner_type: string;
   owner_ref: string | null;
   due_at: string | null;
+  estimated_minutes: number | null;
+  scheduled_start_at: string | null;
+  agent_task: boolean;
+  agent_task_status: string;
+  workflow_task_id: string | null;
+  workflow_run_id: string | null;
+  agent_task_error: string | null;
   priority: string;
   status: string;
   source_refs: Array<Record<string, unknown>>;

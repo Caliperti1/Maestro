@@ -23,8 +23,8 @@ from app.db.models import (
     Entity,
     Idea,
     IngestionRecord,
-    MemoryItem,
     MemoryHygieneRun,
+    MemoryItem,
     MemoryProposal,
     RoutedItem,
     SeedPackage,
@@ -34,29 +34,32 @@ from app.db.models import (
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
-from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
 from app.memory.calendar_intelligence import CalendarIntelligenceService
-from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
-from app.memory.contact_hydration import ContactHydrationError, ContactHydrationService
-from app.memory.dropbox import MemoryDropboxProcessor
-from app.memory.ingestion import IngestionLedgerService
-from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.chatgpt_import import ChatGPTExportImporter
+from app.memory.contact_hydration import ContactHydrationError, ContactHydrationService
+from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.context_gateway import (
     ContextGatewayService,
     GatewayItem,
     parse_sanitized_context_manifest,
 )
 from app.memory.context_mailbox import ContextMailboxError, ContextMailboxService
-from app.memory.hygiene import DurableMemoryHygieneService
-from app.memory.ingestion import SourcePolicy
-from app.memory.repository_observer import RepositoryObserverService
+from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
+from app.memory.dropbox import MemoryDropboxProcessor
+from app.memory.embeddings import MemoryEmbeddingService
 from app.memory.federated_retrieval import (
     FederatedIndexService,
     FederatedRetrievalRequest,
     FederatedRetrievalService,
     federated_bundle_payload,
 )
+from app.memory.hygiene import DurableMemoryHygieneService
+from app.memory.ingestion import IngestionLedgerService, SourcePolicy
+from app.memory.organization_intelligence import (
+    OrganizationEmbeddingService,
+    OrganizationIntelligenceService,
+)
+from app.memory.repository_observer import RepositoryObserverService
 from app.memory.retrieval import (
     MemoryContextBundle,
     MemoryContextBundleRequest,
@@ -68,7 +71,6 @@ from app.memory.retrieval import (
     RetrievedMemory,
     RetrievedMemoryLink,
 )
-from app.memory.service import MemoryAccessError, MemoryService
 from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_retrieval import (
     ContactAliasConflictError,
@@ -76,7 +78,7 @@ from app.memory.routed_retrieval import (
     RoutedRetrievalService,
 )
 from app.memory.routed_service import RoutedMemoryService
-from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
+from app.memory.service import MemoryAccessError, MemoryService
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 CALENDAR_EVENT_STATUSES = {"scheduled", "tentative", "cancelled", "archived"}
@@ -136,6 +138,17 @@ class CreateCalendarEventRequest(BaseModel):
     conferencing_url: str | None = None
     attendees: list[dict[str, Any]] = Field(default_factory=list)
     organizations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CreateTodoRequest(BaseModel):
+    domain_key: str
+    title: str = Field(min_length=1, max_length=240)
+    description: str = ""
+    due_at: datetime | None = None
+    estimated_minutes: int | None = Field(default=None, ge=5, le=480)
+    scheduled_start_at: datetime | None = None
+    priority: str = "normal"
+    agent_task: bool = False
 
 
 class RepositorySourceRequest(BaseModel):
@@ -691,6 +704,44 @@ def list_todos(
         query = query.where(Todo.status == status)
     todos = db.scalars(query.order_by(Todo.due_at, Todo.created_at.desc()).limit(limit)).all()
     return {"todos": [_todo_payload(db, todo) for todo in todos]}
+
+
+@router.post("/routed-objects/todos")
+def create_todo(
+    body: CreateTodoRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    domain_id = _domain_id_for_key(db, body.domain_key)
+    if domain_id is None:
+        raise HTTPException(status_code=404, detail="Domain not found.")
+    todo = Todo(
+        domain_id=domain_id,
+        title=body.title.strip(),
+        description=body.description.strip() or body.title.strip(),
+        todo_type="task",
+        owner_type="maestro" if body.agent_task else "user",
+        owner_ref="Maestro" if body.agent_task else get_settings().user_display_name,
+        due_at=body.due_at,
+        estimated_minutes=body.estimated_minutes,
+        scheduled_start_at=body.scheduled_start_at,
+        agent_task=body.agent_task,
+        agent_task_status="pending" if body.agent_task else "not_agent",
+        priority=body.priority,
+        status="open",
+        source_refs=[],
+        provenance={"source": "maestro_todo_ui"},
+        metadata_={"created_in_ui": True},
+    )
+    db.add(todo)
+    db.flush()
+    from app.memory.todo_scheduling import TodoSchedulingService
+
+    if todo.estimated_minutes is None:
+        todo.estimated_minutes = TodoSchedulingService(db).estimate_minutes(todo)
+    TodoSchedulingService(db).sync_projection(todo, commit=False)
+    db.commit()
+    db.refresh(todo)
+    return {"todo": _todo_payload(db, todo)}
 
 
 @router.patch("/routed-objects/todos/{todo_id}")
@@ -1600,6 +1651,13 @@ def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
         "owner_type": todo.owner_type,
         "owner_ref": todo.owner_ref,
         "due_at": todo.due_at.isoformat() if todo.due_at else None,
+        "estimated_minutes": todo.estimated_minutes,
+        "scheduled_start_at": home_isoformat(todo.scheduled_start_at),
+        "agent_task": todo.agent_task,
+        "agent_task_status": todo.agent_task_status,
+        "workflow_task_id": str(todo.workflow_task_id) if todo.workflow_task_id else None,
+        "workflow_run_id": str(todo.workflow_run_id) if todo.workflow_run_id else None,
+        "agent_task_error": todo.agent_task_error,
         "priority": todo.priority,
         "status": todo.status,
         "source_refs": todo.source_refs,

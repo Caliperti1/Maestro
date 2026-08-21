@@ -1,5 +1,5 @@
-import uuid
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -20,12 +20,12 @@ from app.db.models import (
     OrganizationRelationship,
     Todo,
 )
-from app.memory.routed_hygiene import RoutedHygieneService
-from app.memory.ingestion import IngestionTarget, payload_allowed_for_target
 from app.memory.calendar_intelligence import (
     CalendarIntelligenceService,
     conferencing_url_from_values,
 )
+from app.memory.ingestion import IngestionTarget, payload_allowed_for_target
+from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_resolver import contact_aliases_for
 from app.memory.routed_service import RoutedMemoryService
 
@@ -224,6 +224,18 @@ class RoutedEditService:
         for key in ("start_at", "end_at"):
             if key in updates:
                 setattr(event, key, _parse_optional_datetime(updates[key]))
+        if event.todo_id:
+            todo = self.session.get(Todo, event.todo_id)
+            if todo is not None:
+                todo.scheduled_start_at = event.start_at
+                if event.start_at and event.end_at:
+                    duration = int((event.end_at - event.start_at).total_seconds() // 60)
+                    todo.estimated_minutes = min(480, max(5, duration))
+                event.metadata_ = {
+                    **(event.metadata_ or {}),
+                    "todo_status": todo.status,
+                    "estimated_minutes": todo.estimated_minutes,
+                }
         if "metadata" in updates and isinstance(updates["metadata"], dict):
             event.metadata_ = {**(event.metadata_ or {}), **updates["metadata"]}
         calendar = CalendarIntelligenceService(self.session)
@@ -245,8 +257,27 @@ class RoutedEditService:
                 setattr(todo, key, updates[key])
         if "due_at" in updates:
             todo.due_at = _parse_optional_datetime(updates["due_at"])
+        if "estimated_minutes" in updates:
+            value = updates["estimated_minutes"]
+            todo.estimated_minutes = min(480, max(5, int(value))) if value not in (None, "") else None
+        if "scheduled_start_at" in updates:
+            todo.scheduled_start_at = _parse_optional_datetime(updates["scheduled_start_at"])
+        if "agent_task" in updates:
+            todo.agent_task = bool(updates["agent_task"])
+            if todo.agent_task and todo.agent_task_status == "not_agent":
+                todo.agent_task_status = "pending"
+            elif not todo.agent_task:
+                todo.agent_task_status = "not_agent"
+                todo.agent_task_error = None
+        if "agent_task_status" in updates:
+            todo.agent_task_status = str(updates["agent_task_status"])
         if "metadata" in updates and isinstance(updates["metadata"], dict):
             todo.metadata_ = {**(todo.metadata_ or {}), **updates["metadata"]}
+        from app.memory.todo_scheduling import TodoSchedulingService
+
+        if todo.estimated_minutes is None:
+            todo.estimated_minutes = TodoSchedulingService(self.session).estimate_minutes(todo)
+        TodoSchedulingService(self.session).sync_projection(todo, commit=False)
         self.session.commit()
         self.session.refresh(todo)
         return todo
@@ -396,6 +427,13 @@ class RoutedEditService:
         if obj is None:
             raise ValueError("Routed object not found.")
         obj.status = "archived"
+        if isinstance(obj, Todo):
+            event = self.session.scalar(
+                select(CalendarEvent).where(CalendarEvent.todo_id == obj.id)
+            )
+            if event is not None:
+                event.status = "archived"
+                event.metadata_ = {**(event.metadata_ or {}), "todo_status": "archived"}
         self.session.commit()
         return obj
 
