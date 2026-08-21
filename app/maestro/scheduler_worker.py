@@ -53,9 +53,13 @@ def _queue_item_required_skills(item: WorkflowQueueItem) -> list[str]:
     return [str(skill).strip() for skill in skills if str(skill).strip()]
 
 
-def _trigger_email_bootstrap_requests(run: WorkflowRun) -> list[AgentToolRequest]:
+def _trigger_bootstrap_requests(run: WorkflowRun) -> list[AgentToolRequest]:
     event = (run.input_payload or {}).get("event")
-    if not isinstance(event, dict) or event.get("event_type") != "gmail.message.received":
+    if not isinstance(event, dict):
+        return []
+    if event.get("event_type") == "google.calendar.event.changed":
+        return _trigger_calendar_bootstrap_requests(run, event)
+    if event.get("event_type") != "gmail.message.received":
         return []
     payload = event.get("payload")
     if not isinstance(payload, dict):
@@ -78,6 +82,91 @@ def _trigger_email_bootstrap_requests(run: WorkflowRun) -> list[AgentToolRequest
             )
         )
     return requests
+
+
+def _trigger_calendar_bootstrap_requests(
+    run: WorkflowRun,
+    event: dict[str, Any],
+) -> list[AgentToolRequest]:
+    workflow_spec = (run.input_payload or {}).get("workflow_spec")
+    if isinstance(workflow_spec, dict) and workflow_spec.get("shadow_mode") is True:
+        return []
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return []
+    google_event = payload.get("google_event")
+    if not isinstance(google_event, dict):
+        return []
+    event_id = str(payload.get("event_id") or google_event.get("id") or "").strip()
+    if not event_id:
+        return []
+    start = google_event.get("start") if isinstance(google_event.get("start"), dict) else {}
+    end = google_event.get("end") if isinstance(google_event.get("end"), dict) else {}
+    all_day = bool(start.get("date") and not start.get("dateTime"))
+    attendees = [
+        {
+            "name": str(item.get("displayName") or item.get("email") or "").strip(),
+            "email": item.get("email"),
+            "response_status": item.get("responseStatus") or "needs_action",
+            "is_organizer": bool(item.get("organizer")),
+            "is_user": bool(item.get("self")),
+        }
+        for item in google_event.get("attendees") or []
+        if isinstance(item, dict) and (item.get("displayName") or item.get("email"))
+    ]
+    organizer = google_event.get("organizer") if isinstance(google_event.get("organizer"), dict) else {}
+    recurrence = next(
+        (str(item).removeprefix("RRULE:") for item in google_event.get("recurrence") or [] if str(item).startswith("RRULE:")),
+        None,
+    )
+    conferencing_url = str(google_event.get("hangoutLink") or "").strip() or None
+    if not conferencing_url:
+        conference_data = google_event.get("conferenceData") if isinstance(google_event.get("conferenceData"), dict) else {}
+        conferencing_url = next(
+            (
+                str(item.get("uri") or "").strip()
+                for item in conference_data.get("entryPoints") or []
+                if isinstance(item, dict) and item.get("entryPointType") == "video" and item.get("uri")
+            ),
+            None,
+        )
+    calendar_id = str(payload.get("calendar_id") or "primary")
+    source_ref = {
+        "type": "google_calendar_event",
+        "provider": "google_calendar",
+        "calendar_id": calendar_id,
+        "event_id": event_id,
+        "event_version": payload.get("event_version"),
+        "html_link": google_event.get("htmlLink"),
+        "updated": google_event.get("updated"),
+    }
+    route_payload = {
+        "route_type": "event",
+        "title": str(google_event.get("summary") or "Untitled calendar event"),
+        "content": str(google_event.get("description") or google_event.get("summary") or "Calendar event"),
+        "status": "cancelled" if google_event.get("status") == "cancelled" else "open",
+        "source_refs": [source_ref],
+        "metadata": {
+            "start_at": start.get("dateTime") or start.get("date"),
+            "end_at": end.get("dateTime") or end.get("date"),
+            "timezone": start.get("timeZone") or end.get("timeZone") or "America/New_York",
+            "all_day": all_day,
+            "recurrence_rule": recurrence,
+            "location": google_event.get("location"),
+            "conferencing_url": conferencing_url,
+            "organizer_name": organizer.get("displayName"),
+            "organizer_email": organizer.get("email"),
+            "attendees": attendees,
+            "external_provider": "google_calendar",
+            "external_calendar_id": calendar_id,
+            "external_event_id": event_id,
+            "external_etag": google_event.get("etag"),
+            "sync_status": "synced",
+            "provider_updated_at": google_event.get("updated"),
+            "recurring_event_id": google_event.get("recurringEventId"),
+        },
+    }
+    return [AgentToolRequest(tool_key="routed.item.create", payload=route_payload)]
 
 
 def _coding_pr_number(tool_calls: list[dict[str, Any]]) -> int | None:
@@ -395,7 +484,7 @@ class SchedulerWorkerService:
                 ),
                 stage_interaction=False,
                 execute_llm=execute_llm,
-                tool_requests=_trigger_email_bootstrap_requests(run),
+                tool_requests=_trigger_bootstrap_requests(run),
                 initial_tool_results=_approved_tool_results(item),
                 auto_tool_loop=auto_tool_loop,
                 max_tool_iterations=max_tool_iterations,

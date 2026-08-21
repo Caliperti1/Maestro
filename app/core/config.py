@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     user_display_name: str = "Chris"
     user_full_name: str = "Chris Aliperti"
     user_email: str = "chris.aliperti@praxis-defense.com"
+    user_email_aliases: str = "chris@perti.io"
     app_host: str = "0.0.0.0"
     app_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     frontend_origin: str = "http://localhost:5174"
@@ -78,6 +79,9 @@ class Settings(BaseSettings):
     gmail_trigger_autorun: bool = False
     gmail_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     gmail_trigger_page_size: Annotated[int, Field(ge=1, le=500)] = 100
+    calendar_trigger_autorun: bool = False
+    calendar_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
+    calendar_trigger_page_size: Annotated[int, Field(ge=1, le=2500)] = 250
     context_mailbox_autorun: bool = True
     context_mailbox_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     context_mailbox_page_size: Annotated[int, Field(ge=1, le=100)] = 25
@@ -112,6 +116,14 @@ class Settings(BaseSettings):
         if self.tailscale_frontend_origin and self.tailscale_frontend_origin not in origins:
             origins.append(self.tailscale_frontend_origin)
         return origins
+
+    @property
+    def user_emails(self) -> set[str]:
+        return {
+            address.strip().lower()
+            for address in (self.user_email, *self.user_email_aliases.split(","))
+            if address.strip()
+        }
 
 
 @lru_cache

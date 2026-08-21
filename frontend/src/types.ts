@@ -199,6 +199,9 @@ export type GmailTriggerDomainStatus = {
   last_emitted_count?: number;
   last_skipped_count?: number;
   last_error?: string | null;
+  sync_token_present?: boolean;
+  calendar_id?: string | null;
+  last_event_id?: string | null;
 };
 
 export type GmailTriggerStatus = {
@@ -211,6 +214,8 @@ export type GmailTriggerStatus = {
   event_type: string;
   domains: GmailTriggerDomainStatus[];
 };
+
+export type CalendarTriggerStatus = GmailTriggerStatus;
 
 export type DropboxDomain = {
   key: string;

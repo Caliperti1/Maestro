@@ -9,6 +9,8 @@ from app.core.config import get_settings
 from app.db.models import Domain, ToolConnection, WorkflowDefinition
 from app.db.session import get_db
 from app.maestro.workflow_templates import (
+    PERTI_CALENDAR_AGENT_KEY,
+    PERTI_EMAIL_AGENT_KEY,
     PRAXIS_EMAIL_AGENT_KEY,
     PRAXIS_EMAIL_SKILLS,
     WorkflowTemplateService,
@@ -36,7 +38,12 @@ def _add_google_connection(session: Session) -> None:
             tool_key="google",
             display_name="Praxis Google Workspace",
             auth_type="oauth",
-            config={"user_id": "me"},
+            config={
+                "user_id": "me",
+                "client_id": "client",
+                "client_secret": "secret",
+                "refresh_token": "refresh",
+            },
             is_active=True,
         )
     )
@@ -213,3 +220,60 @@ def test_praxis_email_shadow_mode_is_per_workflow_definition(
 
     assert updated.status_code == 200
     assert updated.json()["definition"]["workflow_spec"]["shadow_mode"] is False
+
+
+def test_perti_email_and_calendar_templates_seed_dedicated_agents(
+    session: Session,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PERTI_GOOGLE_CLIENT_ID", "client")
+    monkeypatch.setenv("PERTI_GOOGLE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("PERTI_GOOGLE_CLIENT_REFRESH_TOKEN", "refresh")
+    service = WorkflowTemplateService(session)
+
+    email = service.install("perti-email-triage")
+    calendar = service.install("perti-calendar-monitor")
+
+    assert email.is_active is False
+    assert email.trigger_config["gmail_watch_enabled"] is False
+    assert email.workflow_spec["queue_items"][0]["agent_key"] == PERTI_EMAIL_AGENT_KEY
+    assert calendar.trigger_config["calendar_watch_enabled"] is False
+    assert calendar.workflow_spec["queue_items"][0]["agent_key"] == PERTI_CALENDAR_AGENT_KEY
+    assert service.readiness("perti-email-triage")["ready"] is True
+    assert service.readiness("perti-calendar-monitor")["ready"] is True
+
+
+def test_calendar_watch_is_scoped_to_active_template(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PERTI_GOOGLE_CLIENT_ID", "client")
+    monkeypatch.setenv("PERTI_GOOGLE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("PERTI_GOOGLE_CLIENT_REFRESH_TOKEN", "refresh")
+    client = _client(session, tmp_path)
+    installed = client.post(
+        "/scheduler/templates/perti-calendar-monitor/install",
+        json={"is_active": False},
+    )
+    definition_id = installed.json()["definition"]["id"]
+
+    rejected = client.patch(
+        f"/scheduler/definitions/{definition_id}/calendar-watch",
+        json={"enabled": True},
+    )
+    assert rejected.status_code == 409
+
+    activated = client.patch(
+        f"/scheduler/definitions/{definition_id}/activation",
+        json={"is_active": True},
+    )
+    enabled = client.patch(
+        f"/scheduler/definitions/{definition_id}/calendar-watch",
+        json={"enabled": True},
+    )
+
+    assert activated.status_code == 200
+    assert enabled.status_code == 200
+    assert enabled.json()["definition"]["trigger_config"]["calendar_watch_enabled"] is True
+    assert enabled.json()["worker"]["enabled"] is True

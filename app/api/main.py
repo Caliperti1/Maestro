@@ -24,6 +24,7 @@ from app.core.logging import configure_logging
 from app.db.session import SessionLocal
 from app.db.seed import seed_default_domains
 from app.maestro.gmail_trigger import GmailTriggerService, gmail_trigger_worker_settings
+from app.maestro.calendar_trigger import CalendarTriggerService, calendar_trigger_worker_settings
 from app.maestro.identity_grounding import IdentityGroundingService
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
 from app.memory.dropbox import MemoryDropboxProcessor
@@ -50,6 +51,7 @@ def create_app() -> FastAPI:
             [
                 asyncio.create_task(_scheduler_worker_loop()),
                 asyncio.create_task(_gmail_trigger_worker_loop()),
+                asyncio.create_task(_calendar_trigger_worker_loop()),
                 asyncio.create_task(_memory_dropbox_worker_loop()),
                 asyncio.create_task(_context_mailbox_worker_loop()),
                 asyncio.create_task(_contact_hydration_worker_loop()),
@@ -149,6 +151,31 @@ def _process_gmail_triggers_once() -> int:
             if result["emitted_count"]:
                 logger.info(
                     "Gmail trigger worker emitted %s message event(s).",
+                    result["emitted_count"],
+                )
+        return int(worker_settings["interval_seconds"])
+
+
+async def _calendar_trigger_worker_loop() -> None:
+    while True:
+        interval_seconds = get_settings().calendar_trigger_interval_seconds
+        try:
+            interval_seconds = await asyncio.to_thread(_process_calendar_triggers_once)
+        except Exception:
+            logger.exception("Calendar trigger worker heartbeat failed.")
+        await asyncio.sleep(max(10, interval_seconds))
+
+
+def _process_calendar_triggers_once() -> int:
+    with SessionLocal() as session:
+        worker_settings = calendar_trigger_worker_settings(session)
+        if worker_settings["enabled"]:
+            result = CalendarTriggerService(session).poll_once(
+                page_size=int(worker_settings["page_size"]),
+            )
+            if result["emitted_count"]:
+                logger.info(
+                    "Calendar trigger worker emitted %s event change(s).",
                     result["emitted_count"],
                 )
         return int(worker_settings["interval_seconds"])

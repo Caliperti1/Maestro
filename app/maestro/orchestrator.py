@@ -2786,12 +2786,21 @@ class MaestroOrchestratorService:
         }
 
     def _selected_agent_payload(self, agent, *, user_input: str | None = None) -> dict[str, Any]:
+        universal_tools = {
+            "artifact.stage_interaction",
+            "llm.gateway",
+            "memory.context_bundle",
+            "reports.get",
+            "reports.search",
+        }
         payload = {
             "key": agent.key,
             "name": agent.name,
             "domain_key": agent.domain_key,
-            "role_summary": _truncate_registry_text(agent.role_summary, 260),
-            "allowed_tool_keys": [tool.key for tool in agent.allowed_tools],
+            "role_summary": _truncate_registry_text(agent.role_summary, 220),
+            "allowed_tool_keys": [
+                tool.key for tool in agent.allowed_tools if tool.key not in universal_tools
+            ],
             "allowed_skill_keys": [skill.key for skill in agent.allowed_skills],
             "model_profile": agent.model_profile,
         }

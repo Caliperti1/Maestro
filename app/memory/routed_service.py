@@ -253,13 +253,36 @@ class RoutedMemoryService:
         event_title = _event_title_from_item(item)
         attendees = self._event_attendees_from_item(item)
         conferencing_url = conferencing_url_from_values(item.metadata_, item.content, item.title)
-        decision = self.resolver.resolve_event(item, start_at=start_at)
-        self._attach_resolution(item, decision)
-        event = (
-            self.session.get(CalendarEvent, decision.object_id)
-            if decision.action == "update_existing" and decision.object_id
-            else None
-        )
+        external_provider = _string_from_metadata(item.metadata_, "external_provider")
+        external_calendar_id = _string_from_metadata(item.metadata_, "external_calendar_id")
+        external_event_id = _string_from_metadata(item.metadata_, "external_event_id")
+        external_sync = bool(external_provider and external_event_id)
+        event = None
+        if external_sync:
+            event = self.session.scalar(
+                select(CalendarEvent).where(
+                    CalendarEvent.domain_id == item.domain_id,
+                    CalendarEvent.external_provider == external_provider,
+                    CalendarEvent.external_calendar_id == external_calendar_id,
+                    CalendarEvent.external_event_id == external_event_id,
+                )
+            )
+            item.metadata_ = {
+                **(item.metadata_ or {}),
+                "resolution": {
+                    "action": "update_existing" if event else "create_new",
+                    "object_id": str(event.id) if event else None,
+                    "reason": "exact_external_calendar_identity",
+                },
+            }
+        else:
+            decision = self.resolver.resolve_event(item, start_at=start_at)
+            self._attach_resolution(item, decision)
+            event = (
+                self.session.get(CalendarEvent, decision.object_id)
+                if decision.action == "update_existing" and decision.object_id
+                else None
+            )
         if event is None:
             event = self._find_matching_event(item, start_at, event_title)
         action = "updated" if event is not None else "created"
@@ -293,14 +316,26 @@ class RoutedMemoryService:
                 source_refs=item.source_refs,
                 provenance=self._provenance(item),
                 status=_calendar_status(item.status),
+                external_provider=external_provider,
+                external_calendar_id=external_calendar_id,
+                external_event_id=external_event_id,
+                external_etag=_string_from_metadata(item.metadata_, "external_etag"),
+                sync_status=_string_from_metadata(item.metadata_, "sync_status") or "local",
+                last_synced_at=datetime.now(UTC) if external_sync else None,
                 metadata_=self._canonical_metadata(item),
             )
             self.session.add(event)
             self.session.flush()
         else:
-            if _is_generic_route_title(event.title) and not _is_generic_route_title(event_title):
+            if external_sync or (
+                _is_generic_route_title(event.title) and not _is_generic_route_title(event_title)
+            ):
                 event.title = event_title
-            event.summary = _append_note(event.summary, _event_summary_from_item(item))
+            event.summary = (
+                _event_summary_from_item(item)
+                if external_sync
+                else _append_note(event.summary, _event_summary_from_item(item))
+            )
             event.source_refs = _merge_source_refs(event.source_refs, item.source_refs)
             event.supporting_refs = _merge_source_refs(event.supporting_refs, item.source_refs)
             event.metadata_ = {**(event.metadata_ or {}), **self._canonical_metadata(item)}
@@ -316,16 +351,29 @@ class RoutedMemoryService:
             event.blocks_time = event.item_kind != "context_window" and bool(
                 (item.metadata_ or {}).get("blocks_time", event.blocks_time)
             )
-            if start_at and not event.start_at:
+            if start_at and (external_sync or not event.start_at):
                 event.start_at = start_at
             end_at = _datetime_from_metadata(item.metadata_, "end_at")
-            if end_at and not event.end_at:
+            if end_at and (external_sync or not event.end_at):
                 event.end_at = end_at
-            if not event.location:
+            if external_sync or not event.location:
                 event.location = _string_from_metadata(item.metadata_, "location")
-            if not event.conferencing_url:
+            if external_sync or not event.conferencing_url:
                 event.conferencing_url = conferencing_url
-            event.attendees = _merge_attendees(event.attendees, attendees)
+            event.attendees = attendees if external_sync else _merge_attendees(event.attendees, attendees)
+            if external_sync:
+                event.timezone = _string_from_metadata(item.metadata_, "timezone") or event.timezone
+                event.all_day = bool((item.metadata_ or {}).get("all_day", False))
+                event.recurrence_rule = _string_from_metadata(item.metadata_, "recurrence_rule")
+                event.organizer_name = _string_from_metadata(item.metadata_, "organizer_name")
+                event.organizer_email = _string_from_metadata(item.metadata_, "organizer_email")
+                event.status = _calendar_status(item.status)
+                event.external_provider = external_provider
+                event.external_calendar_id = external_calendar_id
+                event.external_event_id = external_event_id
+                event.external_etag = _string_from_metadata(item.metadata_, "external_etag")
+                event.sync_status = _string_from_metadata(item.metadata_, "sync_status") or "synced"
+                event.last_synced_at = datetime.now(UTC)
         calendar = CalendarIntelligenceService(self.session)
         calendar.replace_attendees(event, event.attendees, commit=False)
         organizations = (item.metadata_ or {}).get("organizations") or []
