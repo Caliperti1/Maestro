@@ -329,7 +329,28 @@ class FederatedIndexService:
                 content = "\n".join(value for value in [entity.summary, note.notes if note else None, f"Website: {entity.website}" if entity.website else None, f"Aliases: {aliases}" if aliases else None] if value)
                 embedding = org_embeddings.get(entity.id)
                 yield _Projection(key=f"organization:{entity.id}{suffix}", store="organizations", source_id=str(entity.id), domain_id=domain_id, title=entity.name, content=content or entity.name, status=entity.status, source_timestamp=entity.updated_at, trust_score=_trust(entity.provenance), importance=0.65, relationship_weight=0.3, policy=_policy(entity.provenance), provenance={"source_refs": entity.source_refs, **entity.provenance}, metadata={"aliases": org_aliases.get(entity.id, []), "domain_key": domains.get(domain_id)}, embedding=list(embedding.embedding) if embedding else None, embedding_provider=embedding.provider if embedding else None, embedding_model=embedding.model if embedding else None)
-        yield from self._simple_projections(CalendarEvent, "events", lambda item: "\n".join(value for value in [item.summary, _date_line(item.start_at, item.end_at), item.location, item.conferencing_url] if value), lambda item: item.start_at, domains)
+        yield from self._simple_projections(
+            CalendarEvent,
+            "events",
+            lambda item: "\n".join(
+                value
+                for value in [
+                    item.summary,
+                    _date_line(item.start_at, item.end_at),
+                    (
+                        f"Context window: {item.context_type or 'routine'}; "
+                        f"scheduling effect: {item.scheduling_effect}; does not block availability"
+                        if item.item_kind == "context_window"
+                        else "Calendar event: blocks availability" if item.blocks_time else None
+                    ),
+                    item.location,
+                    item.conferencing_url,
+                ]
+                if value
+            ),
+            lambda item: item.start_at,
+            domains,
+        )
         yield from self._simple_projections(Todo, "todos", lambda item: "\n".join(value for value in [item.description, f"Due: {item.due_at.isoformat()}" if item.due_at else None, f"Owner: {item.owner_ref or item.owner_type}"] if value), lambda item: item.due_at or item.updated_at, domains)
         yield from self._simple_projections(Idea, "ideas", lambda item: item.content, lambda item: item.updated_at, domains)
         yield from self._simple_projections(DecisionRecord, "decisions", lambda item: "\n".join(value for value in [item.decision, item.rationale] if value), lambda item: item.updated_at, domains)
@@ -346,7 +367,17 @@ class FederatedIndexService:
     def _simple_projections(self, model, store: str, content_fn, timestamp_fn, domains):
         for item in self.session.scalars(select(model)).all():
             provenance = item.provenance or {}
-            yield _Projection(key=f"{store[:-1]}:{item.id}", store=store, source_id=str(item.id), domain_id=item.domain_id, title=item.title, content=content_fn(item) or item.title, status=item.status, source_timestamp=timestamp_fn(item), trust_score=_trust(provenance), importance=0.58, policy=_policy(provenance), provenance={"source_refs": item.source_refs, **provenance}, metadata={"domain_key": domains.get(item.domain_id)})
+            metadata = {"domain_key": domains.get(item.domain_id)}
+            if isinstance(item, CalendarEvent):
+                metadata.update(
+                    {
+                        "item_kind": item.item_kind,
+                        "context_type": item.context_type,
+                        "scheduling_effect": item.scheduling_effect,
+                        "blocks_time": item.blocks_time,
+                    }
+                )
+            yield _Projection(key=f"{store[:-1]}:{item.id}", store=store, source_id=str(item.id), domain_id=item.domain_id, title=item.title, content=content_fn(item) or item.title, status=item.status, source_timestamp=timestamp_fn(item), trust_score=_trust(provenance), importance=0.58, policy=_policy(provenance), provenance={"source_refs": item.source_refs, **provenance}, metadata=metadata)
 
 
 class FederatedRetrievalService:

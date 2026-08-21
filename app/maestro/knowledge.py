@@ -855,6 +855,48 @@ def _normalize_calendar_arguments(
     normalized = dict(arguments)
     updates = normalized.get("updates") if isinstance(normalized.get("updates"), dict) else None
     schedule = dict(updates) if updates is not None else normalized
+    raw_item_kind = schedule.get("item_kind")
+    item_kind = (
+        str(raw_item_kind or "event").strip().lower()
+        if raw_item_kind is not None or updates is None
+        else None
+    )
+    if item_kind is not None and item_kind not in {"event", "scheduled_todo", "context_window"}:
+        raise ValueError("I could not identify that calendar item type.")
+    if item_kind is not None:
+        schedule["item_kind"] = item_kind
+    if item_kind == "context_window":
+        context_type = str(schedule.get("context_type") or "routine").strip().lower()
+        if context_type not in {
+            "availability",
+            "childcare",
+            "energy",
+            "household",
+            "location",
+            "routine",
+        }:
+            raise ValueError("I need a recognized context type for that calendar context window.")
+        scheduling_effect = str(
+            schedule.get("scheduling_effect") or "informational"
+        ).strip().lower()
+        if scheduling_effect not in {
+            "informational",
+            "prefer",
+            "prefer_avoid",
+            "strongly_avoid",
+        }:
+            raise ValueError("I could not identify how that context should affect scheduling.")
+        schedule.update(
+            {
+                "context_type": context_type,
+                "scheduling_effect": scheduling_effect,
+                "blocks_time": False,
+            }
+        )
+    elif item_kind is not None:
+        schedule.update({"context_type": None, "blocks_time": bool(schedule.get("blocks_time", True))})
+        if schedule["blocks_time"]:
+            schedule["scheduling_effect"] = "hard"
     start_at = _parse_datetime(schedule.get("start_at"))
     end_at = _parse_datetime(schedule.get("end_at"))
     explicit_range = _time_range_from_message(source_message, anchor=start_at)

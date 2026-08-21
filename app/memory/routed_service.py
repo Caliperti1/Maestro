@@ -264,6 +264,7 @@ class RoutedMemoryService:
             event = self._find_matching_event(item, start_at, event_title)
         action = "updated" if event is not None else "created"
         if event is None:
+            item_kind = _calendar_item_kind(item.metadata_)
             event = CalendarEvent(
                 domain_id=item.domain_id,
                 title=event_title,
@@ -273,6 +274,16 @@ class RoutedMemoryService:
                 timezone=_string_from_metadata(item.metadata_, "timezone") or "America/New_York",
                 all_day=bool((item.metadata_ or {}).get("all_day", False)),
                 recurrence_rule=_string_from_metadata(item.metadata_, "recurrence_rule"),
+                item_kind=item_kind,
+                context_type=(
+                    _string_from_metadata(item.metadata_, "context_type") or "routine"
+                    if item_kind == "context_window"
+                    else None
+                ),
+                scheduling_effect=_calendar_scheduling_effect(item.metadata_, item_kind),
+                blocks_time=item_kind != "context_window" and bool(
+                    (item.metadata_ or {}).get("blocks_time", True)
+                ),
                 location=_string_from_metadata(item.metadata_, "location"),
                 conferencing_url=conferencing_url,
                 organizer_name=_string_from_metadata(item.metadata_, "organizer_name"),
@@ -293,6 +304,18 @@ class RoutedMemoryService:
             event.source_refs = _merge_source_refs(event.source_refs, item.source_refs)
             event.supporting_refs = _merge_source_refs(event.supporting_refs, item.source_refs)
             event.metadata_ = {**(event.metadata_ or {}), **self._canonical_metadata(item)}
+            event.item_kind = _calendar_item_kind(item.metadata_)
+            event.context_type = (
+                _string_from_metadata(item.metadata_, "context_type") or "routine"
+                if event.item_kind == "context_window"
+                else None
+            )
+            event.scheduling_effect = _calendar_scheduling_effect(
+                item.metadata_, event.item_kind
+            )
+            event.blocks_time = event.item_kind != "context_window" and bool(
+                (item.metadata_ or {}).get("blocks_time", event.blocks_time)
+            )
             if start_at and not event.start_at:
                 event.start_at = start_at
             end_at = _datetime_from_metadata(item.metadata_, "end_at")
@@ -321,6 +344,7 @@ class RoutedMemoryService:
             CalendarEvent.domain_id == item.domain_id,
             func.lower(CalendarEvent.title) == event_title.strip().lower(),
             CalendarEvent.status != "archived",
+            CalendarEvent.item_kind == _calendar_item_kind(item.metadata_),
         )
         if start_at is not None:
             statement = statement.where(CalendarEvent.start_at == start_at)
@@ -1142,6 +1166,10 @@ class RoutedMemoryService:
             "start_at": item.start_at.isoformat() if item.start_at else None,
             "end_at": item.end_at.isoformat() if item.end_at else None,
             "recurrence_rule": item.recurrence_rule,
+            "item_kind": item.item_kind,
+            "context_type": item.context_type,
+            "scheduling_effect": item.scheduling_effect,
+            "blocks_time": item.blocks_time,
             "location": item.location,
             "status": item.status,
             "metadata": item.metadata_,
@@ -1804,6 +1832,19 @@ def _string_from_metadata(metadata: dict[str, Any], key: str) -> str | None:
 
 def _calendar_status(value: str | None) -> str:
     return value if value in {"scheduled", "tentative", "cancelled", "archived"} else "scheduled"
+
+
+def _calendar_item_kind(metadata: dict[str, Any] | None) -> str:
+    value = str((metadata or {}).get("item_kind") or "event").strip().lower()
+    return value if value in {"event", "scheduled_todo", "context_window"} else "event"
+
+
+def _calendar_scheduling_effect(metadata: dict[str, Any] | None, item_kind: str) -> str:
+    value = str((metadata or {}).get("scheduling_effect") or "").strip().lower()
+    allowed = {"hard", "informational", "prefer", "prefer_avoid", "strongly_avoid"}
+    if value in allowed:
+        return "informational" if item_kind == "context_window" and value == "hard" else value
+    return "informational" if item_kind == "context_window" else "hard"
 
 
 def _emails_from_metadata(metadata: dict[str, Any], key: str) -> list[str]:

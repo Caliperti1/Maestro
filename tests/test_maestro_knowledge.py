@@ -160,6 +160,46 @@ def test_knowledge_mode_creates_a_recurring_calendar_event(session: Session) -> 
     assert session.scalar(select(func.count()).select_from(Task)) == 0
 
 
+def test_knowledge_mode_creates_nonblocking_recurring_context_window(session: Session) -> None:
+    seed_default_domains(session)
+    planner = StaticKnowledgePlanner(
+        KnowledgeTurn(
+            message="I added the household context without blocking your availability.",
+            actions=[
+                {
+                    "type": "calendar.create",
+                    "reason": "Chris explicitly supplied recurring household context.",
+                    "arguments": {
+                        "title": "Wife working",
+                        "domain_key": "personal",
+                        "summary": "Household capacity is reduced during this window.",
+                        "start_at": "2026-08-25T07:00:00-04:00",
+                        "end_at": "2026-08-25T19:00:00-04:00",
+                        "timezone": "America/New_York",
+                        "recurrence_rule": "FREQ=WEEKLY;BYDAY=TU",
+                        "item_kind": "context_window",
+                        "context_type": "household",
+                        "scheduling_effect": "strongly_avoid",
+                        "blocks_time": True,
+                    },
+                }
+            ],
+        )
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "My wife works every Tuesday from 7am to 7pm; keep that as household context."
+    )
+
+    event = session.scalar(select(CalendarEvent).where(CalendarEvent.title == "Wife working"))
+    assert event is not None
+    assert event.item_kind == "context_window"
+    assert event.context_type == "household"
+    assert event.scheduling_effect == "strongly_avoid"
+    assert event.blocks_time is False
+    assert response.action_results[0].status == "completed"
+
+
 def test_knowledge_mode_continues_clarification_and_repairs_event_schedule(
     session: Session,
 ) -> None:

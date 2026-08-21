@@ -413,6 +413,14 @@ class CalendarEvent(TimestampMixin, Base):
     timezone: Mapped[str] = mapped_column(String(80), default="America/New_York", nullable=False)
     all_day: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     recurrence_rule: Mapped[str | None] = mapped_column(Text)
+    item_kind: Mapped[str] = mapped_column(
+        String(40), default="event", nullable=False, index=True
+    )
+    context_type: Mapped[str | None] = mapped_column(String(80), index=True)
+    scheduling_effect: Mapped[str] = mapped_column(
+        String(40), default="hard", nullable=False, index=True
+    )
+    blocks_time: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     location: Mapped[str | None] = mapped_column(String(320))
     conferencing_url: Mapped[str | None] = mapped_column(String(640))
     organizer_name: Mapped[str | None] = mapped_column(String(240))

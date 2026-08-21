@@ -235,6 +235,72 @@ def test_calendar_create_links_contacts_organizations_and_reports_conflicts(
     )
 
 
+def test_calendar_context_window_is_nonblocking_and_keeps_soft_scheduling_semantics(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+
+    context_response = client.post(
+        "/memory/routed-objects/events",
+        json={
+            "domain_key": "personal",
+            "title": "Household quiet time",
+            "summary": "Kids usually nap during this window.",
+            "start_at": "2030-08-12T13:00:00-04:00",
+            "end_at": "2030-08-12T15:00:00-04:00",
+            "timezone": "America/New_York",
+            "item_kind": "context_window",
+            "context_type": "childcare",
+            "scheduling_effect": "prefer_avoid",
+            "blocks_time": True,
+        },
+    )
+
+    assert context_response.status_code == 200
+    context = context_response.json()["event"]
+    assert context["item_kind"] == "context_window"
+    assert context["context_type"] == "childcare"
+    assert context["scheduling_effect"] == "prefer_avoid"
+    assert context["blocks_time"] is False
+    assert context["conflicts"] == []
+
+    event_response = client.post(
+        "/memory/routed-objects/events",
+        json={
+            "domain_key": "personal",
+            "title": "Quick phone call",
+            "start_at": "2030-08-12T13:30:00-04:00",
+            "end_at": "2030-08-12T14:00:00-04:00",
+            "timezone": "America/New_York",
+        },
+    )
+
+    assert event_response.status_code == 200
+    event = event_response.json()["event"]
+    assert event["blocks_time"] is True
+    assert event["conflicts"] == []
+
+
+def test_calendar_context_window_rejects_unknown_semantics(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    response = _client(session, tmp_path).post(
+        "/memory/routed-objects/events",
+        json={
+            "domain_key": "personal",
+            "title": "Unclear context",
+            "item_kind": "context_window",
+            "context_type": "invented",
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_calendar_past_event_materializes_one_contact_interaction(
     session: Session,
     tmp_path: Path,

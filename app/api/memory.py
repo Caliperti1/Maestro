@@ -80,6 +80,22 @@ from app.memory.organization_intelligence import OrganizationEmbeddingService, O
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 CALENDAR_EVENT_STATUSES = {"scheduled", "tentative", "cancelled", "archived"}
+CALENDAR_ITEM_KINDS = {"event", "scheduled_todo", "context_window"}
+CALENDAR_CONTEXT_TYPES = {
+    "availability",
+    "childcare",
+    "energy",
+    "household",
+    "location",
+    "routine",
+}
+CALENDAR_SCHEDULING_EFFECTS = {
+    "hard",
+    "informational",
+    "prefer",
+    "prefer_avoid",
+    "strongly_avoid",
+}
 
 
 class RejectProposalRequest(BaseModel):
@@ -112,6 +128,10 @@ class CreateCalendarEventRequest(BaseModel):
     timezone: str = "America/New_York"
     all_day: bool = False
     recurrence_rule: str | None = None
+    item_kind: str = "event"
+    context_type: str | None = None
+    scheduling_effect: str = "hard"
+    blocks_time: bool = True
     location: str | None = None
     conferencing_url: str | None = None
     attendees: list[dict[str, Any]] = Field(default_factory=list)
@@ -575,6 +595,12 @@ def create_calendar_event(
         raise HTTPException(status_code=422, detail="Event title cannot be empty.")
     start_at = _ensure_aware(body.start_at)
     end_at = _ensure_aware(body.end_at)
+    item_kind, context_type, scheduling_effect, blocks_time = _calendar_semantics(
+        item_kind=body.item_kind,
+        context_type=body.context_type,
+        scheduling_effect=body.scheduling_effect,
+        blocks_time=body.blocks_time,
+    )
     _validate_calendar_window(start_at, end_at, body.timezone)
     event = CalendarEvent(
         domain_id=domain_id,
@@ -585,6 +611,10 @@ def create_calendar_event(
         timezone=body.timezone,
         all_day=body.all_day,
         recurrence_rule=body.recurrence_rule,
+        item_kind=item_kind,
+        context_type=context_type,
+        scheduling_effect=scheduling_effect,
+        blocks_time=blocks_time,
         location=body.location,
         conferencing_url=body.conferencing_url,
         attendees=[],
@@ -623,6 +653,20 @@ def update_calendar_event(
     proposed_start = _coerce_calendar_datetime(body.updates.get("start_at")) if "start_at" in body.updates else current.start_at
     proposed_end = _coerce_calendar_datetime(body.updates.get("end_at")) if "end_at" in body.updates else current.end_at
     proposed_timezone = str(body.updates.get("timezone") or current.timezone)
+    item_kind, context_type, scheduling_effect, blocks_time = _calendar_semantics(
+        item_kind=body.updates.get("item_kind", current.item_kind),
+        context_type=body.updates.get("context_type", current.context_type),
+        scheduling_effect=body.updates.get("scheduling_effect", current.scheduling_effect),
+        blocks_time=body.updates.get("blocks_time", current.blocks_time),
+    )
+    body.updates.update(
+        {
+            "item_kind": item_kind,
+            "context_type": context_type,
+            "scheduling_effect": scheduling_effect,
+            "blocks_time": blocks_time,
+        }
+    )
     _validate_calendar_window(proposed_start, proposed_end, proposed_timezone)
     try:
         event = RoutedEditService(db).update_event(event_id, body.updates)
@@ -1516,6 +1560,34 @@ def _validate_calendar_window(
         and ensure_aware_utc(end_at) <= ensure_aware_utc(start_at)
     ):
         raise HTTPException(status_code=422, detail="Event end must be after its start.")
+
+
+def _calendar_semantics(
+    *,
+    item_kind: Any,
+    context_type: Any,
+    scheduling_effect: Any,
+    blocks_time: Any,
+) -> tuple[str, str | None, str, bool]:
+    kind = str(item_kind or "event").strip().lower()
+    if kind not in CALENDAR_ITEM_KINDS:
+        raise HTTPException(status_code=422, detail="Unknown calendar item kind.")
+    effect = str(scheduling_effect or "hard").strip().lower()
+    if effect not in CALENDAR_SCHEDULING_EFFECTS:
+        raise HTTPException(status_code=422, detail="Unknown calendar scheduling effect.")
+    normalized_context = str(context_type or "").strip().lower() or None
+    if normalized_context is not None and normalized_context not in CALENDAR_CONTEXT_TYPES:
+        raise HTTPException(status_code=422, detail="Unknown calendar context type.")
+    blocking = bool(blocks_time)
+    if kind == "context_window":
+        blocking = False
+        effect = effect if effect != "hard" else "informational"
+        normalized_context = normalized_context or "routine"
+    else:
+        normalized_context = None
+        if blocking and effect != "hard":
+            effect = "hard"
+    return kind, normalized_context, effect, blocking
 
 
 def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:

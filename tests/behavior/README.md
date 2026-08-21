@@ -11,6 +11,7 @@
 - [007 Memory Intelligence And Connected Domains](007_memory_intelligence_and_connected_domains.md)
 - [008 Context Mailbox Ingestion](008_context_mailbox_ingestion.md)
 - [009 Explicit Knowledge And Workflow Modes](009_explicit_knowledge_and_workflow_modes.md)
+- [010 Calendar Context Windows](010_calendar_context_windows.md)
 
 This directory tracks end-to-end behavioral tests that are not fully automated yet. Use these
 matrices while manually testing Maestro through the UI and backend logs.

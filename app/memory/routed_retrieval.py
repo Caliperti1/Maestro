@@ -205,6 +205,9 @@ class RoutedEditService:
             "status",
             "timezone",
             "recurrence_rule",
+            "item_kind",
+            "context_type",
+            "scheduling_effect",
             "conferencing_url",
             "organizer_name",
             "organizer_email",
@@ -216,6 +219,8 @@ class RoutedEditService:
                 setattr(event, key, value)
         if "all_day" in updates:
             event.all_day = bool(updates["all_day"])
+        if "blocks_time" in updates:
+            event.blocks_time = bool(updates["blocks_time"])
         for key in ("start_at", "end_at"):
             if key in updates:
                 setattr(event, key, _parse_optional_datetime(updates[key]))

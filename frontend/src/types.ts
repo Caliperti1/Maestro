@@ -373,6 +373,10 @@ export type RoutedEvent = {
   timezone: string;
   all_day: boolean;
   recurrence_rule: string | null;
+  item_kind: "event" | "scheduled_todo" | "context_window";
+  context_type: "availability" | "childcare" | "energy" | "household" | "location" | "routine" | null;
+  scheduling_effect: "hard" | "informational" | "prefer" | "prefer_avoid" | "strongly_avoid";
+  blocks_time: boolean;
   location: string | null;
   conferencing_url: string | null;
   organizer_name: string | null;
