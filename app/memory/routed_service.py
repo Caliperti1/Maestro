@@ -6,9 +6,9 @@ queryable, and displayed in calendar/CRM/task surfaces. This service promotes ra
 extraction rows into those canonical stores with provenance and duplicate resolution.
 """
 
+import json
 import re
 import uuid
-import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -41,12 +41,16 @@ from app.db.models import (
     RoutedObjectLink,
     Todo,
 )
-from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.calendar_intelligence import (
     CalendarIntelligenceService,
     conferencing_url_from_values,
 )
-from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
+from app.memory.calendar_recurrence import event_occurs_on, query_calendar_date
+from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
+from app.memory.organization_intelligence import (
+    OrganizationEmbeddingService,
+    OrganizationIntelligenceService,
+)
 from app.memory.routed_resolver import (
     RoutedObjectResolver,
     contact_aliases_for,
@@ -85,7 +89,9 @@ class RoutedMemoryService:
         ).all()
         return self.promote_items(items)
 
-    def promote_items(self, items: list[RoutedItem] | tuple[RoutedItem, ...]) -> list[RoutedPromotionResult]:
+    def promote_items(
+        self, items: list[RoutedItem] | tuple[RoutedItem, ...]
+    ) -> list[RoutedPromotionResult]:
         results: list[RoutedPromotionResult] = []
         processed = False
         for item in items:
@@ -192,19 +198,27 @@ class RoutedMemoryService:
             ]
         calendar = CalendarIntelligenceService(self.session)
         return {
-            "events": [calendar.event_payload(item) for item in self._events(domain_id, query, limit)],
+            "events": [
+                calendar.event_payload(item) for item in self._events(domain_id, query, limit)
+            ],
             "todos": [self._todo_payload(item) for item in self._todos(domain_id, query, limit)],
             "contacts": contacts,
             "entities": organizations,
             "ideas": [self._idea_payload(item) for item in self._ideas(domain_id, query, limit)],
-            "decisions": [self._decision_payload(item) for item in self._decisions(domain_id, query, limit)],
+            "decisions": [
+                self._decision_payload(item) for item in self._decisions(domain_id, query, limit)
+            ],
         }
 
     def _promote_todo(self, item: RoutedItem) -> RoutedPromotionResult:
         due_at = _datetime_from_metadata(item.metadata_, "due_at")
         decision = self.resolver.resolve_todo(item, due_at=due_at)
         self._attach_resolution(item, decision)
-        todo = self.session.get(Todo, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
+        todo = (
+            self.session.get(Todo, decision.object_id)
+            if decision.action == "update_existing" and decision.object_id
+            else None
+        )
         action = "updated" if todo is not None else "created"
         owner_ref = get_settings().user_display_name if item.route_type == "human_input" else None
         if todo is None:
@@ -241,7 +255,11 @@ class RoutedMemoryService:
         conferencing_url = conferencing_url_from_values(item.metadata_, item.content, item.title)
         decision = self.resolver.resolve_event(item, start_at=start_at)
         self._attach_resolution(item, decision)
-        event = self.session.get(CalendarEvent, decision.object_id) if decision.action == "update_existing" and decision.object_id else None
+        event = (
+            self.session.get(CalendarEvent, decision.object_id)
+            if decision.action == "update_existing" and decision.object_id
+            else None
+        )
         if event is None:
             event = self._find_matching_event(item, start_at, event_title)
         action = "updated" if event is not None else "created"
@@ -334,7 +352,9 @@ class RoutedMemoryService:
             return None
         normalized_name = _normalize_key(name)
         phone = _phone_from_text(item.content) or _string_from_metadata(item.metadata_, "phone")
-        linkedin = _linkedin_from_text(item.content) or _string_from_metadata(item.metadata_, "linkedin")
+        linkedin = _linkedin_from_text(item.content) or _string_from_metadata(
+            item.metadata_, "linkedin"
+        )
         resolution_action = _string_from_metadata(item.metadata_, "resolution_action")
         existing_object_id = _uuid_from_metadata(item.metadata_, "existing_object_id")
         if resolution_action == "update" and existing_object_id:
@@ -351,7 +371,9 @@ class RoutedMemoryService:
             }
         elif resolution_action == "create":
             contact = (
-                self.session.scalar(select(Contact).where(func.lower(Contact.email) == email.lower()))
+                self.session.scalar(
+                    select(Contact).where(func.lower(Contact.email) == email.lower())
+                )
                 if email
                 else None
             )
@@ -422,7 +444,9 @@ class RoutedMemoryService:
                 contact.email = email
             contact.phone = contact.phone or phone
             contact.linkedin = contact.linkedin or linkedin
-        organization = _organization_from_text(item.content) or _string_from_metadata(item.metadata_, "organization")
+        organization = _organization_from_text(item.content) or _string_from_metadata(
+            item.metadata_, "organization"
+        )
         if organization:
             entity = self._upsert_entity(organization, item)
             contact.organization_entity_id = entity.id
@@ -454,7 +478,9 @@ class RoutedMemoryService:
         entity.metadata_ = {**(entity.metadata_ or {}), "embedding_status": embedding_status}
         return self._link(item, "entity", entity.id, "upserted")
 
-    def _promote_idea(self, item: RoutedItem, *, object_type: str = "idea") -> RoutedPromotionResult:
+    def _promote_idea(
+        self, item: RoutedItem, *, object_type: str = "idea"
+    ) -> RoutedPromotionResult:
         idea = Idea(
             domain_id=item.domain_id,
             title=item.title,
@@ -492,9 +518,7 @@ class RoutedMemoryService:
             else None
         )
         existing_object_id = (
-            _uuid_from_metadata(item.metadata_, "existing_object_id")
-            if resolution_action
-            else None
+            _uuid_from_metadata(item.metadata_, "existing_object_id") if resolution_action else None
         )
         if resolution_action == "update" and existing_object_id:
             entity = self.session.get(Entity, existing_object_id)
@@ -512,9 +536,13 @@ class RoutedMemoryService:
                     )
                 )
             )
-            entity = self.session.get(Entity, identifier.entity_id) if identifier is not None else None
+            entity = (
+                self.session.get(Entity, identifier.entity_id) if identifier is not None else None
+            )
             if entity is None:
-                entity = self.session.scalar(select(Entity).where(Entity.normalized_name == normalized))
+                entity = self.session.scalar(
+                    select(Entity).where(Entity.normalized_name == normalized)
+                )
         else:
             entity = self.session.scalar(select(Entity).where(Entity.normalized_name == normalized))
         if entity is None:
@@ -595,7 +623,9 @@ class RoutedMemoryService:
             if not isinstance(raw, dict):
                 continue
             related_name = str(raw.get("organization") or raw.get("name") or "").strip()
-            related_id = _uuid_from_value(raw.get("organization_id") or raw.get("related_entity_id"))
+            related_id = _uuid_from_value(
+                raw.get("organization_id") or raw.get("related_entity_id")
+            )
             related = self.session.get(Entity, related_id) if related_id else None
             if related is None and related_name:
                 related = self._find_organization_by_name_or_alias(related_name)
@@ -678,7 +708,9 @@ class RoutedMemoryService:
             or datetime.now(UTC)
         )
         channel = _string_from_metadata(metadata, "channel") or _source_channel(item.source_refs)
-        interaction_type = _string_from_metadata(metadata, "interaction_type") or channel or "mention"
+        interaction_type = (
+            _string_from_metadata(metadata, "interaction_type") or channel or "mention"
+        )
         interaction = ContactInteraction(
             contact_id=contact.id,
             domain_id=item.domain_id,
@@ -698,7 +730,9 @@ class RoutedMemoryService:
         ):
             contact.last_contact_at = occurred_at
 
-    def _upsert_contact_affiliation(self, contact: Contact, entity: Entity, item: RoutedItem) -> None:
+    def _upsert_contact_affiliation(
+        self, contact: Contact, entity: Entity, item: RoutedItem
+    ) -> None:
         metadata = item.metadata_ or {}
         role = (
             _string_from_metadata(metadata, "role")
@@ -721,7 +755,8 @@ class RoutedMemoryService:
                     entity_id=entity.id,
                     domain_id=item.domain_id,
                     role=role,
-                    relationship_type=_string_from_metadata(metadata, "affiliation_type") or "works_at",
+                    relationship_type=_string_from_metadata(metadata, "affiliation_type")
+                    or "works_at",
                     is_primary=contact.organization_entity_id == entity.id,
                     source_refs=item.source_refs,
                     provenance=self._provenance(item),
@@ -730,7 +765,10 @@ class RoutedMemoryService:
             )
         else:
             affiliation.source_refs = _merge_source_refs(affiliation.source_refs, item.source_refs)
-            affiliation.metadata_ = {**(affiliation.metadata_ or {}), **self._canonical_metadata(item)}
+            affiliation.metadata_ = {
+                **(affiliation.metadata_ or {}),
+                **self._canonical_metadata(item),
+            }
 
     def _upsert_contact_aliases(self, contact: Contact, name: str, item: RoutedItem) -> None:
         aliases = set(contact_aliases_for(contact.name))
@@ -765,7 +803,10 @@ class RoutedMemoryService:
                 added_alias = True
             elif existing.contact_id == contact.id:
                 existing.source_refs = _merge_source_refs(existing.source_refs, item.source_refs)
-                existing.metadata_ = {**(existing.metadata_ or {}), **self._canonical_metadata(item)}
+                existing.metadata_ = {
+                    **(existing.metadata_ or {}),
+                    **self._canonical_metadata(item),
+                }
         if added_alias:
             self.session.flush()
 
@@ -774,7 +815,9 @@ class RoutedMemoryService:
         if not related_name:
             return
         related_normalized = _normalize_key(related_name)
-        related = self.session.scalar(select(Contact).where(Contact.normalized_name == related_normalized))
+        related = self.session.scalar(
+            select(Contact).where(Contact.normalized_name == related_normalized)
+        )
         if related is None or related.id == contact.id:
             return
         existing = self.session.scalar(
@@ -804,11 +847,15 @@ class RoutedMemoryService:
     def _event_attendees_from_item(self, item: RoutedItem) -> list[dict[str, Any]]:
         attendees = _list_from_metadata(item.metadata_ or {}, "attendees")
         if not attendees:
-            attendees = [{"name": name} for name in _attendee_names_from_event_text(item.title, item.content)]
+            attendees = [
+                {"name": name} for name in _attendee_names_from_event_text(item.title, item.content)
+            ]
         linked: list[dict[str, Any]] = []
         seen: set[str] = set()
         for attendee in attendees:
-            name = str(attendee.get("name") or attendee.get("value") or attendee.get("email") or "").strip()
+            name = str(
+                attendee.get("name") or attendee.get("value") or attendee.get("email") or ""
+            ).strip()
             if not name:
                 continue
             attendee_email = str(attendee.get("email") or "").strip()
@@ -836,7 +883,9 @@ class RoutedMemoryService:
         normalized = _normalize_key(name)
         contact = self.session.scalar(select(Contact).where(Contact.normalized_name == normalized))
         if contact is None:
-            alias = self.session.scalar(select(ContactAlias).where(ContactAlias.normalized_alias == normalized))
+            alias = self.session.scalar(
+                select(ContactAlias).where(ContactAlias.normalized_alias == normalized)
+            )
             if alias is not None:
                 contact = self.session.get(Contact, alias.contact_id)
         if contact is None and " " not in normalized:
@@ -951,9 +1000,14 @@ class RoutedMemoryService:
         )
 
     def _has_link(self, item: RoutedItem) -> bool:
-        return self.session.scalar(
-            select(RoutedObjectLink.id).where(RoutedObjectLink.routed_item_id == item.id).limit(1)
-        ) is not None
+        return (
+            self.session.scalar(
+                select(RoutedObjectLink.id)
+                .where(RoutedObjectLink.routed_item_id == item.id)
+                .limit(1)
+            )
+            is not None
+        )
 
     def _canonical_metadata(self, item: RoutedItem) -> dict[str, Any]:
         return {
@@ -987,9 +1041,36 @@ class RoutedMemoryService:
         statement = select(CalendarEvent).where(CalendarEvent.status != "archived")
         if domain_id is not None:
             statement = statement.where(CalendarEvent.domain_id == domain_id)
+        target_date = query_calendar_date(query) if query else None
+        if target_date is not None:
+            candidates = list(
+                self.session.scalars(
+                    statement.where(CalendarEvent.start_at.is_not(None)).order_by(
+                        CalendarEvent.start_at
+                    )
+                ).all()
+            )
+            return [
+                item
+                for item in candidates
+                if event_occurs_on(
+                    start_at=item.start_at,
+                    recurrence_rule=item.recurrence_rule,
+                    target_date=target_date,
+                    timezone_name=item.timezone,
+                )
+            ][:limit]
         if query:
-            statement = statement.where(_text_match(CalendarEvent.title, CalendarEvent.summary, query=query))
-        return list(self.session.scalars(statement.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(limit)).all())
+            statement = statement.where(
+                _text_match(CalendarEvent.title, CalendarEvent.summary, query=query)
+            )
+        return list(
+            self.session.scalars(
+                statement.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(
+                    limit
+                )
+            ).all()
+        )
 
     def _todos(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[Todo]:
         statement = select(Todo).where(Todo.status.notin_(["done", "archived"]))
@@ -997,27 +1078,35 @@ class RoutedMemoryService:
             statement = statement.where(Todo.domain_id == domain_id)
         if query:
             statement = statement.where(_text_match(Todo.title, Todo.description, query=query))
-        return list(self.session.scalars(statement.order_by(Todo.due_at, Todo.created_at.desc()).limit(limit)).all())
+        return list(
+            self.session.scalars(
+                statement.order_by(Todo.due_at, Todo.created_at.desc()).limit(limit)
+            ).all()
+        )
 
     def _contacts(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[Contact]:
         statement = select(Contact).where(Contact.status != "archived")
         if domain_id is not None:
-            statement = statement.join(ContactDomainNote, ContactDomainNote.contact_id == Contact.id).where(
-                ContactDomainNote.domain_id == domain_id
-            )
+            statement = statement.join(
+                ContactDomainNote, ContactDomainNote.contact_id == Contact.id
+            ).where(ContactDomainNote.domain_id == domain_id)
         if query:
             statement = statement.where(_text_match(Contact.name, Contact.summary, query=query))
-        return list(self.session.scalars(statement.order_by(Contact.updated_at.desc()).limit(limit)).all())
+        return list(
+            self.session.scalars(statement.order_by(Contact.updated_at.desc()).limit(limit)).all()
+        )
 
     def _entities(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[Entity]:
         statement = select(Entity).where(Entity.status != "archived")
         if domain_id is not None:
-            statement = statement.join(EntityDomainNote, EntityDomainNote.entity_id == Entity.id).where(
-                EntityDomainNote.domain_id == domain_id
-            )
+            statement = statement.join(
+                EntityDomainNote, EntityDomainNote.entity_id == Entity.id
+            ).where(EntityDomainNote.domain_id == domain_id)
         if query:
             statement = statement.where(_text_match(Entity.name, Entity.summary, query=query))
-        return list(self.session.scalars(statement.order_by(Entity.updated_at.desc()).limit(limit)).all())
+        return list(
+            self.session.scalars(statement.order_by(Entity.updated_at.desc()).limit(limit)).all()
+        )
 
     def _ideas(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[Idea]:
         statement = select(Idea).where(Idea.status.notin_(["done", "archived"]))
@@ -1025,15 +1114,25 @@ class RoutedMemoryService:
             statement = statement.where(Idea.domain_id == domain_id)
         if query:
             statement = statement.where(_text_match(Idea.title, Idea.content, query=query))
-        return list(self.session.scalars(statement.order_by(Idea.updated_at.desc()).limit(limit)).all())
+        return list(
+            self.session.scalars(statement.order_by(Idea.updated_at.desc()).limit(limit)).all()
+        )
 
-    def _decisions(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[DecisionRecord]:
+    def _decisions(
+        self, domain_id: uuid.UUID | None, query: str, limit: int
+    ) -> list[DecisionRecord]:
         statement = select(DecisionRecord).where(DecisionRecord.status != "archived")
         if domain_id is not None:
             statement = statement.where(DecisionRecord.domain_id == domain_id)
         if query:
-            statement = statement.where(_text_match(DecisionRecord.title, DecisionRecord.decision, query=query))
-        return list(self.session.scalars(statement.order_by(DecisionRecord.updated_at.desc()).limit(limit)).all())
+            statement = statement.where(
+                _text_match(DecisionRecord.title, DecisionRecord.decision, query=query)
+            )
+        return list(
+            self.session.scalars(
+                statement.order_by(DecisionRecord.updated_at.desc()).limit(limit)
+            ).all()
+        )
 
     def _event_payload(self, item: CalendarEvent) -> dict[str, Any]:
         return {
@@ -1042,6 +1141,7 @@ class RoutedMemoryService:
             "summary": item.summary,
             "start_at": item.start_at.isoformat() if item.start_at else None,
             "end_at": item.end_at.isoformat() if item.end_at else None,
+            "recurrence_rule": item.recurrence_rule,
             "location": item.location,
             "status": item.status,
             "metadata": item.metadata_,
@@ -1132,13 +1232,10 @@ def _deterministic_enrichment(item: RoutedItem) -> dict[str, Any]:
         }
     if item.route_type in {"task", "human_input", "project", "integration_note"}:
         metadata = item.metadata_ or {}
-        due_at = (
-            _datetime_from_metadata(metadata, "due_at")
-            or _datetime_from_date_time_metadata(
-                metadata,
-                date_key="due_date",
-                time_key="due_time",
-            )
+        due_at = _datetime_from_metadata(metadata, "due_at") or _datetime_from_date_time_metadata(
+            metadata,
+            date_key="due_date",
+            time_key="due_time",
         )
         return {
             "due_at": due_at.isoformat() if due_at else None,
@@ -1170,7 +1267,9 @@ def _deterministic_event_enrichment(item: RoutedItem) -> dict[str, Any]:
         end_at = start_at + timedelta(minutes=duration_minutes)
     attendees = _list_from_metadata(item.metadata_ or {}, "attendees")
     if not attendees:
-        attendees = [{"name": name} for name in _attendee_names_from_event_text(item.title, item.content)]
+        attendees = [
+            {"name": name} for name in _attendee_names_from_event_text(item.title, item.content)
+        ]
     if not attendees:
         title = _event_title_from_text(f"{item.title}\n{item.content}") or ""
         meeting_match = re.match(r"Meeting with (.+)", title)
@@ -1178,7 +1277,10 @@ def _deterministic_event_enrichment(item: RoutedItem) -> dict[str, Any]:
             attendees = [{"name": meeting_match.group(1).strip()}]
     title = _event_title_from_item(item)
     if _is_generic_route_title(title) and attendees:
-        names = [str(attendee.get("name") or attendee.get("value") or "").strip() for attendee in attendees]
+        names = [
+            str(attendee.get("name") or attendee.get("value") or "").strip()
+            for attendee in attendees
+        ]
         names = [name for name in names if name]
         if names:
             title = f"Meeting with {', '.join(names[:2])}"
@@ -1296,9 +1398,21 @@ def _is_generic_route_title(value: str | None) -> bool:
 
 def _clean_routed_label(value: str) -> str:
     text = value.strip()
-    text = re.sub(r"^(?:event|calendar|contact|person|entity|organization)\s*[:\-]\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^(?:record|recorded|capture|save|add)\s+(?:the\s+)?", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+(?:as|to)\s+(?:an?\s+)?(?:event|calendar entry|contact|crm contact|entity)\.?$", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"^(?:event|calendar|contact|person|entity|organization)\s*[:\-]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^(?:record|recorded|capture|save|add)\s+(?:the\s+)?", "", text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r"\s+(?:as|to)\s+(?:an?\s+)?(?:event|calendar entry|contact|crm contact|entity)\.?$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     return text.strip(" .") or value.strip()
 
 
@@ -1332,7 +1446,9 @@ def _attendee_names_from_event_text(*texts: str) -> list[str]:
             r"\b(?:meeting|call|sync|standup)\s+with\s+([A-Z][a-z]+(?:\s+[A-Z](?:[A-Za-z.'-]+)?){0,3})",
             text or "",
         ):
-            candidate = re.split(r"\s+(?:about|at|on|for|was|is|today|tomorrow|yesterday)\b", match.group(1).strip())[0].strip()
+            candidate = re.split(
+                r"\s+(?:about|at|on|for|was|is|today|tomorrow|yesterday)\b", match.group(1).strip()
+            )[0].strip()
             if candidate:
                 names.append(candidate)
     return names
@@ -1381,7 +1497,7 @@ def _name_from_title(title: str) -> str:
         return _title_case_name(context_match.group(1))
     for prefix in ("contact:", "new contact:", "person:"):
         if title.lower().startswith(prefix):
-            return title[len(prefix):].strip() or title
+            return title[len(prefix) :].strip() or title
     return title or "Unknown contact"
 
 
@@ -1399,7 +1515,10 @@ def _name_from_content(content: str) -> str | None:
     )
     if contact_match:
         return _title_case_name(contact_match.group(1))
-    match = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z](?:[A-Za-z.'-]+)?){1,3})\s+(?:is|serves|works|prefers|leads)\b", content)
+    match = re.search(
+        r"\b([A-Z][a-z]+(?:\s+[A-Z](?:[A-Za-z.'-]+)?){1,3})\s+(?:is|serves|works|prefers|leads)\b",
+        content,
+    )
     return match.group(1).strip() if match else None
 
 
@@ -1483,9 +1602,18 @@ def _relationship_type(description: str | None) -> str:
 def _relationship_from_text(contact_name: str, text: str) -> tuple[str | None, str | None]:
     escaped = re.escape(contact_name)
     patterns = [
-        (rf"{escaped}\s+(?:works with|collaborates with|partners with)\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){{1,3}})", "works with"),
-        (rf"{escaped}\s+(?:reports to|works for)\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){{1,3}})", "reports to"),
-        (rf"([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){{1,3}})\s+(?:works with|collaborates with|partners with)\s+{escaped}", "works with"),
+        (
+            rf"{escaped}\s+(?:works with|collaborates with|partners with)\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){{1,3}})",
+            "works with",
+        ),
+        (
+            rf"{escaped}\s+(?:reports to|works for)\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){{1,3}})",
+            "reports to",
+        ),
+        (
+            rf"([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.'-]+){{1,3}})\s+(?:works with|collaborates with|partners with)\s+{escaped}",
+            "works with",
+        ),
     ]
     for pattern, relation in patterns:
         match = re.search(pattern, text)
@@ -1522,7 +1650,9 @@ def _organization_name_from_identifier(name: str) -> str:
     parts = candidate.lower().split(".")
     stem = parts[-2] if len(parts) >= 2 else parts[0]
     words = [part for part in re.split(r"[-_]", stem) if part]
-    return " ".join(word.upper() if len(word) <= 3 else word.capitalize() for word in words) or cleaned
+    return (
+        " ".join(word.upper() if len(word) <= 3 else word.capitalize() for word in words) or cleaned
+    )
 
 
 def _organization_identifiers_from_item(item: RoutedItem) -> list[tuple[str, str, str]]:
@@ -1640,7 +1770,9 @@ def _time_from_text(text: str) -> time | None:
 
 
 def _duration_minutes_from_text(text: str) -> int:
-    match = re.search(r"\b(?:for|duration)\s+(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b", text, re.IGNORECASE)
+    match = re.search(
+        r"\b(?:for|duration)\s+(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b", text, re.IGNORECASE
+    )
     if not match:
         return 60
     value = int(match.group(1))
@@ -1714,11 +1846,15 @@ def _list_from_metadata(metadata: dict[str, Any], key: str) -> list[dict[str, An
     return []
 
 
-def _merge_attendees(existing: list[dict[str, Any]] | None, additions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_attendees(
+    existing: list[dict[str, Any]] | None, additions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
     for attendee in [*(existing or []), *additions]:
-        name = str(attendee.get("name") or attendee.get("value") or attendee.get("email") or "").strip()
+        name = str(
+            attendee.get("name") or attendee.get("value") or attendee.get("email") or ""
+        ).strip()
         contact_id = str(attendee.get("contact_id") or "").strip()
         key = contact_id or _normalize_key(name)
         if not key or key in seen:
@@ -1737,7 +1873,9 @@ def _append_note(existing: str | None, addition: str) -> str:
     return existing
 
 
-def _merge_source_refs(existing: list[dict[str, Any]], new_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_source_refs(
+    existing: list[dict[str, Any]], new_refs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     merged = list(existing or [])
     for ref in new_refs or []:
         if ref not in merged:

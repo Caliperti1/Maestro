@@ -618,6 +618,28 @@ function calendarRecurrence(item: RoutedEvent): Record<string, string | number> 
       .map(([key, value]) => [key.toLowerCase(), value]),
   );
   if (!options.freq) return undefined;
+  const start = new Date(item.start_at);
+  if (Number.isNaN(start.getTime())) return undefined;
+  if (typeof options.until === "string") {
+    const match = options.until.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})Z)?$/);
+    if (!match) return undefined;
+    const until = Date.UTC(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      Number(match[4] ?? 23),
+      Number(match[5] ?? 59),
+      Number(match[6] ?? 59),
+    );
+    const untilDate = new Date(until);
+    if (
+      Number.isNaN(until)
+      || untilDate.getUTCFullYear() !== Number(match[1])
+      || untilDate.getUTCMonth() !== Number(match[2]) - 1
+      || untilDate.getUTCDate() !== Number(match[3])
+      || until < start.getTime()
+    ) return undefined;
+  }
   return {
     ...options,
     freq: String(options.freq).toLowerCase(),
@@ -879,8 +901,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             textColor: item.status === "cancelled" ? "#667085" : "#ffffff",
             extendedProps: { resource: item },
           };
-          if (item.recurrence_rule) {
-            calendarEvent.rrule = calendarRecurrence(item);
+          const recurrence = calendarRecurrence(item);
+          if (recurrence) {
+            calendarEvent.rrule = recurrence;
           }
           return calendarEvent;
         }),

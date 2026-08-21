@@ -252,6 +252,7 @@ def _respond_to_maestro_sync(
             "interaction_mode": "knowledge",
             "action_results": [result.payload() for result in knowledge.action_results],
             "workflow_suggestion": knowledge.workflow_suggestion,
+            "pending_clarification": knowledge.pending_clarification,
         }
         _record_session_message(db, conversation, "maestro", knowledge.message, metadata=response_metadata)
         return {
@@ -264,6 +265,7 @@ def _respond_to_maestro_sync(
             "active_plan": None,
             "action_results": [result.payload() for result in knowledge.action_results],
             "workflow_suggestion": knowledge.workflow_suggestion,
+            "pending_clarification": knowledge.pending_clarification,
             "channel_context": topic_context,
             "conversation": _conversation_payload(db, conversation),
         }

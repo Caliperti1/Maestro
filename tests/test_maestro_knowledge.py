@@ -1,12 +1,10 @@
-import uuid
-
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api import maestro as maestro_api
 from app.api.main import create_app
-from app.db.models import CalendarEvent, Contact, Task, WorkflowDefinition
+from app.db.models import CalendarEvent, Contact, Conversation, Message, Task, WorkflowDefinition
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.maestro.knowledge import (
@@ -21,6 +19,16 @@ class StaticKnowledgePlanner:
         self.turn = turn
 
     def plan(self, **_kwargs) -> KnowledgeTurn:
+        return self.turn
+
+
+class CapturingKnowledgePlanner(StaticKnowledgePlanner):
+    def __init__(self, turn: KnowledgeTurn):
+        super().__init__(turn)
+        self.context_text = ""
+
+    def plan(self, **kwargs) -> KnowledgeTurn:
+        self.context_text = str(kwargs["context_text"])
         return self.turn
 
 
@@ -104,12 +112,91 @@ def test_knowledge_mode_creates_a_recurring_calendar_event(session: Session) -> 
 
     response = MaestroKnowledgeService(session, planner=planner).respond("Create the event.")
 
-    event = session.scalar(select(CalendarEvent).where(CalendarEvent.title == "Praxis weekly planning"))
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.title == "Praxis weekly planning")
+    )
     assert event is not None
     assert event.recurrence_rule == "FREQ=WEEKLY;BYDAY=MO"
     assert event.timezone == "America/New_York"
     assert response.action_results[0].status == "completed"
     assert session.scalar(select(func.count()).select_from(Task)) == 0
+
+
+def test_knowledge_mode_continues_clarification_and_repairs_event_schedule(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    conversation = Conversation(title="Calendar scheduling", metadata_={})
+    session.add(conversation)
+    session.flush()
+    session.add_all(
+        [
+            Message(
+                conversation_id=conversation.id,
+                sender_type="user",
+                content=(
+                    "Create an L3 calendar event every Monday through Thursday from now until "
+                    "the end of the year called Collaborative Autonomy Standup."
+                ),
+                metadata_={},
+            ),
+            Message(
+                conversation_id=conversation.id,
+                sender_type="maestro",
+                content="What time and duration should I use?",
+                metadata_={
+                    "interaction_mode": "knowledge",
+                    "pending_clarification": (
+                        "Create the L3 Collaborative Autonomy Standup Monday through Thursday "
+                        "through the end of 2026; waiting for time and duration."
+                    ),
+                },
+            ),
+        ]
+    )
+    current = Message(
+        conversation_id=conversation.id,
+        sender_type="user",
+        content="11-1130",
+        metadata_={},
+    )
+    session.add(current)
+    session.commit()
+    planner = CapturingKnowledgePlanner(
+        KnowledgeTurn(
+            message="I scheduled it for 11:00 to 11:30 AM.",
+            actions=[
+                {
+                    "type": "calendar.create",
+                    "reason": "Chris answered the pending time question.",
+                    "arguments": {
+                        "title": "Collaborative Autonomy Standup",
+                        "domain_key": "l3",
+                        "start_at": "2026-08-24T11:00:00-04:00",
+                        "end_at": "2026-08-24T12:00:00-04:00",
+                        "timezone": "America/New_York",
+                        "recurrence_rule": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH;UNTIL=20251231T235959Z",
+                    },
+                }
+            ],
+        )
+    )
+
+    MaestroKnowledgeService(session, planner=planner).respond(
+        "11-1130",
+        conversation_id=conversation.id,
+        message_id=current.id,
+    )
+
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.title == "Collaborative Autonomy Standup")
+    )
+    assert event is not None
+    assert event.end_at is not None
+    assert (event.end_at.hour, event.end_at.minute) == (11, 30)
+    assert event.recurrence_rule == "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH;UNTIL=20261231T235959Z"
+    assert "What time and duration should I use?" in planner.context_text
+    assert "waiting for time and duration" in planner.context_text
 
 
 def test_knowledge_mode_updates_contact_manual_context(session: Session) -> None:
