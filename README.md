@@ -12,8 +12,8 @@ chat responses toward persistent execution.
 
 - Single Maestro chat channel with persistent conversation history and explicit Knowledge / Build
   workflow modes.
-- Knowledge mode for cross-domain retrieval, conversation, and bounded direct updates to routed
-  objects and existing durable workflows.
+- Iterative Knowledge mode for cross-domain retrieval, current web search, conversation, and
+  bounded direct updates to routed objects and existing durable workflows.
 - Deliberate plan-first orchestration in Build workflow mode for delegated agent work.
 - Domain-aware agent registry with editable global/domain/agent prompts.
 - Prompt aggregation with scoped memory retrieval.
@@ -80,10 +80,11 @@ RFIs, notifications, direct answers, and workflow progress surface.
 
 The channel has two explicit operating modes:
 
-- **Knowledge** is the default. Maestro retrieves across authorized memory, reports, run logs, and
-  routed stores, answers directly, and can make bounded canonical changes such as updating a contact,
-  creating a recurring event, or pausing an existing durable workflow. This path cannot create tasks,
-  queue work, or delegate to agents.
+- **Knowledge** is the default. Maestro can repeatedly query authorized memory, reports, run logs,
+  routed stores, and current web results within one turn; reason over exact results; make bounded
+  canonical changes such as updating a contact, creating a recurring event, or pausing an existing
+  durable workflow; and query again to verify. The immediate loop is capped and suppresses duplicate
+  writes. It cannot create tasks, queue work, or delegate to agents.
 - **Build workflow** deliberately enters orchestration. Maestro creates or refines a proposed plan,
   shows it for approval, and only then queues subordinate agent work. After approval or dismissal,
   the UI returns to Knowledge mode.
@@ -96,6 +97,7 @@ Relevant code:
 - `app/api/maestro.py`
 - `app/maestro/channel.py`
 - `app/maestro/knowledge.py`
+- `app/maestro/knowledge_tools.py`
 - `app/maestro/orchestrator.py`
 
 ### Orchestration

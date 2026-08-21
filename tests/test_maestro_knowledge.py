@@ -4,7 +4,15 @@ from sqlalchemy.orm import Session
 
 from app.api import maestro as maestro_api
 from app.api.main import create_app
-from app.db.models import CalendarEvent, Contact, Conversation, Message, Task, WorkflowDefinition
+from app.db.models import (
+    CalendarEvent,
+    Contact,
+    Conversation,
+    Domain,
+    Message,
+    Task,
+    WorkflowDefinition,
+)
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.maestro.knowledge import (
@@ -32,6 +40,34 @@ class CapturingKnowledgePlanner(StaticKnowledgePlanner):
         return self.turn
 
 
+class SequenceKnowledgePlanner:
+    def __init__(self, turns: list[KnowledgeTurn]):
+        self.turns = turns
+        self.contexts: list[str] = []
+
+    def plan(self, **kwargs) -> KnowledgeTurn:
+        self.contexts.append(str(kwargs["context_text"]))
+        return self.turns.pop(0)
+
+
+class FakeWebClient:
+    def web_search_response(self, **kwargs):
+        assert kwargs["input_text"] == "current Praxis SBIR deadline"
+        return {
+            "output_text": "The deadline is September 1, 2026.",
+            "annotations": [
+                {
+                    "url_citation": {
+                        "url": "https://example.test/sbir",
+                        "title": "SBIR notice",
+                        "content": "Deadline details",
+                    }
+                }
+            ],
+            "usage": {"total_tokens": 42},
+        }
+
+
 def _client(session: Session) -> TestClient:
     app = create_app()
 
@@ -52,6 +88,7 @@ def test_knowledge_mode_never_creates_a_workflow_task(session: Session, monkeypa
                 message="That requires delegated work. Switch to Build workflow when you are ready.",
                 action_results=[],
                 workflow_suggestion="Use Build workflow to delegate this request.",
+                iterations=2,
             )
 
     monkeypatch.setattr(maestro_api, "MaestroKnowledgeService", FakeKnowledgeService)
@@ -68,6 +105,7 @@ def test_knowledge_mode_never_creates_a_workflow_task(session: Session, monkeypa
     assert payload["classification"] == "knowledge_chat"
     assert payload["plan"] is None
     assert payload["workflow_suggestion"]
+    assert payload["knowledge_iterations"] == 2
     assert session.scalar(select(func.count()).select_from(Task)) == 0
 
 
@@ -272,4 +310,116 @@ def test_knowledge_mode_edits_existing_workflow_without_creating_one(session: Se
     assert definition.is_active is False
     assert response.action_results[0].object_id == str(definition.id)
     assert session.scalar(select(func.count()).select_from(WorkflowDefinition)) == 1
+    assert session.scalar(select(func.count()).select_from(Task)) == 0
+
+
+def test_knowledge_mode_can_search_update_and_verify_in_one_turn(session: Session) -> None:
+    seed_default_domains(session)
+    l3 = next(domain for domain in session.query(Domain).all() if domain.key == "l3")
+    event = CalendarEvent(
+        domain_id=l3.id,
+        title="Collaborative Autonomy Standup",
+        summary="L3 team standup.",
+        status="scheduled",
+        attendees=[],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(event)
+    session.commit()
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am finding the exact event.",
+                actions=[
+                    {
+                        "type": "context.search",
+                        "arguments": {
+                            "query_text": "Collaborative Autonomy Standup",
+                            "domain_key": "l3",
+                            "stores": ["events"],
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I found it and am updating it.",
+                actions=[
+                    {
+                        "type": "calendar.update",
+                        "arguments": {
+                            "target": str(event.id),
+                            "domain_key": "l3",
+                            "updates": {"location": "Room 204"},
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I am verifying the saved event.",
+                actions=[
+                    {
+                        "type": "context.search",
+                        "arguments": {
+                            "query_text": "Collaborative Autonomy Standup",
+                            "domain_key": "l3",
+                            "stores": ["events"],
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I updated the standup location to Room 204 and verified the change.",
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Move the Collaborative Autonomy Standup to Room 204."
+    )
+
+    session.refresh(event)
+    assert event.location == "Room 204"
+    assert response.iterations == 4
+    assert [result.action_type for result in response.action_results] == [
+        "context.search",
+        "calendar.update",
+        "context.search",
+    ]
+    assert response.action_results[0].data["routed"]["events"][0]["id"] == str(event.id)
+    assert "Immediate action results: round 1" in planner.contexts[1]
+    assert "Room 204" in planner.contexts[3]
+    assert session.scalar(select(func.count()).select_from(Task)) == 0
+
+
+def test_knowledge_mode_can_search_web_then_answer_without_workflow(session: Session) -> None:
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am checking the current deadline.",
+                actions=[
+                    {
+                        "type": "web.search",
+                        "arguments": {"query": "current Praxis SBIR deadline"},
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="The current published deadline is September 1, 2026.",
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(
+        session,
+        planner=planner,
+        web_client=FakeWebClient(),
+    ).respond("When is the current Praxis SBIR deadline?")
+
+    assert response.iterations == 2
+    assert response.action_results[0].data["citations"][0]["title"] == "SBIR notice"
     assert session.scalar(select(func.count()).select_from(Task)) == 0

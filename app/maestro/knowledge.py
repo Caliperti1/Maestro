@@ -34,6 +34,11 @@ from app.db.models import (
 from app.db.repositories import DomainRepository
 from app.llm.client import OpenAILLMClient
 from app.maestro.context_assembler import MaestroContextAssembler
+from app.maestro.knowledge_tools import (
+    READ_ACTIONS,
+    KnowledgeActionResult,
+    KnowledgeReadToolService,
+)
 from app.maestro.scheduler import SchedulerService
 from app.memory.calendar_recurrence import normalize_recurrence_rule
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
@@ -46,6 +51,8 @@ from app.memory.routed_service import RoutedMemoryService
 from app.prompts import load_prompt
 
 ALLOWED_ACTIONS = {
+    "context.search",
+    "web.search",
     "calendar.create",
     "calendar.update",
     "contact.create",
@@ -59,24 +66,7 @@ ALLOWED_ACTIONS = {
     "workflow.update",
     "workflow.archive",
 }
-
-
-@dataclass(frozen=True)
-class KnowledgeActionResult:
-    action_type: str
-    status: str
-    message: str
-    object_type: str | None = None
-    object_id: str | None = None
-
-    def payload(self) -> dict[str, Any]:
-        return {
-            "action_type": self.action_type,
-            "status": self.status,
-            "message": self.message,
-            "object_type": self.object_type,
-            "object_id": self.object_id,
-        }
+MAX_KNOWLEDGE_ACTION_ROUNDS = 4
 
 
 @dataclass(frozen=True)
@@ -93,6 +83,7 @@ class KnowledgeResponse:
     action_results: list[KnowledgeActionResult]
     workflow_suggestion: str | None = None
     pending_clarification: str | None = None
+    iterations: int = 1
 
 
 class KnowledgePlanner(Protocol):
@@ -129,9 +120,16 @@ class LLMKnowledgePlanner:
 class MaestroKnowledgeService:
     """Answers from context and executes only the explicit Knowledge-mode action allowlist."""
 
-    def __init__(self, session: Session, *, planner: KnowledgePlanner | None = None):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        planner: KnowledgePlanner | None = None,
+        web_client: OpenAILLMClient | None = None,
+    ):
         self.session = session
         self.planner = planner
+        self.web_client = web_client
 
     def respond(
         self,
@@ -159,19 +157,19 @@ class MaestroKnowledgeService:
         )
         now = datetime.now(UTC)
         planner = self.planner or LLMKnowledgePlanner()
-        turn = planner.plan(message=message, context_text=context_text, now=now)
         validation_source = "\n".join(part for part in (conversation_context, message) if part)
-        results = [
-            self._execute(
-                action,
-                conversation_id=conversation_id,
-                message_id=message_id,
-                now=now,
-                source_message=validation_source,
-            )
-            for action in turn.actions
+        turn, results, iterations = self._run_action_loop(
+            planner=planner,
+            message=message,
+            context_text=context_text,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            now=now,
+            validation_source=validation_source,
+        )
+        result_lines = [
+            result.message for result in results if result.status not in {"completed", "skipped"}
         ]
-        result_lines = [result.message for result in results if result.status != "completed"]
         if result_lines:
             response_message = "I need one more detail before I can safely finish that change."
             response_message += "\n\n" + "\n".join(f"- {line}" for line in result_lines)
@@ -187,7 +185,94 @@ class MaestroKnowledgeService:
             action_results=results,
             workflow_suggestion=turn.workflow_suggestion,
             pending_clarification=turn.pending_clarification,
+            iterations=iterations,
         )
+
+    def _run_action_loop(
+        self,
+        *,
+        planner: KnowledgePlanner,
+        message: str,
+        context_text: str,
+        conversation_id: uuid.UUID | None,
+        message_id: uuid.UUID | None,
+        now: datetime,
+        validation_source: str,
+    ) -> tuple[KnowledgeTurn, list[KnowledgeActionResult], int]:
+        results: list[KnowledgeActionResult] = []
+        execution_blocks: list[str] = []
+        completed_writes: set[str] = set()
+        turn = KnowledgeTurn(message="", actions=[])
+        iterations = 0
+        for round_number in range(1, MAX_KNOWLEDGE_ACTION_ROUNDS + 1):
+            iterations += 1
+            turn = planner.plan(
+                message=message,
+                context_text=self._loop_context(context_text, execution_blocks),
+                now=now,
+            )
+            if not turn.actions or turn.pending_clarification:
+                return turn, results, iterations
+            actions = turn.actions
+            reads = [action for action in actions if action.get("type") in READ_ACTIONS]
+            if reads:
+                actions = reads
+            round_results: list[KnowledgeActionResult] = []
+            executed = 0
+            for action in actions:
+                action_type = str(action.get("type") or "")
+                signature = _action_signature(action)
+                if action_type not in READ_ACTIONS and signature in completed_writes:
+                    round_results.append(
+                        KnowledgeActionResult(
+                            action_type,
+                            "skipped",
+                            "The identical write already completed in this Knowledge turn.",
+                        )
+                    )
+                    continue
+                result = self._execute(
+                    action,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    now=now,
+                    source_message=validation_source,
+                )
+                executed += 1
+                round_results.append(result)
+                if action_type not in READ_ACTIONS and result.status == "completed":
+                    completed_writes.add(signature)
+            results.extend(round_results)
+            execution_blocks.append(_render_action_results(round_number, round_results))
+            execution_blocks = _bounded_execution_blocks(execution_blocks)
+            if any(result.status == "needs_clarification" for result in round_results):
+                return turn, results, iterations
+            if executed == 0:
+                return turn, results, iterations
+
+        iterations += 1
+        final_context = self._loop_context(context_text, execution_blocks)
+        final_context += (
+            "\n\n## Execution boundary\n"
+            "The immediate-action limit has been reached. Emit no more actions. Give Chris a "
+            "grounded conversational summary of completed results, failures, and anything still open."
+        )
+        turn = planner.plan(message=message, context_text=final_context, now=now)
+        return (
+            KnowledgeTurn(
+                message=turn.message,
+                actions=[],
+                workflow_suggestion=turn.workflow_suggestion,
+                pending_clarification=turn.pending_clarification,
+            ),
+            results,
+            iterations,
+        )
+
+    def _loop_context(self, base_context: str, execution_blocks: list[str]) -> str:
+        if not execution_blocks:
+            return base_context
+        return f"{base_context}\n\n" + "\n\n".join(execution_blocks)
 
     def _conversation_context_text(
         self,
@@ -268,6 +353,12 @@ class MaestroKnowledgeService:
             "acted_at": now.isoformat(),
         }
         try:
+            if action_type in READ_ACTIONS:
+                return KnowledgeReadToolService(
+                    self.session,
+                    domain_resolver=self._domain,
+                    web_client=self.web_client,
+                ).execute(action_type, arguments)
             if action_type.startswith("calendar."):
                 arguments = _normalize_calendar_arguments(arguments, source_message=source_message)
             if action_type.endswith(".create"):
@@ -717,6 +808,43 @@ def _parse_datetime(value: Any) -> datetime | None:
 def _optional_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _action_signature(action: dict[str, Any]) -> str:
+    arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+    return json.dumps(
+        {"type": str(action.get("type") or ""), "arguments": arguments},
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _render_action_results(
+    round_number: int,
+    results: list[KnowledgeActionResult],
+) -> str:
+    payload = [result.payload() for result in results]
+    rendered = json.dumps(payload, indent=2, default=str)
+    if len(rendered) > 6500:
+        rendered = rendered[:6500] + "\n... [result payload truncated]"
+    return (
+        f"## Immediate action results: round {round_number}\n"
+        "These are authoritative results from Maestro's own services. Reason over them before "
+        "choosing another action. Do not repeat a completed write.\n"
+        f"{rendered}"
+    )
+
+
+def _bounded_execution_blocks(blocks: list[str], *, max_chars: int = 14000) -> list[str]:
+    retained: list[str] = []
+    used = 0
+    for block in reversed(blocks):
+        addition = len(block) + (2 if retained else 0)
+        if retained and used + addition > max_chars:
+            break
+        retained.append(block[-max_chars:] if not retained and len(block) > max_chars else block)
+        used += min(addition, max_chars)
+    return list(reversed(retained))
 
 
 def _normalize_calendar_arguments(
