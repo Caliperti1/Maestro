@@ -150,7 +150,7 @@ class CalendarIntelligenceService:
         *,
         commit: bool = True,
     ) -> int:
-        if event.start_at is None:
+        if event.start_at is None or event.item_kind != "event":
             return 0
         start_at = _aware(event.start_at)
         occurred = start_at <= datetime.now(UTC)
@@ -213,6 +213,10 @@ class CalendarIntelligenceService:
             "timezone": event.timezone,
             "all_day": event.all_day,
             "recurrence_rule": event.recurrence_rule,
+            "item_kind": event.item_kind,
+            "context_type": event.context_type,
+            "scheduling_effect": event.scheduling_effect,
+            "blocks_time": event.blocks_time,
             "location": event.location,
             "conferencing_url": event.conferencing_url,
             "organizer_name": event.organizer_name,
@@ -256,7 +260,7 @@ class CalendarIntelligenceService:
         }
 
     def conflicts(self, event: CalendarEvent) -> list[dict[str, Any]]:
-        if event.start_at is None:
+        if event.start_at is None or not event.blocks_time:
             return []
         start = _aware(event.start_at)
         end = _aware(event.end_at) if event.end_at else start + timedelta(hours=1)
@@ -264,6 +268,7 @@ class CalendarIntelligenceService:
             select(CalendarEvent).where(
                 CalendarEvent.id != event.id,
                 CalendarEvent.status.notin_(["archived", "cancelled"]),
+                CalendarEvent.blocks_time.is_(True),
                 CalendarEvent.start_at.is_not(None),
                 CalendarEvent.start_at < end,
                 or_(CalendarEvent.end_at.is_(None), CalendarEvent.end_at > start),

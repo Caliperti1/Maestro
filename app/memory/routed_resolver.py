@@ -196,7 +196,11 @@ class RoutedObjectResolver:
         start_at: datetime | None,
     ) -> ResolutionDecision:
         candidates: list[ResolutionCandidate] = []
-        statement = select(CalendarEvent).where(CalendarEvent.status != "archived")
+        item_kind = str((item.metadata_ or {}).get("item_kind") or "event")
+        statement = select(CalendarEvent).where(
+            CalendarEvent.status != "archived",
+            CalendarEvent.item_kind == item_kind,
+        )
         if item.domain_id is not None:
             statement = statement.where(CalendarEvent.domain_id == item.domain_id)
         events = list(self.session.scalars(statement.order_by(CalendarEvent.updated_at.desc()).limit(50)))

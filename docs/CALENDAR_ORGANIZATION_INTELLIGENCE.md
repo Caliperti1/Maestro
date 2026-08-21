@@ -10,9 +10,21 @@ Google Calendar is an integration source and destination, not the canonical UI o
 truth. The local calendar must remain useful for events extracted from email, agent reports, user
 messages, and future calendar providers.
 
-## Event Model
+## Calendar Item Model
 
-`calendar_events` owns the event's human-facing fields:
+`calendar_events` owns the shared time geometry and human-facing fields for three item kinds:
+
+- `event`: a meeting or commitment that normally blocks availability
+- `scheduled_todo`: a task assigned a working window
+- `context_window`: household, childcare, routine, energy, location, or availability context that
+  affects scheduling judgment without claiming Chris is unavailable
+
+Every row carries `blocks_time` and a `scheduling_effect`. Existing events migrate as blocking,
+`hard` constraints. Context windows are always nonblocking and use `informational`, `prefer`,
+`prefer_avoid`, or `strongly_avoid` effects. This gives schedule reasoning an explicit distinction
+between conflicts and tradeoffs instead of relying on event titles.
+
+Shared fields include:
 
 - domain, title, summary, start/end, timezone, and all-day state
 - recurrence rule, location, and conferencing URL
@@ -26,10 +38,11 @@ marked as the Maestro user and is never turned into a contact.
 `calendar_event_organizations` links organizations to events with a role such as `partner`, `host`,
 or `related`.
 
-Future events appear in each linked contact's upcoming meetings. When an event occurs or is marked
+Future events appear in each linked contact's upcoming meetings. When an ordinary event occurs or is marked
 complete, Maestro materializes one provenance-backed contact interaction per linked contact. This
 avoids polluting contact history with meetings that have not happened and prevents duplicate meeting
-interactions.
+interactions. Context windows never create contact interactions and do not participate in hard
+conflict detection.
 
 ## Calendar Service
 
@@ -44,7 +57,10 @@ interactions.
 
 The calendar API supports aggregated or domain-filtered listing, time-window queries, manual event
 creation, and edits. The frontend uses FullCalendar for month, week, day, and agenda views, selectable
-time ranges, drag/reschedule, resize, domain colors, conflict signals, and touch interaction.
+time ranges, drag/reschedule, resize, domain colors, conflict signals, and touch interaction. Context
+windows render as translucent dashed overlays and can be hidden without removing them from Maestro's
+retrieval context. Recurring items pass their explicit duration to FullCalendar so a 30-minute series
+occupies 30 minutes rather than the library's one-hour default.
 
 ## Organization Intelligence
 

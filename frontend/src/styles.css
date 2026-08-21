@@ -2075,6 +2075,11 @@ h4 {
   border-radius: 2px;
 }
 
+.calendar-legend .calendar-context-legend i {
+  border: 1px dashed var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
 .calendar-shell .fc {
   --fc-border-color: #dfe3e8;
   --fc-button-bg-color: #ffffff;
@@ -2195,6 +2200,26 @@ h4 {
 
 .calendar-shell .calendar-event-conflict {
   box-shadow: inset 0 0 0 2px #b42318;
+}
+
+.calendar-shell .calendar-event-context {
+  border-style: dashed;
+  box-shadow: inset 3px 0 0 currentColor;
+}
+
+.calendar-shell .calendar-event-context .calendar-event-content::before {
+  color: var(--color-muted-strong);
+  content: "Context";
+  font-size: 0.58rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.calendar-context-fields {
+  padding: 10px;
+  border: 1px dashed color-mix(in srgb, var(--color-accent) 45%, var(--color-border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-accent) 5%, #ffffff);
 }
 
 .calendar-meeting-link {

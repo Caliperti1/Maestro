@@ -551,6 +551,10 @@ function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string>
       timezone: item.timezone ?? "America/New_York",
       all_day: item.all_day ? "true" : "false",
       recurrence_rule: item.recurrence_rule ?? "",
+      item_kind: item.item_kind ?? "event",
+      context_type: item.context_type ?? "routine",
+      scheduling_effect: item.scheduling_effect ?? (item.blocks_time ? "hard" : "informational"),
+      blocks_time: item.blocks_time ? "true" : "false",
       location: item.location ?? "",
       conferencing_url: item.conferencing_url ?? "",
       status: item.status ?? "scheduled",
@@ -949,6 +953,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const [domainFilter, setDomainFilter] = useState("all");
   const [showArchived, setShowArchived] = useState(false);
   const [showDone, setShowDone] = useState(false);
+  const [showCalendarContext, setShowCalendarContext] = useState(true);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [creatingEvent, setCreatingEvent] = useState(false);
   const [calendarDomainKey, setCalendarDomainKey] = useState("personal");
@@ -970,9 +975,15 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       items.filter((item) => {
         if (!showArchived && item.status === "archived") return false;
         if (supportsDoneFilter && !showDone && item.status === "done") return false;
+        if (
+          surface === "calendar"
+          && !showCalendarContext
+          && "item_kind" in item
+          && item.item_kind === "context_window"
+        ) return false;
         return true;
       }),
-    [items, showArchived, showDone, supportsDoneFilter],
+    [items, showArchived, showCalendarContext, showDone, supportsDoneFilter, surface],
   );
   const selectedItem = creatingEvent
     ? null
@@ -983,20 +994,27 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         .filter((item): item is RoutedEvent => "start_at" in item && Boolean(item.start_at))
         .map((item) => {
           const color = calendarColors[item.domain_key ?? "global"] ?? calendarColors.global;
+          const isContextWindow = item.item_kind === "context_window";
           const calendarEvent: EventInput & { extendedProps: { resource: RoutedEvent } } = {
             id: item.id,
             title: item.title,
             start: item.start_at!,
             end: item.end_at ?? undefined,
             allDay: item.all_day,
-            backgroundColor: item.status === "cancelled" ? "#f3f4f6" : color,
+            backgroundColor: item.status === "cancelled"
+              ? "#f3f4f6"
+              : isContextWindow ? `${color}24` : color,
             borderColor: color,
-            textColor: item.status === "cancelled" ? "#667085" : "#ffffff",
+            textColor: item.status === "cancelled" || isContextWindow ? "#30363d" : "#ffffff",
             extendedProps: { resource: item },
           };
           const recurrence = calendarRecurrence(item);
           if (recurrence) {
             calendarEvent.rrule = recurrence;
+            if (item.end_at) {
+              const duration = new Date(item.end_at).getTime() - new Date(item.start_at!).getTime();
+              if (Number.isFinite(duration) && duration > 0) calendarEvent.duration = duration;
+            }
           }
           return calendarEvent;
         }),
@@ -1032,13 +1050,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   }, [refreshItems, config.title]);
 
   useEffect(() => {
+    if (creatingEvent) return;
     setDraft(routedDraftFor(selectedItem));
     if (selectedItem && "attendees" in selectedItem) {
       setDraftAttendees(selectedItem.attendees);
       setDraftOrganizations(selectedItem.organizations);
       setCalendarDomainKey(selectedItem.domain_key ?? "personal");
     }
-  }, [selectedItem]);
+  }, [creatingEvent, selectedItem]);
 
   useEffect(() => {
     if (surface !== "calendar") return;
@@ -1067,8 +1086,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             start_at: calendarApiValue(draft.start_at ?? ""),
             end_at: calendarApiValue(draft.end_at ?? ""),
             all_day: draft.all_day === "true",
-            attendees: draftAttendees,
-            organizations: draftOrganizations,
+            blocks_time: draft.item_kind === "context_window" ? false : draft.blocks_time !== "false",
+            attendees: draft.item_kind === "context_window" ? [] : draftAttendees,
+            organizations: draft.item_kind === "context_window" ? [] : draftOrganizations,
           }
         : null;
       const response = await apiJson<{ event?: RoutedEvent }>(
@@ -1151,7 +1171,11 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     }
   };
 
-  const beginNewEvent = (start = new Date(), end = new Date(start.getTime() + 60 * 60 * 1000)) => {
+  const beginNewEvent = (
+    start = new Date(),
+    end = new Date(start.getTime() + 60 * 60 * 1000),
+    itemKind: RoutedEvent["item_kind"] = "event",
+  ) => {
     setCreatingEvent(true);
     setSelectedId(null);
     setDraft({
@@ -1162,6 +1186,10 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       timezone: "America/New_York",
       all_day: "false",
       recurrence_rule: "",
+      item_kind: itemKind,
+      context_type: "routine",
+      scheduling_effect: itemKind === "context_window" ? "informational" : "hard",
+      blocks_time: itemKind === "context_window" ? "false" : "true",
       location: "",
       conferencing_url: "",
       status: "scheduled",
@@ -1314,9 +1342,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           </div>
           <div className="section-heading-actions">
             {surface === "calendar" && (
-              <button className="planner-action" type="button" onClick={() => beginNewEvent()}>
-                <Plus size={17} /> New event
-              </button>
+              <>
+                <button type="button" onClick={() => beginNewEvent(undefined, undefined, "context_window")}>
+                  <Clock3 size={17} /> New context
+                </button>
+                <button className="planner-action" type="button" onClick={() => beginNewEvent()}>
+                  <Plus size={17} /> New event
+                </button>
+              </>
             )}
             <button className="icon-button" onClick={refreshItems} title={`Refresh ${config.title}`}>
               <RefreshCw size={18} />
@@ -1345,6 +1378,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             {Object.entries(domainLabels).filter(([key]) => key !== "global").map(([key, label]) => (
               <span key={key}><i style={{ backgroundColor: calendarColors[key] ?? calendarColors.global }} />{label}</span>
             ))}
+            <span className="calendar-context-legend"><i />Context window</span>
           </div>
         )}
 
@@ -1376,6 +1410,16 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               />
               Show archived
             </label>
+            {surface === "calendar" && (
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={showCalendarContext}
+                  onChange={(event) => setShowCalendarContext(event.target.checked)}
+                />
+                Show context
+              </label>
+            )}
             {supportsDoneFilter && (
               <label className="toggle-row">
                 <input
@@ -1442,6 +1486,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   return [
                     item?.status === "cancelled" ? "calendar-event-cancelled" : "",
                     item?.status === "archived" ? "calendar-event-archived" : "",
+                    item?.item_kind === "context_window" ? "calendar-event-context" : "",
                     item?.conflicts?.length ? "calendar-event-conflict" : "",
                   ].filter(Boolean);
                 }}
@@ -1509,7 +1554,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           <div>
             <p className="eyebrow">Details</p>
             <h3 id={`${surface}-detail`}>
-              {creatingEvent ? "New event" : selectedItem ? routedObjectTitle(selectedItem) : config.title}
+              {creatingEvent
+                ? draft.item_kind === "context_window" ? "New context window" : "New event"
+                : selectedItem ? routedObjectTitle(selectedItem) : config.title}
             </h3>
           </div>
           <Icon size={18} />
@@ -1519,6 +1566,30 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           <div className="routed-object-detail">
             {surface === "calendar" && (creatingEvent || (selectedItem && "attendees" in selectedItem)) && (
               <>
+                <label>
+                  Calendar item
+                  <select
+                    value={draft.item_kind ?? "event"}
+                    onChange={(event) => {
+                      const itemKind = event.target.value as RoutedEvent["item_kind"];
+                      setDraft((current) => ({
+                        ...current,
+                        item_kind: itemKind,
+                        context_type: itemKind === "context_window" ? current.context_type || "routine" : "",
+                        scheduling_effect: itemKind === "context_window" ? "informational" : "hard",
+                        blocks_time: itemKind === "context_window" ? "false" : "true",
+                      }));
+                      if (itemKind === "context_window") {
+                        setDraftAttendees([]);
+                        setDraftOrganizations([]);
+                      }
+                    }}
+                  >
+                    <option value="event">Event</option>
+                    <option value="context_window">Context window</option>
+                    <option value="scheduled_todo">Scheduled to do</option>
+                  </select>
+                </label>
                 <label>
                   Calendar
                   <select value={calendarDomainKey} onChange={(event) => setCalendarDomainKey(event.target.value)} disabled={!creatingEvent}>
@@ -1545,6 +1616,30 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     <input type="datetime-local" value={draft.end_at ?? ""} onChange={(event) => updateDraft("end_at", event.target.value)} />
                   </label>
                 </div>
+                {draft.item_kind === "context_window" && (
+                  <div className="two-column-fields calendar-context-fields">
+                    <label>
+                      Context type
+                      <select value={draft.context_type ?? "routine"} onChange={(event) => updateDraft("context_type", event.target.value)}>
+                        <option value="household">Household</option>
+                        <option value="childcare">Childcare</option>
+                        <option value="routine">Routine</option>
+                        <option value="availability">Availability</option>
+                        <option value="energy">Energy</option>
+                        <option value="location">Location</option>
+                      </select>
+                    </label>
+                    <label>
+                      Scheduling effect
+                      <select value={draft.scheduling_effect ?? "informational"} onChange={(event) => updateDraft("scheduling_effect", event.target.value)}>
+                        <option value="informational">Informational</option>
+                        <option value="prefer">Prefer this window</option>
+                        <option value="prefer_avoid">Prefer to avoid</option>
+                        <option value="strongly_avoid">Strongly avoid</option>
+                      </select>
+                    </label>
+                  </div>
+                )}
                 <div className="two-column-fields">
                   <label>
                     Timezone
@@ -1570,15 +1665,15 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   <input type="checkbox" checked={draft.all_day === "true"} onChange={(event) => updateDraft("all_day", event.target.checked ? "true" : "false")} />
                   All day
                 </label>
-                <label>
+                {draft.item_kind !== "context_window" && <label>
                   Location
                   <input value={draft.location ?? ""} onChange={(event) => updateDraft("location", event.target.value)} />
-                </label>
-                <label>
+                </label>}
+                {draft.item_kind !== "context_window" && <label>
                   Meeting link
                   <input value={draft.conferencing_url ?? ""} onChange={(event) => updateDraft("conferencing_url", event.target.value)} placeholder="Google Meet, Teams, or Zoom URL" />
-                </label>
-                {draft.conferencing_url && /^https?:\/\//i.test(draft.conferencing_url) && (
+                </label>}
+                {draft.item_kind !== "context_window" && draft.conferencing_url && /^https?:\/\//i.test(draft.conferencing_url) && (
                   <a className="calendar-meeting-link" href={draft.conferencing_url} target="_blank" rel="noreferrer">
                     <ExternalLink size={15} /> Open meeting
                   </a>
@@ -1591,7 +1686,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     <option value="cancelled">Cancelled</option>
                   </select>
                 </label>
-                <section className="calendar-link-editor">
+                {draft.item_kind !== "context_window" && <section className="calendar-link-editor">
                   <h4>Attendees</h4>
                   <select defaultValue="" onChange={(event) => { addCalendarAttendee(event.target.value); event.target.value = ""; }}>
                     <option value="">Add a contact</option>
@@ -1607,8 +1702,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                       </span>
                     ))}
                   </div>
-                </section>
-                <section className="calendar-link-editor">
+                </section>}
+                {draft.item_kind !== "context_window" && <section className="calendar-link-editor">
                   <h4>Organizations</h4>
                   <select defaultValue="" onChange={(event) => { addCalendarOrganization(event.target.value); event.target.value = ""; }}>
                     <option value="">Link an organization</option>
@@ -1624,7 +1719,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                       </span>
                     ))}
                   </div>
-                </section>
+                </section>}
                 {selectedItem && "attendees" in selectedItem && selectedItem.conflicts.length > 0 && (
                   <section className="calendar-conflicts">
                     <h4><CircleAlert size={16} /> Scheduling conflicts</h4>
