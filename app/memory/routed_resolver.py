@@ -7,7 +7,7 @@ from typing import Any, Protocol
 from urllib import error, request
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -19,9 +19,12 @@ from app.db.models import (
     ContactInteraction,
     ContactOrganizationAffiliation,
     Entity,
-    Todo,
+    OrganizationAlias,
+    OrganizationIdentifier,
     RoutedItem,
+    Todo,
 )
+from app.memory.organization_intelligence import OrganizationIntelligenceService
 from app.prompts import load_prompt
 
 
@@ -57,7 +60,13 @@ class RoutedResolverLLM(Protocol):
 
 
 class OllamaRoutedResolverLLM:
-    def __init__(self, *, model: str | None = None, base_url: str | None = None, timeout_seconds: float | None = None):
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        base_url: str | None = None,
+        timeout_seconds: float | None = None,
+    ):
         settings = get_settings()
         self.model = model or settings.routed_resolver_llm_model
         self.base_url = (base_url or settings.routed_resolver_llm_base_url).rstrip("/")
@@ -159,34 +168,88 @@ class RoutedObjectResolver:
         if email:
             contact = self.session.scalar(select(Contact).where(Contact.email.ilike(email.strip())))
             if contact is not None:
-                return self._decision("update_existing", "contact", contact.id, 0.99, "email", "Exact email match.", [])
+                return self._decision(
+                    "update_existing",
+                    "contact",
+                    contact.id,
+                    0.99,
+                    "email",
+                    "Exact email match.",
+                    [],
+                )
         normalized_phone = _normalize_phone(phone)
         normalized_linkedin = _normalize_linkedin(linkedin)
         if normalized_phone or normalized_linkedin:
-            contacts = list(self.session.scalars(select(Contact).where(Contact.status != "archived")))
+            contacts = list(
+                self.session.scalars(select(Contact).where(Contact.status != "archived"))
+            )
             for contact in contacts:
                 if normalized_phone and _normalize_phone(contact.phone) == normalized_phone:
-                    return self._decision("update_existing", "contact", contact.id, 0.98, "phone", "Exact phone match.", [])
-                if normalized_linkedin and _normalize_linkedin(contact.linkedin) == normalized_linkedin:
-                    return self._decision("update_existing", "contact", contact.id, 0.98, "linkedin", "Exact LinkedIn match.", [])
+                    return self._decision(
+                        "update_existing",
+                        "contact",
+                        contact.id,
+                        0.98,
+                        "phone",
+                        "Exact phone match.",
+                        [],
+                    )
+                if (
+                    normalized_linkedin
+                    and _normalize_linkedin(contact.linkedin) == normalized_linkedin
+                ):
+                    return self._decision(
+                        "update_existing",
+                        "contact",
+                        contact.id,
+                        0.98,
+                        "linkedin",
+                        "Exact LinkedIn match.",
+                        [],
+                    )
 
         contacts = list(
             self.session.scalars(
-                select(Contact).where(Contact.status != "archived").order_by(Contact.updated_at.desc()).limit(50)
+                select(Contact)
+                .where(Contact.status != "archived")
+                .order_by(Contact.updated_at.desc())
+                .limit(50)
             )
         )
         for contact in contacts:
             score, strategy, reason = self._score_contact(item, contact, normalized, name)
             if score >= 0.45:
-                candidates.append(ResolutionCandidate("contact", contact.id, score, strategy, reason))
+                candidates.append(
+                    ResolutionCandidate("contact", contact.id, score, strategy, reason)
+                )
         candidates.sort(key=lambda candidate: candidate.score, reverse=True)
 
         if candidates and candidates[0].score >= 0.92:
             top = candidates[0]
-            return self._decision("update_existing", "contact", top.object_id, top.score, top.strategy, top.reason, candidates)
-        if candidates and candidates[0].score >= 0.74 and (len(candidates) == 1 or candidates[0].score - candidates[1].score >= 0.18):
+            return self._decision(
+                "update_existing",
+                "contact",
+                top.object_id,
+                top.score,
+                top.strategy,
+                top.reason,
+                candidates,
+            )
+        if (
+            candidates
+            and candidates[0].score >= 0.74
+            and (len(candidates) == 1 or candidates[0].score - candidates[1].score >= 0.18)
+        ):
             top = candidates[0]
-            return self._decision("update_existing", "contact", top.object_id, top.score, top.strategy, top.reason, candidates)
+            return self._decision(
+                "update_existing",
+                "contact",
+                top.object_id,
+                top.score,
+                top.strategy,
+                top.reason,
+                candidates,
+            )
         return self._llm_or_create(item, "contact", candidates)
 
     def resolve_event(
@@ -203,7 +266,9 @@ class RoutedObjectResolver:
         )
         if item.domain_id is not None:
             statement = statement.where(CalendarEvent.domain_id == item.domain_id)
-        events = list(self.session.scalars(statement.order_by(CalendarEvent.updated_at.desc()).limit(50)))
+        events = list(
+            self.session.scalars(statement.order_by(CalendarEvent.updated_at.desc()).limit(50))
+        )
         for event in events:
             score, strategy, reason = self._score_event(item, event, start_at)
             if score >= 0.45:
@@ -211,11 +276,151 @@ class RoutedObjectResolver:
         candidates.sort(key=lambda candidate: candidate.score, reverse=True)
         if candidates and candidates[0].score >= 0.9:
             top = candidates[0]
-            return self._decision("update_existing", "event", top.object_id, top.score, top.strategy, top.reason, candidates)
-        if candidates and candidates[0].score >= 0.76 and (len(candidates) == 1 or candidates[0].score - candidates[1].score >= 0.16):
+            return self._decision(
+                "update_existing",
+                "event",
+                top.object_id,
+                top.score,
+                top.strategy,
+                top.reason,
+                candidates,
+            )
+        if (
+            candidates
+            and candidates[0].score >= 0.76
+            and (len(candidates) == 1 or candidates[0].score - candidates[1].score >= 0.16)
+        ):
             top = candidates[0]
-            return self._decision("update_existing", "event", top.object_id, top.score, top.strategy, top.reason, candidates)
+            return self._decision(
+                "update_existing",
+                "event",
+                top.object_id,
+                top.score,
+                top.strategy,
+                top.reason,
+                candidates,
+            )
         return self._llm_or_create(item, "event", candidates)
+
+    def resolve_organization(
+        self,
+        item: RoutedItem,
+        *,
+        name: str,
+        identifiers: list[tuple[str, str, str]],
+    ) -> ResolutionDecision:
+        for identifier_type, _, normalized_value in identifiers:
+            identifier = self.session.scalar(
+                select(OrganizationIdentifier).where(
+                    OrganizationIdentifier.identifier_type == identifier_type,
+                    OrganizationIdentifier.normalized_value == normalized_value,
+                )
+            )
+            if identifier is not None:
+                return self._decision(
+                    "update_existing",
+                    "organization",
+                    identifier.entity_id,
+                    0.99,
+                    "identifier",
+                    "Exact organization identifier match.",
+                    [],
+                )
+
+        normalized = _normalize_key(name)
+        legal_normalized = _normalize_organization_name(name)
+        candidates: list[ResolutionCandidate] = []
+        organizations = list(
+            self.session.scalars(
+                select(Entity)
+                .where(Entity.status != "archived")
+                .order_by(Entity.updated_at.desc())
+                .limit(100)
+            )
+        )
+        for organization in organizations:
+            aliases = set(
+                self.session.scalars(
+                    select(OrganizationAlias.normalized_alias).where(
+                        OrganizationAlias.entity_id == organization.id
+                    )
+                ).all()
+            )
+            aliases.add(organization.normalized_name)
+            if normalized in aliases:
+                return self._decision(
+                    "update_existing",
+                    "organization",
+                    organization.id,
+                    0.98,
+                    "alias",
+                    "Exact organization name or alias match.",
+                    [],
+                )
+            organization_names = {organization.name, *aliases}
+            if legal_normalized and any(
+                _normalize_organization_name(value) == legal_normalized
+                for value in organization_names
+            ):
+                candidates.append(
+                    ResolutionCandidate(
+                        "organization",
+                        organization.id,
+                        0.94,
+                        "legal_name",
+                        "Organization names differ only by punctuation or legal suffix.",
+                    )
+                )
+                continue
+            score = max(
+                _token_similarity(name, organization.name),
+                _token_similarity(
+                    f"{item.title} {item.content}",
+                    f"{organization.name} {organization.summary or ''}",
+                ),
+            )
+            if score >= 0.35:
+                candidates.append(
+                    ResolutionCandidate(
+                        "organization",
+                        organization.id,
+                        score,
+                        "semantic_context",
+                        "Organization name and contextual evidence overlap.",
+                    )
+                )
+        semantic_results = OrganizationIntelligenceService(self.session).search(
+            f"{name} {item.content}",
+            domain_id=None,
+            limit=8,
+            use_semantic=True,
+        )
+        candidate_ids = {candidate.object_id for candidate in candidates}
+        for result in semantic_results:
+            if result.organization.id in candidate_ids or result.score < 0.2:
+                continue
+            candidates.append(
+                ResolutionCandidate(
+                    "organization",
+                    result.organization.id,
+                    min(0.89, result.score),
+                    "hybrid_semantic",
+                    "; ".join(result.match_reasons),
+                )
+            )
+        candidates.sort(key=lambda candidate: candidate.score, reverse=True)
+        if candidates and candidates[0].score >= 0.92:
+            top = candidates[0]
+            return self._decision(
+                "update_existing",
+                "organization",
+                top.object_id,
+                top.score,
+                top.strategy,
+                top.reason,
+                candidates,
+            )
+        return self._llm_or_create(item, "organization", candidates)
 
     def resolve_todo(self, item: RoutedItem, *, due_at: datetime | None) -> ResolutionDecision:
         candidates: list[ResolutionCandidate] = []
@@ -230,10 +435,20 @@ class RoutedObjectResolver:
         candidates.sort(key=lambda candidate: candidate.score, reverse=True)
         if candidates and candidates[0].score >= 0.88:
             top = candidates[0]
-            return self._decision("update_existing", "todo", top.object_id, top.score, top.strategy, top.reason, candidates)
+            return self._decision(
+                "update_existing",
+                "todo",
+                top.object_id,
+                top.score,
+                top.strategy,
+                top.reason,
+                candidates,
+            )
         return self._llm_or_create(item, "todo", candidates)
 
-    def _score_contact(self, item: RoutedItem, contact: Contact, normalized: str, name: str) -> tuple[float, str, str]:
+    def _score_contact(
+        self, item: RoutedItem, contact: Contact, normalized: str, name: str
+    ) -> tuple[float, str, str]:
         aliases = _contact_aliases(contact)
         aliases.update(
             self.session.scalars(
@@ -247,7 +462,9 @@ class RoutedObjectResolver:
             return 0.94, "normalized_name", "Exact normalized name match."
         if _initial_alias_match(normalized, contact_name):
             return 0.86, "initial_alias", "Matched first name plus last initial."
-        item_org = _organization_from_text(item.content) or _string_from_metadata(item.metadata_ or {}, "organization")
+        item_org = _organization_from_text(item.content) or _string_from_metadata(
+            item.metadata_ or {}, "organization"
+        )
         contact_org = _string_from_metadata(contact.metadata_ or {}, "organization")
         if item_org and contact_org and _normalize_key(item_org) == _normalize_key(contact_org):
             overlap = _token_similarity(name, contact.name)
@@ -255,12 +472,23 @@ class RoutedObjectResolver:
                 return 0.78, "organization_context", "Name and organization context overlap."
         if _first_name(name) and _first_name(name) == _first_name(contact.name):
             domain_score = self._contact_domain_score(contact, item)
-            if domain_score >= 0.2 and _token_similarity(item.content, contact.summary or contact.name) >= 0.35:
-                return 0.74 + domain_score, "domain_context", "Unique first name in the same domain context."
-        similarity = _token_similarity(f"{item.title} {item.content}", f"{contact.name} {contact.summary or ''}")
+            if (
+                domain_score >= 0.2
+                and _token_similarity(item.content, contact.summary or contact.name) >= 0.35
+            ):
+                return (
+                    0.74 + domain_score,
+                    "domain_context",
+                    "Unique first name in the same domain context.",
+                )
+        similarity = _token_similarity(
+            f"{item.title} {item.content}", f"{contact.name} {contact.summary or ''}"
+        )
         return similarity, "lexical", "Lexical overlap with existing contact."
 
-    def _score_event(self, item: RoutedItem, event: CalendarEvent, start_at: datetime | None) -> tuple[float, str, str]:
+    def _score_event(
+        self, item: RoutedItem, event: CalendarEvent, start_at: datetime | None
+    ) -> tuple[float, str, str]:
         title_similarity = _token_similarity(item.title, event.title)
         content_similarity = _token_similarity(item.content, f"{event.title} {event.summary or ''}")
         participant_similarity = _event_participant_similarity(item, event)
@@ -273,16 +501,26 @@ class RoutedObjectResolver:
             if delta <= timedelta(hours=2) and participant_similarity >= 0.65:
                 return 0.86, "near_time_participant", "Nearby event time and matching participant."
         if start_at and not event.start_at and participant_similarity >= 0.65:
-            return 0.88, "fills_missing_time_participant", "Follow-up supplies time for matching incomplete event."
+            return (
+                0.88,
+                "fills_missing_time_participant",
+                "Follow-up supplies time for matching incomplete event.",
+            )
         if participant_similarity >= 0.8 and max(title_similarity, content_similarity) >= 0.45:
             return 0.82, "participant_context", "Matching participant and event context."
         if title_similarity >= 0.86:
             return 0.83, "title", "Strong event title match."
         if content_similarity >= 0.72:
             return 0.76, "event_context", "Strong event context match."
-        return max(title_similarity, content_similarity, participant_similarity * 0.7), "lexical", "Lexical event overlap."
+        return (
+            max(title_similarity, content_similarity, participant_similarity * 0.7),
+            "lexical",
+            "Lexical event overlap.",
+        )
 
-    def _score_todo(self, item: RoutedItem, todo: Todo, due_at: datetime | None) -> tuple[float, str, str]:
+    def _score_todo(
+        self, item: RoutedItem, todo: Todo, due_at: datetime | None
+    ) -> tuple[float, str, str]:
         title_similarity = _token_similarity(item.title, todo.title)
         content_similarity = _token_similarity(item.content, f"{todo.title} {todo.description}")
         source_overlap = _source_identity_tokens(
@@ -291,7 +529,11 @@ class RoutedObjectResolver:
         ) & _source_identity_tokens(todo.source_refs, todo.metadata_ or {})
         if source_overlap and max(title_similarity, content_similarity) >= 0.5:
             return 0.92, "source_context", "Same source artifact and overlapping todo context."
-        if due_at and todo.due_at and abs(_aware(todo.due_at) - _aware(due_at)) <= timedelta(hours=2):
+        if (
+            due_at
+            and todo.due_at
+            and abs(_aware(todo.due_at) - _aware(due_at)) <= timedelta(hours=2)
+        ):
             if title_similarity >= 0.65:
                 return 0.9, "due_time_title", "Same due time and similar todo title."
             if content_similarity >= 0.55:
@@ -322,7 +564,15 @@ class RoutedObjectResolver:
         llm_decision = self._llm_decision(item, object_type, candidates)
         if llm_decision is not None:
             return llm_decision
-        return self._decision("create_new", object_type, None, 0.0, "no_match", "No confident existing routed object match.", candidates)
+        return self._decision(
+            "create_new",
+            object_type,
+            None,
+            0.0,
+            "no_match",
+            "No confident existing routed object match.",
+            candidates,
+        )
 
     def _llm_decision(
         self,
@@ -333,7 +583,9 @@ class RoutedObjectResolver:
         if self.llm is None or not candidates:
             return None
         candidate_payloads = [self._candidate_payload(candidate) for candidate in candidates[:5]]
-        raw = self.llm.choose_match(item=item, object_type=object_type, candidates=candidate_payloads)
+        raw = self.llm.choose_match(
+            item=item, object_type=object_type, candidates=candidate_payloads
+        )
         if raw is None:
             return None
         try:
@@ -353,6 +605,18 @@ class RoutedObjectResolver:
             return None
         if response.action == "update_existing" and response.confidence < 0.72:
             return None
+        if response.action == "update_existing" and object_type == "organization":
+            organization = self.session.get(Entity, object_id)
+            incoming_name = (
+                _string_from_metadata(item.metadata_ or {}, "entity_name")
+                or _string_from_metadata(item.metadata_ or {}, "organization_name")
+                or _string_from_metadata(item.metadata_ or {}, "name")
+                or item.title
+            )
+            if organization is None or _item_declares_organization_relationship(
+                item, incoming_name, organization
+            ):
+                return None
         return self._decision(
             response.action,
             object_type,
@@ -436,6 +700,33 @@ class RoutedObjectResolver:
                 "strategy": candidate.strategy,
                 "reason": candidate.reason,
             }
+        if candidate.object_type == "organization":
+            organization = self.session.get(Entity, candidate.object_id)
+            if organization is None:
+                return {}
+            aliases = self.session.scalars(
+                select(OrganizationAlias.alias).where(
+                    OrganizationAlias.entity_id == organization.id
+                )
+            ).all()
+            identifiers = self.session.scalars(
+                select(OrganizationIdentifier).where(
+                    OrganizationIdentifier.entity_id == organization.id
+                )
+            ).all()
+            return {
+                "object_id": str(organization.id),
+                "name": organization.name,
+                "aliases": list(aliases),
+                "website": organization.website,
+                "summary": organization.summary,
+                "identifiers": [
+                    {"type": value.identifier_type, "value": value.value} for value in identifiers
+                ],
+                "score": candidate.score,
+                "strategy": candidate.strategy,
+                "reason": candidate.reason,
+            }
         return {}
 
     def _decision(
@@ -489,7 +780,9 @@ def _contact_aliases(contact: Contact) -> set[str]:
     aliases = set(contact_aliases_for(contact.name))
     metadata_aliases = (contact.metadata_ or {}).get("aliases") or []
     if isinstance(metadata_aliases, list):
-        aliases.update(_normalize_key(str(alias)) for alias in metadata_aliases if str(alias).strip())
+        aliases.update(
+            _normalize_key(str(alias)) for alias in metadata_aliases if str(alias).strip()
+        )
     return aliases
 
 
@@ -498,7 +791,10 @@ def _initial_alias_match(candidate: str, contact_name: str) -> bool:
     contact_parts = contact_name.split()
     if len(candidate_parts) != 2 or len(contact_parts) < 2:
         return False
-    return candidate_parts[0] == contact_parts[0] and candidate_parts[1].rstrip(".") == contact_parts[-1][0]
+    return (
+        candidate_parts[0] == contact_parts[0]
+        and candidate_parts[1].rstrip(".") == contact_parts[-1][0]
+    )
 
 
 def _first_name(name: str) -> str | None:
@@ -512,7 +808,60 @@ def _normalize_phone(value: str | None) -> str:
 
 
 def _normalize_linkedin(value: str | None) -> str:
-    return (value or "").lower().rstrip("/").removeprefix("https://").removeprefix("http://").removeprefix("www.")
+    return (
+        (value or "")
+        .lower()
+        .rstrip("/")
+        .removeprefix("https://")
+        .removeprefix("http://")
+        .removeprefix("www.")
+    )
+
+
+def _normalize_organization_name(value: str) -> str:
+    parts = _normalize_key(value).split()
+    suffixes = {
+        "co",
+        "company",
+        "corp",
+        "corporation",
+        "inc",
+        "incorporated",
+        "llc",
+        "llp",
+        "limited",
+        "ltd",
+        "pllc",
+        "the",
+    }
+    while parts and parts[-1] in suffixes:
+        parts.pop()
+    return " ".join(parts)
+
+
+def _item_declares_organization_relationship(
+    item: RoutedItem, incoming_name: str, existing: Entity
+) -> bool:
+    """Do not collapse an organization into an explicitly related organization."""
+    relationships = (item.metadata_ or {}).get("relationships") or []
+    for relationship in relationships:
+        if not isinstance(relationship, dict):
+            continue
+        if str(relationship.get("organization_id") or "") == str(existing.id):
+            return True
+
+    incoming = re.escape(incoming_name.strip())
+    candidate = re.escape(existing.name.strip())
+    if not incoming or not candidate:
+        return False
+    relation = r"(?:subsidiary|division|department|partner|affiliate|customer|vendor)\s+of"
+    return bool(
+        re.search(
+            rf"\b{incoming}\b.{{0,80}}\b{relation}\s+(?:the\s+)?{candidate}\b",
+            item.content,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _event_participant_similarity(item: RoutedItem, event: CalendarEvent) -> float:
@@ -530,7 +879,9 @@ def _event_participant_similarity(item: RoutedItem, event: CalendarEvent) -> flo
             if item_tokens <= event_tokens or event_tokens <= item_tokens:
                 best = max(best, 1.0)
             elif item_tokens & event_tokens:
-                best = max(best, len(item_tokens & event_tokens) / min(len(item_tokens), len(event_tokens)))
+                best = max(
+                    best, len(item_tokens & event_tokens) / min(len(item_tokens), len(event_tokens))
+                )
     return best
 
 

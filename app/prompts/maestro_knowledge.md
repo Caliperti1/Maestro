@@ -14,6 +14,10 @@ Knowledge mode may:
 - issue `web.search` when the request requires current external information;
 - create or update contacts, organizations, calendar events, calendar context windows, todos, and
   think-tank ideas;
+- Treat "task" and "todo" as the same routed object. Todos may include estimated_minutes (5-480),
+  scheduled_start_at, and agent_task. When Chris asks Maestro or an agent to complete the todo in
+  the background, set agent_task=true. Do not set agent_task merely because Maestro created the
+  reminder. Scheduled todos appear on the calendar but remain open until explicitly completed.
 - update or archive an existing durable workflow definition;
 - create recurring calendar events using an RFC 5545 recurrence rule such as FREQ=WEEKLY;BYDAY=MO.
 - create personal context windows on the same calendar when Chris describes household, childcare,

@@ -13,24 +13,26 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agents.runtime import AgentRegistryService
 from app.api.agents import router as agents_router
 from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
 from app.api.scheduler import router as scheduler_router
 from app.api.workflow_outputs import router as workflow_outputs_router
-from app.agents.runtime import AgentRegistryService
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.db.session import SessionLocal
 from app.db.seed import seed_default_domains
-from app.maestro.gmail_trigger import GmailTriggerService, gmail_trigger_worker_settings
+from app.db.session import SessionLocal
 from app.maestro.calendar_trigger import CalendarTriggerService, calendar_trigger_worker_settings
+from app.maestro.gmail_trigger import GmailTriggerService, gmail_trigger_worker_settings
 from app.maestro.identity_grounding import IdentityGroundingService
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
-from app.memory.dropbox import MemoryDropboxProcessor
+from app.maestro.todo_agent_tasks import TodoAgentTaskService
 from app.memory.contact_hydration import ContactHydrationService
 from app.memory.context_mailbox import ContextMailboxService
+from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.hygiene import DurableMemoryHygieneService
+from app.memory.routed_hygiene import RoutedHygieneService
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,8 @@ def create_app() -> FastAPI:
                 asyncio.create_task(_context_mailbox_worker_loop()),
                 asyncio.create_task(_contact_hydration_worker_loop()),
                 asyncio.create_task(_memory_hygiene_worker_loop()),
+                asyncio.create_task(_todo_agent_task_worker_loop()),
+                asyncio.create_task(_routed_hygiene_worker_loop()),
             ]
         )
         try:
@@ -113,6 +117,24 @@ def _process_scheduler_work_once() -> int:
     return int(worker_settings["interval_seconds"])
 
 
+async def _todo_agent_task_worker_loop() -> None:
+    while True:
+        settings = get_settings()
+        await asyncio.sleep(max(10, settings.todo_agent_worker_interval_seconds))
+        try:
+            if settings.todo_agent_worker_autorun:
+                await asyncio.to_thread(_process_todo_agent_tasks_once)
+        except Exception:
+            logger.exception("Todo agent-task worker heartbeat failed.")
+
+
+def _process_todo_agent_tasks_once() -> None:
+    with SessionLocal() as session:
+        TodoAgentTaskService(session).run_once(
+            claim_limit=get_settings().todo_agent_worker_claim_limit
+        )
+
+
 async def _memory_hygiene_worker_loop() -> None:
     while True:
         settings = get_settings()
@@ -128,6 +150,23 @@ async def _memory_hygiene_worker_loop() -> None:
 def _process_memory_hygiene_once() -> None:
     with SessionLocal() as session:
         DurableMemoryHygieneService(session).run()
+
+
+async def _routed_hygiene_worker_loop() -> None:
+    while True:
+        settings = get_settings()
+        await asyncio.sleep(max(300, settings.routed_hygiene_interval_seconds))
+        if not settings.routed_hygiene_autorun:
+            continue
+        try:
+            await asyncio.to_thread(_process_routed_hygiene_once)
+        except Exception:
+            logger.exception("Routed-object hygiene heartbeat failed.")
+
+
+def _process_routed_hygiene_once() -> None:
+    with SessionLocal() as session:
+        RoutedHygieneService(session).run_once()
 
 
 async def _gmail_trigger_worker_loop() -> None:

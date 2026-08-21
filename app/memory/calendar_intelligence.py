@@ -23,6 +23,7 @@ from app.db.models import (
     Entity,
     OrganizationAlias,
     OrganizationIdentifier,
+    Todo,
 )
 
 
@@ -203,6 +204,7 @@ class CalendarIntelligenceService:
             .join(Entity, Entity.id == CalendarEventOrganization.entity_id)
             .where(CalendarEventOrganization.event_id == event.id)
         ).all()
+        todo = self.session.get(Todo, event.todo_id) if event.todo_id else None
         return {
             "id": str(event.id),
             "domain_key": self._domain_key(event.domain_id),
@@ -214,6 +216,9 @@ class CalendarIntelligenceService:
             "all_day": event.all_day,
             "recurrence_rule": event.recurrence_rule,
             "item_kind": event.item_kind,
+            "todo_id": str(event.todo_id) if event.todo_id else None,
+            "todo_status": todo.status if todo else None,
+            "estimated_minutes": todo.estimated_minutes if todo else None,
             "context_type": event.context_type,
             "scheduling_effect": event.scheduling_effect,
             "blocks_time": event.blocks_time,

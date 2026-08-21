@@ -566,6 +566,10 @@ function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string>
       title: item.title ?? "",
       description: item.description ?? "",
       due_at: item.due_at ?? "",
+      estimated_minutes: item.estimated_minutes?.toString() ?? "",
+      scheduled_start_at: calendarInputValue(item.scheduled_start_at),
+      agent_task: item.agent_task ? "true" : "false",
+      agent_task_status: item.agent_task_status ?? "not_agent",
       priority: item.priority ?? "normal",
       status: item.status ?? "open",
       owner_type: item.owner_type ?? "user",
@@ -957,6 +961,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const [showCalendarContext, setShowCalendarContext] = useState(true);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [creatingEvent, setCreatingEvent] = useState(false);
+  const [creatingTodo, setCreatingTodo] = useState(false);
+  const [todoDomainKey, setTodoDomainKey] = useState("personal");
   const [calendarDomainKey, setCalendarDomainKey] = useState("personal");
   const [draftAttendees, setDraftAttendees] = useState<RoutedEvent["attendees"]>([]);
   const [draftOrganizations, setDraftOrganizations] = useState<RoutedEvent["organizations"]>([]);
@@ -986,9 +992,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       }),
     [items, showArchived, showCalendarContext, showDone, supportsDoneFilter, surface],
   );
-  const selectedItem = creatingEvent
+  const selectedItem = creatingEvent || creatingTodo
     ? null
-    : visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0] ?? null;
+    : visibleItems.find((item) => item.id === selectedId) ?? null;
   const calendarItems = useMemo(
     () =>
       visibleItems
@@ -996,6 +1002,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         .map((item) => {
           const color = calendarColors[item.domain_key ?? "global"] ?? calendarColors.global;
           const isContextWindow = item.item_kind === "context_window";
+          const isScheduledTodo = item.item_kind === "scheduled_todo";
           const calendarEvent: EventInput & { extendedProps: { resource: RoutedEvent } } = {
             id: item.id,
             title: item.title,
@@ -1004,9 +1011,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             allDay: item.all_day,
             backgroundColor: item.status === "cancelled"
               ? "#f3f4f6"
-              : isContextWindow ? `${color}24` : color,
+              : isContextWindow ? `${color}24` : isScheduledTodo ? `${color}80` : color,
             borderColor: color,
-            textColor: item.status === "cancelled" || isContextWindow ? "#30363d" : "#ffffff",
+            textColor: item.status === "cancelled" || isContextWindow || isScheduledTodo ? "#20252b" : "#ffffff",
             extendedProps: { resource: item },
           };
           const recurrence = calendarRecurrence(item);
@@ -1038,9 +1045,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     );
     const nextItems = response[config.responseKey] ?? [];
     setItems(nextItems);
-    setSelectedId((current) =>
-      current && nextItems.some((item) => item.id === current) ? current : (nextItems[0]?.id ?? null),
-    );
+    setSelectedId((current) => current && nextItems.some((item) => item.id === current) ? current : null);
     setStatusMessage("Ready");
   }, [config.endpoint, config.responseKey, contactQuery, domainFilter, supportsDomainFilter, surface]);
 
@@ -1051,14 +1056,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   }, [refreshItems, config.title]);
 
   useEffect(() => {
-    if (creatingEvent) return;
+    if (creatingEvent || creatingTodo) return;
     setDraft(routedDraftFor(selectedItem));
     if (selectedItem && "attendees" in selectedItem) {
       setDraftAttendees(selectedItem.attendees);
       setDraftOrganizations(selectedItem.organizations);
       setCalendarDomainKey(selectedItem.domain_key ?? "personal");
     }
-  }, [creatingEvent, selectedItem]);
+  }, [creatingEvent, creatingTodo, selectedItem]);
 
   useEffect(() => {
     if (surface !== "calendar") return;
@@ -1078,7 +1083,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   };
 
   const saveSelected = async () => {
-    if (!selectedItem && !(surface === "calendar" && creatingEvent)) return;
+    if (!selectedItem && !(surface === "calendar" && creatingEvent) && !(surface === "todos" && creatingTodo)) return;
     setBusy(true);
     try {
       const calendarUpdates = surface === "calendar"
@@ -1092,6 +1097,15 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             organizations: draft.item_kind === "context_window" ? [] : draftOrganizations,
           }
         : null;
+      const todoUpdates = surface === "todos"
+        ? {
+            ...draft,
+            due_at: calendarApiValue(draft.due_at ?? ""),
+            scheduled_start_at: calendarApiValue(draft.scheduled_start_at ?? ""),
+            estimated_minutes: draft.estimated_minutes ? Number(draft.estimated_minutes) : null,
+            agent_task: draft.agent_task === "true",
+          }
+        : null;
       const response = await apiJson<{ event?: RoutedEvent }>(
         selectedItem ? `${config.endpoint}/${selectedItem.id}` : config.endpoint,
         {
@@ -1100,7 +1114,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         body: JSON.stringify({
           ...(selectedItem
             ? {
-                updates: calendarUpdates ?? Object.fromEntries(
+                updates: calendarUpdates ?? todoUpdates ?? Object.fromEntries(
                   Object.entries(draft).map(([key, value]) => [
                     key,
                     key === "aliases"
@@ -1109,14 +1123,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   ]),
                 ),
               }
-            : {
-                ...calendarUpdates,
-                domain_key: calendarDomainKey,
-              }),
+            : surface === "calendar"
+              ? { ...calendarUpdates, domain_key: calendarDomainKey }
+              : { ...todoUpdates, domain_key: todoDomainKey }),
         }),
       });
       if (response.event) setSelectedId(response.event.id);
       setCreatingEvent(false);
+      setCreatingTodo(false);
       setStatusMessage(`${config.title} item saved.`);
       await refreshItems();
     } catch (error) {
@@ -1198,6 +1212,23 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     setDraftAttendees([]);
     setDraftOrganizations([]);
     setCalendarDomainKey(domainFilter === "all" ? "personal" : domainFilter);
+  };
+
+  const beginNewTodo = () => {
+    setCreatingTodo(true);
+    setCreatingEvent(false);
+    setSelectedId(null);
+    setTodoDomainKey(domainFilter === "all" ? "personal" : domainFilter);
+    setDraft({
+      title: "",
+      description: "",
+      due_at: "",
+      estimated_minutes: "",
+      scheduled_start_at: "",
+      agent_task: "false",
+      priority: "normal",
+      status: "open",
+    });
   };
 
   const selectCalendarRange = (selection: DateSelectArg) => {
@@ -1332,6 +1363,50 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     }
   };
 
+  const mobileInlineDetail = (item: RoutedObjectRecord) => (
+    <div className="mobile-routed-detail" aria-label={`${routedObjectTitle(item)} details`}>
+      <div className="mobile-routed-detail-heading">
+        <strong>{routedObjectTitle(item)}</strong>
+        <button className="icon-button" type="button" title="Minimize details" onClick={() => setSelectedId(null)}>
+          <X size={16} />
+        </button>
+      </div>
+      {"todo_type" in item && <>
+        <label>Title<input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} /></label>
+        <label>Description<textarea value={draft.description ?? ""} onChange={(event) => updateDraft("description", event.target.value)} /></label>
+        <div className="two-column-fields">
+          <label>Estimate (minutes)<input type="number" min="5" max="480" value={draft.estimated_minutes ?? ""} onChange={(event) => updateDraft("estimated_minutes", event.target.value)} /></label>
+          <label>Scheduled<input type="datetime-local" value={draft.scheduled_start_at ?? ""} onChange={(event) => updateDraft("scheduled_start_at", event.target.value)} /></label>
+        </div>
+        <label className="toggle-row"><input type="checkbox" checked={draft.agent_task === "true"} onChange={(event) => updateDraft("agent_task", event.target.checked ? "true" : "false")} />Agent task</label>
+      </>}
+      {"email" in item && <>
+        <label>Name<input value={draft.name ?? ""} onChange={(event) => updateDraft("name", event.target.value)} /></label>
+        <label>Email<input value={draft.email ?? ""} onChange={(event) => updateDraft("email", event.target.value)} /></label>
+        <label>Phone<input value={draft.phone ?? ""} onChange={(event) => updateDraft("phone", event.target.value)} /></label>
+        <label>Summary<textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} /></label>
+      </>}
+      {"website" in item && !("email" in item) && <>
+        <label>Name<input value={draft.name ?? ""} onChange={(event) => updateDraft("name", event.target.value)} /></label>
+        <label>Website<input value={draft.website ?? ""} onChange={(event) => updateDraft("website", event.target.value)} /></label>
+        <label>Summary<textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} /></label>
+      </>}
+      {"attendees" in item && <>
+        <label>Title<input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} /></label>
+        <div className="two-column-fields">
+          <label>Starts<input type="datetime-local" value={draft.start_at ?? ""} onChange={(event) => updateDraft("start_at", event.target.value)} /></label>
+          <label>Ends<input type="datetime-local" value={draft.end_at ?? ""} onChange={(event) => updateDraft("end_at", event.target.value)} /></label>
+        </div>
+        <label>Summary<textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} /></label>
+      </>}
+      {"content" in item && <label>Idea<textarea value={draft.content ?? ""} onChange={(event) => updateDraft("content", event.target.value)} /></label>}
+      <div className="routed-detail-actions">
+        <button className="planner-action" type="button" onClick={saveSelected} disabled={busy}>Save</button>
+        {(surface === "todos" || surface === "ideas") && item.status !== "done" && <button type="button" onClick={markSelectedDone} disabled={busy}><CheckCircle2 size={16} /> Done</button>}
+      </div>
+    </div>
+  );
+
   return (
     <div className={surface === "calendar" ? "routed-object-workspace calendar-workspace" : "routed-object-workspace"}>
       {(surface === "contacts" || surface === "organizations") && <ContactHydrationPanel surface={surface} />}
@@ -1351,6 +1426,11 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   <Plus size={17} /> New event
                 </button>
               </>
+            )}
+            {surface === "todos" && (
+              <button className="planner-action" type="button" onClick={beginNewTodo}>
+                <Plus size={17} /> New task
+              </button>
             )}
             <button className="icon-button" onClick={refreshItems} title={`Refresh ${config.title}`}>
               <RefreshCw size={18} />
@@ -1488,6 +1568,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     item?.status === "cancelled" ? "calendar-event-cancelled" : "",
                     item?.status === "archived" ? "calendar-event-archived" : "",
                     item?.item_kind === "context_window" ? "calendar-event-context" : "",
+                    item?.item_kind === "scheduled_todo" ? "calendar-event-task" : "",
+                    item?.item_kind === "scheduled_todo" && item.todo_status === "done" ? "calendar-event-task-done" : "",
                     item?.conflicts?.length ? "calendar-event-conflict" : "",
                   ].filter(Boolean);
                 }}
@@ -1499,6 +1581,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 )}
               />
             </CalendarErrorBoundary>
+            {selectedItem && "attendees" in selectedItem && mobileInlineDetail(selectedItem)}
           </div>
         )}
 
@@ -1527,10 +1610,13 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
 
         {surface !== "calendar" && <div className="routed-object-list">
           {visibleItems.map((item) => (
+            <div className="routed-object-mobile-group" key={item.id}>
             <button
               className={item.id === selectedItem?.id ? "routed-object-row active" : "routed-object-row"}
-              key={item.id}
-              onClick={() => setSelectedId(item.id)}
+              onClick={() => {
+                setCreatingTodo(false);
+                setSelectedId((current) => current === item.id ? null : item.id);
+              }}
               type="button"
             >
               {item.status === "done" ? <CheckCircle2 size={18} /> : <Icon size={18} />}
@@ -1545,6 +1631,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 </small>
               </span>
             </button>
+            {item.id === selectedItem?.id && mobileInlineDetail(item)}
+            </div>
           ))}
           {visibleItems.length === 0 && <p className="empty-state">{config.empty}</p>}
         </div>}
@@ -1557,13 +1645,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             <h3 id={`${surface}-detail`}>
               {creatingEvent
                 ? draft.item_kind === "context_window" ? "New context window" : "New event"
+                : creatingTodo ? "New task"
                 : selectedItem ? routedObjectTitle(selectedItem) : config.title}
             </h3>
           </div>
           <Icon size={18} />
         </div>
 
-        {selectedItem || (surface === "calendar" && creatingEvent) ? (
+        {selectedItem || (surface === "calendar" && creatingEvent) || (surface === "todos" && creatingTodo) ? (
           <div className="routed-object-detail">
             {surface === "calendar" && (creatingEvent || (selectedItem && "attendees" in selectedItem)) && (
               <>
@@ -1735,8 +1824,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               </>
             )}
 
-            {selectedItem && "todo_type" in selectedItem && (
+            {(creatingTodo || (selectedItem && "todo_type" in selectedItem)) && (
               <>
+                {creatingTodo && <label>
+                  Domain
+                  <select value={todoDomainKey} onChange={(event) => setTodoDomainKey(event.target.value)}>
+                    {Object.entries(domainLabels).filter(([key]) => key !== "global").map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                  </select>
+                </label>}
                 <label>
                   Title
                   <input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} />
@@ -1748,13 +1843,33 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 <div className="two-column-fields">
                   <label>
                     Due
-                    <input value={draft.due_at ?? ""} onChange={(event) => updateDraft("due_at", event.target.value)} />
+                    <input type="datetime-local" value={calendarInputValue(draft.due_at)} onChange={(event) => updateDraft("due_at", event.target.value)} />
                   </label>
                   <label>
                     Priority
                     <input value={draft.priority ?? ""} onChange={(event) => updateDraft("priority", event.target.value)} />
                   </label>
                 </div>
+                <div className="two-column-fields">
+                  <label>
+                    Time estimate (minutes)
+                    <input type="number" min="5" max="480" step="5" value={draft.estimated_minutes ?? ""} onChange={(event) => updateDraft("estimated_minutes", event.target.value)} placeholder="Maestro will estimate" />
+                  </label>
+                  <label>
+                    Scheduled time
+                    <input type="datetime-local" value={draft.scheduled_start_at ?? ""} onChange={(event) => updateDraft("scheduled_start_at", event.target.value)} />
+                  </label>
+                </div>
+                <label className="toggle-row">
+                  <input type="checkbox" checked={draft.agent_task === "true"} onChange={(event) => updateDraft("agent_task", event.target.checked ? "true" : "false")} />
+                  Assign to Maestro agents in the background
+                </label>
+                {selectedItem && "todo_type" in selectedItem && selectedItem.agent_task && (
+                  <div className="preview-meta">
+                    <span>Agent task: {selectedItem.agent_task_status.replace(/_/g, " ")}</span>
+                    {selectedItem.agent_task_error && <span>{selectedItem.agent_task_error}</span>}
+                  </div>
+                )}
                 <div className="two-column-fields">
                   <label>
                     Owner type

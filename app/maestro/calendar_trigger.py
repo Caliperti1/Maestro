@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -10,10 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Domain, RuntimeSetting, ToolConnection, WorkflowDefinition
+from app.db.models import CalendarEvent, Domain, RuntimeSetting, ToolConnection, WorkflowDefinition
 from app.maestro.scheduler import SchedulerService
 from app.tools.runtime import ToolExecutionError, _gmail_access_token, _google_api_json
-
 
 CALENDAR_TRIGGER_EVENT_TYPE = "google.calendar.event.changed"
 CALENDAR_TRIGGER_SETTING_KEY = "calendar_trigger_worker"
@@ -215,10 +214,14 @@ class CalendarTriggerService:
                 raise CalendarTriggerError("Calendar polling exceeded 100 pages in one cycle.")
 
         emitted: list[dict[str, Any]] = []
+        skipped_past = 0
         calendar_id = str((connection.config or {}).get("calendar_id") or "primary")
         for event in events:
             event_id = str(event.get("id") or "").strip()
             if not event_id:
+                continue
+            if self._is_past_event(domain, calendar_id, event_id, event):
+                skipped_past += 1
                 continue
             version = str(event.get("etag") or event.get("updated") or "unknown").strip()
             event_payload = {
@@ -256,6 +259,7 @@ class CalendarTriggerService:
             "last_emitted_at": now if emitted else payload.get("last_emitted_at"),
             "last_event_id": emitted[-1]["event_id"] if emitted else payload.get("last_event_id"),
             "last_emitted_count": len(emitted),
+            "last_skipped_past_count": skipped_past,
             "last_error": None,
             "error_count": 0,
         })
@@ -264,9 +268,34 @@ class CalendarTriggerService:
             "status": "healthy",
             "seen_count": len(events),
             "emitted_count": len(emitted),
+            "skipped_past_count": skipped_past,
             "page_count": page_count,
             "emitted": emitted,
         }
+
+    def _is_past_event(
+        self,
+        domain: Domain,
+        calendar_id: str,
+        event_id: str,
+        event: dict[str, Any],
+    ) -> bool:
+        end_at = _google_event_datetime(event.get("end")) or _google_event_datetime(event.get("start"))
+        if end_at is None:
+            existing = self.session.scalar(
+                select(CalendarEvent).where(
+                    CalendarEvent.domain_id == domain.id,
+                    CalendarEvent.external_provider == "google_calendar",
+                    CalendarEvent.external_calendar_id == calendar_id,
+                    CalendarEvent.external_event_id == event_id,
+                )
+            )
+            end_at = existing.end_at or existing.start_at if existing else None
+        if end_at is None:
+            return False
+        if end_at.tzinfo is None:
+            end_at = end_at.replace(tzinfo=UTC)
+        return end_at.astimezone(UTC) < datetime.now(UTC)
 
     def _bootstrap_domain(self, domain: Domain, *, status: str, reason: str | None = None) -> dict[str, Any]:
         connection = self._connection_for(domain)
@@ -371,3 +400,21 @@ class CalendarTriggerService:
             self.session.add(setting)
         setting.value = payload
         self.session.commit()
+
+
+def _google_event_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, dict):
+        return None
+    raw = str(value.get("dateTime") or "").strip()
+    if raw:
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    raw_date = str(value.get("date") or "").strip()
+    if raw_date:
+        try:
+            return datetime.combine(date.fromisoformat(raw_date), time.min, tzinfo=UTC)
+        except ValueError:
+            return None
+    return None

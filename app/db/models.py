@@ -406,6 +406,9 @@ class CalendarEvent(TimestampMixin, Base):
     domain_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
     )
+    todo_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("todos.id", ondelete="CASCADE"), unique=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
     summary: Mapped[str | None] = mapped_column(Text)
     start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -841,6 +844,20 @@ class Todo(TimestampMixin, Base):
     owner_type: Mapped[str] = mapped_column(String(80), default="user", nullable=False)
     owner_ref: Mapped[str | None] = mapped_column(String(240))
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    estimated_minutes: Mapped[int | None] = mapped_column(Integer)
+    scheduled_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    agent_task: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    agent_task_status: Mapped[str] = mapped_column(
+        String(40), default="not_agent", nullable=False, index=True
+    )
+    workflow_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("tasks.id", ondelete="SET NULL"), index=True
+    )
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("workflow_runs.id", ondelete="SET NULL"), index=True
+    )
+    last_agent_task_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    agent_task_error: Mapped[str | None] = mapped_column(Text)
     priority: Mapped[str] = mapped_column(String(40), default="normal", nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="open", nullable=False, index=True)
     source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)

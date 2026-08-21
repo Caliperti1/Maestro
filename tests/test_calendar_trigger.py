@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -127,4 +128,41 @@ def test_calendar_trigger_resets_expired_token_without_emitting(session: Session
 
     assert result["emitted_count"] == 0
     assert result["domains"][0]["status"] == "token_reset"
+    assert session.scalars(select(WorkflowRun)).all() == []
+
+
+def test_calendar_trigger_skips_historical_changes(session: Session) -> None:
+    _seed_calendar_trigger(session)
+    source = FakeCalendarChangeSource()
+    service = CalendarTriggerService(session, source=source)
+    service.poll_once()
+    past = datetime.now(UTC) - timedelta(days=2)
+    original = source.changes_page
+
+    def past_page(connection, *, sync_token, page_token, page_size, bootstrap_at=None):
+        if sync_token is None:
+            return original(
+                connection,
+                sync_token=sync_token,
+                page_token=page_token,
+                page_size=page_size,
+                bootstrap_at=bootstrap_at,
+            )
+        return {
+            "items": [{
+                "id": "past-event",
+                "etag": "past-v1",
+                "status": "confirmed",
+                "summary": "Past meeting",
+                "start": {"dateTime": past.isoformat()},
+                "end": {"dateTime": (past + timedelta(minutes=30)).isoformat()},
+            }],
+            "nextSyncToken": "sync-past",
+        }
+
+    source.changes_page = past_page
+    result = service.poll_once()
+
+    assert result["emitted_count"] == 0
+    assert result["domains"][0]["skipped_past_count"] == 1
     assert session.scalars(select(WorkflowRun)).all() == []

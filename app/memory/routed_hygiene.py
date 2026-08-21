@@ -451,6 +451,21 @@ class RoutedHygieneService:
                 continue
             self.merge_entities(survivor, entity, commit=False)
             merged += 1
+        by_legal_name: dict[str, Entity] = {}
+        for entity in self.session.scalars(
+            select(Entity).where(Entity.status != "archived").order_by(Entity.created_at)
+        ):
+            key = _organization_merge_name(entity.name)
+            if not key:
+                continue
+            survivor = by_legal_name.get(key)
+            if survivor is None:
+                by_legal_name[key] = entity
+                continue
+            if survivor.id == entity.id or entity.status == "archived":
+                continue
+            self.merge_entities(survivor, entity, commit=False)
+            merged += 1
         return merged
 
     def _merge_duplicate_contacts(self) -> int:
@@ -468,19 +483,33 @@ class RoutedHygieneService:
                 item.created_at or datetime.now(UTC),
             ),
         ):
-            # Names are discovery signals, not safe merge keys. Keep name-only duplicates in the
-            # review suggestions below and auto-merge only exact durable identifiers.
-            email_identity = _contact_email_identity(contact)
-            keys = [f"email:{email_identity}"] if email_identity else []
+            email_identities = _contact_email_identities(contact)
+            normalized_name = _normalize(contact.name)
+            derived_name = _normalize(_name_from_contact_email(contact))
+            keys = [*(f"email:{value}" for value in email_identities)]
+            for name in (normalized_name, derived_name):
+                if name and len(name.split()) >= 2 and "@" not in name:
+                    keys.append(f"name:{name}")
             if not keys:
                 continue
-            survivor = next((by_key[key] for key in keys if key in by_key), None)
+            matched_key = next((key for key in keys if key in by_key), None)
+            survivor = by_key.get(matched_key) if matched_key else None
             if survivor is None:
                 for key in keys:
                     by_key.setdefault(key, contact)
                 continue
+            if matched_key.startswith("name:"):
+                survivor_emails = set(_contact_email_identities(survivor))
+                contact_emails = set(email_identities)
+                if survivor_emails and contact_emails and survivor_emails.isdisjoint(contact_emails):
+                    for key in keys:
+                        if key.startswith("email:"):
+                            by_key.setdefault(key, contact)
+                    continue
             self._merge_contact(survivor, contact)
             merged += 1
+            for key in keys:
+                by_key[key] = survivor
         return merged
 
     def _merge_duplicate_events(self) -> int:
@@ -520,6 +549,17 @@ class RoutedHygieneService:
         survivor.summary = _append_note(survivor.summary, duplicate.summary or "")
         survivor.source_refs = _merge_source_refs(survivor.source_refs, duplicate.source_refs)
         survivor.metadata_ = _merge_metadata(survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id)
+        alternate_emails = {
+            *(survivor.metadata_ or {}).get("alternate_emails", []),
+            *_contact_email_identities(survivor),
+            *_contact_email_identities(duplicate),
+        }
+        survivor.metadata_ = {
+            **(survivor.metadata_ or {}),
+            "alternate_emails": sorted(
+                value for value in alternate_emails if value and value != (survivor.email or "").lower()
+            ),
+        }
         survivor.phone = survivor.phone or duplicate.phone
         survivor.email = survivor.email or duplicate.email
         survivor.linkedin = survivor.linkedin or duplicate.linkedin
@@ -901,6 +941,17 @@ def _normalize(value: str | None) -> str:
 
     normalized = re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
     return re.sub(r"\s+", " ", normalized)
+
+
+def _organization_merge_name(value: str | None) -> str:
+    parts = _normalize(value).split()
+    suffixes = {
+        "co", "company", "corp", "corporation", "inc", "incorporated", "llc", "llp",
+        "limited", "ltd", "pllc", "the",
+    }
+    while parts and parts[-1] in suffixes:
+        parts.pop()
+    return " ".join(parts)
 
 
 def _name_from_contact_email(contact: Contact) -> str | None:
