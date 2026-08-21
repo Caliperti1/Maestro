@@ -356,6 +356,9 @@ class AgentRegistryService:
                     )
                 )
                 if existing is not None:
+                    if domain_key == "perti-laboratories" and existing.display_name.startswith("Ophi"):
+                        existing.display_name = display_name
+                    existing.config = {**config, **(existing.config or {})}
                     continue
                 self.session.add(
                     ToolConnection(
@@ -1640,6 +1643,11 @@ class PromptAggregationService:
                     user_context=package.user_context,
                     allowed_tool_keys={tool.key for tool in package.tool_manifest},
                 )
+                requested = _harden_calendar_tool_plan(
+                    requested,
+                    prior_results,
+                    user_context=package.user_context,
+                )
                 fallback_reason = ""
                 if not requested and _should_try_deterministic_tool_fallback(package, prior_results):
                     requested = _deterministic_tool_plan(
@@ -2366,6 +2374,33 @@ def _triggered_gmail_message_id(user_context: str | None) -> str | None:
     return message_id or None
 
 
+def _harden_calendar_tool_plan(
+    requested_tools: list[dict[str, Any]],
+    prior_results: list[dict[str, Any]],
+    *,
+    user_context: str | None,
+) -> list[dict[str, Any]]:
+    if not user_context or "google.calendar.event.changed" not in user_context:
+        return requested_tools
+    json_start = user_context.find("{")
+    if json_start < 0:
+        return requested_tools
+    try:
+        context = json.loads(user_context[json_start:])
+    except json.JSONDecodeError:
+        return requested_tools
+    event = context.get("event") if isinstance(context, dict) else None
+    if not isinstance(event, dict) or event.get("event_type") != "google.calendar.event.changed":
+        return requested_tools
+    workflow = context.get("workflow") if isinstance(context.get("workflow"), dict) else {}
+    already_synced = _has_tool_result(prior_results, "routed.item.create")
+    if workflow.get("shadow_mode") is True or already_synced:
+        return [
+            item for item in requested_tools if item.get("tool_key") != "routed.item.create"
+        ]
+    return requested_tools
+
+
 def _normalize_email_action_requests(
     requested_tools: list[dict[str, Any]],
     prior_results: list[dict[str, Any]],
@@ -2401,7 +2436,7 @@ def _normalize_email_action_requests(
             ).lower()
             if not any(
                 token and token.lower() in identity_text
-                for token in (settings.user_full_name, settings.user_email)
+                for token in (settings.user_full_name, *settings.user_emails)
             ):
                 continue
         normalized.append(item)
@@ -2410,7 +2445,7 @@ def _normalize_email_action_requests(
 
 def _latest_email_recipient_context(prior_results: list[dict[str, Any]]) -> dict[str, bool]:
     settings = get_settings()
-    user_email = settings.user_email.strip().lower()
+    user_emails = settings.user_emails
     for result in reversed(prior_results):
         if not isinstance(result, dict) or result.get("tool_name") != "gmail.message.get":
             continue
@@ -2420,9 +2455,11 @@ def _latest_email_recipient_context(prior_results: list[dict[str, Any]]) -> dict
         to_text = str(output.get("to") or "").lower()
         cc_text = str(output.get("cc") or "").lower()
         return {
-            "user_direct": bool(user_email and user_email in to_text),
-            "user_copied": bool(user_email and user_email in cc_text),
-            "competing_chris": bool("chris" in to_text and user_email not in to_text),
+            "user_direct": any(email in to_text for email in user_emails),
+            "user_copied": any(email in cc_text for email in user_emails),
+            "competing_chris": bool(
+                "chris" in to_text and not any(email in to_text for email in user_emails)
+            ),
         }
     return {"user_direct": False, "user_copied": False, "competing_chris": False}
 
@@ -2436,7 +2473,7 @@ def _email_task_owner_is_current_user(owner: Any, *, competing_chris: bool) -> b
         "me",
         "user",
         settings.user_full_name.strip().lower(),
-        settings.user_email.strip().lower(),
+        *settings.user_emails,
     }
     if normalized in explicit_user_tokens:
         return True
@@ -4222,6 +4259,30 @@ def _connected_domain_tool_permissions(domain_name: str) -> dict[str, Any]:
     return permissions
 
 
+def _monitor_tool_permissions(
+    domain_name: str,
+    tool_keys: tuple[str, ...],
+) -> dict[str, Any]:
+    available = _connected_domain_tool_permissions(domain_name)
+    return {key: available[key] for key in tool_keys if key in available}
+
+
+_EMAIL_MONITOR_TOOL_KEYS = (
+    "memory.context_bundle", "reports.search", "reports.get", "artifact.stage_interaction",
+    "llm.gateway", "gmail.message.search", "gmail.message.list_recent", "gmail.message.get",
+    "gmail.thread.get", "gmail.message.modify", "google.drive.file.get",
+    "google.drive.folder.list", "google.drive.file.export", "google.docs.get",
+    "google.slides.get", "google.sheets.get", "google.sheets.values.get",
+    "routed.item.create", "workflow.notification.create",
+)
+
+_CALENDAR_MONITOR_TOOL_KEYS = (
+    "memory.context_bundle", "reports.search", "reports.get", "artifact.stage_interaction",
+    "llm.gateway", "google.calendar.events.list", "google.calendar.event.get",
+    "routed.item.create",
+)
+
+
 _SEED_AGENTS = [
     {
         "domain_key": "personal",
@@ -4252,6 +4313,56 @@ _SEED_AGENTS = [
         "skill_permissions": {
             "email_triage": {"permission": "use"}, "contact_manager": {"permission": "use"},
             "to_do_manager": {"permission": "use"}, "calendar_manager": {"permission": "use"},
+            "organization_manager": {"permission": "use"},
+        },
+    },
+    {
+        "domain_key": "perti-laboratories",
+        "key": "perti-email-agent",
+        "name": "Perti Email Agent",
+        "agent_type": "domain_agent",
+        "role_summary": "Triages Perti Laboratories Gmail and maintains grounded operational context.",
+        "role_prompt": load_prompt("agents/perti_email_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "tool_permissions": _monitor_tool_permissions("Perti Laboratories", _EMAIL_MONITOR_TOOL_KEYS),
+        "skill_permissions": {
+            "email_triage": {"permission": "use"},
+            "contact_manager": {"permission": "use"},
+            "to_do_manager": {"permission": "use"},
+            "calendar_manager": {"permission": "use"},
+            "organization_manager": {"permission": "use"},
+        },
+    },
+    {
+        "domain_key": "perti-laboratories",
+        "key": "perti-calendar-agent",
+        "name": "Perti Calendar Agent",
+        "agent_type": "domain_agent",
+        "role_summary": "Keeps Perti calendar events, attendees, and organization links current.",
+        "role_prompt": load_prompt("agents/perti_calendar_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "tool_permissions": _monitor_tool_permissions("Perti Laboratories", _CALENDAR_MONITOR_TOOL_KEYS),
+        "skill_permissions": {
+            "calendar_manager": {"permission": "use"},
+            "contact_manager": {"permission": "use"},
+            "organization_manager": {"permission": "use"},
+        },
+    },
+    {
+        "domain_key": "praxis",
+        "key": "praxis-calendar-agent",
+        "name": "Praxis Calendar Agent",
+        "agent_type": "domain_agent",
+        "role_summary": "Keeps Praxis calendar events and relationship links current from the authoritative calendar source.",
+        "role_prompt": load_prompt("agents/praxis_calendar_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "tool_permissions": _monitor_tool_permissions("Praxis", _CALENDAR_MONITOR_TOOL_KEYS),
+        "skill_permissions": {
+            "calendar_manager": {"permission": "use"},
+            "contact_manager": {"permission": "use"},
             "organization_manager": {"permission": "use"},
         },
     },

@@ -198,6 +198,11 @@ class SchedulerService:
                 and trigger_config.get("gmail_watch_enabled") is False
             ):
                 continue
+            if (
+                event_type == "google.calendar.event.changed"
+                and trigger_config.get("calendar_watch_enabled") is False
+            ):
+                continue
             if not self._event_matches_filters(event_payload, trigger_config.get("filters") or {}):
                 continue
             suffix = event_id or str(event_payload.get("id") or uuid.uuid4())

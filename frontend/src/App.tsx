@@ -89,6 +89,7 @@ import type {
   SchedulerRun,
   SchedulerWorkerAgentRun,
   SchedulerWorkerStatus,
+  CalendarTriggerStatus,
   WorkflowTemplate,
   SkillRegistryItem,
   ToolConnection,
@@ -2363,6 +2364,7 @@ export function App() {
   const [schedulerWorkerStatus, setSchedulerWorkerStatus] =
     useState<SchedulerWorkerStatus | null>(null);
   const [gmailTriggerStatus, setGmailTriggerStatus] = useState<GmailTriggerStatus | null>(null);
+  const [calendarTriggerStatus, setCalendarTriggerStatus] = useState<CalendarTriggerStatus | null>(null);
   const [workflowTemplates, setWorkflowTemplates] = useState<WorkflowTemplate[]>([]);
 
   const maestroPlanStages = useMemo(() => {
@@ -2615,7 +2617,7 @@ export function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ is_active: false }),
     });
-    setSchedulerStatusMessage("Praxis Email Triage was installed paused for review.");
+    setSchedulerStatusMessage("Durable workflow was installed paused for review.");
     await loadSchedulerDashboard();
   };
 
@@ -2680,6 +2682,11 @@ export function App() {
     setGmailTriggerStatus(response);
   }, []);
 
+  const loadCalendarTriggerStatus = useCallback(async () => {
+    const response = await apiJson<CalendarTriggerStatus>("/scheduler/triggers/calendar/status");
+    setCalendarTriggerStatus(response);
+  }, []);
+
   const updateDefinitionGmailWatch = async (definitionId: string, enabled: boolean) => {
     const response = await apiJson<{ worker: GmailTriggerStatus["worker"]; status: GmailTriggerStatus }>(
       `/scheduler/definitions/${definitionId}/gmail-watch`,
@@ -2694,6 +2701,24 @@ export function App() {
       response.worker.enabled
         ? "This workflow is watching Gmail for new eligible messages."
         : "This workflow's Gmail watch is off.",
+    );
+    await loadSchedulerDashboard();
+  };
+
+  const updateDefinitionCalendarWatch = async (definitionId: string, enabled: boolean) => {
+    const response = await apiJson<{ worker: CalendarTriggerStatus["worker"]; status: CalendarTriggerStatus }>(
+      `/scheduler/definitions/${definitionId}/calendar-watch`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      },
+    );
+    setCalendarTriggerStatus(response.status);
+    setSchedulerStatusMessage(
+      response.worker.enabled
+        ? "This workflow is watching Google Calendar for changes."
+        : "This workflow's Calendar watch is off.",
     );
     await loadSchedulerDashboard();
   };
@@ -2722,6 +2747,18 @@ export function App() {
     await apiJson(`/scheduler/triggers/gmail/domains/${domainKey}/reset`, { method: "POST" });
     await loadGmailTriggerStatus();
     setSchedulerStatusMessage(`Reset ${domainKey} Gmail monitoring at the current inbox cursor.`);
+  };
+
+  const pollCalendarTriggers = async () => {
+    await apiJson("/scheduler/triggers/calendar/poll", { method: "POST" });
+    await Promise.all([loadCalendarTriggerStatus(), loadSchedulerDashboard()]);
+    setSchedulerStatusMessage("Calendar trigger poll completed.");
+  };
+
+  const resetCalendarTriggerDomain = async (domainKey: string) => {
+    await apiJson(`/scheduler/triggers/calendar/domains/${domainKey}/reset`, { method: "POST" });
+    await loadCalendarTriggerStatus();
+    setSchedulerStatusMessage(`Reset ${domainKey} Calendar monitoring at the current change cursor.`);
   };
 
   const replaySchedulerRun = async (runId: string) => {
@@ -2941,12 +2978,14 @@ export function App() {
     loadSchedulerDashboard().catch(() => undefined);
     loadSchedulerWorkerStatus().catch(() => undefined);
     loadGmailTriggerStatus().catch(() => undefined);
+    loadCalendarTriggerStatus().catch(() => undefined);
     loadWorkflowOutputs().catch(() => undefined);
   }, [
     loadActiveSession,
     loadSchedulerDashboard,
     loadSchedulerWorkerStatus,
     loadGmailTriggerStatus,
+    loadCalendarTriggerStatus,
     loadSessionHistory,
     loadWorkflowOutputs,
   ]);
@@ -2956,10 +2995,11 @@ export function App() {
       loadSchedulerDashboard().catch(() => undefined);
       loadSchedulerWorkerStatus().catch(() => undefined);
       loadGmailTriggerStatus().catch(() => undefined);
+      loadCalendarTriggerStatus().catch(() => undefined);
       loadWorkflowOutputs().catch(() => undefined);
     }, 3000);
     return () => window.clearInterval(interval);
-  }, [loadGmailTriggerStatus, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
+  }, [loadCalendarTriggerStatus, loadGmailTriggerStatus, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
 
   useEffect(() => {
     let closed = false;
@@ -3729,6 +3769,7 @@ export function App() {
             schedulerDashboard={schedulerDashboard}
             schedulerWorkerStatus={schedulerWorkerStatus}
             gmailTriggerStatus={gmailTriggerStatus}
+            calendarTriggerStatus={calendarTriggerStatus}
             workflowTemplates={workflowTemplates}
             selectedSchedulerRun={selectedSchedulerRun}
             selectedSchedulerDefinition={selectedSchedulerDefinition}
@@ -3738,6 +3779,7 @@ export function App() {
             onRefresh={async () => {
               await loadSchedulerDashboard();
               await loadGmailTriggerStatus();
+              await loadCalendarTriggerStatus();
               await loadWorkflowOutputs();
             }}
             onSelectRun={selectSchedulerRun}
@@ -3748,10 +3790,13 @@ export function App() {
             onApproveToolCall={approveToolCall}
             onRejectToolCall={rejectToolCall}
             onToggleDefinitionGmailWatch={updateDefinitionGmailWatch}
+            onToggleDefinitionCalendarWatch={updateDefinitionCalendarWatch}
             onToggleDefinitionShadowMode={updateDefinitionShadowMode}
             onToggleSchedulerWorker={(enabled) => updateSchedulerWorkerStatus({ enabled })}
             onPollGmailTriggers={pollGmailTriggers}
+            onPollCalendarTriggers={pollCalendarTriggers}
             onResetGmailDomain={resetGmailTriggerDomain}
+            onResetCalendarDomain={resetCalendarTriggerDomain}
             onInstallTemplate={installWorkflowTemplate}
             onToggleDefinition={updateWorkflowDefinitionActivation}
           />
@@ -4515,6 +4560,7 @@ function WorkflowsWorkspace({
   schedulerDashboard,
   schedulerWorkerStatus,
   gmailTriggerStatus,
+  calendarTriggerStatus,
   workflowTemplates,
   selectedSchedulerRun,
   selectedSchedulerDefinition,
@@ -4530,16 +4576,20 @@ function WorkflowsWorkspace({
   onApproveToolCall,
   onRejectToolCall,
   onToggleDefinitionGmailWatch,
+  onToggleDefinitionCalendarWatch,
   onToggleDefinitionShadowMode,
   onToggleSchedulerWorker,
   onPollGmailTriggers,
+  onPollCalendarTriggers,
   onResetGmailDomain,
+  onResetCalendarDomain,
   onInstallTemplate,
   onToggleDefinition,
 }: {
   schedulerDashboard: SchedulerDashboard | null;
   schedulerWorkerStatus: SchedulerWorkerStatus | null;
   gmailTriggerStatus: GmailTriggerStatus | null;
+  calendarTriggerStatus: CalendarTriggerStatus | null;
   workflowTemplates: WorkflowTemplate[];
   selectedSchedulerRun: SchedulerRun | null;
   selectedSchedulerDefinition: SchedulerDefinition | null;
@@ -4555,10 +4605,13 @@ function WorkflowsWorkspace({
   onApproveToolCall: (toolCallId: string) => Promise<void>;
   onRejectToolCall: (toolCallId: string) => Promise<void>;
   onToggleDefinitionGmailWatch: (definitionId: string, enabled: boolean) => Promise<void>;
+  onToggleDefinitionCalendarWatch: (definitionId: string, enabled: boolean) => Promise<void>;
   onToggleDefinitionShadowMode: (definitionId: string, enabled: boolean) => Promise<void>;
   onToggleSchedulerWorker: (enabled: boolean) => Promise<void>;
   onPollGmailTriggers: () => Promise<void>;
+  onPollCalendarTriggers: () => Promise<void>;
   onResetGmailDomain: (domainKey: string) => Promise<void>;
+  onResetCalendarDomain: (domainKey: string) => Promise<void>;
   onInstallTemplate: (templateKey: string) => Promise<void>;
   onToggleDefinition: (definitionId: string, isActive: boolean) => Promise<void>;
 }) {
@@ -4705,6 +4758,8 @@ function WorkflowsWorkspace({
             );
             const isGmailTrigger =
               definition.trigger_config.event_type === "gmail.message.received";
+            const isCalendarTrigger =
+              definition.trigger_config.event_type === "google.calendar.event.changed";
             const configuredWatch = definition.trigger_config.gmail_watch_enabled;
             const gmailWatchEnabled =
               configuredWatch === true
@@ -4713,6 +4768,11 @@ function WorkflowsWorkspace({
             const gmailDomainStatus = gmailTriggerStatus?.domains.find(
               (domain) => domain.domain_key === definition.domain_key,
             );
+            const calendarWatchEnabled = definition.trigger_config.calendar_watch_enabled === true;
+            const calendarDomainStatus = calendarTriggerStatus?.domains.find(
+              (domain) => domain.domain_key === definition.domain_key,
+            );
+            const triggerDomainStatus = isCalendarTrigger ? calendarDomainStatus : gmailDomainStatus;
             return (
               <article
                 className="workflow-summary-card compact-run-card durable-workflow-card"
@@ -4729,17 +4789,17 @@ function WorkflowsWorkspace({
                   {template && (
                     <span>{template.readiness.ready ? "prerequisites ready" : template.readiness.missing.join("; ")}</span>
                   )}
-                  {gmailDomainStatus?.last_polled_at && (
-                    <span>polled {formatDateTime(gmailDomainStatus.last_polled_at)}</span>
+                  {triggerDomainStatus?.last_polled_at && (
+                    <span>polled {formatDateTime(triggerDomainStatus.last_polled_at)}</span>
                   )}
-                  {gmailDomainStatus?.status === "error" && gmailDomainStatus.last_error && (
+                  {triggerDomainStatus?.status === "error" && triggerDomainStatus.last_error && (
                     <span className="warning-pill">Last poll failed</span>
                   )}
                 </div>
-                {gmailDomainStatus?.status === "error" && gmailDomainStatus.last_error && (
+                {triggerDomainStatus?.status === "error" && triggerDomainStatus.last_error && (
                   <details className="inline-error-details">
-                    <summary>Gmail watcher diagnostic</summary>
-                    <p>{gmailDomainStatus.last_error}</p>
+                    <summary>{isCalendarTrigger ? "Calendar" : "Gmail"} watcher diagnostic</summary>
+                    <p>{triggerDomainStatus.last_error}</p>
                   </details>
                 )}
                 <div className="scheduler-action-row compact-actions">
@@ -4766,7 +4826,21 @@ function WorkflowsWorkspace({
                       />
                     </label>
                   )}
-                  {isGmailTrigger && (
+                  {isCalendarTrigger && (
+                    <label className="worker-toggle">
+                      Calendar watch
+                      <input
+                        type="checkbox"
+                        checked={calendarWatchEnabled}
+                        disabled={!definition.is_active}
+                        onChange={(event) => onToggleDefinitionCalendarWatch(
+                          definition.id,
+                          event.target.checked,
+                        )}
+                      />
+                    </label>
+                  )}
+                  {(isGmailTrigger || isCalendarTrigger) && (
                     <label className="worker-toggle">
                       Shadow mode
                       <input
@@ -4792,6 +4866,21 @@ function WorkflowsWorkspace({
                   {isGmailTrigger && gmailDomainStatus && (
                     <button type="button" onClick={() => onResetGmailDomain(gmailDomainStatus.domain_key)}>
                       Reset account cursor
+                    </button>
+                  )}
+                  {isCalendarTrigger && calendarWatchEnabled && (
+                    <button
+                      className="icon-button"
+                      onClick={onPollCalendarTriggers}
+                      title="Poll this Google Calendar now"
+                      type="button"
+                    >
+                      <CalendarDays size={18} />
+                    </button>
+                  )}
+                  {isCalendarTrigger && calendarDomainStatus && (
+                    <button type="button" onClick={() => onResetCalendarDomain(calendarDomainStatus.domain_key)}>
+                      Reset calendar cursor
                     </button>
                   )}
                 </div>

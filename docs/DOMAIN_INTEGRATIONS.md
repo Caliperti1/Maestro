@@ -45,3 +45,6 @@ backend after `.env` changes.
 4. Confirm both reads run without approval and the Run Log shows the expected domain connection.
 5. Ask either agent to create a disposable calendar event or GitHub issue; confirm Maestro pauses
    for approval before the external write.
+
+For autonomous domain email and calendar monitoring, continue with
+[DOMAIN_MONITORS.md](DOMAIN_MONITORS.md).

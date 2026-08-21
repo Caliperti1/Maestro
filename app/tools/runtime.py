@@ -2213,7 +2213,7 @@ class RoutedItemCreateToolAdapter:
         source_refs: list[dict[str, Any]],
     ) -> RoutedItem | None:
         source_ids = {
-            str(ref.get("message_id") or ref.get("source_message_id") or "").strip()
+            _routed_source_identity(ref)
             for ref in source_refs
             if isinstance(ref, dict)
         } - {""}
@@ -2231,13 +2231,25 @@ class RoutedItemCreateToolAdapter:
             if " ".join(candidate.title.lower().split()) != normalized_title:
                 continue
             candidate_source_ids = {
-                str(ref.get("message_id") or ref.get("source_message_id") or "").strip()
+                _routed_source_identity(ref)
                 for ref in candidate.source_refs or []
                 if isinstance(ref, dict)
             } - {""}
             if source_ids & candidate_source_ids:
                 return candidate
         return None
+
+
+def _routed_source_identity(ref: dict[str, Any]) -> str:
+    message_id = str(ref.get("message_id") or ref.get("source_message_id") or "").strip()
+    if message_id:
+        return f"gmail:{message_id}"
+    event_id = str(ref.get("event_id") or "").strip()
+    if event_id:
+        calendar_id = str(ref.get("calendar_id") or "primary").strip()
+        version = str(ref.get("event_version") or ref.get("etag") or "").strip()
+        return f"calendar:{calendar_id}:{event_id}:{version}"
+    return ""
 
 
 class WorkflowNotificationCreateToolAdapter:

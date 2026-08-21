@@ -14,6 +14,12 @@ from app.maestro.gmail_trigger import (
     sync_gmail_trigger_worker_settings,
     update_gmail_trigger_worker_settings,
 )
+from app.maestro.calendar_trigger import (
+    CalendarTriggerError,
+    CalendarTriggerService,
+    sync_calendar_trigger_worker_settings,
+    update_calendar_trigger_worker_settings,
+)
 from app.maestro.scheduler import SchedulerService
 from app.maestro.scheduler_worker import (
     SchedulerWorkerService,
@@ -97,6 +103,12 @@ class GmailTriggerWorkerSettingsBody(BaseModel):
     page_size: int | None = Field(default=None, ge=1, le=500)
 
 
+class CalendarTriggerWorkerSettingsBody(BaseModel):
+    enabled: bool | None = None
+    interval_seconds: int | None = Field(default=None, ge=10, le=3600)
+    page_size: int | None = Field(default=None, ge=1, le=2500)
+
+
 class WorkflowTemplateInstallBody(BaseModel):
     is_active: bool = False
 
@@ -106,6 +118,10 @@ class WorkflowDefinitionActivationBody(BaseModel):
 
 
 class WorkflowDefinitionGmailWatchBody(BaseModel):
+    enabled: bool
+
+
+class WorkflowDefinitionCalendarWatchBody(BaseModel):
     enabled: bool
 
 
@@ -232,11 +248,9 @@ def activate_workflow_definition(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "definition": SchedulerService(db).workflow_definition_payload(definition),
-        "template": (
-            template_service.template_payload(definition.key)
-            if definition.key == "praxis-email-triage"
-            else None
-        ),
+        "template": template_service.template_payload(definition.key)
+        if template_service.is_template(definition.key)
+        else None,
     }
 
 
@@ -272,6 +286,35 @@ def update_workflow_definition_gmail_watch(
     }
 
 
+@router.patch("/definitions/{definition_id}/calendar-watch")
+def update_workflow_definition_calendar_watch(
+    definition_id: uuid.UUID,
+    body: WorkflowDefinitionCalendarWatchBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    definition = db.get(WorkflowDefinition, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow definition.")
+    trigger_config = dict(definition.trigger_config or {})
+    if (
+        definition.trigger_type != "event"
+        or trigger_config.get("event_type") != "google.calendar.event.changed"
+    ):
+        raise HTTPException(status_code=400, detail="Workflow is not triggered by Google Calendar.")
+    if body.enabled and not definition.is_active:
+        raise HTTPException(status_code=409, detail="Activate the workflow before enabling its Calendar watch.")
+    trigger_config["calendar_watch_enabled"] = body.enabled
+    definition.trigger_config = trigger_config
+    db.commit()
+    db.refresh(definition)
+    worker = sync_calendar_trigger_worker_settings(db)
+    return {
+        "definition": SchedulerService(db).workflow_definition_payload(definition),
+        "worker": worker,
+        "status": CalendarTriggerService(db).status(),
+    }
+
+
 @router.patch("/definitions/{definition_id}/shadow-mode")
 def update_workflow_definition_shadow_mode(
     definition_id: uuid.UUID,
@@ -282,13 +325,13 @@ def update_workflow_definition_shadow_mode(
     if definition is None:
         raise HTTPException(status_code=404, detail="Unknown workflow definition.")
     trigger_config = definition.trigger_config or {}
-    if (
-        definition.trigger_type != "event"
-        or trigger_config.get("event_type") != "gmail.message.received"
-    ):
+    if definition.trigger_type != "event" or trigger_config.get("event_type") not in {
+        "gmail.message.received",
+        "google.calendar.event.changed",
+    }:
         raise HTTPException(
             status_code=400,
-            detail="Shadow mode is only supported for Gmail workflows.",
+            detail="Shadow mode is only supported for managed trigger workflows.",
         )
     definition.workflow_spec = {
         **(definition.workflow_spec or {}),
@@ -336,6 +379,41 @@ def reset_gmail_trigger_domain(
     try:
         return {"domain": GmailTriggerService(db).reset_domain(domain_key)}
     except GmailTriggerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/triggers/calendar/status")
+def get_calendar_trigger_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return CalendarTriggerService(db).status()
+
+
+@router.patch("/triggers/calendar/status")
+def update_calendar_trigger_status(
+    body: CalendarTriggerWorkerSettingsBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    worker = update_calendar_trigger_worker_settings(
+        db,
+        enabled=body.enabled,
+        interval_seconds=body.interval_seconds,
+        page_size=body.page_size,
+    )
+    return {"worker": worker, "status": CalendarTriggerService(db).status()}
+
+
+@router.post("/triggers/calendar/poll")
+def poll_calendar_triggers(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return CalendarTriggerService(db).poll_once()
+
+
+@router.post("/triggers/calendar/domains/{domain_key}/reset")
+def reset_calendar_trigger_domain(
+    domain_key: str,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return {"domain": CalendarTriggerService(db).reset_domain(domain_key)}
+    except CalendarTriggerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
