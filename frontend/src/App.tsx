@@ -41,6 +41,7 @@ import type { DateSelectArg, EventDropArg, EventInput } from "@fullcalendar/core
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { API_BASE_URL, apiJson, websocketUrl } from "./api";
+import { CalendarErrorBoundary } from "./CalendarErrorBoundary";
 import {
   domainKeysByLabel,
   domainLabels,
@@ -608,22 +609,71 @@ function calendarApiValue(value: string): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function calendarRecurrence(item: RoutedEvent): Record<string, string | number> | undefined {
+type CalendarRecurrenceOptions = {
+  freq: "daily" | "weekly" | "monthly" | "yearly";
+  dtstart: string;
+  until?: string;
+  interval?: number;
+  count?: number;
+  wkst?: string;
+  byweekday?: string[];
+  bymonth?: number[];
+  bymonthday?: number[];
+  byhour?: number[];
+  byminute?: number[];
+  bysecond?: number[];
+  bysetpos?: number[];
+};
+
+function recurrenceInteger(
+  value: string | undefined,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : undefined;
+}
+
+function recurrenceIntegerList(
+  value: string | undefined,
+  minimum: number,
+  maximum: number,
+  excludeZero = false,
+): number[] | undefined {
+  if (!value) return undefined;
+  const parsed = value.split(",").map(Number);
+  if (
+    parsed.length === 0
+    || parsed.some((entry) => (
+      !Number.isSafeInteger(entry)
+      || entry < minimum
+      || entry > maximum
+      || (excludeZero && entry === 0)
+    ))
+  ) return undefined;
+  return parsed;
+}
+
+function calendarRecurrence(item: RoutedEvent): CalendarRecurrenceOptions | undefined {
   if (!item.recurrence_rule || !item.start_at) return undefined;
-  const options = Object.fromEntries(
+  const fields = Object.fromEntries(
     item.recurrence_rule
       .split(";")
       .map((part) => part.split("=", 2))
       .filter((part) => part.length === 2)
-      .map(([key, value]) => [key.toLowerCase(), value]),
-  );
-  if (!options.freq) return undefined;
+      .map(([key, value]) => [key.trim().toUpperCase(), value.trim().toUpperCase()]),
+  ) as Record<string, string>;
+  const frequency = fields.FREQ?.toLowerCase();
+  if (!(["daily", "weekly", "monthly", "yearly"] as string[]).includes(frequency)) return undefined;
   const start = new Date(item.start_at);
   if (Number.isNaN(start.getTime())) return undefined;
-  if (typeof options.until === "string") {
-    const match = options.until.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})Z)?$/);
+
+  let until: string | undefined;
+  if (fields.UNTIL) {
+    const match = fields.UNTIL.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})Z)?$/);
     if (!match) return undefined;
-    const until = Date.UTC(
+    const untilTimestamp = Date.UTC(
       Number(match[1]),
       Number(match[2]) - 1,
       Number(match[3]),
@@ -631,21 +681,64 @@ function calendarRecurrence(item: RoutedEvent): Record<string, string | number> 
       Number(match[5] ?? 59),
       Number(match[6] ?? 59),
     );
-    const untilDate = new Date(until);
+    const untilDate = new Date(untilTimestamp);
     if (
-      Number.isNaN(until)
+      Number.isNaN(untilTimestamp)
       || untilDate.getUTCFullYear() !== Number(match[1])
       || untilDate.getUTCMonth() !== Number(match[2]) - 1
       || untilDate.getUTCDate() !== Number(match[3])
-      || until < start.getTime()
+      || untilTimestamp < start.getTime()
     ) return undefined;
+    until = untilDate.toISOString();
   }
-  return {
-    ...options,
-    freq: String(options.freq).toLowerCase(),
-    ...(options.interval ? { interval: Number(options.interval) } : {}),
+
+  const recurrence: CalendarRecurrenceOptions = {
+    freq: frequency as CalendarRecurrenceOptions["freq"],
     dtstart: item.start_at,
   };
+  if (until) recurrence.until = until;
+
+  if (fields.INTERVAL) {
+    const interval = recurrenceInteger(fields.INTERVAL, 1, 10_000);
+    if (interval === undefined) return undefined;
+    recurrence.interval = interval;
+  }
+  if (fields.COUNT) {
+    const count = recurrenceInteger(fields.COUNT, 1, 100_000);
+    if (count === undefined) return undefined;
+    recurrence.count = count;
+  }
+  if (fields.WKST) {
+    if (!/^(MO|TU|WE|TH|FR|SA|SU)$/.test(fields.WKST)) return undefined;
+    recurrence.wkst = fields.WKST;
+  }
+  if (fields.BYDAY) {
+    const weekdays = fields.BYDAY.split(",");
+    if (weekdays.some((weekday) => !/^(MO|TU|WE|TH|FR|SA|SU)$/.test(weekday))) return undefined;
+    recurrence.byweekday = weekdays;
+  }
+
+  const numericLists: Array<[
+    keyof Pick<CalendarRecurrenceOptions, "bymonth" | "bymonthday" | "byhour" | "byminute" | "bysecond" | "bysetpos">,
+    string,
+    number,
+    number,
+    boolean,
+  ]> = [
+    ["bymonth", "BYMONTH", 1, 12, false],
+    ["bymonthday", "BYMONTHDAY", -31, 31, true],
+    ["byhour", "BYHOUR", 0, 23, false],
+    ["byminute", "BYMINUTE", 0, 59, false],
+    ["bysecond", "BYSECOND", 0, 60, false],
+    ["bysetpos", "BYSETPOS", -366, 366, true],
+  ];
+  for (const [target, source, minimum, maximum, excludeZero] of numericLists) {
+    if (!fields[source]) continue;
+    const values = recurrenceIntegerList(fields[source], minimum, maximum, excludeZero);
+    if (!values) return undefined;
+    recurrence[target] = values;
+  }
+  return recurrence;
 }
 
 function ContactHydrationPanel({ surface }: { surface: "contacts" | "organizations" }) {
@@ -1298,50 +1391,68 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
 
         {surface === "calendar" && (
           <div className="calendar-shell">
-            <FullCalendar
-              plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin, rrulePlugin]}
-              events={calendarItems}
-              initialView={window.innerWidth < 720 ? "timeGridDay" : "timeGridWeek"}
-              headerToolbar={{
-                left: "prev,next today",
-                center: "title",
-                right: "dayGridMonth,timeGridWeek,timeGridDay,listWeek",
-              }}
-              buttonText={{ today: "Today", month: "Month", week: "Week", day: "Day", list: "Agenda" }}
-              editable={!busy}
-              selectable={!busy}
-              selectMirror
-              nowIndicator
-              dayMaxEvents
-              allDaySlot
-              slotMinTime="06:00:00"
-              slotMaxTime="22:00:00"
-              scrollTime="08:00:00"
-              eventTimeFormat={{ hour: "numeric", minute: "2-digit", meridiem: "short" }}
-              slotLabelFormat={{ hour: "numeric", minute: "2-digit", meridiem: "short" }}
-              height="auto"
-              select={selectCalendarRange}
-              eventClick={(info) => {
-                setCreatingEvent(false);
-                setSelectedId(info.event.id);
-              }}
-              eventDrop={updateCalendarTiming}
-              eventResize={updateCalendarTiming}
-              eventClassNames={(info) => {
-                const item = info.event.extendedProps.resource as RoutedEvent | undefined;
-                return [
-                  item?.status === "cancelled" ? "calendar-event-cancelled" : "",
-                  item?.status === "archived" ? "calendar-event-archived" : "",
-                  item?.conflicts?.length ? "calendar-event-conflict" : "",
-                ].filter(Boolean);
-              }}
-              eventContent={(info) => (
-                <div className="calendar-event-content">
-                  <strong>{info.timeText}</strong>
-                  <span>{info.event.title}</span>
+            <CalendarErrorBoundary
+              resetKey={calendarItems.map((item) => `${item.id}:${String(item.start)}:${String(item.rrule ?? "")}`).join("|")}
+              fallback={(
+                <div className="calendar-grid-fallback" role="alert">
+                  <strong>Calendar grid unavailable</strong>
+                  <span>The event list is still available. Refresh after correcting the affected event.</span>
+                  {visibleItems
+                    .filter((item): item is RoutedEvent => "start_at" in item)
+                    .map((item) => (
+                      <button key={item.id} type="button" onClick={() => setSelectedId(item.id)}>
+                        <span>{item.title}</span>
+                        <small>{item.start_at ? new Date(item.start_at).toLocaleString() : "Unscheduled"}</small>
+                      </button>
+                    ))}
                 </div>
               )}
-            />
+            >
+              <FullCalendar
+                plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin, rrulePlugin]}
+                events={calendarItems}
+                initialView={window.innerWidth < 720 ? "timeGridDay" : "timeGridWeek"}
+                headerToolbar={{
+                  left: "prev,next today",
+                  center: "title",
+                  right: "dayGridMonth,timeGridWeek,timeGridDay,listWeek",
+                }}
+                buttonText={{ today: "Today", month: "Month", week: "Week", day: "Day", list: "Agenda" }}
+                editable={!busy}
+                selectable={!busy}
+                selectMirror
+                nowIndicator
+                dayMaxEvents
+                allDaySlot
+                slotMinTime="06:00:00"
+                slotMaxTime="22:00:00"
+                scrollTime="08:00:00"
+                eventTimeFormat={{ hour: "numeric", minute: "2-digit", meridiem: "short" }}
+                slotLabelFormat={{ hour: "numeric", minute: "2-digit", meridiem: "short" }}
+                height="auto"
+                select={selectCalendarRange}
+                eventClick={(info) => {
+                  setCreatingEvent(false);
+                  setSelectedId(info.event.id);
+                }}
+                eventDrop={updateCalendarTiming}
+                eventResize={updateCalendarTiming}
+                eventClassNames={(info) => {
+                  const item = info.event.extendedProps.resource as RoutedEvent | undefined;
+                  return [
+                    item?.status === "cancelled" ? "calendar-event-cancelled" : "",
+                    item?.status === "archived" ? "calendar-event-archived" : "",
+                    item?.conflicts?.length ? "calendar-event-conflict" : "",
+                  ].filter(Boolean);
+                }}
+                eventContent={(info) => (
+                  <div className="calendar-event-content">
+                    <strong>{info.timeText}</strong>
+                    <span>{info.event.title}</span>
+                  </div>
+                )}
+              />
+            </CalendarErrorBoundary>
           </div>
         )}
 
