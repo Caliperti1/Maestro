@@ -42,10 +42,7 @@ class RoutedHygieneReport:
 
 
 class RoutedHygieneService:
-    """Background hygiene for routed-object stores.
-
-    This intentionally proposes duplicate merges instead of applying them automatically.
-    """
+    """Canonicalize routed objects and merge only high-confidence duplicates."""
 
     SETTING_KEY = "routed_hygiene_latest"
 
@@ -275,7 +272,6 @@ class RoutedHygieneService:
                     select(Contact).where(
                         Contact.email == embedded_email,
                         Contact.id != contact.id,
-                        Contact.status != "archived",
                     )
                 )
                 if collision is None:
