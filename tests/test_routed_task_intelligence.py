@@ -109,6 +109,40 @@ def test_contact_hygiene_extracts_email_name_and_merges_full_name(session) -> No
     assert active[0].email == "chris.flournoy.mil@army.mil"
 
 
+def test_contact_hygiene_does_not_reuse_email_held_by_archived_contact(session) -> None:
+    session.add_all(
+        [
+            Contact(
+                name="douglas.w.thompson50.mil@army.mil",
+                normalized_name="douglas w thompson50 mil army mil",
+                email=None,
+                source_refs=[],
+                provenance={},
+                metadata_={},
+            ),
+            Contact(
+                name="Archived Douglas Thompson",
+                normalized_name="archived douglas thompson",
+                email="douglas.w.thompson50.mil@army.mil",
+                status="archived",
+                source_refs=[],
+                provenance={},
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+    active = session.scalar(select(Contact).where(Contact.status != "archived"))
+
+    assert report.display_fields_canonicalized >= 1
+    assert active is not None
+    assert active.name == "Douglas W Thompson"
+    assert active.email is None
+    assert active.metadata_["observed_email_identity"] == "douglas.w.thompson50.mil@army.mil"
+
+
 def test_organization_hygiene_merges_legal_suffix_variants(session) -> None:
     session.add_all(
         [
