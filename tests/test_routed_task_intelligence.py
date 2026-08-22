@@ -143,6 +143,37 @@ def test_contact_hygiene_does_not_reuse_email_held_by_archived_contact(session) 
     assert active.metadata_["observed_email_identity"] == "douglas.w.thompson50.mil@army.mil"
 
 
+def test_contact_hygiene_does_not_assign_same_derived_email_twice_in_one_batch(session) -> None:
+    session.add_all(
+        [
+            Contact(
+                name="russell.w.hupp.ctr@army.mil",
+                normalized_name="russell w hupp ctr army mil",
+                email=None,
+                source_refs=[],
+                provenance={},
+                metadata_={},
+            ),
+            Contact(
+                name="Russell W. Hupp <russell.w.hupp.ctr@army.mil>",
+                normalized_name="russell w hupp russell w hupp ctr army mil",
+                email=None,
+                source_refs=[],
+                provenance={},
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+    active = session.scalars(select(Contact).where(Contact.status != "archived")).all()
+
+    assert report.duplicates_merged == 1
+    assert len(active) == 1
+    assert active[0].email == "russell.w.hupp.ctr@army.mil"
+
+
 def test_organization_hygiene_merges_legal_suffix_variants(session) -> None:
     session.add_all(
         [
