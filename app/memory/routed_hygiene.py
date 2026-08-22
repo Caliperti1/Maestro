@@ -250,6 +250,11 @@ class RoutedHygieneService:
 
         count = 0
         contacts = self.session.scalars(select(Contact)).all()
+        claimed_emails = {
+            contact.email.strip().lower()
+            for contact in contacts
+            if contact.email and contact.email.strip()
+        }
         for contact in contacts:
             observed_emails = _contact_email_identities(contact)
             embedded_email = observed_emails[0] if observed_emails else None
@@ -268,14 +273,10 @@ class RoutedHygieneService:
                     ),
                 }
             if embedded_email and contact.email != embedded_email:
-                collision = self.session.scalar(
-                    select(Contact).where(
-                        Contact.email == embedded_email,
-                        Contact.id != contact.id,
-                    )
-                )
-                if collision is None:
+                normalized_email = embedded_email.strip().lower()
+                if normalized_email not in claimed_emails:
                     contact.email = embedded_email
+                    claimed_emails.add(normalized_email)
             cleaned_name = _name_from_contact_email(contact) or _name_from_title(contact.name)
             if cleaned_name and _normalize(cleaned_name) != _normalize(contact.name):
                 contact.metadata_ = {
