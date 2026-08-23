@@ -9,6 +9,7 @@ from app.db.models import Artifact, MemoryItem, MemoryProposal, RoutedItem, Seed
 from app.llm import LLMMemoryExtractor
 from app.llm.client import LLMClientError
 from app.memory import LLMMemoryCurator
+from app.memory.llm_curator import _normalized_routed_status
 import app.memory.document_extract as document_extract
 from app.memory.document_extract import DocumentExtractionError, extract_dropbox_text
 import app.memory.dropbox as dropbox
@@ -53,6 +54,14 @@ def test_memory_extraction_schema_forbids_additional_properties_recursively() ->
                 assert_strict_objects(nested)
 
     assert_strict_objects(schema)
+
+
+def test_curator_normalizes_freeform_routed_status_before_database_write() -> None:
+    assert (
+        _normalized_routed_status("incomplete—official-source research unavailable")
+        == "incomplete"
+    )
+    assert _normalized_routed_status("an unexpected narrative status") == "open"
 
 
 def test_dropbox_processor_creates_domain_folders(session: Session, tmp_path: Path) -> None:

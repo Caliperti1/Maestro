@@ -195,7 +195,7 @@ class LLMMemoryCurator:
                     title=extracted_item.title,
                     content=extracted_item.content,
                     priority=extracted_item.priority,
-                    status=extracted_item.status or "open",
+                    status=_normalized_routed_status(extracted_item.status),
                     source_refs=[self._source_ref(source)],
                     metadata_={
                         "curator": "llm",
@@ -257,6 +257,27 @@ class LLMMemoryCurator:
         if external_id is not None:
             source_ref["external_id"] = external_id
         return source_ref
+
+
+def _normalized_routed_status(value: object) -> str:
+    normalized = str(value or "open").strip().lower().replace("-", "_").replace(" ", "_")
+    allowed = {
+        "active",
+        "archived",
+        "cancelled",
+        "done",
+        "incomplete",
+        "needs_input",
+        "open",
+        "pending",
+        "scheduled",
+        "tentative",
+    }
+    if normalized in allowed:
+        return normalized
+    if normalized.startswith("incomplete"):
+        return "incomplete"
+    return "open"
 
 
 def _uuid_or_none(value: object) -> uuid.UUID | None:
