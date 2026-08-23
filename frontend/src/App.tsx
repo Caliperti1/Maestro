@@ -2551,6 +2551,37 @@ function IssuesWorkspace() {
     }
   };
 
+  const renderIssueDetail = (mobile = false) => selected ? (
+    <div className={mobile ? "mobile-routed-detail issue-mobile-detail" : "routed-object-detail"}>
+      <div className={mobile ? "mobile-routed-detail-heading" : "section-heading"}>
+        <div>
+          {!mobile && <p className="eyebrow">Canonical issue</p>}
+          <h3>{mobile ? selected.title : selected.external_number ? `#${selected.external_number}` : "Local issue"}</h3>
+        </div>
+        <div className="section-heading-actions">
+          {selected.external_url && <a className="icon-button" href={selected.external_url} target="_blank" rel="noreferrer" title="Open in GitHub"><ExternalLink size={16} /></a>}
+          {mobile && <button className="icon-button" type="button" title="Minimize details" onClick={() => setSelectedId(null)}><X size={16} /></button>}
+        </div>
+      </div>
+      <label>Title<input value={draft.title ?? ""} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} /></label>
+      <div className="two-column-fields">
+        <label>Type<select value={draft.issue_type ?? "feature"} onChange={(event) => setDraft((current) => ({ ...current, issue_type: event.target.value }))}><option>feature</option><option>bug</option><option>story</option><option>architecture</option><option>research</option><option>chore</option><option>idea</option></select></label>
+        <label>Status<select value={draft.status ?? "ready"} onChange={(event) => setDraft((current) => ({ ...current, status: event.target.value }))}><option>ready</option><option>active</option><option>blocked</option><option>review</option><option>completed</option><option>cancelled</option><option>superseded</option></select></label>
+      </div>
+      <label>Problem<textarea value={draft.problem ?? ""} onChange={(event) => setDraft((current) => ({ ...current, problem: event.target.value }))} /></label>
+      <label>Desired outcome<textarea value={draft.desired_outcome ?? ""} onChange={(event) => setDraft((current) => ({ ...current, desired_outcome: event.target.value }))} /></label>
+      <label>Acceptance criteria<textarea value={(draft.acceptance_criteria ?? []).join("\n")} onChange={(event) => setDraft((current) => ({ ...current, acceptance_criteria: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) }))} placeholder="One criterion per line" /></label>
+      <label>Notes<textarea value={draft.notes ?? ""} onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} /></label>
+      <div className="two-column-fields">
+        <label>Priority<select value={draft.priority ?? "normal"} onChange={(event) => setDraft((current) => ({ ...current, priority: event.target.value }))}><option>low</option><option>normal</option><option>high</option><option>urgent</option></select></label>
+        <label>Estimate (minutes)<input type="number" min="5" value={draft.estimated_minutes ?? ""} onChange={(event) => setDraft((current) => ({ ...current, estimated_minutes: event.target.value ? Number(event.target.value) : null }))} /></label>
+      </div>
+      <label className="checkbox-row"><input type="checkbox" checked={Boolean(draft.agent_task)} onChange={(event) => setDraft((current) => ({ ...current, agent_task: event.target.checked }))} /> Agent task</label>
+      <div className="routed-detail-actions"><button className="planner-action" type="button" onClick={save} disabled={busy}>Save issue</button>{selected.repository_id && <button type="button" onClick={syncRepository} disabled={busy}><RefreshCw size={15} /> Sync GitHub</button>}</div>
+      {selected.relations.length > 0 && <details><summary>Issue relationships ({selected.relations.length})</summary><pre>{JSON.stringify(selected.relations, null, 2)}</pre></details>}
+    </div>
+  ) : <p className="empty-state">Select an issue to inspect it.</p>;
+
   return (
     <section className="panel routed-object-workspace issue-workspace">
       <div className="routed-object-list-panel">
@@ -2570,37 +2601,20 @@ function IssuesWorkspace() {
         </div>
         <div className="routed-object-list">
           {visible.map((issue) => (
-            <button key={issue.id} className={`routed-object-row${issue.id === selectedId ? " active" : ""}`} onClick={() => setSelectedId(issue.id)} type="button">
-              <GitPullRequest size={17} />
-              <span><strong>{issue.title}</strong><small>{issue.project?.name ?? "Unassigned project"}{issue.repository ? ` / ${issue.repository.display_name}` : ""} · {issue.status}</small><small>{issue.external_number ? `GitHub #${issue.external_number}` : "Local"} · {issue.sync_status}</small></span>
-            </button>
+            <div className="routed-object-mobile-group" key={issue.id}>
+              <button className={`routed-object-row${issue.id === selectedId ? " active" : ""}`} onClick={() => setSelectedId((current) => current === issue.id ? null : issue.id)} type="button">
+                <GitPullRequest size={17} />
+                <span><strong>{issue.title}</strong><small>{issue.project?.name ?? "Unassigned project"}{issue.repository ? ` / ${issue.repository.display_name}` : ""} · {issue.status}</small><small>{issue.external_number ? `GitHub #${issue.external_number}` : "Local"} · {issue.sync_status}</small></span>
+              </button>
+              {issue.id === selectedId && renderIssueDetail(true)}
+            </div>
           ))}
           {visible.length === 0 && <p className="empty-state">No issues match these filters.</p>}
         </div>
         <p className="memory-status">{statusMessage}</p>
       </div>
       <div className="routed-object-detail-panel">
-        {selected ? (
-          <div className="routed-object-detail">
-            <div className="section-heading"><div><p className="eyebrow">Canonical issue</p><h3>{selected.external_number ? `#${selected.external_number}` : "Local issue"}</h3></div>{selected.external_url && <a className="icon-button" href={selected.external_url} target="_blank" rel="noreferrer" title="Open in GitHub"><ExternalLink size={16} /></a>}</div>
-            <label>Title<input value={draft.title ?? ""} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} /></label>
-            <div className="two-column-fields">
-              <label>Type<select value={draft.issue_type ?? "feature"} onChange={(event) => setDraft((current) => ({ ...current, issue_type: event.target.value }))}><option>feature</option><option>bug</option><option>story</option><option>architecture</option><option>research</option><option>chore</option><option>idea</option></select></label>
-              <label>Status<select value={draft.status ?? "ready"} onChange={(event) => setDraft((current) => ({ ...current, status: event.target.value }))}><option>ready</option><option>active</option><option>blocked</option><option>review</option><option>completed</option><option>cancelled</option><option>superseded</option></select></label>
-            </div>
-            <label>Problem<textarea value={draft.problem ?? ""} onChange={(event) => setDraft((current) => ({ ...current, problem: event.target.value }))} /></label>
-            <label>Desired outcome<textarea value={draft.desired_outcome ?? ""} onChange={(event) => setDraft((current) => ({ ...current, desired_outcome: event.target.value }))} /></label>
-            <label>Acceptance criteria<textarea value={(draft.acceptance_criteria ?? []).join("\n")} onChange={(event) => setDraft((current) => ({ ...current, acceptance_criteria: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) }))} placeholder="One criterion per line" /></label>
-            <label>Notes<textarea value={draft.notes ?? ""} onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} /></label>
-            <div className="two-column-fields">
-              <label>Priority<select value={draft.priority ?? "normal"} onChange={(event) => setDraft((current) => ({ ...current, priority: event.target.value }))}><option>low</option><option>normal</option><option>high</option><option>urgent</option></select></label>
-              <label>Estimate (minutes)<input type="number" min="5" value={draft.estimated_minutes ?? ""} onChange={(event) => setDraft((current) => ({ ...current, estimated_minutes: event.target.value ? Number(event.target.value) : null }))} /></label>
-            </div>
-            <label className="checkbox-row"><input type="checkbox" checked={Boolean(draft.agent_task)} onChange={(event) => setDraft((current) => ({ ...current, agent_task: event.target.checked }))} /> Agent task</label>
-            <div className="routed-detail-actions"><button className="planner-action" type="button" onClick={save} disabled={busy}>Save issue</button>{selected.repository_id && <button type="button" onClick={syncRepository} disabled={busy}><RefreshCw size={15} /> Sync GitHub</button>}</div>
-            {selected.relations.length > 0 && <details><summary>Issue relationships ({selected.relations.length})</summary><pre>{JSON.stringify(selected.relations, null, 2)}</pre></details>}
-          </div>
-        ) : <p className="empty-state">Select an issue to inspect it.</p>}
+        {renderIssueDetail()}
       </div>
     </section>
   );
