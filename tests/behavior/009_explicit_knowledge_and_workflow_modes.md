@@ -37,7 +37,8 @@ cd frontend && npm run build
 | 9.7 Explicit workflow | Select Build workflow and repeat 9.6. | Maestro proposes a decomposed agent plan for review. It does not execute before approval. | Proposed-plan preview. | Not run |
 | 9.8 Draft refinement | While still in Build workflow say: `Limit the research to US companies and add a pricing comparison.` | The existing draft is refined rather than a second draft being created. | One candidate plan with updated work items. | Not run |
 | 9.9 Approval reset | Approve/run the draft. | The draft leaves main chat, appears under active workflows, and the mode returns to Knowledge so chat remains usable. | Mode control and Workflows surface. | Not run |
-| 9.10 Existing blocker | Answer an RFI or approve a tool from Needs Attention while Knowledge is selected. | The exact blocked workflow resumes; Maestro does not create a new plan. | Existing run ID resumes. | Not run |
+| 9.10 Existing blocker | Answer an RFI or approve a tool from Needs Attention while Knowledge is selected. | The exact blocked workflow resumes, including a background agent-task workflow that has no chat conversation ID; Maestro does not create a new plan. | Existing run ID resumes. | Automated; human run pending |
+| 9.11 Agent-task completion quality | Mark a to-do as an agent task and force its agent report to state that a required source/action was unavailable. | The run log and report remain available, but Maestro keeps the originating to-do open, explains the failed quality check in chat, and closes only explicitly linked clarification to-dos after they are answered or the work passes. | To-do state, report status, run log, and channel message. | Automated; human run pending |
 
 ## Pass Criteria
 

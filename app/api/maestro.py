@@ -12,7 +12,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased
 
 from app.core.config import get_settings
-from app.db.models import Conversation, Domain, Message, RoutedItem, RuntimeSetting, Task, Todo, ToolCall
+from app.db.models import (
+    Conversation,
+    Domain,
+    Message,
+    RoutedItem,
+    RuntimeSetting,
+    Task,
+    Todo,
+    ToolCall,
+    WorkflowRun,
+)
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal, get_db
@@ -31,6 +41,7 @@ from app.maestro.intent_classifier import (
     understand_message_with_local_llm,
 )
 from app.maestro.scheduler import SchedulerService
+from app.maestro.todo_agent_tasks import TodoAgentTaskService
 from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
@@ -507,10 +518,15 @@ def _pending_tool_approvals_for_conversation(
             select(ToolCall)
             .join(child_task, ToolCall.task_id == child_task.id)
             .outerjoin(parent_task, child_task.parent_task_id == parent_task.id)
+            .outerjoin(WorkflowRun, WorkflowRun.parent_task_id == parent_task.id)
             .where(
                 ToolCall.status == "approval_required",
                 (child_task.conversation_id == conversation.id)
-                | (parent_task.conversation_id == conversation.id),
+                | (parent_task.conversation_id == conversation.id)
+                | (
+                    (parent_task.source_type == "todo_agent_task")
+                    & WorkflowRun.status.in_(["blocked", "awaiting_approval", "needs_input"])
+                ),
             )
             .order_by(ToolCall.created_at.desc())
         ).all()
@@ -1316,31 +1332,11 @@ def _resume_waiting_agent_task_from_reply(
     clarification = user_message.content.strip()
     if not clarification:
         return None
-    clarifications = list((todo.metadata_ or {}).get("agent_task_clarifications") or [])
-    clarifications.append(
-        {
-            "message_id": str(user_message.id),
-            "content": clarification,
-            "received_at": datetime.now(UTC).isoformat(),
-        }
+    return TodoAgentTaskService(db).apply_clarification(
+        todo,
+        clarification=clarification,
+        message_id=user_message.id,
     )
-    metadata = {
-        **(todo.metadata_ or {}),
-        "agent_task_clarifications": clarifications,
-        "last_agent_task_clarification_at": datetime.now(UTC).isoformat(),
-    }
-    metadata.pop("planning_notified_at", None)
-    todo.metadata_ = metadata
-    clarification_line = f"User clarification: {clarification}"
-    if clarification_line not in (todo.description or ""):
-        todo.description = "\n\n".join(
-            part for part in ((todo.description or "").strip(), clarification_line) if part
-        )
-    todo.agent_task_status = "retry"
-    todo.agent_task_error = None
-    db.commit()
-    db.refresh(todo)
-    return todo
 
 
 def _conversation_messages(db: Session, conversation_id: uuid.UUID) -> list[Message]:

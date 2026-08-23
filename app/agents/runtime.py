@@ -1322,7 +1322,11 @@ class PromptAggregationService:
                                 "assembled prompt exactly, stay within your domain, respect the tool "
                                 "manifest, and produce the requested structured output. Include a "
                                 "top-level `conversation` field written as a concise plain-English "
-                                "message Maestro can say directly to Chris. Tool results, when present, "
+                                "message Maestro can say directly to Chris. Also include a top-level "
+                                "`completion` object with `status` (`complete`, `incomplete`, or "
+                                "`blocked`), `evidence`, and `unresolved_items`; never claim `complete` "
+                                "when a required action, source, or deliverable is missing. Tool results, "
+                                "when present, "
                                 "have already been executed by Maestro; do not emit synthetic "
                                 "tool-call markup or function-call requests in your answer."
                             ),
