@@ -11,6 +11,7 @@ from app.db.models import (
     Domain,
     Message,
     Task,
+    Todo,
     WorkflowDefinition,
 )
 from app.db.seed import seed_default_domains
@@ -107,6 +108,55 @@ def test_knowledge_mode_never_creates_a_workflow_task(session: Session, monkeypa
     assert payload["workflow_suggestion"]
     assert payload["knowledge_iterations"] == 2
     assert session.scalar(select(func.count()).select_from(Task)) == 0
+
+
+def test_knowledge_reply_resumes_waiting_agent_task_instead_of_answering_directly(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    conversation = maestro_api._get_or_create_maestro_conversation(session, None)
+    domain = session.scalar(select(Domain).where(Domain.key == "personal"))
+    todo = Todo(
+        domain_id=domain.id,
+        title="Determine shed debris disposal rules",
+        description="Research the applicable disposal requirements.",
+        agent_task=True,
+        agent_task_status="needs_input",
+        agent_task_error="Provide the shed locality.",
+        source_refs=[],
+        provenance={},
+        metadata_={"planning_notified_at": "2026-08-22T12:00:00+00:00"},
+    )
+    session.add(todo)
+    session.commit()
+    maestro_api._record_session_message(
+        session,
+        conversation,
+        "maestro",
+        "Where is the shed located?",
+        metadata={
+            "message_type": "todo_agent_task_rfi",
+            "todo_id": str(todo.id),
+            "channel_visibility": "global",
+        },
+    )
+
+    response = _client(session).post(
+        "/maestro/respond",
+        json={
+            "message": "The shed is in Stony Brook, New York.",
+            "interaction_mode": "knowledge",
+            "conversation_id": str(conversation.id),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["classification"] == "todo_agent_task_rfi_answer"
+    session.refresh(todo)
+    assert todo.agent_task_status == "retry"
+    assert todo.agent_task_error is None
+    assert "User clarification: The shed is in Stony Brook, New York." in todo.description
+    assert "planning_notified_at" not in todo.metadata_
 
 
 def test_workflow_builder_explicitly_creates_a_proposed_plan(session: Session) -> None:
