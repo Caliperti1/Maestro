@@ -1115,6 +1115,18 @@ def test_approved_tool_action_requeues_its_blocked_durable_workflow(
         "output_preview": "The message was noise.",
         "tool_calls": [
             {
+                "id": str(uuid.uuid4()),
+                "tool_name": "llm.tool_planner",
+                "status": "complete",
+                "output_payload": {"plan_summary": "Search before changing the message."},
+            },
+            {
+                "id": str(uuid.uuid4()),
+                "tool_name": "github.issue.search",
+                "status": "complete",
+                "output_payload": {"issues": [{"number": 10, "title": "Related work"}]},
+            },
+            {
                 "id": tool_call_id,
                 "tool_name": "gmail.message.modify",
                 "status": "approval_required",
@@ -1163,7 +1175,10 @@ def test_approved_tool_action_requeues_its_blocked_durable_workflow(
     assert approved[0]["tool_name"] == "gmail.message.modify"
     assert approved[0]["status"] == "complete"
     stored_agent_run = item.output_payload.get("agent_run", item.output_payload)
-    assert stored_agent_run["tool_calls"][0]["status"] == "complete"
+    approved_call = next(
+        call for call in stored_agent_run["tool_calls"] if call["id"] == tool_call_id
+    )
+    assert approved_call["status"] == "complete"
     assert session.query(WorkflowRunLogEntry).filter_by(workflow_run_id=run.id).count() == 0
 
     AgentRegistryService(session).ensure_seed_agents()
@@ -1174,7 +1189,11 @@ def test_approved_tool_action_requeues_its_blocked_durable_workflow(
     class ResumedRuntime:
         def run_agent_once(self, request, **kwargs):
             initial = kwargs["initial_tool_results"]
-            assert initial[0]["tool_name"] == "gmail.message.modify"
+            assert [item["tool_name"] for item in initial] == [
+                "github.issue.search",
+                "gmail.message.modify",
+            ]
+            assert initial[0]["output_payload"]["issues"][0]["number"] == 10
             return SimpleNamespace(
                 run_id="resumed-run",
                 status="completed",
