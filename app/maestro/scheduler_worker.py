@@ -301,6 +301,39 @@ def _approved_tool_results(item: WorkflowQueueItem) -> list[dict[str, Any]]:
     return [result for result in results if isinstance(result, dict)]
 
 
+def _resume_tool_results(item: WorkflowQueueItem) -> list[dict[str, Any]]:
+    output = item.output_payload or {}
+    results = output.get("resume_tool_results")
+    if not isinstance(results, list):
+        return _approved_tool_results(item)
+    return [result for result in results if isinstance(result, dict)]
+
+
+def _successful_resume_evidence(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    internal_tools = {"llm.tool_planner", "llm.gateway", "email.report.render"}
+    return [
+        call
+        for call in calls
+        if call.get("status") == "complete"
+        and str(call.get("tool_name") or "") not in internal_tools
+    ]
+
+
+def _merge_tool_results(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    positions: dict[str, int] = {}
+    for group in groups:
+        for result in group:
+            result_id = str(result.get("id") or "")
+            if result_id and result_id in positions:
+                merged[positions[result_id]] = result
+                continue
+            if result_id:
+                positions[result_id] = len(merged)
+            merged.append(result)
+    return merged
+
+
 def _stored_agent_run(output: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
     """Read current nested queue payloads and historical flat agent-run payloads."""
     nested = output.get("agent_run")
@@ -495,7 +528,7 @@ class SchedulerWorkerService:
                 stage_interaction=False,
                 execute_llm=execute_llm,
                 tool_requests=_trigger_bootstrap_requests(run),
-                initial_tool_results=_approved_tool_results(item),
+                initial_tool_results=_resume_tool_results(item),
                 auto_tool_loop=auto_tool_loop,
                 max_tool_iterations=max_tool_iterations,
                 parent_task_id=item.parent_task_id,
@@ -692,6 +725,11 @@ class SchedulerWorkerService:
                 for call in calls
             ]
             agent_run = {**agent_run, "tool_calls": updated_calls}
+            approved_results = _merge_tool_results(_approved_tool_results(item), [tool_result])
+            resume_results = _merge_tool_results(
+                _resume_tool_results(item),
+                _successful_resume_evidence(updated_calls),
+            )
             remaining = [
                 call for call in updated_calls if call.get("status") == "approval_required"
             ]
@@ -699,7 +737,11 @@ class SchedulerWorkerService:
                 blocked = self.scheduler.block_queue_item(
                     item.id,
                     error_message=_tool_call_blocker_message(remaining[0]),
-                    output_payload={"agent_run": agent_run},
+                    output_payload={
+                        "agent_run": agent_run,
+                        "approved_tool_results": approved_results,
+                        "resume_tool_results": resume_results,
+                    },
                 )
                 return self.session.get(WorkflowRun, blocked.workflow_run_id)
 
@@ -708,7 +750,6 @@ class SchedulerWorkerService:
                 task.status = "completed"
                 task.error_message = None
                 task.completed_at = datetime.now(UTC)
-            prior_results = _approved_tool_results(item)
             item.status = "queued"
             item.error_message = None
             item.completed_at = None
@@ -719,12 +760,14 @@ class SchedulerWorkerService:
                 {
                     **item_output,
                     "agent_run": agent_run,
-                    "approved_tool_results": [*prior_results, tool_result],
+                    "approved_tool_results": approved_results,
+                    "resume_tool_results": resume_results,
                 }
                 if nested
                 else {
                     **agent_run,
-                    "approved_tool_results": [*prior_results, tool_result],
+                    "approved_tool_results": approved_results,
+                    "resume_tool_results": resume_results,
                 }
             )
             run = self.session.get(WorkflowRun, item.workflow_run_id)
