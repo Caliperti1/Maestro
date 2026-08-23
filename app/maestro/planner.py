@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.llm.client import LLMClient, LLMClientError
 from app.prompts import load_prompt
@@ -13,7 +13,6 @@ WorkItemType = Literal[
     "decision",
     "rfi",
     "memory_candidate",
-    "think_tank",
     "direct_response",
 ]
 PlannerPriority = Literal["low", "normal", "high", "urgent"]
@@ -105,9 +104,13 @@ def _normalize_planner_response(raw_response: Any) -> Any:
         if not isinstance(item, dict):
             normalized_items.append(item)
             continue
+        normalized_type = item.get("type")
+        if normalized_type == "think_tank":
+            normalized_type = "direct_response"
         normalized_items.append(
             {
                 **item,
+                "type": normalized_type,
                 "model_tier": item.get("model_tier") or "auto",
                 "model_rationale": item.get("model_rationale")
                 or "Runtime routing will select the appropriate model tier.",

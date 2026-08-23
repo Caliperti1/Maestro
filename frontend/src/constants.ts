@@ -38,7 +38,6 @@ export const routedGroups = [
   { key: "event", label: "Events", empty: "No extracted events." },
   { key: "contact", label: "Contacts", empty: "No extracted contacts." },
   { key: "decision_log", label: "Decisions", empty: "No recent decisions." },
-  { key: "think_tank", label: "Think Tank", empty: "No think tank notes." },
 ];
 
 export const hiddenRoutedStatuses = new Set(["done", "archived"]);

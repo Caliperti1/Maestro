@@ -28,7 +28,6 @@ from app.db.models import (
     Domain,
     Entity,
     EntityDomainNote,
-    Idea,
     IdentityNode,
     MemoryEmbedding,
     MemoryItem,
@@ -45,7 +44,7 @@ from app.memory.ingestion import memory_allowed_for_target
 from app.prompts import load_prompt
 
 STORE_NAMES = {
-    "memory", "contacts", "organizations", "events", "todos", "ideas", "decisions",
+    "memory", "contacts", "organizations", "events", "todos", "decisions",
     "reports", "run_log", "artifacts", "identity", "issues",
 }
 
@@ -192,17 +191,19 @@ class RetrievalQueryRouter:
             "organizations": {"company", "organization", "works", "employer"},
             "events": {"meeting", "calendar", "when", "schedule", "event"},
             "todos": {"todo", "task", "due", "deadline", "owe"},
-            "ideas": {"idea", "brainstorm", "think"},
+            "issues": {
+                "issue", "story", "bug", "feature", "backlog", "github", "codebase",
+                "idea", "brainstorm",
+            },
             "decisions": {"decision", "decided", "why"},
             "reports": {"report", "research", "learned", "summary"},
             "run_log": {"ran", "workflow", "completed", "failed"},
             "artifacts": {"file", "artifact", "document", "code"},
-            "issues": {"issue", "story", "bug", "feature", "backlog", "github", "codebase"},
         }
         stores.extend(store for store, words in hints.items() if terms & words)
         if len(stores) == 2:
             stores.extend([
-                "contacts", "organizations", "events", "todos", "ideas", "decisions",
+                "contacts", "organizations", "events", "todos", "decisions",
                 "reports", "run_log", "artifacts", "issues",
             ])
         matched_domains = [domain for domain in domains if domain.replace("-", " ") in query.lower()]
@@ -354,7 +355,6 @@ class FederatedIndexService:
             domains,
         )
         yield from self._simple_projections(Todo, "todos", lambda item: "\n".join(value for value in [item.description, f"Due: {item.due_at.isoformat()}" if item.due_at else None, f"Owner: {item.owner_ref or item.owner_type}"] if value), lambda item: item.due_at or item.updated_at, domains)
-        yield from self._simple_projections(Idea, "ideas", lambda item: item.content, lambda item: item.updated_at, domains)
         yield from self._simple_projections(DecisionRecord, "decisions", lambda item: "\n".join(value for value in [item.decision, item.rationale] if value), lambda item: item.updated_at, domains)
         yield from self._simple_projections(
             ProductIssue,

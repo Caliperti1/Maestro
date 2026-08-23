@@ -14,7 +14,6 @@ from app.db.models import (
     ContactAlias,
     DecisionRecord,
     Entity,
-    Idea,
     OrganizationAlias,
     OrganizationIdentifier,
     OrganizationRelationship,
@@ -518,26 +517,12 @@ class RoutedEditService:
                     )
                 )
 
-    def update_idea(self, idea_id: uuid.UUID, updates: dict[str, Any]) -> Idea:
-        idea = self.session.get(Idea, idea_id)
-        if idea is None:
-            raise ValueError("Idea not found.")
-        for key in ("title", "content", "status"):
-            if key in updates:
-                setattr(idea, key, updates[key])
-        if "metadata" in updates and isinstance(updates["metadata"], dict):
-            idea.metadata_ = {**(idea.metadata_ or {}), **updates["metadata"]}
-        self.session.commit()
-        self.session.refresh(idea)
-        return idea
-
     def archive_object(self, object_type: str, object_id: uuid.UUID):
         model = {
             "contact": Contact,
             "event": CalendarEvent,
             "todo": Todo,
             "entity": Entity,
-            "idea": Idea,
             "decision": DecisionRecord,
         }.get(object_type)
         if model is None:

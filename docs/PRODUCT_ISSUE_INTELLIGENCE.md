@@ -4,6 +4,11 @@ Maestro product issues are a canonical routed store for software and product wor
 personal todos and they are not a shadow copy of GitHub. Local ideas and GitHub issues become peer
 records with domain, project, repository, provenance, relationships, sync state, and execution state.
 
+The initial portfolio registers Maestro, Praxis/GroundTruth, and the Perti Laboratories projects
+Deeper Learning, AAce, and Ophi. Each repository owns a visible Repository Intelligence workflow
+and a daily Issue Hygiene workflow. Cheap unchanged checks remain quiet; substantive observations,
+sync changes, and failures are preserved in reports and the run log.
+
 ## Capture
 
 ```mermaid
@@ -58,6 +63,10 @@ Issue hygiene repeats semantic reconciliation over likely pairs. It may merge a 
 duplicate and preserves a `duplicate_of` edge. It never silently collapses two externally distinct
 GitHub issues. Related, contradictory, blocking, superseding, and implementation relationships are
 first-class records.
+
+Unrequested brainstorming remains in conversation. When Chris explicitly asks Maestro to capture a
+product or software idea, Maestro clarifies missing scope and writes it directly into Product Issues.
+The former Think Tank routed store has been removed.
 
 ## Repository Intelligence
 

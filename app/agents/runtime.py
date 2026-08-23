@@ -35,15 +35,15 @@ from app.db.seed import seed_default_domains
 from app.llm.client import LLMClient, OllamaLLMClient, OpenAILLMClient
 from app.llm.telemetry import record_llm_call
 from app.maestro.identity_grounding import IdentityGroundingService
-from app.memory.retrieval import (
-    MemoryContextBundle,
-    MemoryContextBundleRequest,
-    MemoryRetrievalService,
-)
 from app.memory.federated_retrieval import (
     FederatedContextBundle,
     FederatedRetrievalRequest,
     FederatedRetrievalService,
+)
+from app.memory.retrieval import (
+    MemoryContextBundle,
+    MemoryContextBundleRequest,
+    MemoryRetrievalService,
 )
 from app.prompts import load_prompt
 from app.tools.runtime import (
@@ -2491,7 +2491,6 @@ def _normalize_routed_route_type(value: str) -> str:
         "to_do": "task",
         "organization": "entity",
         "org": "entity",
-        "idea": "think_tank",
         "decision": "decision_log",
         "rfi": "human_input",
     }.get(normalized, normalized)

@@ -39,7 +39,7 @@ Routed item categories:
 - `human_input`: RFIs, approvals, missing answers, or decisions needed from Chris
 - `event`: meetings, deadlines, reminders, or scheduled blocks
 - `contact`: people, organizations, roles, relationship details, or contact facts
-- `think_tank`: brainstorms and immature ideas
+- `product_issue`: explicitly captured product and software ideas
 - `decision_log`: approvals, denials, decision records, and rationale
 - `project`: initiatives that group work and artifacts
 - `artifact_history`: raw run output, transcripts, reports, or tool results kept as provenance

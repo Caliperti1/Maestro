@@ -81,8 +81,8 @@ sequenceDiagram
     API->>Retriever: Retrieve Maestro-development context
     API->>Planner: Decompose message with memory and agent/tool roster
     alt pure brainstorm or immature concept
-        Planner-->>API: direct response and/or think_tank routed item
-        API->>Routed: Save Think Tank idea with provenance
+        Planner-->>API: conversational response unless Chris explicitly requests capture
+        API->>Issues: Save a canonical Product Issue only on explicit capture
         API-->>UI: Conversational response, no executable queue
     else planner believes agent research is useful
         Planner-->>API: Proposed workflow plus conversational explanation

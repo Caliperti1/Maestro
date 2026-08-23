@@ -1630,17 +1630,6 @@ class MaestroOrchestratorService:
         work_items = [
             replace(
                 item,
-                type="think_tank",
-                can_log_directly=True,
-                rationale=(
-                    item.rationale
-                    + " Hardened by Maestro: this is an immature idea or feature concept, "
-                    "so it belongs in Think Tank rather than durable RAG memory."
-                ),
-            )
-            if self._is_think_tank_candidate(item)
-            else replace(
-                item,
                 type="contact",
                 can_log_directly=True,
                 rationale=(
@@ -1859,31 +1848,6 @@ class MaestroOrchestratorService:
     def _model_profile_for_work_item_payload(self, payload: dict[str, Any]) -> str | None:
         """Compatibility shim for callers that only need the resolved runtime profile."""
         return self._model_selection_for_work_item_payload(payload)["model_profile"]
-
-    def _is_think_tank_candidate(self, item: MaestroWorkItem) -> bool:
-        if item.type != "memory_candidate":
-            return False
-        text = " ".join(
-            [
-                item.title,
-                item.description,
-                item.expected_output,
-                item.rationale,
-            ]
-        ).lower()
-        idea_markers = (
-            "idea",
-            "concept",
-            "brainstorm",
-            "feature",
-            "possible",
-            "proposal",
-            "prototype",
-            "explore",
-            "future",
-            "think tank",
-        )
-        return any(marker in text for marker in idea_markers)
 
     def _is_contact_context_candidate(self, item: MaestroWorkItem) -> bool:
         if item.type != "memory_candidate":
@@ -2417,19 +2381,6 @@ class MaestroOrchestratorService:
             item = blocking_rfis[0]
             detail = item.description.strip() if item.description else item.title
             return f"I need one bit of context before I can answer that well: {detail}"
-        think_tank_items = [item for item in routed if item.type == "think_tank"]
-        if think_tank_items and len(routed) == len(think_tank_items):
-            if len(think_tank_items) == 1:
-                item = think_tank_items[0]
-                return (
-                    f'I saved this in Think Tank as "{item.title}". We can keep '
-                    "brainstorming here, and when it matures I can turn it into a workflow, "
-                    "GitHub issue, or durable memory."
-                )
-            return (
-                f"I saved {len(think_tank_items)} ideas in Think Tank. We can keep "
-                "working them here and promote the useful ones when they get sharper."
-            )
         route_counts: dict[str, int] = {}
         for item in routed:
             route_type = route_type_for_work_item(item.type) or "item"

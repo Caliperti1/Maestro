@@ -504,7 +504,7 @@ event, contact, or remain transient.
 
 ## Future Notes
 
-- Think Tank should be an idea inbox/incubation surface that can later promote ideas into
+- Product Issues should be the canonical product-work surface that can promote scoped work into
   memory, tasks, projects, or docs.
 - Tool registry and credentials should build on the agent tool manifest rather than duplicating
   tool implementations per domain.

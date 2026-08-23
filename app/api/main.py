@@ -24,7 +24,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal
-from app.issues.repositories import ensure_runtime_repository
+from app.issues.repositories import ensure_default_repository_portfolio, ensure_runtime_repository
 from app.issues.worker import RepositoryIntelligenceWorker
 from app.maestro.calendar_trigger import CalendarTriggerService, calendar_trigger_worker_settings
 from app.maestro.gmail_trigger import GmailTriggerService, gmail_trigger_worker_settings
@@ -54,6 +54,7 @@ def create_app() -> FastAPI:
             IdentityGroundingService(session).seed_defaults()
             AgentRegistryService(session).ensure_domain_provider_connections()
             ensure_runtime_repository(session)
+            ensure_default_repository_portfolio(session)
         worker_tasks.extend(
             [
                 asyncio.create_task(_scheduler_worker_loop()),
@@ -199,13 +200,12 @@ def _process_routed_hygiene_once() -> None:
 async def _repository_intelligence_worker_loop() -> None:
     while True:
         settings = get_settings()
+        if settings.repository_intelligence_autorun:
+            try:
+                await asyncio.to_thread(_process_repository_intelligence_once)
+            except Exception:
+                logger.exception("Repository intelligence heartbeat failed.")
         await asyncio.sleep(max(60, settings.repository_intelligence_interval_seconds))
-        if not settings.repository_intelligence_autorun:
-            continue
-        try:
-            await asyncio.to_thread(_process_repository_intelligence_once)
-        except Exception:
-            logger.exception("Repository intelligence heartbeat failed.")
 
 
 def _process_repository_intelligence_once() -> None:

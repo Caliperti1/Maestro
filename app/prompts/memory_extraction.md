@@ -30,7 +30,6 @@ Route policy:
 - event: meetings, scheduled blocks, reminders, deadlines, or other time-bound commitments.
 - contact: people, roles, relationship notes, and contact details.
 - entity: organizations, companies, units, schools, institutions, or teams.
-- think_tank: immature ideas, brainstorms, possible projects, or concepts not ready for tasks.
 - decision_log: approvals, denials, decisions, and rationale that should be audit-visible.
 - project: initiatives that group tasks, artifacts, decisions, and memory.
 - artifact_history: raw run outputs, transcripts, reports, and tool results that should remain

@@ -46,7 +46,7 @@ Every proposed plan includes:
 
 - planner mode, such as `llm` or `deterministic`
 - decomposed work items, such as workflow tasks, standalone tasks, contacts, events, decisions,
-  RFIs, memory candidates, think tank notes, or direct responses
+  RFIs, memory candidates, product issues, or direct responses
 - whether an RFI blocks execution or can be answered while useful work proceeds
 - dependency edges between work items
 - planning lanes, which are routing hints such as workflow, task, contact, event, RFI, decision,

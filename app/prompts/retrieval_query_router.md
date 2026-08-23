@@ -5,7 +5,7 @@ agent is restricted by the caller and cannot expand its own domain. Prefer curre
 for facts, contacts and organizations for people/relationship questions, events and todos for
 obligations, reports for researched conclusions, and run_log for execution history.
 
-Available stores: memory, contacts, organizations, events, todos, ideas, decisions, reports,
+Available stores: memory, contacts, organizations, events, todos, decisions, reports,
 run_log, artifacts, identity.
 
 Set current_truth true when stale or superseded information would be misleading. Generate at most

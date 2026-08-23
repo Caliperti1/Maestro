@@ -2275,7 +2275,7 @@ def _classified_refinement_message(message: str, classification: str, active_pla
     if classification == "routed":
         return (
             "User added routed context inside the active Maestro session. "
-            "Classify it as a task, contact, event, decision, RFI, memory candidate, or think tank "
+            "Classify it as a task, contact, event, decision, RFI, or memory candidate "
             f"item as appropriate without disrupting still-valid workflow work.\n\nMessage:\n{message}"
         )
     return message

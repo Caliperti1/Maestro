@@ -1,7 +1,7 @@
 """Canonical routed-object promotion service.
 
-Routed objects are operational records such as events, todos, contacts, entities, decisions, and
-think-tank ideas. They are not the same thing as durable RAG memories: they should be editable,
+Routed objects are operational records such as events, todos, contacts, entities, and decisions.
+They are not the same thing as durable RAG memories: they should be editable,
 queryable, and displayed in calendar/CRM/task surfaces. This service promotes raw routed
 extraction rows into those canonical stores with provenance and duplicate resolution.
 """
@@ -32,7 +32,6 @@ from app.db.models import (
     DecisionRecord,
     Entity,
     EntityDomainNote,
-    Idea,
     OrganizationAlias,
     OrganizationIdentifier,
     OrganizationRelationship,
@@ -118,11 +117,9 @@ class RoutedMemoryService:
             return self._promote_contact(item)
         if route_type == "entity":
             return self._promote_entity(item)
-        if route_type == "think_tank":
-            return self._promote_idea(item)
         if route_type == "decision_log":
             return self._promote_decision(item)
-        return self._promote_idea(item, object_type="routed_note")
+        return None
 
     def _enrich_item(self, item: RoutedItem) -> None:
         if (item.metadata_ or {}).get("enriched_at"):
@@ -204,7 +201,6 @@ class RoutedMemoryService:
             "todos": [self._todo_payload(item) for item in self._todos(domain_id, query, limit)],
             "contacts": contacts,
             "entities": organizations,
-            "ideas": [self._idea_payload(item) for item in self._ideas(domain_id, query, limit)],
             "decisions": [
                 self._decision_payload(item) for item in self._decisions(domain_id, query, limit)
             ],
@@ -568,22 +564,6 @@ class RoutedMemoryService:
         embedding_status = OrganizationEmbeddingService(self.session).upsert(entity)
         entity.metadata_ = {**(entity.metadata_ or {}), "embedding_status": embedding_status}
         return self._link(item, "entity", entity.id, "upserted")
-
-    def _promote_idea(
-        self, item: RoutedItem, *, object_type: str = "idea"
-    ) -> RoutedPromotionResult:
-        idea = Idea(
-            domain_id=item.domain_id,
-            title=item.title,
-            content=item.content,
-            status="open",
-            source_refs=item.source_refs,
-            provenance=self._provenance(item),
-            metadata_=self._canonical_metadata(item),
-        )
-        self.session.add(idea)
-        self.session.flush()
-        return self._link(item, object_type, idea.id, "created")
 
     def _promote_decision(self, item: RoutedItem) -> RoutedPromotionResult:
         decision = DecisionRecord(
@@ -1208,16 +1188,6 @@ class RoutedMemoryService:
             self.session.scalars(statement.order_by(Entity.updated_at.desc()).limit(limit)).all()
         )
 
-    def _ideas(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[Idea]:
-        statement = select(Idea).where(Idea.status.notin_(["done", "archived"]))
-        if domain_id is not None:
-            statement = statement.where(Idea.domain_id == domain_id)
-        if query:
-            statement = statement.where(_text_match(Idea.title, Idea.content, query=query))
-        return list(
-            self.session.scalars(statement.order_by(Idea.updated_at.desc()).limit(limit)).all()
-        )
-
     def _decisions(
         self, domain_id: uuid.UUID | None, query: str, limit: int
     ) -> list[DecisionRecord]:
@@ -1288,15 +1258,6 @@ class RoutedMemoryService:
             "name": item.name,
             "website": item.website,
             "summary": item.summary,
-            "status": item.status,
-            "metadata": item.metadata_,
-        }
-
-    def _idea_payload(self, item: Idea) -> dict[str, Any]:
-        return {
-            "id": str(item.id),
-            "title": item.title,
-            "content": item.content,
             "status": item.status,
             "metadata": item.metadata_,
         }
