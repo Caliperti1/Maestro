@@ -11,6 +11,7 @@ from app.db.models import (
     Entity,
     Message,
     RoutedItem,
+    Task,
     Todo,
     WorkflowRun,
 )
@@ -299,6 +300,10 @@ def test_agent_todo_is_planned_once_and_linked_to_workflow(session) -> None:
 
     run = session.get(WorkflowRun, todo.workflow_run_id)
     assert run is not None
+    parent = session.get(Task, todo.workflow_task_id)
+    assert parent is not None
+    assert parent.source_type == "todo_agent_task"
+    assert parent.input_payload["originating_todo_id"] == str(todo.id)
     run.status = "completed"
     run.output_payload = {"chat_summary": "I prepared the partner background report."}
     session.commit()
