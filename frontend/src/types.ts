@@ -626,9 +626,76 @@ export type ActiveSurface =
   | "skills"
   | "domain"
   | "memory"
+  | "issues"
   | "tools"
   | RoutedObjectSurface;
 export type RoutedObjectRecord = RoutedEvent | RoutedTodo | RoutedContact | RoutedEntity | RoutedIdea;
+
+export type ProductRepository = {
+  id: string;
+  domain_id: string;
+  project_id: string;
+  key: string;
+  display_name: string;
+  provider: string;
+  external_repo: string;
+  local_path: string | null;
+  default_branch: string;
+  current_commit: string | null;
+  last_observed_at: string | null;
+  last_synced_at: string | null;
+  status: string;
+  sync_config: Record<string, unknown>;
+};
+
+export type ProductProject = {
+  id: string;
+  domain_id: string;
+  key: string;
+  name: string;
+  summary: string;
+  vision: string;
+  status: string;
+  repositories: ProductRepository[];
+};
+
+export type ProductIssue = {
+  id: string;
+  domain_id: string;
+  project_id: string;
+  repository_id: string | null;
+  issue_type: string;
+  title: string;
+  problem: string;
+  desired_outcome: string;
+  acceptance_criteria: string[];
+  notes: string;
+  priority: string;
+  estimated_minutes: number | null;
+  status: string;
+  assignee_type: string;
+  assignee_ref: string | null;
+  agent_task: boolean;
+  agent_task_status: string;
+  external_provider: string | null;
+  external_repo: string | null;
+  external_number: number | null;
+  external_url: string | null;
+  external_state: string | null;
+  sync_status: string;
+  project: { key: string; name: string } | null;
+  repository: ProductRepository | null;
+  relations: Array<{
+    id: string;
+    source_issue_id: string;
+    target_issue_id: string;
+    relation_type: string;
+    rationale: string;
+    confidence: number;
+  }>;
+  created_at: string | null;
+  updated_at: string | null;
+};
 
 export type WorkflowRunLogEntry = {
   id: string;

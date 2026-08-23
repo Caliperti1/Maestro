@@ -34,6 +34,7 @@ from app.db.models import (
     MemoryItem,
     OrganizationAlias,
     OrganizationEmbedding,
+    ProductIssue,
     Report,
     RetrievalDocument,
     Todo,
@@ -45,7 +46,7 @@ from app.prompts import load_prompt
 
 STORE_NAMES = {
     "memory", "contacts", "organizations", "events", "todos", "ideas", "decisions",
-    "reports", "run_log", "artifacts", "identity",
+    "reports", "run_log", "artifacts", "identity", "issues",
 }
 
 
@@ -196,12 +197,13 @@ class RetrievalQueryRouter:
             "reports": {"report", "research", "learned", "summary"},
             "run_log": {"ran", "workflow", "completed", "failed"},
             "artifacts": {"file", "artifact", "document", "code"},
+            "issues": {"issue", "story", "bug", "feature", "backlog", "github", "codebase"},
         }
         stores.extend(store for store, words in hints.items() if terms & words)
         if len(stores) == 2:
             stores.extend([
                 "contacts", "organizations", "events", "todos", "ideas", "decisions",
-                "reports", "run_log", "artifacts",
+                "reports", "run_log", "artifacts", "issues",
             ])
         matched_domains = [domain for domain in domains if domain.replace("-", " ") in query.lower()]
         return RetrievalQueryPlan(
@@ -354,6 +356,23 @@ class FederatedIndexService:
         yield from self._simple_projections(Todo, "todos", lambda item: "\n".join(value for value in [item.description, f"Due: {item.due_at.isoformat()}" if item.due_at else None, f"Owner: {item.owner_ref or item.owner_type}"] if value), lambda item: item.due_at or item.updated_at, domains)
         yield from self._simple_projections(Idea, "ideas", lambda item: item.content, lambda item: item.updated_at, domains)
         yield from self._simple_projections(DecisionRecord, "decisions", lambda item: "\n".join(value for value in [item.decision, item.rationale] if value), lambda item: item.updated_at, domains)
+        yield from self._simple_projections(
+            ProductIssue,
+            "issues",
+            lambda item: "\n".join(
+                value
+                for value in [
+                    item.problem,
+                    f"Desired outcome: {item.desired_outcome}" if item.desired_outcome else None,
+                    "Acceptance criteria: " + "; ".join(item.acceptance_criteria or []) if item.acceptance_criteria else None,
+                    item.notes,
+                    f"Repository: {item.external_repo}" if item.external_repo else None,
+                ]
+                if value
+            ),
+            lambda item: item.updated_at,
+            domains,
+        )
         for report in self.session.scalars(select(Report)).all():
             if not (report.structured_data or {}).get("archived"):
                 yield _Projection(key=f"report:{report.id}", store="reports", source_id=str(report.id), domain_id=report.domain_id, title=report.title, content="\n".join(value for value in [report.summary, report.body_markdown] if value), source_timestamp=report.created_at, trust_score=_trust(report.structured_data), importance=0.62, policy=_policy(report.structured_data), provenance=report.structured_data, metadata={"report_type": report.report_type, "domain_key": domains.get(report.domain_id)})

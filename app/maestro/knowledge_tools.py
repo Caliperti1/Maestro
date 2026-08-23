@@ -8,6 +8,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.db.models import Domain
+from app.issues.service import ProductIssueService, issue_payload
 from app.llm.client import OpenAILLMClient
 from app.memory.federated_retrieval import (
     STORE_NAMES,
@@ -16,7 +17,7 @@ from app.memory.federated_retrieval import (
 )
 from app.memory.routed_retrieval import RoutedRetrievalService
 
-READ_ACTIONS = {"context.search", "web.search"}
+READ_ACTIONS = {"context.search", "web.search", "issue.search", "issue.get"}
 ROUTED_CONTEXT_STORES = {"contacts", "organizations", "events", "todos", "ideas", "decisions"}
 
 
@@ -57,6 +58,8 @@ class KnowledgeReadToolService:
             return self._search_context(arguments)
         if action_type == "web.search":
             return self._search_web(arguments)
+        if action_type in {"issue.search", "issue.get"}:
+            return self._search_issues(action_type, arguments)
         raise ValueError(f"Unsupported Knowledge read action: {action_type}")
 
     def _search_context(self, arguments: dict[str, Any]) -> KnowledgeActionResult:
@@ -182,6 +185,39 @@ class KnowledgeReadToolService:
             },
         )
 
+    def _search_issues(
+        self,
+        action_type: str,
+        arguments: dict[str, Any],
+    ) -> KnowledgeActionResult:
+        service = ProductIssueService(self.session)
+        query = str(
+            arguments.get("query")
+            or arguments.get("query_text")
+            or arguments.get("title")
+            or arguments.get("id")
+            or ""
+        ).strip()
+        if not query:
+            raise ValueError("An issue search needs an issue ID, title, or focused query.")
+        issues = service.search(
+            query=query,
+            domain_key=str(arguments.get("domain_key") or "").strip() or None,
+            project_key=str(arguments.get("project_key") or "").strip() or None,
+            repository_key=str(arguments.get("repository_key") or "").strip() or None,
+            status=str(arguments.get("status") or "").strip() or None,
+            limit=1 if action_type == "issue.get" else _bounded_int(
+                arguments.get("max_items"), default=8, minimum=1, maximum=20
+            ),
+        )
+        return KnowledgeActionResult(
+            action_type,
+            "completed",
+            f"Retrieved {len(issues)} product issue{'s' if len(issues) != 1 else ''}.",
+            "product_issue",
+            data={"query": query, "issues": [issue_payload(issue) for issue in issues]},
+        )
+
 
 def _context_stores(value: Any) -> set[str] | None:
     if value in (None, "", []):
@@ -203,6 +239,9 @@ def _context_stores(value: Any) -> set[str] | None:
         "run_logs": "run_log",
         "artifact": "artifacts",
         "memories": "memory",
+        "issue": "issues",
+        "story": "issues",
+        "backlog": "issues",
     }
     normalized = {
         aliases.get(str(item).strip().lower(), str(item).strip().lower())

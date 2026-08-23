@@ -1,12 +1,20 @@
-from typing import Any, Literal
 import asyncio
 import json
 import logging
-import uuid
 import re
+import uuid
 from datetime import UTC, datetime
+from typing import Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased
@@ -16,6 +24,7 @@ from app.db.models import (
     Conversation,
     Domain,
     Message,
+    ProductIssue,
     RoutedItem,
     RuntimeSetting,
     Task,
@@ -34,21 +43,22 @@ from app.maestro.channel import (
 )
 from app.maestro.context_assembler import MaestroContextAssembler, maestro_context_payload
 from app.maestro.identity_grounding import IdentityGroundingService
-from app.maestro.knowledge import MaestroKnowledgeService, knowledge_fallback
 from app.maestro.intent_classifier import (
     classify_active_message_with_local_llm,
     resolve_topic_with_local_llm,
     understand_message_with_local_llm,
 )
-from app.maestro.scheduler import SchedulerService
-from app.maestro.todo_agent_tasks import TodoAgentTaskService
-from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
+from app.maestro.knowledge import MaestroKnowledgeService, knowledge_fallback
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
     MaestroOrchestratorService,
     MaestroPlan,
     MaestroRun,
 )
+from app.maestro.product_issue_agent_tasks import ProductIssueAgentTaskService
+from app.maestro.scheduler import SchedulerService
+from app.maestro.todo_agent_tasks import TodoAgentTaskService
+from app.tools.runtime import ToolExecutionError, ToolExecutionService, tool_result_payload
 
 router = APIRouter(prefix="/maestro", tags=["maestro"])
 logger = logging.getLogger(__name__)
@@ -198,6 +208,7 @@ def _respond_to_maestro_sync(
         user_message=user_message,
     )
     if resumed_agent_task is not None:
+        resumed_is_issue = isinstance(resumed_agent_task, ProductIssue)
         response_message = (
             f"Thanks, Chris. I attached that clarification to **{resumed_agent_task.title}** "
             "and returned it to the background queue. I’ll continue the workflow and report back "
@@ -210,13 +221,13 @@ def _respond_to_maestro_sync(
             response_message,
             metadata={
                 **message_metadata,
-                "message_type": "todo_agent_task_rfi_resolved",
-                "todo_id": str(resumed_agent_task.id),
+                "message_type": "agent_task_rfi_resolved",
+                "origin_id": str(resumed_agent_task.id),
             },
         )
         return {
             "kind": "chat_only",
-            "classification": "todo_agent_task_rfi_answer",
+            "classification": "product_issue_rfi_answer" if resumed_is_issue else "todo_agent_task_rfi_answer",
             "interaction_mode": body.interaction_mode,
             "message": response_message,
             "plan": None,
@@ -1300,7 +1311,7 @@ def _resume_waiting_agent_task_from_reply(
     *,
     conversation: Conversation,
     user_message: Message,
-) -> Todo | None:
+) -> Todo | ProductIssue | None:
     """Bind a direct chat reply to the most recent unresolved agent-task RFI."""
     recent = db.scalars(
         select(Message)
@@ -1316,16 +1327,23 @@ def _resume_waiting_agent_task_from_reply(
     for message in recent:
         if message.sender_type == "user":
             break
-        if (message.metadata_ or {}).get("message_type") == "todo_agent_task_rfi":
+        if (message.metadata_ or {}).get("message_type") in {"todo_agent_task_rfi", "product_issue_rfi"}:
             rfi_message = message
             break
     if rfi_message is None:
         return None
+    metadata = rfi_message.metadata_ or {}
     try:
-        todo_id = uuid.UUID(str((rfi_message.metadata_ or {}).get("todo_id") or ""))
+        origin_id = uuid.UUID(str(metadata.get("todo_id") or metadata.get("product_issue_id") or ""))
     except ValueError:
         return None
-    todo = db.get(Todo, todo_id)
+    if metadata.get("message_type") == "product_issue_rfi":
+        issue = db.get(ProductIssue, origin_id)
+        if issue is None or not issue.agent_task or issue.agent_task_status != "needs_input":
+            return None
+        clarification = user_message.content.strip()
+        return ProductIssueAgentTaskService(db).apply_clarification(issue, clarification=clarification, message_id=user_message.id) if clarification else None
+    todo = db.get(Todo, origin_id)
     if todo is None or not todo.agent_task or todo.agent_task_status != "needs_input":
         return None
 

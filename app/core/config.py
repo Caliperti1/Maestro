@@ -85,8 +85,13 @@ class Settings(BaseSettings):
     todo_agent_worker_autorun: bool = True
     todo_agent_worker_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     todo_agent_worker_claim_limit: Annotated[int, Field(ge=1, le=20)] = 2
+    product_issue_agent_worker_autorun: bool = True
+    product_issue_agent_worker_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
+    product_issue_agent_worker_claim_limit: Annotated[int, Field(ge=1, le=10)] = 1
     routed_hygiene_autorun: bool = True
     routed_hygiene_interval_seconds: Annotated[int, Field(ge=300, le=86400)] = 3600
+    repository_intelligence_autorun: bool = True
+    repository_intelligence_interval_seconds: Annotated[int, Field(ge=60, le=86400)] = 300
     context_mailbox_autorun: bool = True
     context_mailbox_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     context_mailbox_page_size: Annotated[int, Field(ge=1, le=100)] = 25

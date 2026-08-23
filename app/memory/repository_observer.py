@@ -24,6 +24,7 @@ class RepositoryObservationResult:
     mode: str
     changed_files: list[str]
     gateway: GatewayIngestResult | None
+    report_markdown: str | None = None
 
 
 class RepositoryObserverService:
@@ -56,7 +57,7 @@ class RepositoryObserverService:
         checkpoint = self.session.scalar(select(SourceCheckpoint).where(SourceCheckpoint.source_registration_id == registration.id, SourceCheckpoint.cursor_key == "last_observed_commit"))
         previous = str((checkpoint.cursor_value or {}).get("commit") or "") if checkpoint else ""
         if previous == head and not force_full:
-            return RepositoryObservationResult("unchanged", registration.key, head, previous, "incremental", [], None)
+            return RepositoryObservationResult("unchanged", registration.key, head, previous, "incremental", [], None, None)
         mode = "full" if force_full or not previous else "incremental"
         changed = _git(repository, "ls-files").splitlines() if mode == "full" else _git(repository, "diff", "--name-only", f"{previous}..{head}").splitlines()
         report = self._report(repository, registration, head=head, previous=previous or None, mode=mode, changed=changed)
@@ -77,7 +78,7 @@ class RepositoryObserverService:
             domain=domain,
         )
         IngestionLedgerService(self.session).update_checkpoint(registration, cursor_key="last_observed_commit", cursor_value={"commit": head, "observed_at": datetime.now(UTC).isoformat()})
-        return RepositoryObservationResult("staged", registration.key, head, previous or None, mode, changed, gateway_result)
+        return RepositoryObservationResult("staged", registration.key, head, previous or None, mode, changed, gateway_result, report)
 
     def _report(self, repository: Path, registration: SourceRegistration, *, head: str, previous: str | None, mode: str, changed: list[str]) -> str:
         readme = ""

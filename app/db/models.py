@@ -2,7 +2,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     Float,
@@ -13,10 +15,8 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import Uuid
-from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
@@ -862,6 +862,171 @@ class Todo(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(40), default="open", nullable=False, index=True)
     source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class ProductProject(TimestampMixin, Base):
+    """A product or codebase boundary used to organize repositories and product issues."""
+
+    __tablename__ = "product_projects"
+    __table_args__ = (
+        UniqueConstraint("domain_id", "key", name="uq_product_projects_domain_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    vision: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class RepositoryProfile(TimestampMixin, Base):
+    """Repository registration plus observation, sync, and persistent Codex state."""
+
+    __tablename__ = "repository_profiles"
+    __table_args__ = (
+        UniqueConstraint("provider", "external_repo", name="uq_repository_profiles_provider_repo"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("product_projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_registration_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("source_registrations.id", ondelete="SET NULL"), index=True
+    )
+    key: Mapped[str] = mapped_column(String(200), unique=True, nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), default="github", nullable=False, index=True)
+    external_repo: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    local_path: Mapped[str | None] = mapped_column(Text)
+    default_branch: Mapped[str] = mapped_column(String(160), default="main", nullable=False)
+    current_commit: Mapped[str | None] = mapped_column(String(80), index=True)
+    last_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    codex_steward_session_id: Mapped[str | None] = mapped_column(String(240), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
+    sync_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class ProductIssue(TimestampMixin, Base):
+    """Canonical product work, independent of whether it originated locally or in GitHub."""
+
+    __tablename__ = "product_issues"
+    __table_args__ = (
+        UniqueConstraint(
+            "external_provider",
+            "external_repo",
+            "external_number",
+            name="uq_product_issues_external_identity",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("product_projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    repository_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("repository_profiles.id", ondelete="SET NULL"), index=True
+    )
+    issue_type: Mapped[str] = mapped_column(String(80), default="feature", nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    normalized_title: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    problem: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    desired_outcome: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    acceptance_criteria: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    priority: Mapped[str] = mapped_column(String(40), default="normal", nullable=False, index=True)
+    estimated_minutes: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(40), default="ready", nullable=False, index=True)
+    assignee_type: Mapped[str] = mapped_column(String(40), default="unassigned", nullable=False)
+    assignee_ref: Mapped[str | None] = mapped_column(String(240))
+    agent_task: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    agent_task_status: Mapped[str] = mapped_column(
+        String(40), default="not_agent", nullable=False, index=True
+    )
+    workflow_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("tasks.id", ondelete="SET NULL"), index=True
+    )
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("workflow_runs.id", ondelete="SET NULL"), index=True
+    )
+    external_provider: Mapped[str | None] = mapped_column(String(80), index=True)
+    external_repo: Mapped[str | None] = mapped_column(String(320), index=True)
+    external_number: Mapped[int | None] = mapped_column(Integer, index=True)
+    external_url: Mapped[str | None] = mapped_column(Text)
+    external_state: Mapped[str | None] = mapped_column(String(40), index=True)
+    external_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sync_status: Mapped[str] = mapped_column(String(40), default="local", nullable=False, index=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    sync_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class ProductIssueRelation(TimestampMixin, Base):
+    __tablename__ = "product_issue_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_issue_id",
+            "target_issue_id",
+            "relation_type",
+            name="uq_product_issue_relations_edge",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_issue_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("product_issues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_issue_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("product_issues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ProductIssueExecution(TimestampMixin, Base):
+    __tablename__ = "product_issue_executions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    issue_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("product_issues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    workflow_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("tasks.id", ondelete="SET NULL"), index=True
+    )
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("workflow_runs.id", ondelete="SET NULL"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), default="queued", nullable=False, index=True)
+    branch_name: Mapped[str | None] = mapped_column(String(320))
+    pull_request_number: Mapped[int | None] = mapped_column(Integer)
+    pull_request_url: Mapped[str | None] = mapped_column(Text)
+    codex_session_id: Mapped[str | None] = mapped_column(String(240), index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    report_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("reports.id", ondelete="SET NULL"), index=True
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 

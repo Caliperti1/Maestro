@@ -27,11 +27,13 @@ from app.db.models import (
     Idea,
     Message,
     OrganizationAlias,
+    ProductIssue,
     RoutedItem,
     Todo,
     WorkflowDefinition,
 )
 from app.db.repositories import DomainRepository
+from app.issues.service import ProductIssueService
 from app.llm.client import OpenAILLMClient
 from app.maestro.context_assembler import MaestroContextAssembler
 from app.maestro.knowledge_tools import (
@@ -65,6 +67,10 @@ ALLOWED_ACTIONS = {
     "idea.update",
     "workflow.update",
     "workflow.archive",
+    "issue.search",
+    "issue.get",
+    "issue.capture",
+    "issue.update",
 }
 MAX_KNOWLEDGE_ACTION_ROUNDS = 4
 
@@ -359,6 +365,10 @@ class MaestroKnowledgeService:
                     domain_resolver=self._domain,
                     web_client=self.web_client,
                 ).execute(action_type, arguments)
+            if action_type == "issue.capture":
+                return self._capture_issue(arguments, provenance)
+            if action_type == "issue.update":
+                return self._update_issue(arguments)
             if action_type.startswith("calendar."):
                 arguments = _normalize_calendar_arguments(arguments, source_message=source_message)
             if action_type.endswith(".create"):
@@ -376,6 +386,74 @@ class MaestroKnowledgeService:
             return KnowledgeActionResult(
                 action_type, "failed", "I could not apply that change safely."
             )
+
+    def _capture_issue(
+        self,
+        arguments: dict[str, Any],
+        provenance: dict[str, Any],
+    ) -> KnowledgeActionResult:
+        result = ProductIssueService(self.session).capture(
+            domain_key=_optional_text(arguments.get("domain_key")),
+            project_key=_optional_text(arguments.get("project_key")),
+            repository_key=_optional_text(arguments.get("repository_key")),
+            title=_optional_text(arguments.get("title")),
+            problem=str(arguments.get("problem") or ""),
+            desired_outcome=str(arguments.get("desired_outcome") or ""),
+            acceptance_criteria=(
+                arguments.get("acceptance_criteria")
+                if isinstance(arguments.get("acceptance_criteria"), list)
+                else []
+            ),
+            notes=str(arguments.get("notes") or ""),
+            issue_type=str(arguments.get("issue_type") or "feature"),
+            priority=str(arguments.get("priority") or "normal"),
+            agent_task=bool(arguments.get("agent_task", False)),
+            source_refs=[provenance],
+            provenance=provenance,
+        )
+        if result.status == "needs_clarification":
+            return KnowledgeActionResult(
+                "issue.capture", "needs_clarification", result.clarification or result.message
+            )
+        return KnowledgeActionResult(
+            "issue.capture",
+            "completed",
+            result.message,
+            "product_issue",
+            str(result.issue.id) if result.issue else None,
+            data={
+                "capture_status": result.status,
+                "matched_issue_id": result.matched_issue_id,
+                "confidence": result.confidence,
+            },
+        )
+
+    def _update_issue(self, arguments: dict[str, Any]) -> KnowledgeActionResult:
+        target = str(arguments.get("target") or arguments.get("id") or arguments.get("title") or "").strip()
+        if not target:
+            raise ValueError("I need the issue ID or title to update it.")
+        try:
+            issue_id = uuid.UUID(target)
+            issue = self.session.get(ProductIssue, issue_id)
+        except ValueError:
+            matches = ProductIssueService(self.session).search(
+                query=target,
+                domain_key=_optional_text(arguments.get("domain_key")),
+                project_key=_optional_text(arguments.get("project_key")),
+                limit=3,
+            )
+            issue = matches[0] if len(matches) == 1 else None
+        if issue is None:
+            raise ValueError(f"I could not find one unambiguous product issue matching '{target}'.")
+        updates = arguments.get("updates") if isinstance(arguments.get("updates"), dict) else {
+            key: value for key, value in arguments.items()
+            if key not in {"target", "id", "domain_key", "project_key"}
+        }
+        updated = ProductIssueService(self.session).update(issue.id, updates)
+        return KnowledgeActionResult(
+            "issue.update", "completed", f"Updated issue '{updated.title}'.",
+            "product_issue", str(updated.id),
+        )
 
     def _create(
         self,

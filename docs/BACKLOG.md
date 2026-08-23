@@ -27,6 +27,24 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
   links to run-log/provenance, generated artifacts, and explicit follow-up sections so reports are
   pleasant for Chris to read and reliable for agents to retrieve.
 
+## Product Issue And Repository Intelligence
+
+- [x] Add canonical project, repository, issue, relationship, sync, and execution records.
+- [x] Let Knowledge mode search, clarify, capture, reconcile, and update product issues.
+- [x] Preserve merged submissions and model duplicate, related, conflicting, blocking, superseding,
+  and implementation relationships explicitly.
+- [x] Add deterministic paginated two-way GitHub issue synchronization with conflict detection.
+- [x] Add a Product Issues UI with filters, editing, GitHub links/sync, and agent-task controls.
+- [x] Create visible repository-intelligence and issue-hygiene durable workflows per repository while
+  keeping unchanged polling quiet.
+- [x] Allow local Codex executions to resume a persistent session.
+- [x] Bridge agent-marked product issues into background coding workflows with run/PR/thread links.
+- [ ] Add repository registration and project-vision editing directly to the Product Issues UI.
+- [ ] Add explicit sync-conflict resolution controls and side-by-side local/GitHub field comparison.
+- [ ] Add webhook-based GitHub issue and merged-PR triggers; retain polling as recovery.
+- [ ] Add semantic issue embeddings and recommendation ranking across projects.
+- [ ] Add a graph visualization for issue dependencies, conflicts, supersession, and implementation.
+
 ## Context And Retrieval Program
 
 ### Ingestion control plane

@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.runtime import AgentRegistryService
 from app.api.agents import router as agents_router
+from app.api.issues import router as issues_router
 from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
 from app.api.scheduler import router as scheduler_router
@@ -23,9 +24,12 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal
+from app.issues.repositories import ensure_runtime_repository
+from app.issues.worker import RepositoryIntelligenceWorker
 from app.maestro.calendar_trigger import CalendarTriggerService, calendar_trigger_worker_settings
 from app.maestro.gmail_trigger import GmailTriggerService, gmail_trigger_worker_settings
 from app.maestro.identity_grounding import IdentityGroundingService
+from app.maestro.product_issue_agent_tasks import ProductIssueAgentTaskService
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
 from app.maestro.todo_agent_tasks import TodoAgentTaskService
 from app.memory.contact_hydration import ContactHydrationService
@@ -49,6 +53,7 @@ def create_app() -> FastAPI:
             seed_default_domains(session)
             IdentityGroundingService(session).seed_defaults()
             AgentRegistryService(session).ensure_domain_provider_connections()
+            ensure_runtime_repository(session)
         worker_tasks.extend(
             [
                 asyncio.create_task(_scheduler_worker_loop()),
@@ -59,7 +64,9 @@ def create_app() -> FastAPI:
                 asyncio.create_task(_contact_hydration_worker_loop()),
                 asyncio.create_task(_memory_hygiene_worker_loop()),
                 asyncio.create_task(_todo_agent_task_worker_loop()),
+                asyncio.create_task(_product_issue_agent_task_worker_loop()),
                 asyncio.create_task(_routed_hygiene_worker_loop()),
+                asyncio.create_task(_repository_intelligence_worker_loop()),
             ]
         )
         try:
@@ -85,6 +92,7 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": settings.app_name}
 
     app.include_router(memory_router)
+    app.include_router(issues_router)
     app.include_router(agents_router)
     app.include_router(maestro_router)
     app.include_router(scheduler_router)
@@ -135,6 +143,25 @@ def _process_todo_agent_tasks_once() -> None:
         )
 
 
+async def _product_issue_agent_task_worker_loop() -> None:
+    while True:
+        settings = get_settings()
+        await asyncio.sleep(max(10, settings.product_issue_agent_worker_interval_seconds))
+        if not settings.product_issue_agent_worker_autorun:
+            continue
+        try:
+            await asyncio.to_thread(_process_product_issue_agent_tasks_once)
+        except Exception:
+            logger.exception("Product issue agent-task worker heartbeat failed.")
+
+
+def _process_product_issue_agent_tasks_once() -> None:
+    with SessionLocal() as session:
+        ProductIssueAgentTaskService(session).run_once(
+            claim_limit=get_settings().product_issue_agent_worker_claim_limit
+        )
+
+
 async def _memory_hygiene_worker_loop() -> None:
     while True:
         settings = get_settings()
@@ -167,6 +194,23 @@ async def _routed_hygiene_worker_loop() -> None:
 def _process_routed_hygiene_once() -> None:
     with SessionLocal() as session:
         RoutedHygieneService(session).run_once()
+
+
+async def _repository_intelligence_worker_loop() -> None:
+    while True:
+        settings = get_settings()
+        await asyncio.sleep(max(60, settings.repository_intelligence_interval_seconds))
+        if not settings.repository_intelligence_autorun:
+            continue
+        try:
+            await asyncio.to_thread(_process_repository_intelligence_once)
+        except Exception:
+            logger.exception("Repository intelligence heartbeat failed.")
+
+
+def _process_repository_intelligence_once() -> None:
+    with SessionLocal() as session:
+        RepositoryIntelligenceWorker(session).run_once()
 
 
 async def _gmail_trigger_worker_loop() -> None:
