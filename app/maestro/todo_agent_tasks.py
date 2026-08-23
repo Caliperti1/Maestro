@@ -24,7 +24,7 @@ class TodoAgentTaskService:
             select(Todo)
             .where(
                 Todo.agent_task.is_(True),
-                Todo.agent_task_status.in_(["pending", "retry"]),
+                Todo.agent_task_status.in_(["not_agent", "pending", "retry"]),
                 Todo.status.notin_(["done", "archived"]),
                 Todo.workflow_task_id.is_(None),
             )
@@ -40,7 +40,28 @@ class TodoAgentTaskService:
         todo.agent_task_status = "planning"
         todo.last_agent_task_attempt_at = datetime.now(UTC)
         todo.agent_task_error = None
+        should_notify = not (todo.metadata_ or {}).get("planning_notified_at")
+        if should_notify:
+            todo.metadata_ = {
+                **(todo.metadata_ or {}),
+                "planning_notified_at": datetime.now(UTC).isoformat(),
+            }
         self.session.commit()
+        if should_notify:
+            record_channel_message(
+                self.session,
+                sender="maestro",
+                content=(
+                    f"Chris, I picked up the background task **{todo.title}** and am preparing "
+                    "a one-time workflow now. I will run it automatically and ask you here only "
+                    "if I need missing information or approval for a protected action."
+                ),
+                metadata={
+                    "channel_visibility": "global",
+                    "message_type": "todo_agent_task_planning",
+                    "todo_id": str(todo.id),
+                },
+            )
         domain = self.session.get(Domain, todo.domain_id) if todo.domain_id else None
         prompt = (
             "Create a one-time background agent workflow to complete this routed task. "
