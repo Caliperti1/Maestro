@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -692,6 +692,58 @@ def test_routed_context_returns_recurring_event_for_requested_date(
     assert response.status_code == 200
     assert response.json()["events"][0]["title"] == "Collaborative Autonomy Standup"
     assert response.json()["events"][0]["recurrence_rule"].endswith("20261231T235959Z")
+
+
+def test_calendar_instance_edit_creates_exception_without_moving_series(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    parent_start = datetime(2026, 8, 24, 15, 0, tzinfo=UTC)
+    parent = CalendarEvent(
+        domain_id=praxis.id,
+        title="Daily Sync",
+        start_at=parent_start,
+        end_at=parent_start + timedelta(minutes=30),
+        timezone="America/New_York",
+        recurrence_rule="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH",
+        status="scheduled",
+        attendees=[],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={"created_from": "test"},
+        metadata_={},
+    )
+    session.add(parent)
+    session.commit()
+    occurrence_start = datetime(2026, 8, 25, 15, 0, tzinfo=UTC)
+    moved_start = datetime(2026, 8, 25, 17, 0, tzinfo=UTC)
+
+    response = _client(session, tmp_path).patch(
+        f"/memory/routed-objects/events/{parent.id}",
+        json={
+            "updates": {
+                "edit_scope": "instance",
+                "occurrence_start_at": occurrence_start.isoformat(),
+                "start_at": moved_start.isoformat(),
+                "end_at": (moved_start + timedelta(minutes=30)).isoformat(),
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    exception = response.json()["event"]
+    session.refresh(parent)
+    assert exception["id"] != str(parent.id)
+    assert datetime.fromisoformat(exception["start_at"]) == moved_start
+    assert exception["recurrence_rule"] is None
+    assert exception["metadata"]["recurrence_parent_id"] == str(parent.id)
+    assert parent.start_at is not None
+    assert parent.start_at.replace(tzinfo=UTC) == parent_start
+    assert parent.recurrence_rule == "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH"
+    assert occurrence_start.isoformat() in parent.metadata_["recurrence_exdates"]
 
 
 def test_routed_memory_service_dedupes_contacts_and_links_entities(

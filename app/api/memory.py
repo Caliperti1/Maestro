@@ -586,9 +586,17 @@ def list_calendar_events(
     if status is not None:
         query = query.where(CalendarEvent.status == status)
     if start_at is not None:
-        query = query.where(or_(CalendarEvent.end_at.is_(None), CalendarEvent.end_at >= start_at))
+        query = query.where(
+            or_(
+                CalendarEvent.recurrence_rule.is_not(None),
+                CalendarEvent.end_at.is_(None),
+                CalendarEvent.end_at >= start_at,
+            )
+        )
     if end_at is not None:
-        query = query.where(CalendarEvent.start_at < end_at)
+        query = query.where(
+            or_(CalendarEvent.recurrence_rule.is_not(None), CalendarEvent.start_at < end_at)
+        )
     events = db.scalars(query.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(limit)).all()
     calendar = CalendarIntelligenceService(db)
     for event in events:
@@ -682,9 +690,15 @@ def update_calendar_event(
     )
     _validate_calendar_window(proposed_start, proposed_end, proposed_timezone)
     try:
-        event = RoutedEditService(db).update_event(event_id, body.updates)
+        editor = RoutedEditService(db)
+        event = (
+            editor.create_event_exception(event_id, body.updates)
+            if body.updates.get("edit_scope") == "instance" and current.recurrence_rule
+            else editor.update_event(event_id, body.updates)
+        )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        status_code = 422 if "occurrence_start_at" in str(exc) else 404
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     return {"event": _calendar_event_payload(db, event)}
 
 

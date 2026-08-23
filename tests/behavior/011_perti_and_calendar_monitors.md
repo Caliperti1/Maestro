@@ -14,13 +14,14 @@ and update canonical routed records without duplicate runs or events.
 | 11.3 | Install all missing Perti and Calendar templates paused. | Four canonical templates exist; none silently activates. | Durable workflow cards. | Automated; UI not run |
 | 11.4 | Activate Perti Email Triage in shadow mode, enable Gmail watch, and poll once. | The current Gmail cursor initializes and old mail is not processed. | Perti Gmail health says initialized; zero runs. | Automated producer behavior; human OAuth not run |
 | 11.5 | Send one controlled Perti action email. | One exact-message shadow run appears under Perti and proposes grounded routes/notification. | Run event payload, report, and decision. | Not run |
-| 11.6 | Activate each Calendar monitor in shadow mode, enable Calendar watch, and poll once. | Each domain stores its own sync token and does not import historical events. | Two domain health rows; zero old-event runs. | Automated producer behavior; human OAuth not run |
+| 11.6 | Activate each Calendar monitor in shadow mode, enable Calendar watch, and poll once. | Each domain stores its own sync token, skips past events, and deterministically seeds upcoming events, including instances from older recurring series. | Two domain health rows; zero old-event runs; upcoming recurring standup visible without an LLM run. | Automated producer behavior; human OAuth not run |
 | 11.7 | Create a controlled future event in Perti Google Calendar. | One exact-event shadow run appears; no routed write occurs yet. | Trigger payload and shadow report. | Not run |
 | 11.8 | Switch Perti Calendar Monitor live and edit the controlled event time/title. | The same canonical Maestro event updates with exact provider identity and provenance. | Stable Maestro event ID with new time/title/etag. | Automated upsert identity pending human OAuth test |
 | 11.9 | Cancel the controlled Google event. | The same Maestro event becomes cancelled and remains inspectable. | Stable canonical ID and cancelled status. | Not run |
 | 11.10 | Repeat 11.7-11.9 for Praxis. | Praxis Calendar stays current independently from email triage. | Praxis workflow run and canonical event. | Not run |
 | 11.11 | Re-poll unchanged Gmail/Calendar provider pages. | No duplicate workflow run or canonical routed object appears. | Stable run/event IDs. | Automated |
 | 11.12 | Keep Maestro chat open during simultaneous Perti email and Calendar runs. | Chat remains responsive and both background runs progress independently subject to agent locks. | Chat response plus active run cards. | Not run |
+| 11.13 | In Maestro Calendar, drag one upcoming occurrence of a recurring Maestro event to a different time. | Only that date moves. The original slot disappears, later occurrences remain unchanged, and the detail panel identifies the edit as a single occurrence. | Calendar week view and event metadata. | Automated API behavior; UI not run |
 
 ## Pass Criteria
 

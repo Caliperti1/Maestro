@@ -2248,6 +2248,26 @@ h4 {
   background: color-mix(in srgb, var(--color-accent) 5%, #ffffff);
 }
 
+.calendar-instance-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 7%, #ffffff);
+  color: var(--color-text);
+  font-size: 0.78rem;
+}
+
+.calendar-instance-notice button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--color-accent);
+  font-weight: 750;
+}
+
 .calendar-meeting-link {
   display: inline-flex;
   gap: 6px;

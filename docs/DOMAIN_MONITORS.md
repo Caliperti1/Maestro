@@ -27,13 +27,21 @@ when he personally needs to act.
 ## Calendar Flow
 
 The shared Calendar producer keeps one Google incremental sync token per watched domain. First
-enablement records the current token without importing old events. Later changes emit the exact
-calendar ID, event ID, provider version, and Google event payload.
+enablement records the current token without importing past events, then deterministically seeds a
+bounded window of upcoming event instances. Expanding future instances is important for recurring
+series whose master record may not have changed recently. This seed bypasses agent reasoning and
+therefore adds no LLM cost. Later changes emit the exact calendar ID, event ID, provider version,
+and Google event payload; changes to a recurring master refresh its upcoming instances.
 
 The calendar workflow performs a deterministic routed write before its reasoning pass. Canonical
 events are keyed by domain plus external provider/calendar/event IDs. A retry of one provider
 version is idempotent; a later edit updates the same event. Time changes, cancellations, attendees,
 organizer, recurrence, location, and conferencing links remain provider-grounded.
+
+Each expanded occurrence retains its provider series ID and original start time. Google-originated
+occurrences can therefore be adjusted independently in Maestro. For Maestro-native recurrence
+rules, dragging, resizing, or editing an occurrence creates a dated exception and excludes the
+original slot; choosing `Edit full series` edits the parent recurrence instead.
 
 Shadow mode records the proposed run without the routed write. Switch a monitor to live only after
 one controlled shadow test looks correct.
