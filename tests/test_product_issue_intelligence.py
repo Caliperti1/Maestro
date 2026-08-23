@@ -15,7 +15,12 @@ from app.db.models import (
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.issues.github_sync import GitHubIssueSyncService
-from app.issues.repositories import ensure_default_repository_portfolio, ensure_repository_workflows
+from app.issues.hygiene import ProductIssueHygieneService
+from app.issues.repositories import (
+    _github_repo,
+    ensure_default_repository_portfolio,
+    ensure_repository_workflows,
+)
 from app.issues.service import ProductIssueService
 from app.issues.worker import RepositoryIntelligenceWorker
 
@@ -210,3 +215,52 @@ def test_repository_failure_is_throttled_per_workflow(session):
     ).all()
     assert len(failures) == 1
     assert failures[0].error_message == "updated failure"
+
+
+def test_repository_parser_supports_custom_ssh_host_aliases():
+    assert (
+        _github_repo("git@github-praxis:Praxis-Defense/GroundTruth.git")
+        == "Praxis-Defense/GroundTruth"
+    )
+
+
+def test_issue_hygiene_bounds_semantic_checks(session, monkeypatch):
+    domain = _domain(session)
+    project = _project(session, domain)
+    repository = _repository(session, domain, project)
+    for index in range(5):
+        session.add(
+            ProductIssue(
+                domain_id=domain.id,
+                project_id=project.id,
+                repository_id=repository.id,
+                issue_type="feature",
+                title=f"Improve memory retrieval {index}",
+                normalized_title=f"improve memory retrieval {index}",
+                problem="Bound semantic hygiene work.",
+                desired_outcome="",
+                acceptance_criteria=[],
+                notes="",
+                source_refs=[],
+                provenance={},
+            )
+        )
+    session.commit()
+    calls = []
+
+    class Matcher:
+        def resolve(self, **_kwargs):
+            from app.issues.service import IssueMatchDecision
+
+            calls.append(True)
+            return IssueMatchDecision("create", None, None, "Distinct work.", 0.8)
+
+    monkeypatch.setattr("app.issues.hygiene.LLMIssueMatcher", Matcher)
+
+    result = ProductIssueHygieneService(session).run(
+        repository,
+        max_semantic_checks=2,
+    )
+
+    assert result.semantic_checks == 2
+    assert len(calls) == 2

@@ -227,4 +227,7 @@ def _git(repository: Path, *args: str) -> str:
 def _github_repo(remote: str) -> str:
     value = remote.strip().removesuffix(".git")
     match = re.search(r"github\.com[/:]([^/]+/[^/]+)$", value)
-    return match.group(1) if match else ""
+    if match:
+        return match.group(1)
+    ssh_alias = re.search(r"^[^:]+:([^/]+/[^/]+)$", value)
+    return ssh_alias.group(1) if ssh_alias else ""
