@@ -4,7 +4,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Domain, RuntimeSetting, ToolConnection, WorkflowRun
+from app.db.models import CalendarEvent, Domain, RuntimeSetting, ToolConnection, WorkflowRun
 from app.db.seed import seed_default_domains
 from app.maestro.calendar_trigger import (
     CALENDAR_TRIGGER_CURSOR_PREFIX,
@@ -18,6 +18,8 @@ class FakeCalendarChangeSource:
     def __init__(self) -> None:
         self.version = "v1"
         self.calls: list[dict[str, Any]] = []
+        self.upcoming_events: list[dict[str, Any]] = []
+        self.series_events: dict[str, list[dict[str, Any]]] = {}
 
     def changes_page(
         self,
@@ -47,6 +49,29 @@ class FakeCalendarChangeSource:
             }],
             "nextSyncToken": f"sync-{self.version}",
         }
+
+    def upcoming_page(
+        self,
+        connection,
+        *,
+        page_token,
+        page_size,
+        time_min,
+        time_max,
+    ):
+        return {"items": self.upcoming_events}
+
+    def series_instances_page(
+        self,
+        connection,
+        *,
+        event_id,
+        page_token,
+        page_size,
+        time_min,
+        time_max,
+    ):
+        return {"items": self.series_events.get(event_id, [])}
 
 
 class ExpiredCalendarChangeSource(FakeCalendarChangeSource):
@@ -165,4 +190,33 @@ def test_calendar_trigger_skips_historical_changes(session: Session) -> None:
 
     assert result["emitted_count"] == 0
     assert result["domains"][0]["skipped_past_count"] == 1
+    assert session.scalars(select(WorkflowRun)).all() == []
+
+
+def test_calendar_trigger_bootstrap_stages_upcoming_recurring_instances_without_agent_runs(
+    session: Session,
+) -> None:
+    _seed_calendar_trigger(session)
+    source = FakeCalendarChangeSource()
+    occurrence_start = datetime.now(UTC) + timedelta(days=2)
+    occurrence_end = occurrence_start + timedelta(minutes=30)
+    source.upcoming_events = [{
+        "id": "daily-sync_instance-1",
+        "etag": "daily-v1",
+        "status": "confirmed",
+        "summary": "Daily Sync",
+        "recurringEventId": "daily-sync",
+        "originalStartTime": {"dateTime": occurrence_start.isoformat()},
+        "start": {"dateTime": occurrence_start.isoformat(), "timeZone": "America/New_York"},
+        "end": {"dateTime": occurrence_end.isoformat(), "timeZone": "America/New_York"},
+    }]
+
+    result = CalendarTriggerService(session, source=source).poll_once()
+
+    event = session.scalar(select(CalendarEvent).where(CalendarEvent.title == "Daily Sync"))
+    assert event is not None
+    assert event.external_event_id == "daily-sync_instance-1"
+    assert event.metadata_["recurring_event_id"] == "daily-sync"
+    assert event.metadata_["recurrence_original_start_at"] == occurrence_start.isoformat()
+    assert result["domains"][0]["future_seed"]["staged_count"] == 1
     assert session.scalars(select(WorkflowRun)).all() == []

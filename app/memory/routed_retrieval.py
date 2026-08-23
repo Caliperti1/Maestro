@@ -248,6 +248,125 @@ class RoutedEditService:
         self.session.refresh(event)
         return event
 
+    def create_event_exception(
+        self,
+        event_id: uuid.UUID,
+        updates: dict[str, Any],
+    ) -> CalendarEvent:
+        """Replace one generated recurrence occurrence while preserving its parent series."""
+        parent = self.session.get(CalendarEvent, event_id)
+        if parent is None:
+            raise ValueError("Event not found.")
+        if not parent.recurrence_rule:
+            raise ValueError("Event is not recurring.")
+        original_start = _parse_optional_datetime(updates.get("occurrence_start_at"))
+        if original_start is None:
+            raise ValueError("Recurring instance edits require occurrence_start_at.")
+        original_key = original_start.isoformat()
+
+        exception = next(
+            (
+                candidate
+                for candidate in self.session.scalars(
+                    select(CalendarEvent).where(
+                        CalendarEvent.domain_id == parent.domain_id,
+                        CalendarEvent.recurrence_rule.is_(None),
+                    )
+                ).all()
+                if str((candidate.metadata_ or {}).get("recurrence_parent_id") or "")
+                == str(parent.id)
+                and str(
+                    (candidate.metadata_ or {}).get("recurrence_original_start_at") or ""
+                )
+                == original_key
+            ),
+            None,
+        )
+        calendar = CalendarIntelligenceService(self.session)
+        parent_payload = calendar.event_payload(parent)
+        if exception is None:
+            exception = CalendarEvent(
+                domain_id=parent.domain_id,
+                title=parent.title,
+                summary=parent.summary,
+                start_at=original_start,
+                end_at=(
+                    original_start + (parent.end_at - parent.start_at)
+                    if parent.start_at and parent.end_at
+                    else None
+                ),
+                timezone=parent.timezone,
+                all_day=parent.all_day,
+                recurrence_rule=None,
+                item_kind=parent.item_kind,
+                context_type=parent.context_type,
+                scheduling_effect=parent.scheduling_effect,
+                blocks_time=parent.blocks_time,
+                location=parent.location,
+                conferencing_url=parent.conferencing_url,
+                organizer_name=parent.organizer_name,
+                organizer_email=parent.organizer_email,
+                attendees=list(parent.attendees or []),
+                supporting_refs=list(parent.supporting_refs or []),
+                source_refs=list(parent.source_refs or []),
+                provenance={
+                    **(parent.provenance or {}),
+                    "source": "maestro_calendar_instance_edit",
+                    "recurrence_parent_id": str(parent.id),
+                },
+                status=parent.status,
+                external_provider=parent.external_provider,
+                external_calendar_id=parent.external_calendar_id,
+                external_event_id=None,
+                sync_status="local_override",
+                metadata_={
+                    **(parent.metadata_ or {}),
+                    "is_recurrence_exception": True,
+                    "recurrence_parent_id": str(parent.id),
+                    "recurrence_original_start_at": original_key,
+                    "recurrence_rule": None,
+                },
+            )
+            self.session.add(exception)
+            self.session.flush()
+            calendar.replace_attendees(
+                exception,
+                parent_payload.get("attendees") or [],
+                commit=False,
+            )
+            calendar.replace_organizations(
+                exception,
+                parent_payload.get("organizations") or [],
+                commit=False,
+            )
+
+        exclusions = {
+            str(value)
+            for value in (parent.metadata_ or {}).get("recurrence_exdates") or []
+            if value
+        }
+        exclusions.add(original_key)
+        parent.metadata_ = {
+            **(parent.metadata_ or {}),
+            "recurrence_exdates": sorted(exclusions),
+        }
+        instance_updates = {
+            key: value
+            for key, value in updates.items()
+            if key not in {"edit_scope", "occurrence_start_at", "recurrence_rule"}
+        }
+        instance_updates["metadata"] = {
+            **(
+                instance_updates.get("metadata")
+                if isinstance(instance_updates.get("metadata"), dict)
+                else {}
+            ),
+            "is_recurrence_exception": True,
+            "recurrence_parent_id": str(parent.id),
+            "recurrence_original_start_at": original_key,
+        }
+        return self.update_event(exception.id, instance_updates)
+
     def update_todo(self, todo_id: uuid.UUID, updates: dict[str, Any]) -> Todo:
         todo = self.session.get(Todo, todo_id)
         if todo is None:

@@ -750,6 +750,14 @@ function calendarRecurrence(item: RoutedEvent): CalendarRecurrenceOptions | unde
   return recurrence;
 }
 
+function calendarRecurrenceExdates(item: RoutedEvent): string[] {
+  const values = item.metadata.recurrence_exdates;
+  if (!Array.isArray(values)) return [];
+  return values
+    .filter((value): value is string => typeof value === "string")
+    .filter((value) => !Number.isNaN(new Date(value).getTime()));
+}
+
 function ContactHydrationPanel({ surface }: { surface: "contacts" | "organizations" }) {
   const candidateType = surface === "contacts" ? "contact" : "organization";
   const [domainKey, setDomainKey] = useState("praxis");
@@ -973,6 +981,12 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const [contactQuery, setContactQuery] = useState("");
   const [contactSearchDraft, setContactSearchDraft] = useState("");
   const [mergeTargetId, setMergeTargetId] = useState("");
+  const [selectedOccurrence, setSelectedOccurrence] = useState<{
+    eventId: string;
+    originalStartAt: string;
+    startAt: string;
+    endAt: string | null;
+  } | null>(null);
 
   const supportsDomainFilter = surface === "calendar" || surface === "contacts" || surface === "todos" || surface === "organizations" || surface === "ideas";
   const supportsLifecycleFilters = surface === "calendar" || surface === "todos" || surface === "ideas";
@@ -1003,7 +1017,10 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           const color = calendarColors[item.domain_key ?? "global"] ?? calendarColors.global;
           const isContextWindow = item.item_kind === "context_window";
           const isScheduledTodo = item.item_kind === "scheduled_todo";
-          const calendarEvent: EventInput & { extendedProps: { resource: RoutedEvent } } = {
+          const calendarEvent: EventInput & {
+            exdate?: string[];
+            extendedProps: { resource: RoutedEvent };
+          } = {
             id: item.id,
             title: item.title,
             start: item.start_at!,
@@ -1019,6 +1036,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           const recurrence = calendarRecurrence(item);
           if (recurrence) {
             calendarEvent.rrule = recurrence;
+            const exclusions = calendarRecurrenceExdates(item);
+            if (exclusions.length > 0) calendarEvent.exdate = exclusions;
             if (item.end_at) {
               const duration = new Date(item.end_at).getTime() - new Date(item.start_at!).getTime();
               if (Number.isFinite(duration) && duration > 0) calendarEvent.duration = duration;
@@ -1057,13 +1076,25 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
 
   useEffect(() => {
     if (creatingEvent || creatingTodo) return;
-    setDraft(routedDraftFor(selectedItem));
+    const nextDraft = routedDraftFor(selectedItem);
+    if (
+      selectedItem
+      && "recurrence_rule" in selectedItem
+      && selectedItem.recurrence_rule
+      && selectedOccurrence?.eventId === selectedItem.id
+    ) {
+      nextDraft.start_at = calendarInputValue(selectedOccurrence.startAt);
+      nextDraft.end_at = selectedOccurrence.endAt
+        ? calendarInputValue(selectedOccurrence.endAt)
+        : "";
+    }
+    setDraft(nextDraft);
     if (selectedItem && "attendees" in selectedItem) {
       setDraftAttendees(selectedItem.attendees);
       setDraftOrganizations(selectedItem.organizations);
       setCalendarDomainKey(selectedItem.domain_key ?? "personal");
     }
-  }, [creatingEvent, creatingTodo, selectedItem]);
+  }, [creatingEvent, creatingTodo, selectedItem, selectedOccurrence]);
 
   useEffect(() => {
     if (surface !== "calendar") return;
@@ -1095,6 +1126,15 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             blocks_time: draft.item_kind === "context_window" ? false : draft.blocks_time !== "false",
             attendees: draft.item_kind === "context_window" ? [] : draftAttendees,
             organizations: draft.item_kind === "context_window" ? [] : draftOrganizations,
+            ...(selectedItem
+              && "recurrence_rule" in selectedItem
+              && selectedItem.recurrence_rule
+              && selectedOccurrence?.eventId === selectedItem.id
+              ? {
+                  edit_scope: "instance",
+                  occurrence_start_at: selectedOccurrence.originalStartAt,
+                }
+              : {}),
           }
         : null;
       const todoUpdates = surface === "todos"
@@ -1129,6 +1169,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         }),
       });
       if (response.event) setSelectedId(response.event.id);
+      setSelectedOccurrence(null);
       setCreatingEvent(false);
       setCreatingTodo(false);
       setStatusMessage(`${config.title} item saved.`);
@@ -1145,6 +1186,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     const defaultDuration = info.event.allDay ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
     const nextEnd = info.event.end ?? (nextStart ? new Date(nextStart.getTime() + defaultDuration) : null);
     const eventId = info.event.id;
+    const resource = info.event.extendedProps.resource as RoutedEvent | undefined;
+    const originalStart = info.oldEvent.start ?? nextStart;
+    const editingOccurrence = Boolean(resource?.recurrence_rule && originalStart);
     if (!nextStart || !nextEnd) return;
     if (Number.isNaN(nextStart.getTime()) || Number.isNaN(nextEnd.getTime())) {
       setStatusMessage("Calendar update failed: invalid date or time.");
@@ -1165,7 +1209,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       ),
     );
     try {
-      await apiJson(`${config.endpoint}/${eventId}`, {
+      const response = await apiJson<{ event?: RoutedEvent }>(`${config.endpoint}/${eventId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1173,10 +1217,18 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             start_at: nextStart.toISOString(),
             end_at: nextEnd.toISOString(),
             all_day: info.event.allDay,
+            ...(editingOccurrence
+              ? {
+                  edit_scope: "instance",
+                  occurrence_start_at: originalStart!.toISOString(),
+                }
+              : {}),
           },
         }),
       });
-      setStatusMessage("Event time updated.");
+      if (response.event) setSelectedId(response.event.id);
+      setSelectedOccurrence(null);
+      setStatusMessage(editingOccurrence ? "This occurrence was updated." : "Event time updated.");
       await refreshItems();
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Calendar update failed.");
@@ -1525,7 +1577,10 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                   {visibleItems
                     .filter((item): item is RoutedEvent => "start_at" in item)
                     .map((item) => (
-                      <button key={item.id} type="button" onClick={() => setSelectedId(item.id)}>
+                      <button key={item.id} type="button" onClick={() => {
+                        setSelectedOccurrence(null);
+                        setSelectedId(item.id);
+                      }}>
                         <span>{item.title}</span>
                         <small>{item.start_at ? new Date(item.start_at).toLocaleString() : "Unscheduled"}</small>
                       </button>
@@ -1559,6 +1614,17 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 eventClick={(info) => {
                   setCreatingEvent(false);
                   setSelectedId(info.event.id);
+                  const resource = info.event.extendedProps.resource as RoutedEvent | undefined;
+                  setSelectedOccurrence(
+                    resource?.recurrence_rule && info.event.start
+                      ? {
+                          eventId: info.event.id,
+                          originalStartAt: info.event.start.toISOString(),
+                          startAt: info.event.start.toISOString(),
+                          endAt: info.event.end?.toISOString() ?? null,
+                        }
+                      : null,
+                  );
                 }}
                 eventDrop={updateCalendarTiming}
                 eventResize={updateCalendarTiming}
@@ -1656,6 +1722,16 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           <div className="routed-object-detail">
             {surface === "calendar" && (creatingEvent || (selectedItem && "attendees" in selectedItem)) && (
               <>
+                {selectedOccurrence && selectedItem && "recurrence_rule" in selectedItem && (
+                  <div className="calendar-instance-notice">
+                    <span>
+                      Editing only the {new Date(selectedOccurrence.originalStartAt).toLocaleString()} occurrence.
+                    </span>
+                    <button type="button" onClick={() => setSelectedOccurrence(null)}>
+                      Edit full series
+                    </button>
+                  </div>
+                )}
                 <label>
                   Calendar item
                   <select

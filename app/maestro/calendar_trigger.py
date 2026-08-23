@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -11,12 +11,15 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import CalendarEvent, Domain, RuntimeSetting, ToolConnection, WorkflowDefinition
+from app.maestro.calendar_sync import stage_google_calendar_event
 from app.maestro.scheduler import SchedulerService
 from app.tools.runtime import ToolExecutionError, _gmail_access_token, _google_api_json
 
 CALENDAR_TRIGGER_EVENT_TYPE = "google.calendar.event.changed"
 CALENDAR_TRIGGER_SETTING_KEY = "calendar_trigger_worker"
 CALENDAR_TRIGGER_CURSOR_PREFIX = "calendar_trigger_cursor:"
+CALENDAR_FUTURE_SEED_VERSION = 1
+DEFAULT_CALENDAR_FUTURE_HORIZON_DAYS = 180
 
 
 class CalendarTriggerError(RuntimeError):
@@ -36,6 +39,27 @@ class CalendarChangeSource(Protocol):
         page_token: str | None,
         page_size: int,
         bootstrap_at: datetime | None = None,
+    ) -> dict[str, Any]: ...
+
+    def upcoming_page(
+        self,
+        connection: ToolConnection,
+        *,
+        page_token: str | None,
+        page_size: int,
+        time_min: datetime,
+        time_max: datetime,
+    ) -> dict[str, Any]: ...
+
+    def series_instances_page(
+        self,
+        connection: ToolConnection,
+        *,
+        event_id: str,
+        page_token: str | None,
+        page_size: int,
+        time_min: datetime,
+        time_max: datetime,
     ) -> dict[str, Any]: ...
 
 
@@ -83,6 +107,63 @@ class GoogleCalendarChangeSource:
             if "410" in str(exc):
                 raise CalendarSyncTokenExpired("Google Calendar sync token expired.") from exc
             raise CalendarTriggerError(str(exc)) from exc
+
+    def upcoming_page(
+        self,
+        connection: ToolConnection,
+        *,
+        page_token: str | None,
+        page_size: int,
+        time_min: datetime,
+        time_max: datetime,
+    ) -> dict[str, Any]:
+        config = connection.config or {}
+        calendar_id = str(config.get("calendar_id") or "primary")
+        params: dict[str, Any] = {
+            "maxResults": page_size,
+            "showDeleted": "true",
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "timeMin": _google_timestamp(time_min),
+            "timeMax": _google_timestamp(time_max),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        return _google_api_json(
+            "GET",
+            "https://www.googleapis.com",
+            f"/calendar/v3/calendars/{quote(calendar_id, safe='')}/events",
+            token=self._token(connection),
+            params=params,
+        )
+
+    def series_instances_page(
+        self,
+        connection: ToolConnection,
+        *,
+        event_id: str,
+        page_token: str | None,
+        page_size: int,
+        time_min: datetime,
+        time_max: datetime,
+    ) -> dict[str, Any]:
+        config = connection.config or {}
+        calendar_id = str(config.get("calendar_id") or "primary")
+        params: dict[str, Any] = {
+            "maxResults": page_size,
+            "showDeleted": "true",
+            "timeMin": _google_timestamp(time_min),
+            "timeMax": _google_timestamp(time_max),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        return _google_api_json(
+            "GET",
+            "https://www.googleapis.com",
+            f"/calendar/v3/calendars/{quote(calendar_id, safe='')}/events/{quote(event_id, safe='')}/instances",
+            token=self._token(connection),
+            params=params,
+        )
 
 
 def calendar_trigger_worker_settings(session: Session) -> dict[str, Any]:
@@ -193,6 +274,16 @@ class CalendarTriggerService:
         if not sync_token:
             return self._bootstrap_domain(domain, status="initialized")
         connection = self._connection_for(domain)
+        future_seed = None
+        if payload.get("future_seed_version") != CALENDAR_FUTURE_SEED_VERSION:
+            future_seed = self._seed_upcoming_events(
+                domain,
+                connection,
+                page_size=page_size,
+            )
+            payload["future_seed_version"] = CALENDAR_FUTURE_SEED_VERSION
+            payload["future_seeded_at"] = datetime.now(UTC).isoformat()
+            payload["future_seeded_count"] = future_seed["staged_count"]
         page_token: str | None = None
         next_sync_token = sync_token
         events: list[dict[str, Any]] = []
@@ -215,10 +306,20 @@ class CalendarTriggerService:
 
         emitted: list[dict[str, Any]] = []
         skipped_past = 0
+        refreshed_series = 0
         calendar_id = str((connection.config or {}).get("calendar_id") or "primary")
         for event in events:
             event_id = str(event.get("id") or "").strip()
             if not event_id:
+                continue
+            if event.get("recurrence"):
+                self._sync_series_instances(
+                    domain,
+                    connection,
+                    event_id=event_id,
+                    page_size=page_size,
+                )
+                refreshed_series += 1
                 continue
             if self._is_past_event(domain, calendar_id, event_id, event):
                 skipped_past += 1
@@ -260,6 +361,7 @@ class CalendarTriggerService:
             "last_event_id": emitted[-1]["event_id"] if emitted else payload.get("last_event_id"),
             "last_emitted_count": len(emitted),
             "last_skipped_past_count": skipped_past,
+            "last_refreshed_series_count": refreshed_series,
             "last_error": None,
             "error_count": 0,
         })
@@ -269,6 +371,8 @@ class CalendarTriggerService:
             "seen_count": len(events),
             "emitted_count": len(emitted),
             "skipped_past_count": skipped_past,
+            "refreshed_series_count": refreshed_series,
+            "future_seed": future_seed,
             "page_count": page_count,
             "emitted": emitted,
         }
@@ -318,6 +422,7 @@ class CalendarTriggerService:
                 break
         if not next_sync_token:
             raise CalendarTriggerError("Google Calendar did not return an incremental sync token.")
+        future_seed = self._seed_upcoming_events(domain, connection, page_size=250)
         now = datetime.now(UTC).isoformat()
         prior = self._cursor_setting(domain)
         prior_payload = dict(prior.value or {}) if prior else {}
@@ -332,8 +437,131 @@ class CalendarTriggerService:
             "last_polled_at": now,
             "last_error": reason if status == "token_reset" else None,
             "error_count": 0,
+            "future_seed_version": CALENDAR_FUTURE_SEED_VERSION,
+            "future_seeded_at": now,
+            "future_seeded_count": future_seed["staged_count"],
         })
-        return {"domain_key": domain.key, "status": status, "emitted_count": 0, "bootstrap": True}
+        return {
+            "domain_key": domain.key,
+            "status": status,
+            "emitted_count": 0,
+            "bootstrap": True,
+            "future_seed": future_seed,
+        }
+
+    def _seed_upcoming_events(
+        self,
+        domain: Domain,
+        connection: ToolConnection,
+        *,
+        page_size: int,
+    ) -> dict[str, Any]:
+        source_method = getattr(self.source, "upcoming_page", None)
+        if not callable(source_method):
+            return {"status": "unsupported", "seen_count": 0, "staged_count": 0}
+        config = connection.config or {}
+        try:
+            horizon_days = int(config.get("calendar_sync_horizon_days") or DEFAULT_CALENDAR_FUTURE_HORIZON_DAYS)
+        except (TypeError, ValueError):
+            horizon_days = DEFAULT_CALENDAR_FUTURE_HORIZON_DAYS
+        horizon_days = max(7, min(730, horizon_days))
+        time_min = datetime.now(UTC)
+        time_max = time_min + timedelta(days=horizon_days)
+        calendar_id = str(config.get("calendar_id") or "primary")
+        page_token: str | None = None
+        seen_count = 0
+        staged_count = 0
+        unchanged_count = 0
+        page_count = 0
+        while True:
+            response = source_method(
+                connection,
+                page_token=page_token,
+                page_size=max(1, min(2500, page_size)),
+                time_min=time_min,
+                time_max=time_max,
+            )
+            page_count += 1
+            for event in response.get("items") or []:
+                if not isinstance(event, dict) or not event.get("id"):
+                    continue
+                seen_count += 1
+                result = stage_google_calendar_event(
+                    self.session,
+                    domain=domain,
+                    event_payload=_provider_event_payload(
+                        domain=domain,
+                        calendar_id=calendar_id,
+                        event=event,
+                    ),
+                )
+                if result["status"] == "unchanged":
+                    unchanged_count += 1
+                else:
+                    staged_count += 1
+            page_token = str(response.get("nextPageToken") or "").strip() or None
+            if not page_token:
+                break
+            if page_count >= 100:
+                raise CalendarTriggerError("Upcoming calendar import exceeded 100 pages.")
+        return {
+            "status": "complete",
+            "seen_count": seen_count,
+            "staged_count": staged_count,
+            "unchanged_count": unchanged_count,
+            "page_count": page_count,
+            "time_min": time_min.isoformat(),
+            "time_max": time_max.isoformat(),
+        }
+
+    def _sync_series_instances(
+        self,
+        domain: Domain,
+        connection: ToolConnection,
+        *,
+        event_id: str,
+        page_size: int,
+    ) -> dict[str, Any]:
+        source_method = getattr(self.source, "series_instances_page", None)
+        if not callable(source_method):
+            return {"status": "unsupported", "staged_count": 0}
+        config = connection.config or {}
+        calendar_id = str(config.get("calendar_id") or "primary")
+        time_min = datetime.now(UTC)
+        time_max = time_min + timedelta(days=DEFAULT_CALENDAR_FUTURE_HORIZON_DAYS)
+        page_token: str | None = None
+        staged_count = 0
+        page_count = 0
+        while True:
+            response = source_method(
+                connection,
+                event_id=event_id,
+                page_token=page_token,
+                page_size=max(1, min(2500, page_size)),
+                time_min=time_min,
+                time_max=time_max,
+            )
+            page_count += 1
+            for event in response.get("items") or []:
+                if not isinstance(event, dict) or not event.get("id"):
+                    continue
+                result = stage_google_calendar_event(
+                    self.session,
+                    domain=domain,
+                    event_payload=_provider_event_payload(
+                        domain=domain,
+                        calendar_id=calendar_id,
+                        event=event,
+                    ),
+                )
+                if result["status"] != "unchanged":
+                    staged_count += 1
+            page_token = str(response.get("nextPageToken") or "").strip() or None
+            if not page_token:
+                break
+            if page_count >= 100:
+                raise CalendarTriggerError("Recurring calendar refresh exceeded 100 pages.")
+        return {"status": "complete", "staged_count": staged_count, "page_count": page_count}
 
     def _record_error(self, domain: Domain, message: str) -> dict[str, Any]:
         prior = self._cursor_setting(domain)
@@ -418,3 +646,27 @@ def _google_event_datetime(value: Any) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+def _google_timestamp(value: datetime) -> str:
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return aware.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _provider_event_payload(
+    *,
+    domain: Domain,
+    calendar_id: str,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": str(event.get("id") or ""),
+        "provider": "google_calendar",
+        "domain_key": domain.key,
+        "calendar_id": calendar_id,
+        "event_id": str(event.get("id") or ""),
+        "event_version": str(event.get("etag") or event.get("updated") or "unknown"),
+        "status": event.get("status"),
+        "google_event": event,
+        "detected_at": datetime.now(UTC).isoformat(),
+    }
