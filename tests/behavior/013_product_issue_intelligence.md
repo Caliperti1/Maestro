@@ -7,8 +7,8 @@ and let selected issues become inspectable background coding workflows.
 
 ## Setup
 
-- Register the Maestro project and `Caliperti1/Maestro` repository in Product Issues.
-- Confirm `Repository Intelligence - Maestro` and `Issue Hygiene - Maestro` are visible under durable workflows.
+- Confirm Maestro, Praxis/GroundTruth, Perti/Deeper Learning, Perti/AAce, and Perti/Ophi appear as Product Issue projects/repositories.
+- Confirm each repository has visible `Repository Intelligence` and `Issue Hygiene` durable workflows.
 - Leave the Product Issues page open in another tab for inspection.
 
 ## A. Clarified Capture

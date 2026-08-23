@@ -21,7 +21,6 @@ from app.db.models import (
     DecisionRecord,
     Domain,
     Entity,
-    Idea,
     IngestionRecord,
     MemoryHygieneRun,
     MemoryItem,
@@ -1130,33 +1129,6 @@ async def import_chatgpt_export(
     return result.__dict__
 
 
-@router.get("/routed-objects/ideas")
-def list_ideas(
-    domain_key: str | None = None,
-    limit: int = 50,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
-    query = select(Idea)
-    if domain_id is not None:
-        query = query.where(Idea.domain_id == domain_id)
-    ideas = db.scalars(query.order_by(Idea.updated_at.desc()).limit(limit)).all()
-    return {"ideas": [_idea_payload(db, idea) for idea in ideas]}
-
-
-@router.patch("/routed-objects/ideas/{idea_id}")
-def update_idea(
-    idea_id: uuid.UUID,
-    body: UpdateRoutedObjectRequest,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    try:
-        idea = RoutedEditService(db).update_idea(idea_id, body.updates)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"idea": _idea_payload(db, idea)}
-
-
 @router.get("/routed-objects/decisions")
 def list_decisions(
     domain_key: str | None = None,
@@ -1696,20 +1668,6 @@ def _entity_payload(entity: Entity) -> dict[str, Any]:
         "status": entity.status,
         "metadata": entity.metadata_,
         "created_at": entity.created_at.isoformat() if entity.created_at else None,
-    }
-
-
-def _idea_payload(db: Session, idea: Idea) -> dict[str, Any]:
-    return {
-        "id": str(idea.id),
-        "domain_key": _domain_key_for_id(db, idea.domain_id),
-        "title": idea.title,
-        "content": idea.content,
-        "status": idea.status,
-        "source_refs": idea.source_refs,
-        "provenance": idea.provenance,
-        "metadata": idea.metadata_,
-        "created_at": idea.created_at.isoformat() if idea.created_at else None,
     }
 
 

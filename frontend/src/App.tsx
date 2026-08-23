@@ -497,7 +497,7 @@ const routedSurfaceConfig: Record<
     title: string;
     eyebrow: string;
     endpoint: string;
-    responseKey: "events" | "contacts" | "todos" | "entities" | "ideas";
+    responseKey: "events" | "contacts" | "todos" | "entities";
     icon: typeof CalendarDays;
     empty: string;
   }
@@ -533,14 +533,6 @@ const routedSurfaceConfig: Record<
     responseKey: "entities",
     icon: Building2,
     empty: "No organizations yet.",
-  },
-  ideas: {
-    title: "Think Tank",
-    eyebrow: "Routed ideas",
-    endpoint: "/memory/routed-objects/ideas",
-    responseKey: "ideas",
-    icon: Sparkles,
-    empty: "No think tank ideas yet.",
   },
 };
 
@@ -589,13 +581,6 @@ function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string>
       summary: item.summary ?? "",
       origination: item.origination ?? "",
       status: item.status ?? "active",
-    };
-  }
-  if ("content" in item) {
-    return {
-      title: item.title ?? "",
-      content: item.content ?? "",
-      status: item.status ?? "open",
     };
   }
   return {
@@ -991,9 +976,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     endAt: string | null;
   } | null>(null);
 
-  const supportsDomainFilter = surface === "calendar" || surface === "contacts" || surface === "todos" || surface === "organizations" || surface === "ideas";
-  const supportsLifecycleFilters = surface === "calendar" || surface === "todos" || surface === "ideas";
-  const supportsDoneFilter = surface === "todos" || surface === "ideas";
+  const supportsDomainFilter = surface === "calendar" || surface === "contacts" || surface === "todos" || surface === "organizations";
+  const supportsLifecycleFilters = surface === "calendar" || surface === "todos";
+  const supportsDoneFilter = surface === "todos";
   const visibleItems = useMemo(
     () =>
       items.filter((item) => {
@@ -1327,9 +1312,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           ? "todo"
           : surface === "contacts"
             ? "contact"
-            : surface === "ideas"
-              ? "idea"
-              : "entity";
+            : "entity";
     setBusy(true);
     try {
       await apiJson(`/memory/routed-objects/${objectType}/${selectedItem.id}/archive`, {
@@ -1345,7 +1328,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   };
 
   const markSelectedDone = async () => {
-    if (!selectedItem || !(surface === "todos" || surface === "ideas")) return;
+    if (!selectedItem || surface !== "todos") return;
     setBusy(true);
     try {
       await apiJson(`${config.endpoint}/${selectedItem.id}`, {
@@ -1454,10 +1437,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         </div>
         <label>Summary<textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} /></label>
       </>}
-      {"content" in item && <label>Idea<textarea value={draft.content ?? ""} onChange={(event) => updateDraft("content", event.target.value)} /></label>}
       <div className="routed-detail-actions">
         <button className="planner-action" type="button" onClick={saveSelected} disabled={busy}>Save</button>
-        {(surface === "todos" || surface === "ideas") && item.status !== "done" && <button type="button" onClick={markSelectedDone} disabled={busy}><CheckCircle2 size={16} /> Done</button>}
+        {surface === "todos" && item.status !== "done" && <button type="button" onClick={markSelectedDone} disabled={busy}><CheckCircle2 size={16} /> Done</button>}
       </div>
     </div>
   );
@@ -2184,25 +2166,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               </>
             )}
 
-            {selectedItem && "content" in selectedItem && (
-              <>
-                <label>
-                  Title
-                  <input value={draft.title ?? ""} onChange={(event) => updateDraft("title", event.target.value)} />
-                </label>
-                <label>
-                  Idea
-                  <textarea value={draft.content ?? ""} onChange={(event) => updateDraft("content", event.target.value)} />
-                </label>
-                <label>
-                  Status
-                  <input value={draft.status ?? ""} onChange={(event) => updateDraft("status", event.target.value)} />
-                </label>
-              </>
-            )}
-
             <div className="routed-detail-actions">
-              {selectedItem && (surface === "todos" || surface === "ideas") && selectedItem.status !== "done" && (
+              {selectedItem && surface === "todos" && selectedItem.status !== "done" && (
                 <button className="planner-action" onClick={markSelectedDone} disabled={busy}>
                   <CheckCircle2 size={16} />
                   Done
@@ -2300,8 +2265,7 @@ function NeedsAttentionPanel({
   const blockedRuns =
     schedulerDashboard?.runs.filter((run) =>
       run.status === "blocked" ||
-      run.status === "failed" ||
-      run.queue_items.some((item) => ["blocked", "approval_required", "failed"].includes(item.status)),
+      run.queue_items.some((item) => ["blocked", "approval_required"].includes(item.status)),
     ) ?? [];
   const transientApprovalIds = new Set(
     pendingToolApprovals.flatMap((activity) => activity.tool_call_id ? [activity.tool_call_id] : []),
@@ -2428,7 +2392,7 @@ function NeedsAttentionPanel({
               <p>{run.error_message || "Open Workflows to inspect blocked or failed work."}</p>
               <div className="attention-blocker-list">
                 {run.queue_items
-                  .filter((item) => ["blocked", "approval_required", "failed"].includes(item.status))
+                  .filter((item) => ["blocked", "approval_required"].includes(item.status))
                   .map((item) => (
                     <div className="attention-blocker-row" key={item.id}>
                       <strong>{item.agent_name ?? item.agent_key ?? "Unassigned"}</strong>
@@ -3897,7 +3861,7 @@ export function App() {
           <div className="nav-group">
             <button
               className={
-                ["memory", "calendar", "contacts", "todos", "organizations", "ideas", "issues"].includes(activeSurface)
+                ["memory", "calendar", "contacts", "todos", "organizations", "issues"].includes(activeSurface)
                   ? "domain-button active"
                   : "domain-button"
               }
@@ -3949,14 +3913,6 @@ export function App() {
                 >
                   <Building2 size={16} />
                   <span>Organizations</span>
-                </button>
-                <button
-                  className={activeSurface === "ideas" ? "domain-button active" : "domain-button"}
-                  onClick={() => setActiveSurface("ideas")}
-                  type="button"
-                >
-                  <Sparkles size={16} />
-                  <span>Think Tank</span>
                 </button>
                 <button
                   className={activeSurface === "issues" ? "domain-button active" : "domain-button"}

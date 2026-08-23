@@ -143,7 +143,7 @@ export type SchedulerWorkerAgentRun = {
 };
 
 export type EmailTriageRoutedCandidate = {
-  route_type: "contact" | "organization" | "event" | "todo" | "think_tank";
+  route_type: "contact" | "organization" | "event" | "todo";
   title: string;
   content: string;
   metadata: Array<{ key: string; value_json: string }>;
@@ -605,19 +605,7 @@ export type ContactHydrationCandidate = {
   error_message: string | null;
 };
 
-export type RoutedIdea = {
-  id: string;
-  domain_key: string | null;
-  title: string;
-  content: string;
-  status: string;
-  source_refs: Array<Record<string, unknown>>;
-  provenance: Record<string, unknown>;
-  metadata: Record<string, unknown>;
-  created_at: string | null;
-};
-
-export type RoutedObjectSurface = "calendar" | "contacts" | "todos" | "organizations" | "ideas";
+export type RoutedObjectSurface = "calendar" | "contacts" | "todos" | "organizations";
 export type ActiveSurface =
   | "dashboard"
   | "run-log"
@@ -629,7 +617,7 @@ export type ActiveSurface =
   | "issues"
   | "tools"
   | RoutedObjectSurface;
-export type RoutedObjectRecord = RoutedEvent | RoutedTodo | RoutedContact | RoutedEntity | RoutedIdea;
+export type RoutedObjectRecord = RoutedEvent | RoutedTodo | RoutedContact | RoutedEntity;
 
 export type ProductRepository = {
   id: string;

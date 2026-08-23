@@ -184,7 +184,7 @@ Current routed object types include:
 - Organizations
 - Decisions
 - RFIs / human input needs
-- Think-tank ideas
+- Canonical product issues
 
 Relevant code:
 

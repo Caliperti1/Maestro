@@ -18,7 +18,6 @@ from app.db.models import (
     ContactDomainNote,
     Conversation,
     Domain,
-    Idea,
     MemoryItem,
     Message,
     Report,
@@ -857,38 +856,16 @@ class FakeStandaloneContactPlannerLLMClient:
         raise AssertionError("Planner should use structured_response.")
 
 
-class FakeThinkTankPlannerLLMClient:
+class FakeProductBrainstormPlannerLLMClient:
     provider = "test"
-    model = "test-think-tank-planner"
+    model = "test-product-brainstorm-planner"
 
     def structured_response(self, **kwargs):
         return {
-            "plan_summary": "Capture CAD AI tool concept.",
-            "direct_response": "That CAD-to-print concept is worth keeping in Think Tank.",
-            "planner_notes": "Fake think tank response.",
-            "work_items": [
-                {
-                    "id": "wi_cad_concept",
-                    "type": "memory_candidate",
-                    "title": "CAD AI tool feature concept",
-                    "description": (
-                        "A CAD AI tool could let mechanical design agents generate STL files "
-                        "for later slicing and OctoPrint handoff."
-                    ),
-                    "domain_key": "maestro-development",
-                    "priority": "normal",
-                    "required_capabilities": [],
-                    "required_tools": [],
-                    "dependencies": [],
-                    "needs_agent": False,
-                    "needs_user_input": False,
-                    "blocks_execution": False,
-                    "can_log_directly": True,
-                    "suggested_agent_keys": [],
-                    "expected_output": "Idea saved for later feature design.",
-                    "rationale": "This is an immature feature concept.",
-                }
-            ],
+            "plan_summary": "Discuss CAD AI tool concept.",
+            "direct_response": "That CAD-to-print concept is worth exploring together.",
+            "planner_notes": "Keep an unrequested brainstorm conversational.",
+            "work_items": [],
         }
 
     def text_response(self, *, instructions: str, input_text: str) -> str:
@@ -3633,25 +3610,22 @@ def test_orchestrator_routes_contact_shaped_standalone_work_item_as_contact(
     assert session.query(Contact).one().name == "Ben Daniels"
 
 
-def test_orchestrator_routes_feature_concepts_to_think_tank(session: Session) -> None:
+def test_orchestrator_keeps_uncaptured_feature_brainstorm_in_chat(session: Session) -> None:
     service = MaestroOrchestratorService(
         session,
-        planner_llm_client=FakeThinkTankPlannerLLMClient(),
+        planner_llm_client=FakeProductBrainstormPlannerLLMClient(),
     )
 
     plan = service.create_plan(
         "This new feature will be a CAD AI tool for mechanical design agents."
     )
 
-    assert plan.is_routing_only is True
+    assert plan.is_routing_only is False
     assert plan.is_chat_only is True
     assert plan.approval_required is False
-    assert plan.work_items[0].type == "think_tank"
-    assert "Think Tank" in (plan.direct_response or "")
-    routed = session.query(RoutedItem).one()
-    assert routed.route_type == "think_tank"
-    idea = session.query(Idea).one()
-    assert "CAD AI tool" in idea.title
+    assert plan.work_items == []
+    assert "exploring together" in (plan.direct_response or "")
+    assert session.query(RoutedItem).count() == 0
 
 
 def test_orchestrator_drops_duplicate_todo_for_agent_work(session: Session) -> None:

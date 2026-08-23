@@ -83,7 +83,7 @@ class GitHubIssueSyncService:
         self.client = client
 
     def sync(self, profile: RepositoryProfile) -> IssueSyncResult:
-        client = self.client or GitHubCliIssueClient(_github_env(self.session, profile.domain_id))
+        client = self.client or GitHubCliIssueClient(_github_env(self.session, profile))
         remote = client.list_issues(profile.external_repo)
         by_number = {
             issue.external_number: issue
@@ -150,21 +150,40 @@ class GitHubIssueSyncService:
         return IssueSyncResult(repository=profile.external_repo, **counters)
 
 
-def _github_env(session: Session, domain_id: Any) -> dict[str, str]:
+def _github_env(session: Session, profile: RepositoryProfile) -> dict[str, str]:
     env = os.environ.copy()
-    connection = session.scalar(select(ToolConnection).where(ToolConnection.domain_id == domain_id, ToolConnection.tool_key == "github", ToolConnection.is_active.is_(True)))
-    if connection is None:
-        return env
-    config = connection.config or {}
+    connection = session.scalar(
+        select(ToolConnection).where(
+            ToolConnection.domain_id == profile.domain_id,
+            ToolConnection.tool_key == "github",
+            ToolConnection.is_active.is_(True),
+        )
+    )
+    config = (connection.config or {}) if connection is not None else {}
     env_name = str(config.get("env_token_name") or "").strip()
-    if env_name:
-        token = os.getenv(env_name) or _dotenv_value(env_name)
-        if not token:
-            raise RuntimeError(f"GitHub token env var is not set: {env_name}")
+    token = os.getenv(env_name) or _dotenv_value(env_name) if env_name else None
+    if not token and config.get("token"):
+        token = str(config["token"])
+    if not token:
+        account = str((profile.sync_config or {}).get("github_account") or "").strip()
+        token = _github_cli_token(account)
+    if token:
         env["GH_TOKEN"] = token
-    if config.get("token"):
-        env["GH_TOKEN"] = str(config["token"])
     return env
+
+
+def _github_cli_token(account: str) -> str | None:
+    args = ["gh", "auth", "token"]
+    if account:
+        args.extend(["--user", account])
+    completed = subprocess.run(
+        args,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else None
 
 
 def _dotenv_value(key: str) -> str | None:

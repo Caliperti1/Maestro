@@ -3995,7 +3995,6 @@ def _normalize_route_type(value: str) -> str:
         "organization": "entity",
         "org": "entity",
         "decision": "decision_log",
-        "idea": "think_tank",
         "rfi": "human_input",
     }
     normalized = aliases.get(normalized, normalized)
@@ -4005,7 +4004,6 @@ def _normalize_route_type(value: str) -> str:
         "event",
         "contact",
         "entity",
-        "think_tank",
         "decision_log",
         "project",
         "integration_note",

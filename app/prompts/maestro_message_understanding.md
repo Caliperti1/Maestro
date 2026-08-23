@@ -7,7 +7,8 @@ Intent types:
 - chat_response: Chris is asking Maestro to answer conversationally.
 - workflow_request: Chris is asking agents/tools to do executable work.
 - routed_item: Chris explicitly wants information saved, logged, remembered, or routed as
-  contact/event/todo/idea/organization.
+  contact/event/todo/organization. Product and software ideas belong in the canonical Product
+  Issues store only when Chris explicitly asks to save or capture them.
 - rfi_answer: Chris provides information that satisfies or partially answers active_plan.open_rfis,
   even without saying RFI.
 - plan_refinement: Chris changes, narrows, approves, rejects, or updates the active plan/workflow.

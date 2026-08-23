@@ -1030,21 +1030,6 @@ class ProductIssueExecution(TimestampMixin, Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
-class Idea(TimestampMixin, Base):
-    __tablename__ = "ideas"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    domain_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
-    )
-    title: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(40), default="open", nullable=False, index=True)
-    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
-
-
 class DecisionRecord(TimestampMixin, Base):
     __tablename__ = "decision_records"
 

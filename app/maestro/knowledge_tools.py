@@ -18,7 +18,7 @@ from app.memory.federated_retrieval import (
 from app.memory.routed_retrieval import RoutedRetrievalService
 
 READ_ACTIONS = {"context.search", "web.search", "issue.search", "issue.get"}
-ROUTED_CONTEXT_STORES = {"contacts", "organizations", "events", "todos", "ideas", "decisions"}
+ROUTED_CONTEXT_STORES = {"contacts", "organizations", "events", "todos", "decisions"}
 
 
 @dataclass(frozen=True)
@@ -232,7 +232,8 @@ def _context_stores(value: Any) -> set[str] | None:
         "entities": "organizations",
         "todo": "todos",
         "task": "todos",
-        "idea": "ideas",
+        "idea": "issues",
+        "brainstorm": "issues",
         "decision": "decisions",
         "report": "reports",
         "workflow_report": "reports",

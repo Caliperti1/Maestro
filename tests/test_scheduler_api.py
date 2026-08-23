@@ -27,6 +27,7 @@ from app.db.models import (
 )
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
+from app.maestro.scheduler import SchedulerService
 from app.maestro.scheduler_worker import (
     SchedulerWorkerService,
     _approved_tool_results,
@@ -46,6 +47,32 @@ def _client(session: Session, tmp_path: Path) -> TestClient:
 
     app.dependency_overrides[get_db] = override_get_db
     return TestClient(app)
+
+
+def test_scheduler_dashboard_excludes_terminal_failed_runs(session: Session) -> None:
+    seed_default_domains(session)
+    domain = session.query(Domain).filter(Domain.key == "maestro-development").one()
+    failed = WorkflowRun(
+        domain_id=domain.id,
+        source_type="repository_intelligence",
+        status="failed",
+        priority="low",
+        input_payload={},
+        error_message="Historical failure.",
+    )
+    blocked = WorkflowRun(
+        domain_id=domain.id,
+        source_type="maestro",
+        status="blocked",
+        priority="normal",
+        input_payload={},
+    )
+    session.add_all([failed, blocked])
+    session.commit()
+
+    dashboard = SchedulerService(session).dashboard()
+
+    assert [run["id"] for run in dashboard["runs"]] == [str(blocked.id)]
 
 
 def test_scheduler_completion_uses_agent_conversation_field(session: Session) -> None:

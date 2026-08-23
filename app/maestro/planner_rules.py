@@ -17,7 +17,6 @@ INTENT_TYPE_BY_WORK_ITEM: dict[str, str] = {
     "decision": "decision",
     "rfi": "rfi",
     "memory_candidate": "memory_route",
-    "think_tank": "direct_chat",
     "direct_response": "direct_chat",
 }
 
@@ -27,7 +26,6 @@ ROUTE_TYPE_BY_WORK_ITEM: dict[str, str] = {
     "event": "event",
     "decision": "decision_log",
     "rfi": "human_input",
-    "think_tank": "think_tank",
 }
 
 ACTION_BY_WORK_ITEM_TYPE: dict[str, str] = {
@@ -38,7 +36,6 @@ ACTION_BY_WORK_ITEM_TYPE: dict[str, str] = {
     "decision": "Route as an auditable decision.",
     "rfi": "Ask you directly or surface as human input needed.",
     "memory_candidate": "Stage for memory curation at session close.",
-    "think_tank": "Capture as a think tank note until it matures.",
     "direct_response": "Respond directly without workflow execution.",
 }
 

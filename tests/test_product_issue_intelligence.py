@@ -10,10 +10,14 @@ from app.db.models import (
     ProductProject,
     RepositoryProfile,
     WorkflowDefinition,
+    WorkflowRun,
 )
+from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.issues.github_sync import GitHubIssueSyncService
+from app.issues.repositories import ensure_default_repository_portfolio, ensure_repository_workflows
 from app.issues.service import ProductIssueService
+from app.issues.worker import RepositoryIntelligenceWorker
 
 
 def _domain(session, key="maestro-development"):
@@ -166,3 +170,43 @@ def test_issue_api_registers_visible_repository_workflows(session, tmp_path):
     definitions = session.scalars(select(WorkflowDefinition)).all()
     assert {item.key for item in definitions} == {"repository-intelligence:maestro", "issue-hygiene:maestro"}
     assert all(item.trigger_config["managed_by"] == "repository_intelligence_worker" for item in definitions)
+
+
+def test_default_portfolio_registers_each_product_repository(session, monkeypatch):
+    seed_default_domains(session)
+    monkeypatch.setattr("app.issues.repositories._find_checkout", lambda _spec: None)
+
+    profiles = ensure_default_repository_portfolio(session)
+
+    assert {profile.external_repo for profile in profiles} == {
+        "Praxis-Defense/GroundTruth",
+        "Perti-Laboratories/Deeper-Learning",
+        "Perti-Laboratories/AAce",
+        "Perti-Laboratories/Ophi",
+    }
+    definitions = session.scalars(select(WorkflowDefinition)).all()
+    assert len(definitions) == 8
+    assert {definition.name for definition in definitions} >= {
+        "Repository Intelligence - GroundTruth",
+        "Repository Intelligence - Deeper Learning",
+        "Repository Intelligence - AAce",
+        "Repository Intelligence - Ophi",
+    }
+
+
+def test_repository_failure_is_throttled_per_workflow(session):
+    domain = _domain(session)
+    project = _project(session, domain)
+    repository = _repository(session, domain, project)
+    ensure_repository_workflows(session, repository, domain)
+    session.commit()
+    worker = RepositoryIntelligenceWorker(session)
+
+    worker._record_failure(repository, "issue-hygiene", "first failure")
+    worker._record_failure(repository, "issue-hygiene", "updated failure")
+
+    failures = session.scalars(
+        select(WorkflowRun).where(WorkflowRun.status == "failed")
+    ).all()
+    assert len(failures) == 1
+    assert failures[0].error_message == "updated failure"

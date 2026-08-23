@@ -27,15 +27,20 @@ class RepositoryIntelligenceWorker:
     def run_once(self) -> dict[str, int]:
         observed = hygiene = failures = 0
         for profile in self.session.scalars(select(RepositoryProfile).where(RepositoryProfile.status == "active")).all():
-            try:
-                if profile.source_registration_id:
+            if profile.source_registration_id:
+                try:
                     observed += int(self._observe(profile))
-                if not profile.last_synced_at or profile.last_synced_at <= datetime.now(UTC) - timedelta(hours=24):
+                except Exception as exc:  # noqa: BLE001 - one repository failure must not stop others.
+                    self.session.rollback()
+                    self._record_failure(profile, "repository-intelligence", str(exc))
+                    failures += 1
+            if not profile.last_synced_at or profile.last_synced_at <= datetime.now(UTC) - timedelta(hours=24):
+                try:
                     hygiene += int(self._hygiene(profile))
-            except Exception as exc:  # noqa: BLE001 - one repository failure must not stop others.
-                self.session.rollback()
-                self._record_failure(profile, str(exc))
-                failures += 1
+                except Exception as exc:  # noqa: BLE001 - one repository failure must not stop others.
+                    self.session.rollback()
+                    self._record_failure(profile, "issue-hygiene", str(exc))
+                    failures += 1
         return {"observed": observed, "hygiene": hygiene, "failures": failures}
 
     def _observe(self, profile: RepositoryProfile) -> bool:
@@ -86,11 +91,27 @@ class RepositoryIntelligenceWorker:
         self.session.flush()
         self.session.add(WorkflowRunLogEntry(workflow_run_id=run.id, workflow_definition_id=definition.id, domain_id=profile.domain_id, status="completed", title=definition.name, summary=summary, run_started_at=now, run_completed_at=now, report_ids=[str(report.id)], routed_item_ids=[], artifact_ids=[], notification_ids=[], metadata_={"repository_id": str(profile.id), "quiet_background": True}))
 
-    def _record_failure(self, profile: RepositoryProfile, error: str) -> None:
-        definition = self.session.scalar(select(WorkflowDefinition).where(WorkflowDefinition.key == f"issue-hygiene:{profile.key}"))
+    def _record_failure(self, profile: RepositoryProfile, workflow_kind: str, error: str) -> None:
+        definition = self.session.scalar(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.key == f"{workflow_kind}:{profile.key}"
+            )
+        )
         if definition is None:
             return
         now = datetime.now(UTC)
+        recent_failure = self.session.scalar(
+            select(WorkflowRun).where(
+                WorkflowRun.workflow_definition_id == definition.id,
+                WorkflowRun.status == "failed",
+                WorkflowRun.created_at >= now - timedelta(hours=24),
+            )
+        )
+        if recent_failure is not None:
+            recent_failure.error_message = error
+            recent_failure.completed_at = now
+            self.session.commit()
+            return
         run = WorkflowRun(workflow_definition_id=definition.id, domain_id=profile.domain_id, source_type="repository_intelligence", status="failed", priority="low", fairness_group=definition.fairness_group, input_payload={"repository_id": str(profile.id)}, error_message=error, scheduled_for=now, started_at=now, completed_at=now)
         self.session.add(run)
         self.session.flush()

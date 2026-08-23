@@ -5,7 +5,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 EmailClassification = Literal[
     "spam",
     "noise",
@@ -13,7 +12,7 @@ EmailClassification = Literal[
     "response_required",
     "action_required",
 ]
-EmailRouteType = Literal["contact", "todo", "event", "organization", "think_tank"]
+EmailRouteType = Literal["contact", "todo", "event", "organization"]
 
 
 class EmailMetadataEntry(BaseModel):

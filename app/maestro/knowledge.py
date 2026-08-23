@@ -24,7 +24,6 @@ from app.db.models import (
     ContactDomainNote,
     Domain,
     Entity,
-    Idea,
     Message,
     OrganizationAlias,
     ProductIssue,
@@ -63,8 +62,6 @@ ALLOWED_ACTIONS = {
     "todo.update",
     "organization.create",
     "organization.update",
-    "idea.create",
-    "idea.update",
     "workflow.update",
     "workflow.archive",
     "issue.search",
@@ -466,14 +463,13 @@ class MaestroKnowledgeService:
             "contact.create": "contact",
             "todo.create": "task",
             "organization.create": "entity",
-            "idea.create": "think_tank",
         }[action_type]
         title = str(arguments.get("title") or arguments.get("name") or "").strip()
         if not title:
             raise ValueError("I need a name or title before I can create that item.")
         domain = self._domain(
             arguments.get("domain_key"),
-            required=route_type in {"event", "task", "think_tank"},
+            required=route_type in {"event", "task"},
         )
         content = str(
             arguments.get("summary")
@@ -616,8 +612,6 @@ class MaestroKnowledgeService:
             updated = editor.update_entity(object_id, updates)
             OrganizationEmbeddingService(self.session).upsert(updated)
             self.session.commit()
-        elif object_type == "idea":
-            updated = editor.update_idea(object_id, updates)
         else:
             raise ValueError("That routed object cannot be edited in Knowledge mode.")
         return KnowledgeActionResult(
@@ -719,7 +713,6 @@ class MaestroKnowledgeService:
             "contact": Contact,
             "todo": Todo,
             "organization": Entity,
-            "idea": Idea,
         }.get(object_type)
         if model is None:
             raise ValueError("Unsupported routed object type.")

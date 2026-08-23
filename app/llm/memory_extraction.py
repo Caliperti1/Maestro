@@ -1,5 +1,5 @@
 import uuid
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
@@ -17,7 +17,6 @@ ExtractedRouteType = Literal[
     "event",
     "contact",
     "entity",
-    "think_tank",
     "decision_log",
     "project",
     "artifact_history",
