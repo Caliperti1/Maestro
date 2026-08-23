@@ -1,12 +1,15 @@
 """Bridge low-urgency routed todos into Maestro's background workflow runtime."""
 
+import json
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Domain, Task, Todo, WorkflowRun
+from app.db.models import Domain, Report, Task, Todo, WorkflowQueueItem, WorkflowRun
 from app.maestro.channel import record_channel_message
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
 from app.memory.todo_scheduling import TodoSchedulingService
@@ -74,6 +77,17 @@ class TodoAgentTaskService:
         )
         try:
             plan = self.orchestrator.create_plan(prompt)
+            parent_task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
+            if parent_task is None:
+                raise MaestroOrchestratorError("Agent-task workflow parent was not persisted.")
+            parent_task.source_type = "todo_agent_task"
+            parent_task.input_payload = {
+                **(parent_task.input_payload or {}),
+                "originating_todo_id": str(todo.id),
+                "originating_todo_title": todo.title,
+            }
+            self._link_clarification_todos(todo, parent_task)
+            self.session.commit()
             blocking = [
                 item.title
                 for item in plan.work_items
@@ -98,16 +112,6 @@ class TodoAgentTaskService:
                     },
                 )
                 return False
-            parent_task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
-            if parent_task is None:
-                raise MaestroOrchestratorError("Agent-task workflow parent was not persisted.")
-            parent_task.source_type = "todo_agent_task"
-            parent_task.input_payload = {
-                **(parent_task.input_payload or {}),
-                "originating_todo_id": str(todo.id),
-                "originating_todo_title": todo.title,
-            }
-            self.session.commit()
             self.orchestrator.enqueue_plan(plan.plan_id)
             run = self.session.scalar(
                 select(WorkflowRun).where(
@@ -154,9 +158,47 @@ class TodoAgentTaskService:
                 )
                 continue
             if run.status in {"complete", "completed"}:
+                quality = self._assess_completion(run)
+                if not quality.passed:
+                    todo.agent_task_status = "needs_input"
+                    todo.agent_task_error = quality.reason
+                    if not (todo.metadata_ or {}).get("quality_gate_notified_at"):
+                        record_channel_message(
+                            self.session,
+                            sender="maestro",
+                            content=(
+                                f"Chris, the background workflow for **{todo.title}** finished, "
+                                "but I did not close the task because its completion check failed.\n\n"
+                                f"{quality.reason}"
+                            ),
+                            metadata={
+                                "channel_visibility": "global",
+                                "message_type": "todo_agent_task_quality_failed",
+                                "todo_id": str(todo.id),
+                                "workflow_run_id": str(run.id),
+                            },
+                        )
+                        todo.metadata_ = {
+                            **(todo.metadata_ or {}),
+                            "quality_gate_notified_at": datetime.now(UTC).isoformat(),
+                            "quality_gate_status": "failed",
+                            "quality_gate_reason": quality.reason,
+                        }
+                    reconciled += 1
+                    continue
                 todo.agent_task_status = "completed"
                 todo.status = "done"
                 todo.agent_task_error = None
+                todo.metadata_ = {
+                    **(todo.metadata_ or {}),
+                    "quality_gate_status": "passed",
+                    "quality_gate_reason": quality.reason,
+                }
+                self._link_run_clarification_todos(todo, run)
+                self._close_linked_clarification_todos(
+                    todo,
+                    resolution="The linked agent workflow completed and passed its quality check.",
+                )
                 TodoSchedulingService(self.session).sync_projection(todo, commit=False)
                 if not (todo.metadata_ or {}).get("completion_notified_at"):
                     summary = _run_summary(run)
@@ -184,6 +226,215 @@ class TodoAgentTaskService:
                 reconciled += 1
         self.session.commit()
         return reconciled
+
+    def apply_clarification(
+        self,
+        todo: Todo,
+        *,
+        clarification: str,
+        message_id: uuid.UUID | str | None = None,
+    ) -> Todo:
+        """Attach a direct Maestro reply to a preflight RFI and retry the originating task."""
+        now = datetime.now(UTC)
+        clarifications = list((todo.metadata_ or {}).get("agent_task_clarifications") or [])
+        clarifications.append(
+            {
+                "message_id": str(message_id) if message_id else None,
+                "content": clarification,
+                "received_at": now.isoformat(),
+            }
+        )
+        metadata = {
+            **(todo.metadata_ or {}),
+            "agent_task_clarifications": clarifications,
+            "last_agent_task_clarification_at": now.isoformat(),
+        }
+        metadata.pop("planning_notified_at", None)
+        todo.metadata_ = metadata
+        clarification_line = f"User clarification: {clarification}"
+        if clarification_line not in (todo.description or ""):
+            todo.description = "\n\n".join(
+                part for part in ((todo.description or "").strip(), clarification_line) if part
+            )
+        todo.agent_task_status = "retry"
+        todo.agent_task_error = None
+        self._close_linked_clarification_todos(
+            todo,
+            resolution=f"Chris answered the workflow clarification: {clarification}",
+        )
+        self.session.commit()
+        self.session.refresh(todo)
+        return todo
+
+    def _link_clarification_todos(self, originating_todo: Todo, parent_task: Task) -> None:
+        for candidate in self._open_human_input_todos(originating_todo):
+            if str((candidate.provenance or {}).get("task_id") or "") != str(parent_task.id):
+                continue
+            candidate.metadata_ = {
+                **(candidate.metadata_ or {}),
+                "blocking_for_todo_id": str(originating_todo.id),
+                "blocking_for_task_id": str(parent_task.id),
+            }
+
+    def _link_run_clarification_todos(self, originating_todo: Todo, run: WorkflowRun) -> None:
+        queue_items = self.session.scalars(
+            select(WorkflowQueueItem).where(WorkflowQueueItem.workflow_run_id == run.id)
+        ).all()
+        task_ids = {str(run.parent_task_id)} if run.parent_task_id else set()
+        report_ids: set[str] = set()
+        artifact_ids: set[str] = set()
+        for item in queue_items:
+            if item.child_task_id:
+                task_ids.add(str(item.child_task_id))
+            output = item.output_payload or {}
+            if output.get("task_id"):
+                task_ids.add(str(output["task_id"]))
+            if output.get("report_id"):
+                report_ids.add(str(output["report_id"]))
+            if output.get("artifact_id"):
+                artifact_ids.add(str(output["artifact_id"]))
+
+        for candidate in self._open_human_input_todos(originating_todo):
+            provenance = candidate.provenance or {}
+            direct_match = bool(
+                str(provenance.get("task_id") or "") in task_ids
+                or str(provenance.get("report_id") or "") in report_ids
+                or str(provenance.get("artifact_id") or "") in artifact_ids
+            )
+            ref_match = any(
+                str(ref.get("task_id") or ref.get("report_id") or ref.get("artifact_id") or "")
+                in (task_ids | report_ids | artifact_ids)
+                for ref in (candidate.source_refs or [])
+                if isinstance(ref, dict)
+            )
+            if not direct_match and not ref_match:
+                continue
+            candidate.metadata_ = {
+                **(candidate.metadata_ or {}),
+                "blocking_for_todo_id": str(originating_todo.id),
+                "blocking_for_workflow_run_id": str(run.id),
+            }
+
+    def _close_linked_clarification_todos(self, todo: Todo, *, resolution: str) -> None:
+        scheduling = TodoSchedulingService(self.session)
+        for candidate in self._open_human_input_todos(todo):
+            if str((candidate.metadata_ or {}).get("blocking_for_todo_id") or "") != str(todo.id):
+                continue
+            candidate.status = "done"
+            candidate.metadata_ = {
+                **(candidate.metadata_ or {}),
+                "resolved_by_agent_task_id": str(todo.id),
+                "resolution": resolution,
+                "resolved_at": datetime.now(UTC).isoformat(),
+            }
+            scheduling.sync_projection(candidate, commit=False)
+
+    def _open_human_input_todos(self, todo: Todo) -> list[Todo]:
+        return list(
+            self.session.scalars(
+                select(Todo).where(
+                    Todo.id != todo.id,
+                    Todo.todo_type == "human_input",
+                    Todo.status.notin_(["done", "archived"]),
+                    (Todo.domain_id == todo.domain_id)
+                    if todo.domain_id
+                    else Todo.domain_id.is_(None),
+                )
+            ).all()
+        )
+
+    def _assess_completion(self, run: WorkflowRun) -> "CompletionAssessment":
+        queue_items = self.session.scalars(
+            select(WorkflowQueueItem).where(WorkflowQueueItem.workflow_run_id == run.id)
+        ).all()
+        unfinished = [item for item in queue_items if item.status != "completed"]
+        if unfinished:
+            labels = ", ".join(item.external_key for item in unfinished[:3])
+            return CompletionAssessment(False, f"Workflow items are not complete: {labels}.")
+
+        reports = self._reports_for_queue_items(queue_items)
+        explicit_statuses: list[str] = []
+        for report in reports:
+            payload = _parse_report_payload(report.body_markdown)
+            explicit_statuses.extend(_completion_statuses(payload, report.structured_data))
+        failed_status = next(
+            (status for status in explicit_statuses if _is_failed_completion_status(status)),
+            None,
+        )
+        if failed_status:
+            return CompletionAssessment(
+                False,
+                f"The agent reported its result as `{failed_status}`. Review the report before retrying.",
+            )
+        if explicit_statuses:
+            return CompletionAssessment(True, f"Agent completion status: {explicit_statuses[0]}.")
+
+        summary = _run_summary(run).lower()
+        failure_phrases = (
+            "did not execute",
+            "could not complete",
+            "couldn't complete",
+            "unable to complete",
+            "cannot responsibly",
+            "needs additional information",
+        )
+        if any(phrase in summary for phrase in failure_phrases):
+            return CompletionAssessment(
+                False, "The workflow summary says the requested work is incomplete."
+            )
+        return CompletionAssessment(True, "No incomplete or failed result was reported.")
+
+    def _reports_for_queue_items(self, queue_items: list[WorkflowQueueItem]) -> list[Report]:
+        report_ids: list[uuid.UUID] = []
+        for item in queue_items:
+            raw_id = (item.output_payload or {}).get("report_id")
+            try:
+                report_id = uuid.UUID(str(raw_id)) if raw_id else None
+            except ValueError:
+                report_id = None
+            if report_id and report_id not in report_ids:
+                report_ids.append(report_id)
+        if not report_ids:
+            return []
+        return list(self.session.scalars(select(Report).where(Report.id.in_(report_ids))).all())
+
+
+@dataclass(frozen=True)
+class CompletionAssessment:
+    passed: bool
+    reason: str
+
+
+def _parse_report_payload(body: str) -> dict[str, Any]:
+    stripped = body.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _completion_statuses(payload: dict[str, Any], structured_data: dict[str, Any]) -> list[str]:
+    values: list[Any] = []
+    for source in (payload, structured_data or {}):
+        values.append(source.get("status"))
+        completion = source.get("completion")
+        if isinstance(completion, dict):
+            values.append(completion.get("status"))
+        summary = source.get("summary")
+        if isinstance(summary, dict):
+            values.append(summary.get("status"))
+    return [str(value).strip() for value in values if str(value or "").strip()]
+
+
+def _is_failed_completion_status(status: str) -> bool:
+    normalized = status.lower().replace("_", " ").replace("-", " ")
+    return any(
+        token in normalized
+        for token in ("incomplete", "blocked", "failed", "failure", "partial", "needs input")
+    )
 
 
 def _run_summary(run: WorkflowRun) -> str:

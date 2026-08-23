@@ -12,7 +12,9 @@ from app.db.models import (
     Message,
     Task,
     Todo,
+    ToolCall,
     WorkflowDefinition,
+    WorkflowRun,
 )
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
@@ -157,6 +159,69 @@ def test_knowledge_reply_resumes_waiting_agent_task_instead_of_answering_directl
     assert todo.agent_task_error is None
     assert "User clarification: The shed is in Stony Brook, New York." in todo.description
     assert "planning_notified_at" not in todo.metadata_
+
+
+def test_knowledge_approval_resumes_global_background_agent_task(
+    session: Session,
+    monkeypatch,
+) -> None:
+    conversation = maestro_api._get_or_create_maestro_conversation(session, None)
+    parent = Task(
+        objective="Create the approved GitHub issue.",
+        status="blocked",
+        source_type="todo_agent_task",
+        input_payload={},
+    )
+    session.add(parent)
+    session.flush()
+    child = Task(
+        parent_task_id=parent.id,
+        objective="Create the GitHub issue.",
+        status="blocked",
+        source_type="agent",
+        workflow_key="scheduler.workflow_item",
+        input_payload={},
+    )
+    session.add(child)
+    session.flush()
+    run = WorkflowRun(
+        parent_task_id=parent.id,
+        source_type="todo_agent_task",
+        status="blocked",
+        input_payload={},
+    )
+    tool_call = ToolCall(
+        task_id=child.id,
+        tool_name="github.issue.create",
+        status="approval_required",
+        input_payload={"title": "Add quality checks"},
+    )
+    session.add_all([run, tool_call])
+    session.commit()
+
+    approved: list[str] = []
+
+    def fake_approve(_db, *, tool_call, **_kwargs):
+        approved.append(str(tool_call.id))
+        return {
+            "kind": "tool_approved",
+            "classification": "tool_approved",
+            "message": "Approved and resumed the background workflow.",
+        }
+
+    monkeypatch.setattr(maestro_api, "_approve_pending_tool_from_chat", fake_approve)
+    response = _client(session).post(
+        "/maestro/respond",
+        json={
+            "message": "Approved",
+            "interaction_mode": "knowledge",
+            "conversation_id": str(conversation.id),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["classification"] == "tool_approved"
+    assert approved == [str(tool_call.id)]
 
 
 def test_workflow_builder_explicitly_creates_a_proposed_plan(session: Session) -> None:

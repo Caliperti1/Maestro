@@ -10,16 +10,18 @@ from app.db.models import (
     Domain,
     Entity,
     Message,
+    Report,
     RoutedItem,
     Task,
     Todo,
+    WorkflowQueueItem,
     WorkflowRun,
 )
 from app.db.seed import seed_default_domains
 from app.maestro.todo_agent_tasks import TodoAgentTaskService
 from app.memory.routed_hygiene import RoutedHygieneService
-from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_resolver import RoutedObjectResolver
+from app.memory.routed_retrieval import RoutedEditService
 from app.memory.todo_scheduling import TodoSchedulingService
 
 
@@ -304,6 +306,17 @@ def test_agent_todo_is_planned_once_and_linked_to_workflow(session) -> None:
     assert parent is not None
     assert parent.source_type == "todo_agent_task"
     assert parent.input_payload["originating_todo_id"] == str(todo.id)
+    linked_clarification = Todo(
+        domain_id=domain.id,
+        title="Confirm partner scope",
+        description="Clarify the requested partner research scope.",
+        todo_type="human_input",
+        status="needs_input",
+        source_refs=[],
+        provenance={"task_id": str(parent.id)},
+        metadata_={},
+    )
+    session.add(linked_clarification)
     run.status = "completed"
     run.output_payload = {"chat_summary": "I prepared the partner background report."}
     session.commit()
@@ -312,8 +325,112 @@ def test_agent_todo_is_planned_once_and_linked_to_workflow(session) -> None:
 
     assert todo.status == "done"
     assert todo.agent_task_status == "completed"
+    assert linked_clarification.status == "done"
+    assert linked_clarification.metadata_["resolved_by_agent_task_id"] == str(todo.id)
     messages = session.scalars(select(Message).where(Message.sender_type == "maestro")).all()
     assert any("prepared the partner background report" in message.content for message in messages)
+
+
+def test_agent_todo_quality_gate_keeps_incomplete_work_open(session) -> None:
+    domain = _domain(session)
+    todo = Todo(
+        domain_id=domain.id,
+        title="Research local disposal rules",
+        description="Return current, source-cited disposal guidance.",
+        agent_task=True,
+        agent_task_status="pending",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(todo)
+    session.commit()
+
+    service = TodoAgentTaskService(session, orchestrator=FakeOrchestrator(session))
+    service.run_once()
+    run = session.get(WorkflowRun, todo.workflow_run_id)
+    parent = session.get(Task, todo.workflow_task_id)
+    report = Report(
+        task_id=parent.id,
+        domain_id=domain.id,
+        title="Disposal research",
+        report_type="agent_run_once",
+        summary="Research did not execute.",
+        body_markdown='{"summary":{"status":"incomplete—official research unavailable"}}',
+        structured_data={},
+    )
+    session.add(report)
+    session.flush()
+    session.add(
+        WorkflowQueueItem(
+            workflow_run_id=run.id,
+            parent_task_id=parent.id,
+            external_key="q1-wi1",
+            status="completed",
+            objective="Research current rules.",
+            input_payload={},
+            output_payload={"report_id": str(report.id)},
+        )
+    )
+    run.status = "completed"
+    run.output_payload = {"chat_summary": "The official research did not execute."}
+    session.commit()
+
+    service.run_once()
+
+    assert todo.status == "open"
+    assert todo.agent_task_status == "needs_input"
+    assert "incomplete" in (todo.agent_task_error or "")
+    messages = session.scalars(select(Message).where(Message.sender_type == "maestro")).all()
+    assert any("completion check failed" in message.content for message in messages)
+
+
+def test_agent_task_clarification_closes_only_explicitly_linked_human_input(session) -> None:
+    domain = _domain(session)
+    todo = Todo(
+        domain_id=domain.id,
+        title="Research shed disposal",
+        description="Find local rules.",
+        agent_task=True,
+        agent_task_status="needs_input",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    linked = Todo(
+        domain_id=domain.id,
+        title="Provide shed locality",
+        description="Which town is the shed in?",
+        todo_type="human_input",
+        status="needs_input",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    unrelated = Todo(
+        domain_id=domain.id,
+        title="Confirm meeting owner",
+        description="Who owns the partner meeting?",
+        todo_type="human_input",
+        status="needs_input",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([todo, linked, unrelated])
+    session.flush()
+    linked.metadata_ = {"blocking_for_todo_id": str(todo.id)}
+    session.commit()
+
+    TodoAgentTaskService(session, orchestrator=FakeOrchestrator(session)).apply_clarification(
+        todo,
+        clarification="The shed is in Stony Brook.",
+    )
+
+    assert todo.agent_task_status == "retry"
+    assert linked.status == "done"
+    assert linked.metadata_["resolved_by_agent_task_id"] == str(todo.id)
+    assert unrelated.status == "needs_input"
 
 
 def test_existing_todo_toggle_becomes_pending_even_with_stale_ui_status(session) -> None:
