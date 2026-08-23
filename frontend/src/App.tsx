@@ -14,6 +14,7 @@ import {
   HardDriveUpload,
   Inbox,
   ListTodo,
+  GitPullRequest,
   Mail,
   Menu,
   MessageSquareText,
@@ -74,6 +75,8 @@ import type {
   MemoryPreview,
   MemorySource,
   PendingProposal,
+  ProductIssue,
+  ProductProject,
   PromptPackage,
   FederatedRetrievedDocument,
   RoutedEvent,
@@ -2501,6 +2504,144 @@ function NeedsAttentionPanel({
   );
 }
 
+function IssuesWorkspace() {
+  const [issues, setIssues] = useState<ProductIssue[]>([]);
+  const [projects, setProjects] = useState<ProductProject[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("open");
+  const [projectFilter, setProjectFilter] = useState("all");
+  const [statusMessage, setStatusMessage] = useState("Loading product issues...");
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState<Partial<ProductIssue>>({});
+
+  const load = useCallback(async () => {
+    const [issueResponse, projectResponse] = await Promise.all([
+      apiJson<{ issues: ProductIssue[] }>("/issues?limit=250"),
+      apiJson<{ projects: ProductProject[] }>("/issues/projects"),
+    ]);
+    setIssues(issueResponse.issues);
+    setProjects(projectResponse.projects);
+    setSelectedId((current) => current && issueResponse.issues.some((item) => item.id === current) ? current : issueResponse.issues[0]?.id ?? null);
+    setStatusMessage(`${issueResponse.issues.length} canonical product issues loaded.`);
+  }, []);
+
+  useEffect(() => {
+    load().catch((error) => setStatusMessage(error instanceof Error ? error.message : "Issues failed to load."));
+  }, [load]);
+
+  const selected = issues.find((item) => item.id === selectedId) ?? null;
+  useEffect(() => {
+    setDraft(selected ? { ...selected, acceptance_criteria: [...selected.acceptance_criteria] } : {});
+  }, [selected]);
+
+  const visible = useMemo(() => issues.filter((issue) => {
+    const matchesQuery = !query.trim() || [issue.title, issue.problem, issue.desired_outcome, issue.external_repo].some((value) => String(value ?? "").toLowerCase().includes(query.trim().toLowerCase()));
+    const matchesStatus = statusFilter === "all" || (statusFilter === "open" ? !["completed", "cancelled", "superseded"].includes(issue.status) : issue.status === statusFilter);
+    const matchesProject = projectFilter === "all" || issue.project_id === projectFilter;
+    return matchesQuery && matchesStatus && matchesProject;
+  }), [issues, projectFilter, query, statusFilter]);
+
+  const save = async () => {
+    if (!selected || !draft.title?.trim()) return;
+    setBusy(true);
+    try {
+      const response = await apiJson<{ issue: ProductIssue }>(`/issues/${selected.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          updates: {
+            title: draft.title,
+            problem: draft.problem ?? "",
+            desired_outcome: draft.desired_outcome ?? "",
+            acceptance_criteria: draft.acceptance_criteria ?? [],
+            notes: draft.notes ?? "",
+            issue_type: draft.issue_type,
+            priority: draft.priority,
+            status: draft.status,
+            estimated_minutes: draft.estimated_minutes,
+            agent_task: draft.agent_task,
+          },
+        }),
+      });
+      setIssues((current) => current.map((item) => item.id === response.issue.id ? response.issue : item));
+      setStatusMessage(`Saved ${response.issue.title}.`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Issue update failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const syncRepository = async () => {
+    if (!selected?.repository_id) return;
+    setBusy(true);
+    try {
+      const response = await apiJson<{ result: Record<string, number | string> }>(`/issues/repositories/${selected.repository_id}/sync`, { method: "POST" });
+      setStatusMessage(`GitHub sync complete: ${JSON.stringify(response.result)}.`);
+      await load();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "GitHub sync failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="panel routed-object-workspace issue-workspace">
+      <div className="routed-object-list-panel">
+        <div className="section-heading">
+          <div><p className="eyebrow">Product intelligence</p><h3>Issues</h3></div>
+          <button className="icon-button" type="button" onClick={load} title="Refresh issues"><RefreshCw size={16} /></button>
+        </div>
+        <div className="routed-filter-row">
+          <label className="contact-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search issues" /></label>
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Issue status filter">
+            <option value="open">Open work</option><option value="all">All issues</option><option value="ready">Ready</option><option value="active">Active</option><option value="blocked">Blocked</option><option value="review">Review</option><option value="completed">Completed</option>
+          </select>
+          <select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)} aria-label="Project filter">
+            <option value="all">All projects</option>
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </div>
+        <div className="routed-object-list">
+          {visible.map((issue) => (
+            <button key={issue.id} className={`routed-object-row${issue.id === selectedId ? " active" : ""}`} onClick={() => setSelectedId(issue.id)} type="button">
+              <GitPullRequest size={17} />
+              <span><strong>{issue.title}</strong><small>{issue.project?.name ?? "Unassigned project"}{issue.repository ? ` / ${issue.repository.display_name}` : ""} · {issue.status}</small><small>{issue.external_number ? `GitHub #${issue.external_number}` : "Local"} · {issue.sync_status}</small></span>
+            </button>
+          ))}
+          {visible.length === 0 && <p className="empty-state">No issues match these filters.</p>}
+        </div>
+        <p className="memory-status">{statusMessage}</p>
+      </div>
+      <div className="routed-object-detail-panel">
+        {selected ? (
+          <div className="routed-object-detail">
+            <div className="section-heading"><div><p className="eyebrow">Canonical issue</p><h3>{selected.external_number ? `#${selected.external_number}` : "Local issue"}</h3></div>{selected.external_url && <a className="icon-button" href={selected.external_url} target="_blank" rel="noreferrer" title="Open in GitHub"><ExternalLink size={16} /></a>}</div>
+            <label>Title<input value={draft.title ?? ""} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} /></label>
+            <div className="two-column-fields">
+              <label>Type<select value={draft.issue_type ?? "feature"} onChange={(event) => setDraft((current) => ({ ...current, issue_type: event.target.value }))}><option>feature</option><option>bug</option><option>story</option><option>architecture</option><option>research</option><option>chore</option><option>idea</option></select></label>
+              <label>Status<select value={draft.status ?? "ready"} onChange={(event) => setDraft((current) => ({ ...current, status: event.target.value }))}><option>ready</option><option>active</option><option>blocked</option><option>review</option><option>completed</option><option>cancelled</option><option>superseded</option></select></label>
+            </div>
+            <label>Problem<textarea value={draft.problem ?? ""} onChange={(event) => setDraft((current) => ({ ...current, problem: event.target.value }))} /></label>
+            <label>Desired outcome<textarea value={draft.desired_outcome ?? ""} onChange={(event) => setDraft((current) => ({ ...current, desired_outcome: event.target.value }))} /></label>
+            <label>Acceptance criteria<textarea value={(draft.acceptance_criteria ?? []).join("\n")} onChange={(event) => setDraft((current) => ({ ...current, acceptance_criteria: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) }))} placeholder="One criterion per line" /></label>
+            <label>Notes<textarea value={draft.notes ?? ""} onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} /></label>
+            <div className="two-column-fields">
+              <label>Priority<select value={draft.priority ?? "normal"} onChange={(event) => setDraft((current) => ({ ...current, priority: event.target.value }))}><option>low</option><option>normal</option><option>high</option><option>urgent</option></select></label>
+              <label>Estimate (minutes)<input type="number" min="5" value={draft.estimated_minutes ?? ""} onChange={(event) => setDraft((current) => ({ ...current, estimated_minutes: event.target.value ? Number(event.target.value) : null }))} /></label>
+            </div>
+            <label className="checkbox-row"><input type="checkbox" checked={Boolean(draft.agent_task)} onChange={(event) => setDraft((current) => ({ ...current, agent_task: event.target.checked }))} /> Agent task</label>
+            <div className="routed-detail-actions"><button className="planner-action" type="button" onClick={save} disabled={busy}>Save issue</button>{selected.repository_id && <button type="button" onClick={syncRepository} disabled={busy}><RefreshCw size={15} /> Sync GitHub</button>}</div>
+            {selected.relations.length > 0 && <details><summary>Issue relationships ({selected.relations.length})</summary><pre>{JSON.stringify(selected.relations, null, 2)}</pre></details>}
+          </div>
+        ) : <p className="empty-state">Select an issue to inspect it.</p>}
+      </div>
+    </section>
+  );
+}
+
 export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeDomain, setActiveDomain] = useState("Maestro");
@@ -3756,7 +3897,7 @@ export function App() {
           <div className="nav-group">
             <button
               className={
-                ["memory", "calendar", "contacts", "todos", "organizations", "ideas"].includes(activeSurface)
+                ["memory", "calendar", "contacts", "todos", "organizations", "ideas", "issues"].includes(activeSurface)
                   ? "domain-button active"
                   : "domain-button"
               }
@@ -3816,6 +3957,14 @@ export function App() {
                 >
                   <Sparkles size={16} />
                   <span>Think Tank</span>
+                </button>
+                <button
+                  className={activeSurface === "issues" ? "domain-button active" : "domain-button"}
+                  onClick={() => setActiveSurface("issues")}
+                  type="button"
+                >
+                  <GitPullRequest size={16} />
+                  <span>Product Issues</span>
                 </button>
               </div>
             )}
@@ -3884,6 +4033,8 @@ export function App() {
             <h2>
               {activeSurface === "memory"
                 ? "Memory Manager"
+                : activeSurface === "issues"
+                  ? "Product Issues"
                 : activeSurface === "run-log"
                   ? "Run Log"
                 : activeSurface === "workflows"
@@ -3909,6 +4060,11 @@ export function App() {
               <span>
                 <FileText size={16} />
                 Workflow outputs
+              </span>
+            ) : activeSurface === "issues" ? (
+              <span>
+                <GitPullRequest size={16} />
+                Product intelligence
               </span>
             ) : activeSurface in routedSurfaceConfig ? (
               <span>
@@ -3938,6 +4094,8 @@ export function App() {
 
         {activeSurface === "memory" ? (
           <MemoryWorkspace />
+        ) : activeSurface === "issues" ? (
+          <IssuesWorkspace />
         ) : activeSurface === "run-log" ? (
           <RunLogWorkspace
             entries={workflowRunLog}

@@ -11,7 +11,6 @@ import html
 import json
 import os
 import re
-from pathlib import Path
 import shlex
 import shutil
 import subprocess
@@ -19,6 +18,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -45,25 +45,25 @@ from app.db.repositories import AgentRepository, DomainRepository
 from app.llm.client import OpenAILLMClient
 from app.maestro.channel import record_channel_message
 from app.maestro.workflow_outputs import WorkflowOutputService
-from app.memory.retrieval import (
-    MemoryContextBundle,
-    MemoryContextBundleRequest,
-    MemoryContextSection,
-    MemoryContextSnippet,
-    MemoryRetrievalError,
-    MemoryRetrievalService,
-)
+from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
+from app.memory.context_gateway import ToolEvidenceLedgerService
 from app.memory.federated_retrieval import (
     FederatedRetrievalRequest,
     FederatedRetrievalService,
     federated_bundle_payload,
 )
-from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
-from app.memory.organization_intelligence import OrganizationEmbeddingService, OrganizationIntelligenceService
+from app.memory.organization_intelligence import (
+    OrganizationEmbeddingService,
+    OrganizationIntelligenceService,
+)
+from app.memory.retrieval import (
+    MemoryContextBundle,
+    MemoryContextSection,
+    MemoryContextSnippet,
+)
 from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_service import RoutedMemoryService
-from app.memory.context_gateway import ToolEvidenceLedgerService
 
 
 class ToolExecutionError(ValueError):
@@ -2464,6 +2464,7 @@ class CodexCliToolAdapter:
         )
         model = str(payload.get("model") or "").strip()
         profile = str(payload.get("profile") or "").strip()
+        resume_session_id = str(payload.get("session_id") or payload.get("codex_session_id") or "").strip()
         extra_context = str(payload.get("context") or "").strip()
         full_prompt = prompt if not extra_context else f"{prompt}\n\nAdditional context:\n{extra_context}"
         branch_workflow = _bool_setting(payload, context.connection, "branch_workflow", default=True)
@@ -2487,23 +2488,24 @@ class CodexCliToolAdapter:
                 if git_context is not None
                 else target_path
             )
-            args = [
-                codex_bin,
-                "exec",
-                "--json",
-                "--cd",
-                str(execution_path),
-                "--sandbox",
-                sandbox,
-                "--output-last-message",
-                output_path,
-            ]
+            if resume_session_id:
+                args = [
+                    codex_bin, "exec", "--cd", str(execution_path), "--sandbox", sandbox,
+                    "resume", "--json", "--output-last-message", output_path,
+                ]
+            else:
+                args = [
+                    codex_bin, "exec", "--json", "--cd", str(execution_path),
+                    "--sandbox", sandbox, "--output-last-message", output_path,
+                ]
             if model:
                 args.extend(["--model", model])
             if profile:
                 args.extend(["--profile", profile])
             if bool(payload.get("ephemeral", False)):
                 args.append("--ephemeral")
+            if resume_session_id:
+                args.append(resume_session_id)
             args.append(full_prompt)
             completed = subprocess.run(
                 args,
@@ -2530,6 +2532,7 @@ class CodexCliToolAdapter:
                 "profile": profile or None,
                 "returncode": completed.returncode,
                 "session_id": _codex_session_id(events),
+                "resumed_session_id": resume_session_id or None,
                 "final_message": final_message,
                 "changed_files": _codex_changed_files(events),
                 "event_counts": _codex_event_counts(events),

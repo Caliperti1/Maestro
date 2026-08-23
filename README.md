@@ -359,6 +359,7 @@ pytest tests/test_scheduler_api.py -q
 - [Memory service](docs/MEMORY_SERVICE.md)
 - [Memory curator](docs/MEMORY_CURATOR.md)
 - [Memory dropbox](docs/MEMORY_DROPBOX.md)
+- [Product issue and repository intelligence](docs/PRODUCT_ISSUE_INTELLIGENCE.md)
 - [Postgres setup](docs/POSTGRES.md)
 - [Phone access](docs/PHONE_ACCESS.md)
 - [Codebase cleanup register](docs/CODEBASE_CLEANUP.md)

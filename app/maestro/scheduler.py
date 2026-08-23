@@ -157,6 +157,8 @@ class SchedulerService:
         runs: list[WorkflowRun] = []
         for definition in definitions:
             trigger_config = definition.trigger_config or {}
+            if trigger_config.get("managed_by") == "repository_intelligence_worker":
+                continue
             next_run_at = self._datetime_or_none(trigger_config.get("next_run_at"))
             if next_run_at is None or next_run_at > now:
                 continue
@@ -191,6 +193,8 @@ class SchedulerService:
         runs: list[WorkflowRun] = []
         for definition in definitions:
             trigger_config = definition.trigger_config or {}
+            if trigger_config.get("managed_by") == "repository_intelligence_worker":
+                continue
             if trigger_config.get("event_type") != event_type:
                 continue
             if (
