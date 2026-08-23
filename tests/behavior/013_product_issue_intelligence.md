@@ -73,3 +73,19 @@ Expected:
 - [ ] The coding workflow uses an isolated branch and links the PR to the GitHub issue with `Closes #N`.
 - [ ] The issue records its workflow run, PR, and persistent Codex session.
 - [ ] Completion updates the run log/report and notifies Chris conversationally.
+
+## F. Cross-Project Knowledge Retrieval
+
+1. In Knowledge mode say: `Show me the most relevant open product issues across Maestro, GroundTruth, Deeper Learning, AAce, and Ophi related to memory, reporting, or integrations. Do not create or edit anything.`
+2. Inspect the answer and the latest `maestro.knowledge` telemetry entries.
+
+Expected:
+
+- [ ] Maestro recognizes GroundTruth as a Praxis project and Deeper Learning, AAce, and Ophi as Perti Laboratories projects without asking for ownership clarification.
+- [ ] Maestro uses one portfolio search with the canonical project keys instead of one search per project.
+- [ ] Projects with matching issues are represented before remaining result slots are filled by global relevance.
+- [ ] The answer names the project, issue title, status, and why each result is relevant.
+- [ ] No issue, organization, memory, workflow, or other record is changed.
+- [ ] The normal path uses two Knowledge calls: search planning followed by grounded synthesis.
+- [ ] No identical read action is executed more than once in the turn.
+- [ ] The persisted action-result metadata remains compact enough to inspect without carrying full issue bodies.

@@ -128,6 +128,62 @@ def test_issue_search_treats_open_as_active_states_and_ranks_multiple_terms(sess
     ]
 
 
+def test_issue_search_filters_a_cross_domain_portfolio_with_project_keys(session):
+    maestro_domain = _domain(session)
+    maestro_project = _project(session, maestro_domain)
+    praxis_domain = Domain(
+        key="praxis",
+        name="Praxis",
+        description="",
+        is_active=True,
+    )
+    session.add(praxis_domain)
+    session.flush()
+    groundtruth_project = ProductProject(
+        domain_id=praxis_domain.id,
+        key="groundtruth",
+        name="GroundTruth",
+        summary="",
+        vision="",
+        source_refs=[],
+        provenance={},
+    )
+    session.add(groundtruth_project)
+    session.flush()
+    for domain, project, title in (
+        (maestro_domain, maestro_project, "Improve Maestro memory retrieval"),
+        (praxis_domain, groundtruth_project, "Add GroundTruth integration report"),
+    ):
+        session.add(
+            ProductIssue(
+                domain_id=domain.id,
+                project_id=project.id,
+                issue_type="feature",
+                title=title,
+                normalized_title=title.lower(),
+                problem="Memory reporting and integration work.",
+                desired_outcome="",
+                acceptance_criteria=[],
+                notes="",
+                status="ready",
+                source_refs=[],
+                provenance={},
+            )
+        )
+    session.commit()
+
+    results = ProductIssueService(session).search(
+        query="memory reporting integration",
+        project_keys=["maestro", "groundtruth"],
+        status="open",
+    )
+
+    assert {issue.title for issue in results} == {
+        "Improve Maestro memory retrieval",
+        "Add GroundTruth integration report",
+    }
+
+
 def test_distinct_overlapping_issue_is_related_not_deleted(session):
     domain = _domain(session)
     project = _project(session, domain)

@@ -28,6 +28,8 @@ from app.db.models import (
     Message,
     OrganizationAlias,
     ProductIssue,
+    ProductProject,
+    RepositoryProfile,
     RoutedItem,
     Todo,
     WorkflowDefinition,
@@ -212,14 +214,25 @@ class MaestroKnowledgeService:
             report_limit=5,
             run_log_limit=5,
             artifact_limit=4,
+            include_sections=_knowledge_context_sections(message),
         )
-        workflow_context = self._workflow_context_text()
+        portfolio_context = self._product_portfolio_context_text()
+        workflow_context = (
+            self._workflow_context_text() if _message_needs_workflow_context(message) else ""
+        )
         conversation_context = self._conversation_context_text(
             conversation_id=conversation_id,
             current_message_id=message_id,
         )
         context_text = "\n\n".join(
-            part for part in (conversation_context, context.rendered_text, workflow_context) if part
+            part
+            for part in (
+                conversation_context,
+                portfolio_context,
+                context.rendered_text,
+                workflow_context,
+            )
+            if part
         )
         now = datetime.now(UTC)
         planner = self.planner or LLMKnowledgePlanner(session=self.session)
@@ -268,6 +281,7 @@ class MaestroKnowledgeService:
         results: list[KnowledgeActionResult] = []
         execution_blocks: list[str] = []
         completed_writes: set[str] = set()
+        completed_reads: dict[str, KnowledgeActionResult] = {}
         turn = KnowledgeTurn(message="", actions=[])
         iterations = 0
         for round_number in range(1, MAX_KNOWLEDGE_ACTION_ROUNDS + 1):
@@ -282,12 +296,26 @@ class MaestroKnowledgeService:
             actions = turn.actions
             reads = [action for action in actions if action.get("type") in READ_ACTIONS]
             if reads:
-                actions = reads
+                actions = _coalesce_read_actions(reads)
             round_results: list[KnowledgeActionResult] = []
             executed = 0
             for action in actions:
                 action_type = str(action.get("type") or "")
                 signature = _action_signature(action)
+                read_cache_key = _read_cache_key(action)
+                if action_type in READ_ACTIONS and read_cache_key in completed_reads:
+                    cached = completed_reads[read_cache_key]
+                    round_results.append(
+                        KnowledgeActionResult(
+                            action_type,
+                            "reused",
+                            f"Reused the earlier completed result: {cached.message}",
+                            cached.object_type,
+                            cached.object_id,
+                            data={"cached_action_signature": signature},
+                        )
+                    )
+                    continue
                 if action_type not in READ_ACTIONS and signature in completed_writes:
                     round_results.append(
                         KnowledgeActionResult(
@@ -306,15 +334,35 @@ class MaestroKnowledgeService:
                 )
                 executed += 1
                 round_results.append(result)
+                if action_type in READ_ACTIONS and result.status == "completed":
+                    completed_reads[read_cache_key] = result
                 if action_type not in READ_ACTIONS and result.status == "completed":
                     completed_writes.add(signature)
-            results.extend(round_results)
+                    completed_reads.clear()
+            results.extend(result for result in round_results if result.status != "reused")
             execution_blocks.append(_render_action_results(round_number, round_results))
             execution_blocks = _bounded_execution_blocks(execution_blocks)
             if any(result.status == "needs_clarification" for result in round_results):
                 return turn, results, iterations
             if executed == 0:
-                return turn, results, iterations
+                iterations += 1
+                final_context = self._loop_context(context_text, execution_blocks)
+                final_context += (
+                    "\n\n## Execution boundary\n"
+                    "The requested actions were already completed earlier in this turn. Emit no "
+                    "more actions. Use the earlier authoritative results to answer Chris now."
+                )
+                turn = planner.plan(message=message, context_text=final_context, now=now)
+                return (
+                    KnowledgeTurn(
+                        message=turn.message,
+                        actions=[],
+                        workflow_suggestion=turn.workflow_suggestion,
+                        pending_clarification=turn.pending_clarification,
+                    ),
+                    results,
+                    iterations,
+                )
 
         iterations += 1
         final_context = self._loop_context(context_text, execution_blocks)
@@ -391,6 +439,36 @@ class MaestroKnowledgeService:
                 f"- id={definition.id}; key={definition.key}; name={definition.name}; "
                 f"trigger={definition.trigger_type}; active={definition.is_active}; "
                 f"config={json.dumps(definition.trigger_config or {}, sort_keys=True)}"
+            )
+        return "\n".join(lines)
+
+    def _product_portfolio_context_text(self) -> str:
+        rows = self.session.execute(
+            select(Domain, ProductProject, RepositoryProfile)
+            .join(ProductProject, ProductProject.domain_id == Domain.id)
+            .outerjoin(RepositoryProfile, RepositoryProfile.project_id == ProductProject.id)
+            .where(ProductProject.status == "active")
+            .order_by(Domain.name, ProductProject.name, RepositoryProfile.display_name)
+        ).all()
+        if not rows:
+            return ""
+        lines = [
+            "## Canonical Product Portfolio",
+            (
+                "Use these exact domain_key, project_key, and repository_key values for Product "
+                "Issues. Project ownership is already canonical here; do not duplicate it into "
+                "memory or organizations."
+            ),
+        ]
+        for domain, project, repository in rows:
+            repository_text = (
+                f"; repository_key={repository.key}; repository={repository.external_repo}"
+                if repository
+                else ""
+            )
+            lines.append(
+                f"- domain_key={domain.key} ({domain.name}); "
+                f"project_key={project.key} ({project.name}){repository_text}"
             )
         return "\n".join(lines)
 
@@ -939,6 +1017,52 @@ def _knowledge_schema() -> dict[str, Any]:
     }
 
 
+def _knowledge_context_sections(message: str) -> set[str]:
+    normalized = _normalize(message)
+    issue_terms = ("product issue", "github issue", "backlog", "code issue", "story")
+    if any(term in normalized for term in issue_terms):
+        return {"identity", "memory", "web_search"}
+    routed_terms = (
+        "calendar",
+        "event",
+        "contact",
+        "organization",
+        "task",
+        "todo",
+    )
+    if any(term in normalized for term in routed_terms):
+        return {"identity", "memory", "routed_objects", "web_search"}
+    history_terms = ("report", "run log", "artifact")
+    if any(term in normalized for term in history_terms):
+        return {
+            "identity",
+            "federated",
+            "memory",
+            "reports",
+            "run_log",
+            "artifacts",
+            "web_search",
+        }
+    return {
+        "identity",
+        "federated",
+        "memory",
+        "routed_objects",
+        "reports",
+        "run_log",
+        "artifacts",
+        "web_search",
+    }
+
+
+def _message_needs_workflow_context(message: str) -> bool:
+    normalized = _normalize(message)
+    return any(
+        term in normalized
+        for term in ("workflow", "schedule", "scheduled", "recurring", "trigger", "queue")
+    )
+
+
 def _normalize(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
@@ -960,28 +1084,178 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _action_signature(action: dict[str, Any]) -> str:
-    arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+    action_type = str(action.get("type") or "")
+    arguments = dict(action.get("arguments")) if isinstance(action.get("arguments"), dict) else {}
+    if action_type == "issue.search":
+        query_value = arguments.pop("query_text", None) or arguments.pop("query", None)
+        if query_value:
+            query_terms = sorted(
+                term
+                for term in re.findall(r"[a-z0-9]+", str(query_value).lower())
+                if term not in {"and", "or"}
+            )
+            arguments["query"] = " ".join(query_terms)
+        for key in ("domain_keys", "project_keys", "repository_keys"):
+            if isinstance(arguments.get(key), list):
+                arguments[key] = sorted(str(value).lower() for value in arguments[key])
     return json.dumps(
-        {"type": str(action.get("type") or ""), "arguments": arguments},
+        {"type": action_type, "arguments": arguments},
         sort_keys=True,
         default=str,
     )
+
+
+def _read_cache_key(action: dict[str, Any]) -> str:
+    if str(action.get("type") or "") == "issue.search":
+        return "issue.search:portfolio"
+    return _action_signature(action)
+
+
+def _coalesce_read_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    issue_searches = [action for action in actions if action.get("type") == "issue.search"]
+    if len(issue_searches) <= 1:
+        return actions
+    combined_arguments: dict[str, Any] = {}
+    query_terms: set[str] = set()
+    max_items = 0
+    for action in issue_searches:
+        arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+        query = arguments.get("query") or arguments.get("query_text") or ""
+        query_terms.update(
+            term
+            for term in re.findall(r"[a-z0-9]+", str(query).lower())
+            if term not in {"and", "or"}
+        )
+        for plural, singular in (
+            ("domain_keys", "domain_key"),
+            ("project_keys", "project_key"),
+            ("repository_keys", "repository_key"),
+        ):
+            values = arguments.get(plural)
+            values = values if isinstance(values, list) else []
+            if arguments.get(singular):
+                values = [*values, arguments[singular]]
+            combined_arguments[plural] = list(
+                dict.fromkeys(
+                    [
+                        *combined_arguments.get(plural, []),
+                        *(str(value).strip().lower() for value in values if str(value).strip()),
+                    ]
+                )
+            )
+        if arguments.get("status"):
+            combined_arguments["status"] = arguments["status"]
+        try:
+            max_items = max(max_items, int(arguments.get("max_items") or 0))
+        except (TypeError, ValueError):
+            pass
+    combined_arguments["query"] = " ".join(sorted(query_terms))
+    combined_arguments["max_items"] = min(10, max_items or 8)
+    combined = {
+        "type": "issue.search",
+        "arguments": combined_arguments,
+        "reason": "Combined overlapping Product Issue reads into one portfolio search.",
+    }
+    non_issue_searches = [action for action in actions if action.get("type") != "issue.search"]
+    return [combined, *non_issue_searches]
 
 
 def _render_action_results(
     round_number: int,
     results: list[KnowledgeActionResult],
 ) -> str:
-    payload = [result.payload() for result in results]
-    rendered = json.dumps(payload, indent=2, default=str)
-    if len(rendered) > 6500:
-        rendered = rendered[:6500] + "\n... [result payload truncated]"
-    return (
+    header = (
         f"## Immediate action results: round {round_number}\n"
         "These are authoritative results from Maestro's own services. Reason over them before "
-        "choosing another action. Do not repeat a completed write.\n"
-        f"{rendered}"
+        "choosing another action. Do not repeat a completed read or write.\n"
     )
+    if not results:
+        return header + "[]"
+    total_budget = 9000
+    per_result_budget = max(900, (total_budget - len(header)) // len(results))
+    rendered_results = [
+        json.dumps(
+            _bounded_action_result_payload(result, max_chars=per_result_budget),
+            default=str,
+            separators=(",", ":"),
+        )
+        for result in results
+    ]
+    return header + "[\n" + ",\n".join(rendered_results) + "\n]"
+
+
+def _bounded_action_result_payload(
+    result: KnowledgeActionResult,
+    *,
+    max_chars: int,
+) -> dict[str, Any]:
+    payload = result.payload()
+    if len(json.dumps(payload, default=str)) <= max_chars:
+        return payload
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else None
+    if issues is not None:
+        bounded_data = {
+            key: value
+            for key, value in data.items()
+            if key != "issues"
+        }
+        bounded_data["issues"] = []
+        bounded_data["omitted_issue_count"] = len(issues)
+        payload["data"] = bounded_data
+        for issue in issues:
+            compact_issue = _compact_issue_result(issue)
+            bounded_data["issues"].append(compact_issue)
+            bounded_data["omitted_issue_count"] = len(issues) - len(bounded_data["issues"])
+            if len(json.dumps(payload, default=str)) > max_chars:
+                bounded_data["issues"].pop()
+                bounded_data["omitted_issue_count"] = len(issues) - len(bounded_data["issues"])
+                break
+        return payload
+    payload["data"] = _compact_result_value(data, depth=0)
+    if len(json.dumps(payload, default=str)) <= max_chars:
+        return payload
+    payload["data"] = {
+        "truncated": True,
+        "summary": str(data.get("rendered_text") or data.get("output_text") or "")[:600],
+    }
+    return payload
+
+
+def _compact_issue_result(value: Any) -> dict[str, Any]:
+    issue = value if isinstance(value, dict) else {}
+    keys = (
+        "id",
+        "title",
+        "summary",
+        "status",
+        "priority",
+        "domain_key",
+        "project_key",
+        "repository_key",
+        "external_number",
+        "external_url",
+        "relevance_score",
+    )
+    compact = {key: issue.get(key) for key in keys if issue.get(key) is not None}
+    if compact.get("summary"):
+        compact["summary"] = str(compact["summary"])[:320]
+    return compact
+
+
+def _compact_result_value(value: Any, *, depth: int) -> Any:
+    if depth >= 3:
+        return str(value)[:300]
+    if isinstance(value, str):
+        return value if len(value) <= 700 else value[:697] + "..."
+    if isinstance(value, list):
+        return [_compact_result_value(item, depth=depth + 1) for item in value[:5]]
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_result_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:12]
+        }
+    return value
 
 
 def _bounded_execution_blocks(blocks: list[str], *, max_chars: int = 14000) -> list[str]:

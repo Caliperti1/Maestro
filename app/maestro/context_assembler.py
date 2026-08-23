@@ -48,45 +48,65 @@ class MaestroContextAssembler:
         report_limit: int = 6,
         run_log_limit: int = 6,
         artifact_limit: int = 6,
+        include_sections: set[str] | None = None,
     ) -> MaestroContextBundle:
         domain = self._domain(domain_key)
-        sections = {
-            "identity": self._identity_section(domain_key=domain.key if domain else domain_key),
-            "federated": self._federated_section(
+        requested = include_sections or {
+            "identity",
+            "federated",
+            "memory",
+            "routed_objects",
+            "reports",
+            "run_log",
+            "artifacts",
+            "web_search",
+        }
+        sections: dict[str, Any] = {}
+        if "identity" in requested:
+            sections["identity"] = self._identity_section(
+                domain_key=domain.key if domain else domain_key
+            )
+        if "federated" in requested:
+            sections["federated"] = self._federated_section(
                 query_text=query_text,
                 domain=domain,
                 max_chars=min(2800, max_chars - 700),
-            ),
-            "memory": self._memory_section(
+            )
+        if "memory" in requested:
+            sections["memory"] = self._memory_section(
                 query_text=query_text,
                 domain=domain,
                 max_chars=memory_chars,
-            ),
-            "routed_objects": self._routed_section(
+            )
+        if "routed_objects" in requested:
+            sections["routed_objects"] = self._routed_section(
                 query_text=query_text,
                 domain=domain,
                 max_chars=routed_chars,
-            ),
-            "reports": self._reports_section(
+            )
+        if "reports" in requested:
+            sections["reports"] = self._reports_section(
                 query_text=query_text,
                 domain=domain,
                 limit=report_limit,
-            ),
-            "run_log": self._run_log_section(
+            )
+        if "run_log" in requested:
+            sections["run_log"] = self._run_log_section(
                 query_text=query_text,
                 domain=domain,
                 limit=run_log_limit,
-            ),
-            "artifacts": self._artifacts_section(
+            )
+        if "artifacts" in requested:
+            sections["artifacts"] = self._artifacts_section(
                 query_text=query_text,
                 limit=artifact_limit,
-            ),
-            "web_search": {
+            )
+        if "web_search" in requested:
+            sections["web_search"] = {
                 "status": "available_as_tool",
                 "tool_key": "web.search",
                 "note": "Use web.search when current external information is required.",
-            },
-        }
+            }
         rendered = self._render(sections, max_chars=max_chars)
         return MaestroContextBundle(
             query_text=query_text,
@@ -361,9 +381,10 @@ class MaestroContextAssembler:
         ]
         if artifact_lines:
             blocks.append("## Artifacts\n" + "\n".join(artifact_lines))
-        blocks.append(
-            "## Web Search\nUse `web.search` if the answer needs current external information."
-        )
+        if "web_search" in sections:
+            blocks.append(
+                "## Web Search\nUse `web.search` if the answer needs current external information."
+            )
         rendered = "\n\n".join(blocks).strip()
         return rendered[:max_chars]
 

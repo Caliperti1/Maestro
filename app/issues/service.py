@@ -264,18 +264,38 @@ class ProductIssueService:
         *,
         query: str = "",
         domain_key: str | None = None,
+        domain_keys: list[str] | None = None,
         project_key: str | None = None,
+        project_keys: list[str] | None = None,
         repository_key: str | None = None,
+        repository_keys: list[str] | None = None,
         status: str | None = None,
         limit: int = 100,
     ) -> list[ProductIssue]:
         statement = select(ProductIssue).order_by(ProductIssue.updated_at.desc())
-        if domain_key:
-            statement = statement.join(Domain, Domain.id == ProductIssue.domain_id).where(Domain.key == domain_key)
-        if project_key:
-            statement = statement.join(ProductProject, ProductProject.id == ProductIssue.project_id).where(ProductProject.key == project_key)
-        if repository_key:
-            statement = statement.join(RepositoryProfile, RepositoryProfile.id == ProductIssue.repository_id).where(RepositoryProfile.key == repository_key)
+        requested_domains = _clean_keys(domain_keys, domain_key)
+        requested_projects = _clean_keys(project_keys, project_key)
+        requested_repositories = _clean_keys(repository_keys, repository_key)
+        if requested_domains:
+            statement = statement.where(
+                ProductIssue.domain_id.in_(
+                    select(Domain.id).where(Domain.key.in_(requested_domains))
+                )
+            )
+        if requested_projects:
+            statement = statement.where(
+                ProductIssue.project_id.in_(
+                    select(ProductProject.id).where(ProductProject.key.in_(requested_projects))
+                )
+            )
+        if requested_repositories:
+            statement = statement.where(
+                ProductIssue.repository_id.in_(
+                    select(RepositoryProfile.id).where(
+                        RepositoryProfile.key.in_(requested_repositories)
+                    )
+                )
+            )
         normalized_status = str(status or "").strip().lower()
         if normalized_status == "open":
             statement = statement.where(
@@ -298,10 +318,7 @@ class ProductIssueService:
                 ).all()
             )
 
-        ignored_terms = {"a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"}
-        query_terms = {
-            term for term in tokens(query_text) if term not in ignored_terms and len(term) > 1
-        }
+        query_terms = issue_query_terms(query_text)
         if not query_terms:
             return []
         clauses = []
@@ -319,16 +336,7 @@ class ProductIssueService:
         normalized_query = query_text.lower()
 
         def relevance(issue: ProductIssue) -> tuple[float, datetime]:
-            title = issue.title.lower()
-            body = " ".join(
-                (issue.title, issue.problem, issue.desired_outcome, issue.notes)
-            ).lower()
-            body_terms = set(tokens(body))
-            matched = len(query_terms & body_terms)
-            title_matches = len(query_terms & set(tokens(title)))
-            phrase_bonus = 2.0 if normalized_query in body else 0.0
-            score = matched + (title_matches * 0.75) + phrase_bonus
-            return score, issue.updated_at
+            return issue_search_score(issue, normalized_query), issue.updated_at
 
         candidates.sort(key=relevance, reverse=True)
         return candidates[: max(1, min(limit, 250))]
@@ -478,6 +486,33 @@ def tokens(value: str) -> list[str]:
 def token_similarity(left: str, right: str) -> float:
     a, b = set(tokens(left)), set(tokens(right))
     return len(a & b) / max(1, len(a | b))
+
+
+def issue_query_terms(value: str) -> set[str]:
+    ignored = {"a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"}
+    return {term for term in tokens(value) if term not in ignored and len(term) > 1}
+
+
+def issue_search_score(issue: ProductIssue, query: str) -> float:
+    query_terms = issue_query_terms(query)
+    if not query_terms:
+        return 0.0
+    title_terms = set(tokens(issue.title))
+    body = f"{issue.title} {issue.problem} {issue.desired_outcome} {issue.notes}".lower()
+    body_terms = set(tokens(body))
+    matched = len(query_terms & body_terms)
+    title_matches = len(query_terms & title_terms)
+    phrase_bonus = 2.0 if query.strip().lower() in body else 0.0
+    return round(matched + (title_matches * 0.75) + phrase_bonus, 4)
+
+
+def _clean_keys(values: list[str] | None, single: str | None) -> list[str]:
+    candidates = [*(values or []), *([single] if single else [])]
+    return list(
+        dict.fromkeys(
+            str(value).strip().lower() for value in candidates if str(value).strip()
+        )
+    )
 
 
 def clean_list(values: list[Any]) -> list[str]:
