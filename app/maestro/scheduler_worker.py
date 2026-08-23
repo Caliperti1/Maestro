@@ -301,6 +301,16 @@ def _approved_tool_results(item: WorkflowQueueItem) -> list[dict[str, Any]]:
     return [result for result in results if isinstance(result, dict)]
 
 
+def _stored_agent_run(output: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+    """Read current nested queue payloads and historical flat agent-run payloads."""
+    nested = output.get("agent_run")
+    if isinstance(nested, dict):
+        return nested, True
+    if output.get("task_id") and isinstance(output.get("tool_calls"), list):
+        return output, False
+    return None, False
+
+
 def _queue_item_model_profile(
     run: WorkflowRun,
     item: WorkflowQueueItem,
@@ -644,8 +654,8 @@ class SchedulerWorkerService:
         delivery_result: dict[str, Any],
     ) -> WorkflowRun | None:
         for item in self.session.scalars(select(WorkflowQueueItem)).all():
-            agent_run = (item.output_payload or {}).get("agent_run")
-            if not isinstance(agent_run, dict) or str(agent_run.get("task_id")) != str(task_id):
+            agent_run, _ = _stored_agent_run(item.output_payload or {})
+            if agent_run is None or str(agent_run.get("task_id")) != str(task_id):
                 continue
             task = self.session.get(Task, task_id)
             if task is not None:
@@ -671,8 +681,8 @@ class SchedulerWorkerService:
         """Attach an approved result and requeue the same durable lane for finalization."""
         for item in self.session.scalars(select(WorkflowQueueItem)).all():
             item_output = item.output_payload or {}
-            agent_run = item_output.get("agent_run")
-            if not isinstance(agent_run, dict) or str(agent_run.get("task_id")) != str(task_id):
+            agent_run, nested = _stored_agent_run(item_output)
+            if agent_run is None or str(agent_run.get("task_id")) != str(task_id):
                 continue
 
             approved_id = str(tool_result.get("id") or "")
@@ -705,11 +715,18 @@ class SchedulerWorkerService:
             item.started_at = None
             item.lease_owner = None
             item.lease_expires_at = None
-            item.output_payload = {
-                **item_output,
-                "agent_run": agent_run,
-                "approved_tool_results": [*prior_results, tool_result],
-            }
+            item.output_payload = (
+                {
+                    **item_output,
+                    "agent_run": agent_run,
+                    "approved_tool_results": [*prior_results, tool_result],
+                }
+                if nested
+                else {
+                    **agent_run,
+                    "approved_tool_results": [*prior_results, tool_result],
+                }
+            )
             run = self.session.get(WorkflowRun, item.workflow_run_id)
             if run is not None:
                 run.status = "queued"
