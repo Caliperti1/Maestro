@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Domain
-from app.issues.service import ProductIssueService, issue_payload
+from app.db.models import Domain, ProductProject, RepositoryProfile
+from app.issues.service import ProductIssueService, issue_payload, issue_search_score
 from app.llm.client import OpenAILLMClient
 from app.memory.federated_retrieval import (
     STORE_NAMES,
@@ -200,23 +202,162 @@ class KnowledgeReadToolService:
         ).strip()
         if not query:
             raise ValueError("An issue search needs an issue ID, title, or focused query.")
+        domain_keys = _string_list(arguments.get("domain_keys"))
+        project_keys = _string_list(arguments.get("project_keys"))
+        repository_keys = _string_list(arguments.get("repository_keys"))
+        requested_limit = 1 if action_type == "issue.get" else _bounded_int(
+            arguments.get("max_items"), default=8, minimum=1, maximum=10
+        )
         issues = service.search(
             query=query,
             domain_key=str(arguments.get("domain_key") or "").strip() or None,
+            domain_keys=domain_keys,
             project_key=str(arguments.get("project_key") or "").strip() or None,
+            project_keys=project_keys,
             repository_key=str(arguments.get("repository_key") or "").strip() or None,
+            repository_keys=repository_keys,
             status=str(arguments.get("status") or "").strip() or None,
-            limit=1 if action_type == "issue.get" else _bounded_int(
-                arguments.get("max_items"), default=8, minimum=1, maximum=20
-            ),
+            limit=250 if action_type == "issue.search" and len(project_keys) > 1 else requested_limit,
         )
+        project_match_counts = self._project_match_counts(
+            issues,
+            project_keys=project_keys,
+        )
+        if action_type == "issue.search" and len(project_keys) > 1:
+            issues = self._balanced_project_results(
+                issues,
+                project_keys=project_keys,
+                limit=requested_limit,
+            )
+        if action_type == "issue.get":
+            payloads = [issue_payload(issue) for issue in issues]
+        else:
+            payloads = self._compact_issue_payloads(issues, query=query)
         return KnowledgeActionResult(
             action_type,
             "completed",
             f"Retrieved {len(issues)} product issue{'s' if len(issues) != 1 else ''}.",
             "product_issue",
-            data={"query": query, "issues": [issue_payload(issue) for issue in issues]},
+            data={
+                "query": query,
+                "filters": {
+                    "domain_keys": domain_keys,
+                    "project_keys": project_keys,
+                    "repository_keys": repository_keys,
+                    "status": str(arguments.get("status") or "").strip() or None,
+                },
+                "match_count": len(issues),
+                "project_match_counts": project_match_counts,
+                "ordering": (
+                    "project_balanced_then_relevance"
+                    if len(project_keys) > 1
+                    else "relevance"
+                ),
+                "issues": payloads,
+            },
         )
+
+    def _balanced_project_results(
+        self,
+        issues,
+        *,
+        project_keys: list[str],
+        limit: int,
+    ):
+        if not issues or limit <= 0:
+            return []
+        projects = {
+            item.id: item.key
+            for item in self.session.scalars(
+                select(ProductProject).where(ProductProject.key.in_(project_keys))
+            ).all()
+        }
+        grouped: dict[str, list[Any]] = {key: [] for key in project_keys}
+        for issue in issues:
+            key = projects.get(issue.project_id)
+            if key in grouped:
+                grouped[key].append(issue)
+        active_groups = [values for values in grouped.values() if values]
+        if not active_groups:
+            return issues[:limit]
+        quota = max(1, limit // len(active_groups))
+        selected = []
+        for rank in range(quota):
+            for values in active_groups:
+                if rank < len(values) and len(selected) < limit:
+                    selected.append(values[rank])
+        selected_ids = {issue.id for issue in selected}
+        for issue in issues:
+            if len(selected) >= limit:
+                break
+            if issue.id not in selected_ids:
+                selected.append(issue)
+                selected_ids.add(issue.id)
+        return selected
+
+    def _compact_issue_payloads(self, issues, *, query: str) -> list[dict[str, Any]]:
+        if not issues:
+            return []
+        domain_ids = {issue.domain_id for issue in issues}
+        project_ids = {issue.project_id for issue in issues}
+        repository_ids = {issue.repository_id for issue in issues if issue.repository_id}
+        domains = {
+            item.id: item
+            for item in self.session.scalars(select(Domain).where(Domain.id.in_(domain_ids))).all()
+        }
+        projects = {
+            item.id: item
+            for item in self.session.scalars(
+                select(ProductProject).where(ProductProject.id.in_(project_ids))
+            ).all()
+        }
+        repositories = {
+            item.id: item
+            for item in self.session.scalars(
+                select(RepositoryProfile).where(RepositoryProfile.id.in_(repository_ids))
+            ).all()
+        } if repository_ids else {}
+        payloads: list[dict[str, Any]] = []
+        for issue in issues:
+            domain = domains.get(issue.domain_id)
+            project = projects.get(issue.project_id)
+            repository = repositories.get(issue.repository_id)
+            payloads.append(
+                {
+                    "id": str(issue.id),
+                    "title": issue.title,
+                    "summary": _issue_summary(issue),
+                    "status": issue.status,
+                    "priority": issue.priority,
+                    "issue_type": issue.issue_type,
+                    "domain_key": domain.key if domain else None,
+                    "domain_name": domain.name if domain else None,
+                    "project_key": project.key if project else None,
+                    "project_name": project.name if project else None,
+                    "repository_key": repository.key if repository else None,
+                    "external_number": issue.external_number,
+                    "external_url": issue.external_url,
+                    "relevance_score": issue_search_score(issue, query),
+                    "updated_at": issue.updated_at.isoformat() if issue.updated_at else None,
+                }
+            )
+        return payloads
+
+    def _project_match_counts(self, issues, *, project_keys: list[str]) -> dict[str, int]:
+        if not project_keys:
+            return {}
+        projects = {
+            item.id: item.key
+            for item in self.session.scalars(
+                select(ProductProject).where(ProductProject.key.in_(project_keys))
+            ).all()
+        }
+        counts = {key: 0 for key in project_keys}
+        for issue in issues:
+            key = projects.get(issue.project_id)
+            if key in counts:
+                counts[key] += 1
+        return counts
 
 
 def _context_stores(value: Any) -> set[str] | None:
@@ -253,6 +394,24 @@ def _context_stores(value: Any) -> set[str] | None:
     if invalid:
         raise ValueError(f"Unknown context stores: {', '.join(sorted(invalid))}.")
     return normalized
+
+
+def _string_list(value: Any) -> list[str]:
+    if value in (None, "", []):
+        return []
+    values = value if isinstance(value, list) else str(value).split(",")
+    return list(
+        dict.fromkeys(str(item).strip().lower() for item in values if str(item).strip())
+    )
+
+
+def _issue_summary(issue) -> str:
+    text = str(issue.problem or issue.desired_outcome or issue.notes or "").strip()
+    if not text:
+        criteria = [str(item).strip() for item in (issue.acceptance_criteria or []) if str(item).strip()]
+        text = "; ".join(criteria[:3])
+    compact = " ".join(text.split())
+    return compact if len(compact) <= 280 else compact[:277].rstrip() + "..."
 
 
 def _public_store_name(value: str) -> str:

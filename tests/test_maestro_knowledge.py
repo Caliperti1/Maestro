@@ -11,8 +11,10 @@ from app.db.models import (
     Contact,
     Conversation,
     Domain,
-    Message,
     LLMCallLog,
+    Message,
+    ProductIssue,
+    ProductProject,
     Task,
     Todo,
     ToolCall,
@@ -22,9 +24,9 @@ from app.db.models import (
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.maestro.knowledge import (
-    LLMKnowledgePlanner,
     KnowledgeResponse,
     KnowledgeTurn,
+    LLMKnowledgePlanner,
     MaestroKnowledgeService,
 )
 
@@ -624,3 +626,196 @@ def test_knowledge_mode_can_search_web_then_answer_without_workflow(session: Ses
     assert response.iterations == 2
     assert response.action_results[0].data["citations"][0]["title"] == "SBIR notice"
     assert session.scalar(select(func.count()).select_from(Task)) == 0
+
+
+def test_knowledge_portfolio_search_returns_compact_grounded_results(session: Session) -> None:
+    seed_default_domains(session)
+    maestro = session.scalar(select(Domain).where(Domain.key == "maestro-development"))
+    praxis = session.scalar(select(Domain).where(Domain.key == "praxis"))
+    maestro_project = ProductProject(
+        domain_id=maestro.id,
+        key="maestro",
+        name="Maestro",
+        summary="System orchestration.",
+        vision="",
+        source_refs=[],
+        provenance={},
+    )
+    groundtruth_project = ProductProject(
+        domain_id=praxis.id,
+        key="groundtruth",
+        name="GroundTruth",
+        summary="Praxis product.",
+        vision="",
+        source_refs=[],
+        provenance={},
+    )
+    session.add_all([maestro_project, groundtruth_project])
+    session.flush()
+    session.add_all(
+        [
+            ProductIssue(
+                domain_id=maestro.id,
+                project_id=maestro_project.id,
+                issue_type="feature",
+                title="Improve memory retrieval",
+                normalized_title="improve memory retrieval",
+                problem="A" * 3000,
+                desired_outcome="",
+                acceptance_criteria=[],
+                notes="",
+                status="ready",
+                source_refs=[],
+                provenance={},
+            ),
+            ProductIssue(
+                domain_id=praxis.id,
+                project_id=groundtruth_project.id,
+                issue_type="feature",
+                title="Add integration reporting",
+                normalized_title="add integration reporting",
+                problem="Connect GroundTruth reporting to its integrations.",
+                desired_outcome="",
+                acceptance_criteria=[],
+                notes="",
+                status="active",
+                source_refs=[],
+                provenance={},
+            ),
+            ProductIssue(
+                domain_id=maestro.id,
+                project_id=maestro_project.id,
+                issue_type="feature",
+                title="Add memory reporting dashboard",
+                normalized_title="add memory reporting dashboard",
+                problem="Expose memory integration metrics.",
+                desired_outcome="",
+                acceptance_criteria=[],
+                notes="",
+                status="ready",
+                source_refs=[],
+                provenance={},
+            ),
+        ]
+    )
+    session.commit()
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am searching the requested portfolio.",
+                actions=[
+                    {
+                        "type": "issue.search",
+                        "arguments": {
+                            "query": "memory reporting integration",
+                            "project_keys": ["maestro", "groundtruth"],
+                            "status": "open",
+                            "max_items": 2,
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(message="I found the relevant issues.", actions=[]),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Show me open product issues across Maestro and GroundTruth."
+    )
+
+    issues = response.action_results[0].data["issues"]
+    assert response.iterations == 2
+    assert {item["project_key"] for item in issues} == {"maestro", "groundtruth"}
+    assert {item["domain_key"] for item in issues} == {"maestro-development", "praxis"}
+    assert all("problem" not in item for item in issues)
+    assert max(len(item["summary"]) for item in issues) <= 280
+    assert "Canonical Product Portfolio" in planner.contexts[0]
+    assert "Existing durable workflows" not in planner.contexts[0]
+
+
+def test_knowledge_reuses_equivalent_issue_search_instead_of_persisting_duplicates(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="Searching.",
+                actions=[
+                    {
+                        "type": "issue.search",
+                        "arguments": {
+                            "query": "memory OR reporting",
+                            "project_keys": ["groundtruth", "maestro"],
+                            "status": "open",
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="Searching again.",
+                actions=[
+                    {
+                        "type": "issue.search",
+                        "arguments": {
+                            "query_text": "reporting memory",
+                            "project_keys": ["maestro", "groundtruth"],
+                            "status": "open",
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(message="No matching issues were found.", actions=[]),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Find memory and reporting product issues."
+    )
+
+    assert response.iterations == 3
+    assert len(response.action_results) == 1
+    assert "cached_action_signature" in planner.contexts[2]
+
+
+def test_knowledge_coalesces_per_project_issue_reads_into_one_portfolio_search(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="Searching the portfolio.",
+                actions=[
+                    {
+                        "type": "issue.search",
+                        "arguments": {
+                            "query": "memory reporting",
+                            "project_key": "maestro",
+                            "status": "open",
+                        },
+                    },
+                    {
+                        "type": "issue.search",
+                        "arguments": {
+                            "query": "reporting integrations",
+                            "project_key": "groundtruth",
+                            "status": "open",
+                        },
+                    },
+                ],
+            ),
+            KnowledgeTurn(message="I reviewed the portfolio results.", actions=[]),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Compare Maestro and GroundTruth product issues."
+    )
+
+    assert response.iterations == 2
+    assert len(response.action_results) == 1
+    result = response.action_results[0]
+    assert result.action_type == "issue.search"
+    assert result.data["filters"]["project_keys"] == ["maestro", "groundtruth"]
+    assert result.data["query"] == "integrations memory reporting"
