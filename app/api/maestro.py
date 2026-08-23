@@ -304,6 +304,7 @@ def _respond_to_maestro_sync(
                 message_id=user_message.id,
             )
         except (LLMClientError, OSError, ValueError):
+            logger.exception("Knowledge-mode reasoning failed after retrying.")
             knowledge = knowledge_fallback(body.message)
         response_metadata = {
             **message_metadata,

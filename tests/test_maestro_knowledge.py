@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -10,6 +12,7 @@ from app.db.models import (
     Conversation,
     Domain,
     Message,
+    LLMCallLog,
     Task,
     Todo,
     ToolCall,
@@ -19,10 +22,34 @@ from app.db.models import (
 from app.db.seed import seed_default_domains
 from app.db.session import get_db
 from app.maestro.knowledge import (
+    LLMKnowledgePlanner,
     KnowledgeResponse,
     KnowledgeTurn,
     MaestroKnowledgeService,
 )
+
+
+class FlakyKnowledgeClient:
+    provider = "openrouter"
+    model = "openai/gpt-5.6-terra"
+    last_usage = None
+    last_response_id = None
+
+    def __init__(self):
+        self.calls = 0
+
+    def structured_response(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise OSError("temporary connection failure")
+        self.last_usage = {"prompt_tokens": 12, "completion_tokens": 6}
+        self.last_response_id = "response-2"
+        return {
+            "message": "I found the requested issues.",
+            "actions": [],
+            "workflow_suggestion": None,
+            "pending_clarification": None,
+        }
 
 
 class StaticKnowledgePlanner:
@@ -31,6 +58,25 @@ class StaticKnowledgePlanner:
 
     def plan(self, **_kwargs) -> KnowledgeTurn:
         return self.turn
+
+
+def test_live_knowledge_planner_retries_once_and_records_each_attempt(session: Session) -> None:
+    client = FlakyKnowledgeClient()
+
+    turn = LLMKnowledgePlanner(client=client, session=session).plan(
+        message="Show me the relevant product issues.",
+        context_text="Canonical product issue context.",
+        now=datetime.now(UTC),
+    )
+
+    assert turn.message == "I found the requested issues."
+    assert client.calls == 2
+    calls = session.scalars(
+        select(LLMCallLog).where(LLMCallLog.component == "maestro.knowledge")
+        .order_by(LLMCallLog.created_at)
+    ).all()
+    assert [call.status for call in calls] == ["failed", "complete"]
+    assert [call.metadata_["attempt"] for call in calls] == [1, 2]
 
 
 class CapturingKnowledgePlanner(StaticKnowledgePlanner):

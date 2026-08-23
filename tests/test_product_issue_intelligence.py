@@ -90,6 +90,44 @@ def test_capture_creates_then_reconciles_duplicate_at_canonical_level(session):
     assert issues[0].metadata_["merged_submissions"]
 
 
+def test_issue_search_treats_open_as_active_states_and_ranks_multiple_terms(session):
+    domain = _domain(session)
+    project = _project(session, domain)
+    for title, problem, status in (
+        ("Improve memory retrieval", "Tune semantic retrieval and context bundles.", "ready"),
+        ("Report archive cleanup", "Make workflow reports easier to inspect.", "active"),
+        ("Old memory integration", "Historical work that is already finished.", "completed"),
+        ("Unrelated visual polish", "Adjust spacing in the settings page.", "ready"),
+    ):
+        session.add(
+            ProductIssue(
+                domain_id=domain.id,
+                project_id=project.id,
+                issue_type="feature",
+                title=title,
+                normalized_title=title.lower(),
+                problem=problem,
+                desired_outcome="",
+                acceptance_criteria=[],
+                notes="",
+                status=status,
+                source_refs=[],
+                provenance={},
+            )
+        )
+    session.commit()
+
+    results = ProductIssueService(session).search(
+        query="memory OR reporting OR report OR integration",
+        status="open",
+    )
+
+    assert [issue.title for issue in results] == [
+        "Improve memory retrieval",
+        "Report archive cleanup",
+    ]
+
+
 def test_distinct_overlapping_issue_is_related_not_deleted(session):
     domain = _domain(session)
     project = _project(session, domain)

@@ -7,6 +7,7 @@ mutate bounded canonical stores, but it cannot create tasks, plans, queue items,
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -33,7 +34,8 @@ from app.db.models import (
 )
 from app.db.repositories import DomainRepository
 from app.issues.service import ProductIssueService
-from app.llm.client import OpenAILLMClient
+from app.llm.client import LLMClientError, OpenAILLMClient
+from app.llm.telemetry import record_llm_call
 from app.maestro.context_assembler import MaestroContextAssembler
 from app.maestro.knowledge_tools import (
     READ_ACTIONS,
@@ -70,6 +72,9 @@ ALLOWED_ACTIONS = {
     "issue.update",
 }
 MAX_KNOWLEDGE_ACTION_ROUNDS = 4
+KNOWLEDGE_REASONING_ATTEMPTS = 2
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -94,20 +99,55 @@ class KnowledgePlanner(Protocol):
 
 
 class LLMKnowledgePlanner:
-    def __init__(self, client: OpenAILLMClient | None = None):
+    def __init__(
+        self,
+        client: OpenAILLMClient | None = None,
+        *,
+        session: Session | None = None,
+    ):
         self.client = client or OpenAILLMClient()
+        self.session = session
 
     def plan(self, *, message: str, context_text: str, now: datetime) -> KnowledgeTurn:
-        payload = self.client.structured_response(
-            instructions=load_prompt("maestro_knowledge.md"),
-            input_text=(
-                f"Current time: {now.isoformat()}\n\n"
-                f"Chris's message:\n{message}\n\n"
-                f"Relevant Maestro context:\n{context_text or '(none retrieved)'}"
-            ),
-            schema_name="maestro_knowledge_turn",
-            schema=_knowledge_schema(),
+        instructions = load_prompt("maestro_knowledge.md")
+        input_text = (
+            f"Current time: {now.isoformat()}\n\n"
+            f"Chris's message:\n{message}\n\n"
+            f"Relevant Maestro context:\n{context_text or '(none retrieved)'}"
         )
+        payload: dict[str, Any] | None = None
+        for attempt in range(1, KNOWLEDGE_REASONING_ATTEMPTS + 1):
+            try:
+                payload = self.client.structured_response(
+                    instructions=instructions,
+                    input_text=input_text,
+                    schema_name="maestro_knowledge_turn",
+                    schema=_knowledge_schema(),
+                )
+            except (LLMClientError, OSError, ValueError) as exc:
+                self._record_call(
+                    prompt_chars=len(instructions) + len(input_text),
+                    status="failed",
+                    error_message=str(exc),
+                    attempt=attempt,
+                )
+                if attempt >= KNOWLEDGE_REASONING_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "Knowledge reasoning attempt %s failed; retrying once: %s",
+                    attempt,
+                    exc,
+                )
+                continue
+            self._record_call(
+                prompt_chars=len(instructions) + len(input_text),
+                status="complete",
+                error_message=None,
+                attempt=attempt,
+            )
+            break
+        if payload is None:
+            raise LLMClientError("Knowledge reasoning returned no response.")
         return KnowledgeTurn(
             message=str(payload.get("message") or "").strip(),
             actions=[
@@ -118,6 +158,29 @@ class LLMKnowledgePlanner:
             workflow_suggestion=_optional_text(payload.get("workflow_suggestion")),
             pending_clarification=_optional_text(payload.get("pending_clarification")),
         )
+
+    def _record_call(
+        self,
+        *,
+        prompt_chars: int,
+        status: str,
+        error_message: str | None,
+        attempt: int,
+    ) -> None:
+        if self.session is None:
+            return
+        try:
+            record_llm_call(
+                self.session,
+                component="maestro.knowledge",
+                client=self.client,
+                prompt_chars=prompt_chars,
+                status=status,
+                error_message=error_message,
+                metadata={"attempt": attempt},
+            )
+        except Exception:
+            logger.exception("Could not persist Knowledge reasoning telemetry.")
 
 
 class MaestroKnowledgeService:
@@ -159,7 +222,7 @@ class MaestroKnowledgeService:
             part for part in (conversation_context, context.rendered_text, workflow_context) if part
         )
         now = datetime.now(UTC)
-        planner = self.planner or LLMKnowledgePlanner()
+        planner = self.planner or LLMKnowledgePlanner(session=self.session)
         validation_source = "\n".join(part for part in (conversation_context, message) if part)
         turn, results, iterations = self._run_action_loop(
             planner=planner,

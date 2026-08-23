@@ -276,12 +276,62 @@ class ProductIssueService:
             statement = statement.join(ProductProject, ProductProject.id == ProductIssue.project_id).where(ProductProject.key == project_key)
         if repository_key:
             statement = statement.join(RepositoryProfile, RepositoryProfile.id == ProductIssue.repository_id).where(RepositoryProfile.key == repository_key)
-        if status:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status == "open":
+            statement = statement.where(
+                ProductIssue.status.notin_(["completed", "cancelled", "superseded"])
+            )
+        elif normalized_status:
             statement = statement.where(ProductIssue.status == status)
-        if query.strip():
-            term = f"%{query.strip()}%"
-            statement = statement.where(or_(ProductIssue.title.ilike(term), ProductIssue.problem.ilike(term), ProductIssue.desired_outcome.ilike(term), ProductIssue.notes.ilike(term)))
-        return list(self.session.scalars(statement.limit(max(1, min(limit, 250)))).all())
+        query_text = query.strip()
+        if not query_text:
+            return list(self.session.scalars(statement.limit(max(1, min(limit, 250)))).all())
+
+        try:
+            issue_id = uuid.UUID(query_text)
+        except ValueError:
+            issue_id = None
+        if issue_id is not None:
+            return list(
+                self.session.scalars(
+                    statement.where(ProductIssue.id == issue_id).limit(1)
+                ).all()
+            )
+
+        ignored_terms = {"a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"}
+        query_terms = {
+            term for term in tokens(query_text) if term not in ignored_terms and len(term) > 1
+        }
+        if not query_terms:
+            return []
+        clauses = []
+        for token in query_terms:
+            term = f"%{token}%"
+            clauses.extend(
+                (
+                    ProductIssue.title.ilike(term),
+                    ProductIssue.problem.ilike(term),
+                    ProductIssue.desired_outcome.ilike(term),
+                    ProductIssue.notes.ilike(term),
+                )
+            )
+        candidates = list(self.session.scalars(statement.where(or_(*clauses))).all())
+        normalized_query = query_text.lower()
+
+        def relevance(issue: ProductIssue) -> tuple[float, datetime]:
+            title = issue.title.lower()
+            body = " ".join(
+                (issue.title, issue.problem, issue.desired_outcome, issue.notes)
+            ).lower()
+            body_terms = set(tokens(body))
+            matched = len(query_terms & body_terms)
+            title_matches = len(query_terms & set(tokens(title)))
+            phrase_bonus = 2.0 if normalized_query in body else 0.0
+            score = matched + (title_matches * 0.75) + phrase_bonus
+            return score, issue.updated_at
+
+        candidates.sort(key=relevance, reverse=True)
+        return candidates[: max(1, min(limit, 250))]
 
     def update(self, issue_id: uuid.UUID, updates: dict[str, Any]) -> ProductIssue:
         issue = self.session.get(ProductIssue, issue_id)
