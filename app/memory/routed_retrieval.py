@@ -269,7 +269,7 @@ class RoutedEditService:
             elif not todo.agent_task:
                 todo.agent_task_status = "not_agent"
                 todo.agent_task_error = None
-        if "agent_task_status" in updates:
+        if "agent_task_status" in updates and "agent_task" not in updates:
             todo.agent_task_status = str(updates["agent_task_status"])
         if "metadata" in updates and isinstance(updates["metadata"], dict):
             todo.metadata_ = {**(todo.metadata_ or {}), **updates["metadata"]}

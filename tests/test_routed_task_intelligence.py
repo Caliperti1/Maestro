@@ -17,6 +17,7 @@ from app.db.models import (
 from app.db.seed import seed_default_domains
 from app.maestro.todo_agent_tasks import TodoAgentTaskService
 from app.memory.routed_hygiene import RoutedHygieneService
+from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_resolver import RoutedObjectResolver
 from app.memory.todo_scheduling import TodoSchedulingService
 
@@ -293,6 +294,8 @@ def test_agent_todo_is_planned_once_and_linked_to_workflow(session) -> None:
     assert todo.agent_task_status == "queued"
     assert todo.workflow_task_id is not None
     assert todo.workflow_run_id is not None
+    messages = session.scalars(select(Message).where(Message.sender_type == "maestro")).all()
+    assert any("picked up the background task" in message.content for message in messages)
 
     run = session.get(WorkflowRun, todo.workflow_run_id)
     assert run is not None
@@ -306,3 +309,27 @@ def test_agent_todo_is_planned_once_and_linked_to_workflow(session) -> None:
     assert todo.agent_task_status == "completed"
     messages = session.scalars(select(Message).where(Message.sender_type == "maestro")).all()
     assert any("prepared the partner background report" in message.content for message in messages)
+
+
+def test_existing_todo_toggle_becomes_pending_even_with_stale_ui_status(session) -> None:
+    domain = _domain(session)
+    todo = Todo(
+        domain_id=domain.id,
+        title="Research disposal rules",
+        description="Determine the local disposal requirements.",
+        agent_task=False,
+        agent_task_status="not_agent",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(todo)
+    session.commit()
+
+    RoutedEditService(session).update_todo(
+        todo.id,
+        {"agent_task": True, "agent_task_status": "not_agent"},
+    )
+
+    assert todo.agent_task is True
+    assert todo.agent_task_status == "pending"
