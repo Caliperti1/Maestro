@@ -15,6 +15,7 @@ from app.llm.client import LLMClientError
 @dataclass(frozen=True)
 class IssueHygieneResult:
     scanned: int
+    semantic_checks: int
     merged: int
     related: int
     conflicts: int
@@ -27,15 +28,40 @@ class ProductIssueHygieneService:
     def __init__(self, session: Session):
         self.session = session
 
-    def run(self, profile: RepositoryProfile) -> IssueHygieneResult:
+    def run(
+        self,
+        profile: RepositoryProfile,
+        *,
+        max_semantic_checks: int = 8,
+    ) -> IssueHygieneResult:
         issues = list(self.session.scalars(select(ProductIssue).where(ProductIssue.repository_id == profile.id, ProductIssue.status.notin_(["cancelled", "superseded"]))).all())
+        existing_relations = self.session.scalars(
+            select(ProductIssueRelation).where(
+                ProductIssueRelation.source_issue_id.in_([issue.id for issue in issues])
+            )
+        ).all()
+        resolved_pairs = {
+            frozenset((relation.source_issue_id, relation.target_issue_id))
+            for relation in existing_relations
+        }
+        semantic_checks = 0
         merged = related = conflicts = skipped = 0
         for index, issue in enumerate(issues):
             if issue.status == "superseded":
                 continue
-            candidates = [candidate for candidate in issues[index + 1:] if candidate.status != "superseded" and _plausible(issue, candidate)]
+            candidates = [
+                candidate
+                for candidate in issues[index + 1:]
+                if candidate.status != "superseded"
+                and frozenset((issue.id, candidate.id)) not in resolved_pairs
+                and _plausible(issue, candidate)
+            ]
             if not candidates:
                 continue
+            if semantic_checks >= max_semantic_checks:
+                skipped += len(candidates)
+                continue
+            semantic_checks += 1
             try:
                 decision = LLMIssueMatcher().resolve(
                     proposed={
@@ -64,10 +90,13 @@ class ProductIssueHygieneService:
             elif decision.action in {"relate", "conflict", "supersede"} and decision.confidence >= 0.72:
                 relation_type = decision.relation_type or "related_to"
                 self._relate(issue, target, relation_type, decision.rationale, decision.confidence)
+                resolved_pairs.add(frozenset((issue.id, target.id)))
                 conflicts += int(relation_type == "conflicts_with")
                 related += int(relation_type != "conflicts_with")
         self.session.commit()
-        return IssueHygieneResult(len(issues), merged, related, conflicts, skipped)
+        return IssueHygieneResult(
+            len(issues), semantic_checks, merged, related, conflicts, skipped
+        )
 
     def _relate(self, source: ProductIssue, target: ProductIssue, relation_type: str, rationale: str, confidence: float) -> None:
         existing = self.session.scalar(select(ProductIssueRelation).where(ProductIssueRelation.source_issue_id == source.id, ProductIssueRelation.target_issue_id == target.id, ProductIssueRelation.relation_type == relation_type))
