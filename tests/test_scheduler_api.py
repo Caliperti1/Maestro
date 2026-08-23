@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import uuid
 
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy.orm import Session
 
 from app.agents.runtime import AgentRegistryService
@@ -1050,9 +1051,11 @@ def test_scheduler_worker_blocks_unassigned_item(
     assert "No agent" in executed["queue_item"]["error_message"]
 
 
+@pytest.mark.parametrize("nested_payload", [True, False])
 def test_approved_tool_action_requeues_its_blocked_durable_workflow(
     session: Session,
     tmp_path: Path,
+    nested_payload: bool,
 ) -> None:
     seed_default_domains(session)
     get_settings.cache_clear()
@@ -1104,6 +1107,21 @@ def test_approved_tool_action_requeues_its_blocked_durable_workflow(
     session.add(run)
     session.flush()
     tool_call_id = str(uuid.uuid4())
+    agent_run_payload = {
+        "task_id": str(child.id),
+        "agent_key": "praxis-email-agent",
+        "agent_name": "Praxis Email Agent",
+        "status": "blocked",
+        "output_preview": "The message was noise.",
+        "tool_calls": [
+            {
+                "id": tool_call_id,
+                "tool_name": "gmail.message.modify",
+                "status": "approval_required",
+                "output_payload": {},
+            }
+        ],
+    }
     item = WorkflowQueueItem(
         workflow_run_id=run.id,
         parent_task_id=parent.id,
@@ -1117,23 +1135,7 @@ def test_approved_tool_action_requeues_its_blocked_durable_workflow(
         dependency_keys=[],
         resource_locks=[],
         input_payload={},
-        output_payload={
-            "agent_run": {
-                "task_id": str(child.id),
-                "agent_key": "praxis-email-agent",
-                "agent_name": "Praxis Email Agent",
-                "status": "blocked",
-                "output_preview": "The message was noise.",
-                "tool_calls": [
-                    {
-                        "id": tool_call_id,
-                        "tool_name": "gmail.message.modify",
-                        "status": "approval_required",
-                        "output_payload": {},
-                    }
-                ],
-            }
-        },
+        output_payload={"agent_run": agent_run_payload} if nested_payload else agent_run_payload,
         error_message="Waiting for Gmail approval.",
     )
     session.add(item)
@@ -1160,7 +1162,8 @@ def test_approved_tool_action_requeues_its_blocked_durable_workflow(
     approved = _approved_tool_results(item)
     assert approved[0]["tool_name"] == "gmail.message.modify"
     assert approved[0]["status"] == "complete"
-    assert item.output_payload["agent_run"]["tool_calls"][0]["status"] == "complete"
+    stored_agent_run = item.output_payload.get("agent_run", item.output_payload)
+    assert stored_agent_run["tool_calls"][0]["status"] == "complete"
     assert session.query(WorkflowRunLogEntry).filter_by(workflow_run_id=run.id).count() == 0
 
     AgentRegistryService(session).ensure_seed_agents()
