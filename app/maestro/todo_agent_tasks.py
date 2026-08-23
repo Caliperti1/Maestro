@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Domain, Todo, WorkflowRun
+from app.db.models import Domain, Task, Todo, WorkflowRun
 from app.maestro.channel import record_channel_message
 from app.maestro.orchestrator import MaestroOrchestratorError, MaestroOrchestratorService
 from app.memory.todo_scheduling import TodoSchedulingService
@@ -98,6 +98,16 @@ class TodoAgentTaskService:
                     },
                 )
                 return False
+            parent_task = self.session.get(Task, uuid.UUID(plan.parent_task_id))
+            if parent_task is None:
+                raise MaestroOrchestratorError("Agent-task workflow parent was not persisted.")
+            parent_task.source_type = "todo_agent_task"
+            parent_task.input_payload = {
+                **(parent_task.input_payload or {}),
+                "originating_todo_id": str(todo.id),
+                "originating_todo_title": todo.title,
+            }
+            self.session.commit()
             self.orchestrator.enqueue_plan(plan.plan_id)
             run = self.session.scalar(
                 select(WorkflowRun).where(
@@ -110,6 +120,7 @@ class TodoAgentTaskService:
             todo.metadata_ = {
                 **(todo.metadata_ or {}),
                 "agent_task_plan_id": plan.plan_id,
+                "agent_task_parent_task_id": plan.parent_task_id,
                 "agent_task_started_at": datetime.now(UTC).isoformat(),
             }
             self.session.commit()
