@@ -181,6 +181,41 @@ def _respond_to_maestro_sync(
     )
     message_metadata = {"topic_id": topic_context.get("topic_id")} if topic_context.get("topic_id") else {}
     user_message = _record_session_message(db, conversation, "user", body.message, metadata=message_metadata)
+    resumed_agent_task = _resume_waiting_agent_task_from_reply(
+        db,
+        conversation=conversation,
+        user_message=user_message,
+    )
+    if resumed_agent_task is not None:
+        response_message = (
+            f"Thanks, Chris. I attached that clarification to **{resumed_agent_task.title}** "
+            "and returned it to the background queue. I’ll continue the workflow and report back "
+            "here if it needs anything else or when it finishes."
+        )
+        _record_session_message(
+            db,
+            conversation,
+            "maestro",
+            response_message,
+            metadata={
+                **message_metadata,
+                "message_type": "todo_agent_task_rfi_resolved",
+                "todo_id": str(resumed_agent_task.id),
+            },
+        )
+        return {
+            "kind": "chat_only",
+            "classification": "todo_agent_task_rfi_answer",
+            "interaction_mode": body.interaction_mode,
+            "message": response_message,
+            "plan": None,
+            "chat_plan": None,
+            "active_plan": None,
+            "action_results": [],
+            "workflow_suggestion": None,
+            "channel_context": topic_context,
+            "conversation": _conversation_payload(db, conversation),
+        }
     pending_approvals = _pending_tool_approvals_for_conversation(db, conversation)
     if _is_plain_approval_message(normalized_message) and pending_approvals:
         if len(pending_approvals) == 1:
@@ -1242,6 +1277,70 @@ def _record_session_message(
     db.refresh(message)
     db.refresh(conversation)
     return message
+
+
+def _resume_waiting_agent_task_from_reply(
+    db: Session,
+    *,
+    conversation: Conversation,
+    user_message: Message,
+) -> Todo | None:
+    """Bind a direct chat reply to the most recent unresolved agent-task RFI."""
+    recent = db.scalars(
+        select(Message)
+        .where(
+            Message.conversation_id == conversation.id,
+            Message.created_at <= user_message.created_at,
+            Message.id != user_message.id,
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(20)
+    ).all()
+    rfi_message = None
+    for message in recent:
+        if message.sender_type == "user":
+            break
+        if (message.metadata_ or {}).get("message_type") == "todo_agent_task_rfi":
+            rfi_message = message
+            break
+    if rfi_message is None:
+        return None
+    try:
+        todo_id = uuid.UUID(str((rfi_message.metadata_ or {}).get("todo_id") or ""))
+    except ValueError:
+        return None
+    todo = db.get(Todo, todo_id)
+    if todo is None or not todo.agent_task or todo.agent_task_status != "needs_input":
+        return None
+
+    clarification = user_message.content.strip()
+    if not clarification:
+        return None
+    clarifications = list((todo.metadata_ or {}).get("agent_task_clarifications") or [])
+    clarifications.append(
+        {
+            "message_id": str(user_message.id),
+            "content": clarification,
+            "received_at": datetime.now(UTC).isoformat(),
+        }
+    )
+    metadata = {
+        **(todo.metadata_ or {}),
+        "agent_task_clarifications": clarifications,
+        "last_agent_task_clarification_at": datetime.now(UTC).isoformat(),
+    }
+    metadata.pop("planning_notified_at", None)
+    todo.metadata_ = metadata
+    clarification_line = f"User clarification: {clarification}"
+    if clarification_line not in (todo.description or ""):
+        todo.description = "\n\n".join(
+            part for part in ((todo.description or "").strip(), clarification_line) if part
+        )
+    todo.agent_task_status = "retry"
+    todo.agent_task_error = None
+    db.commit()
+    db.refresh(todo)
+    return todo
 
 
 def _conversation_messages(db: Session, conversation_id: uuid.UUID) -> list[Message]:
