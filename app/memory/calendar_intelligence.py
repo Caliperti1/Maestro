@@ -85,6 +85,8 @@ class CalendarIntelligenceService:
             if normalized_identity in seen:
                 continue
             seen.add(normalized_identity)
+            contact_relevance = str(attendee.get("contact_relevance") or "engaged")
+            counts_as_interaction = contact_relevance != "roster_only"
             record = CalendarEventAttendee(
                 event_id=event.id,
                 contact_id=contact.id if contact is not None else None,
@@ -96,7 +98,11 @@ class CalendarIntelligenceService:
                 is_organizer=bool(attendee.get("is_organizer")),
                 is_user=is_user,
                 source_refs=event.source_refs,
-                metadata_={"legacy": attendee},
+                metadata_={
+                    "legacy": attendee,
+                    "contact_relevance": contact_relevance,
+                    "counts_as_interaction": counts_as_interaction,
+                },
             )
             self.session.add(record)
             legacy_attendee: dict[str, Any] = {"name": display_name}
@@ -106,6 +112,8 @@ class CalendarIntelligenceService:
                 legacy_attendee["contact_id"] = str(contact.id)
             if is_user:
                 legacy_attendee.update({"is_user": True, "identity": "maestro_user"})
+            if contact_relevance == "roster_only":
+                legacy_attendee["contact_relevance"] = "roster_only"
             normalized_rows.append(legacy_attendee)
         event.attendees = normalized_rows
         self.materialize_contact_interactions(event, commit=False)
@@ -166,6 +174,8 @@ class CalendarIntelligenceService:
             )
         ).all()
         for attendee in attendees:
+            if (attendee.metadata_ or {}).get("counts_as_interaction") is False:
+                continue
             existing = self.session.scalar(
                 select(ContactInteraction).where(
                     ContactInteraction.contact_id == attendee.contact_id,
@@ -264,6 +274,7 @@ class CalendarIntelligenceService:
             "response_status": attendee.response_status,
             "is_organizer": attendee.is_organizer,
             "is_user": attendee.is_user,
+            "contact_relevance": (attendee.metadata_ or {}).get("contact_relevance", "engaged"),
         }
 
     def conflicts(self, event: CalendarEvent) -> list[dict[str, Any]]:

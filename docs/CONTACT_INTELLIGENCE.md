@@ -34,6 +34,13 @@ be projected into a graph view without introducing a second canonical database.
 Agents do not manually choose create versus update. Ambiguous identity must remain unresolved rather
 than silently merging two people. Canonical contact merges are user-approved operations.
 
+Calendar attendance is supporting evidence, not automatically a relationship. Events with no more
+than `CALENDAR_CONTACT_AUTO_PROMOTE_ATTENDEE_LIMIT` attendees may promote unknown people because a
+small working session is meaningful evidence of likely engagement. Larger rosters retain every
+source attendee on the event as `roster_only`, link people who are already known, and create neither
+new contacts nor contact interactions. Direct correspondence, explicit extraction, or a later small
+meeting can still promote an attendee through the normal contact resolver.
+
 ## Retrieval
 
 `ContactIntelligenceService` combines:

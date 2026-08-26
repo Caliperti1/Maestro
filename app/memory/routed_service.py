@@ -931,6 +931,8 @@ class RoutedMemoryService:
             attendees = [
                 {"name": name} for name in _attendee_names_from_event_text(item.title, item.content)
             ]
+        auto_promote_limit = get_settings().calendar_contact_auto_promote_attendee_limit
+        roster_only = len(attendees) > auto_promote_limit
         linked: list[dict[str, Any]] = []
         seen: set[str] = set()
         for attendee in attendees:
@@ -946,23 +948,51 @@ class RoutedMemoryService:
                 seen.add("maestro_user")
                 linked.append({**attendee, **maestro_user_identity().attendee_payload()})
                 continue
-            contact = self._contact_for_attendee(name, item)
-            normalized = _normalize_key(contact.name)
+            contact = self._contact_for_attendee(
+                name,
+                item,
+                email=attendee_email,
+                create_if_missing=not roster_only,
+                record_event_context=not roster_only,
+            )
+            normalized = _normalize_key(contact.name if contact is not None else name)
             if normalized in seen:
                 continue
             seen.add(normalized)
-            linked.append(
-                {
-                    **attendee,
-                    "name": contact.name,
-                    "contact_id": str(contact.id),
-                }
-            )
+            payload = {
+                **attendee,
+                "name": contact.name if contact is not None else name,
+            }
+            if contact is not None:
+                payload["contact_id"] = str(contact.id)
+            if roster_only:
+                payload["contact_relevance"] = "roster_only"
+            linked.append(payload)
         return linked
 
-    def _contact_for_attendee(self, name: str, item: RoutedItem) -> Contact:
+    def _contact_for_attendee(
+        self,
+        name: str,
+        item: RoutedItem,
+        *,
+        email: str = "",
+        create_if_missing: bool = True,
+        record_event_context: bool = True,
+    ) -> Contact | None:
         normalized = _normalize_key(name)
-        contact = self.session.scalar(select(Contact).where(Contact.normalized_name == normalized))
+        contact = None
+        if email:
+            contact = self.session.scalar(
+                select(Contact).where(
+                    Contact.email.ilike(email),
+                )
+            )
+        if contact is None:
+            contact = self.session.scalar(
+                select(Contact).where(
+                    Contact.normalized_name == normalized,
+                )
+            )
         if contact is None:
             alias = self.session.scalar(
                 select(ContactAlias).where(ContactAlias.normalized_alias == normalized)
@@ -980,10 +1010,13 @@ class RoutedMemoryService:
             )
             if len(candidates) == 1:
                 contact = candidates[0]
+        if contact is None and not create_if_missing:
+            return None
         if contact is None:
             contact = Contact(
                 name=_title_case_name(name),
                 normalized_name=normalized,
+                email=email or None,
                 summary=f"Created as an attendee for {item.title}.",
                 source_refs=item.source_refs,
                 provenance=self._provenance(item),
@@ -996,7 +1029,7 @@ class RoutedMemoryService:
             self.session.add(contact)
             self.session.flush()
             self._upsert_contact_aliases(contact, contact.name, item)
-        else:
+        elif record_event_context:
             contact.source_refs = _merge_source_refs(contact.source_refs, item.source_refs)
             aliases = set(contact.metadata_.get("aliases") or []) if contact.metadata_ else set()
             aliases.update(contact_aliases_for(contact.name))
@@ -1007,7 +1040,8 @@ class RoutedMemoryService:
                 "aliases": sorted(alias for alias in aliases if alias),
             }
             self._upsert_contact_aliases(contact, name, item)
-        self._upsert_contact_domain_note(contact, item)
+        if record_event_context:
+            self._upsert_contact_domain_note(contact, item)
         return contact
 
     def _upsert_entity_domain_note(self, entity: Entity, item: RoutedItem) -> None:

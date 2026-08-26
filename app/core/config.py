@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     calendar_trigger_autorun: bool = False
     calendar_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     calendar_trigger_page_size: Annotated[int, Field(ge=1, le=2500)] = 250
+    calendar_contact_auto_promote_attendee_limit: Annotated[int, Field(ge=0, le=100)] = 12
     todo_agent_worker_autorun: bool = True
     todo_agent_worker_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     todo_agent_worker_claim_limit: Annotated[int, Field(ge=1, le=20)] = 2
