@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models import (
     CalendarEvent,
+    CalendarEventWorkLink,
     Contact,
     ContactAlias,
     ContactDomainNote,
@@ -47,6 +48,7 @@ from app.maestro.knowledge_tools import (
 from app.maestro.scheduler import SchedulerService
 from app.memory.calendar_recurrence import normalize_recurrence_rule
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
+from app.memory.event_work_links import EventWorkLinkService
 from app.memory.organization_intelligence import (
     OrganizationEmbeddingService,
     OrganizationIntelligenceService,
@@ -60,6 +62,8 @@ ALLOWED_ACTIONS = {
     "web.search",
     "calendar.create",
     "calendar.update",
+    "calendar.link_work",
+    "calendar.unlink_work",
     "contact.create",
     "contact.update",
     "todo.create",
@@ -507,6 +511,10 @@ class MaestroKnowledgeService:
                 return self._capture_issue(arguments, provenance)
             if action_type == "issue.update":
                 return self._update_issue(arguments)
+            if action_type == "calendar.link_work":
+                return self._link_event_work(arguments, provenance)
+            if action_type == "calendar.unlink_work":
+                return self._unlink_event_work(arguments)
             if action_type.startswith("calendar."):
                 arguments = _normalize_calendar_arguments(arguments, source_message=source_message)
             if action_type.endswith(".create"):
@@ -592,6 +600,83 @@ class MaestroKnowledgeService:
             "issue.update", "completed", f"Updated issue '{updated.title}'.",
             "product_issue", str(updated.id),
         )
+
+    def _link_event_work(
+        self,
+        arguments: dict[str, Any],
+        provenance: dict[str, Any],
+    ) -> KnowledgeActionResult:
+        event_target = str(
+            arguments.get("event_target") or arguments.get("event_id") or ""
+        ).strip()
+        work_target = str(
+            arguments.get("work_target") or arguments.get("target_id") or ""
+        ).strip()
+        target_type = str(arguments.get("target_type") or "todo").strip().lower()
+        if not event_target or not work_target:
+            raise ValueError("I need both the event and the todo or issue to link.")
+        event_id = self._resolve_object("calendar", event_target, arguments.get("domain_key"))
+        if target_type == "todo":
+            target_id = self._resolve_object("todo", work_target, arguments.get("domain_key"))
+        elif target_type == "product_issue":
+            target_id = self._resolve_issue_id(work_target, arguments)
+        else:
+            raise ValueError("Linked work must be a todo or product issue.")
+        link = EventWorkLinkService(self.session).link(
+            event_id=event_id,
+            target_type=target_type,
+            target_id=target_id,
+            relationship_type=str(arguments.get("relationship_type") or "prerequisite"),
+            notes=str(arguments.get("notes") or ""),
+            provenance=provenance,
+        )
+        payload = EventWorkLinkService(self.session).payload(link)
+        return KnowledgeActionResult(
+            "calendar.link_work",
+            "completed",
+            (
+                f"Linked '{payload['title']}' to the event as "
+                f"{link.relationship_type.replace('_', ' ')} work."
+            ),
+            "event_work_link",
+            str(link.id),
+            data=payload,
+        )
+
+    def _unlink_event_work(self, arguments: dict[str, Any]) -> KnowledgeActionResult:
+        link_id = str(arguments.get("link_id") or arguments.get("id") or "").strip()
+        try:
+            identifier = uuid.UUID(link_id)
+        except ValueError as exc:
+            raise ValueError("I need the event work link ID to remove that relationship.") from exc
+        link = self.session.get(CalendarEventWorkLink, identifier)
+        if link is None:
+            raise ValueError("I could not find that event work link.")
+        EventWorkLinkService(self.session).unlink(identifier)
+        return KnowledgeActionResult(
+            "calendar.unlink_work",
+            "completed",
+            "Removed the linked work from the event.",
+            "event_work_link",
+            link_id,
+        )
+
+    def _resolve_issue_id(self, target: str, arguments: dict[str, Any]) -> uuid.UUID:
+        try:
+            identifier = uuid.UUID(target)
+        except ValueError:
+            identifier = None
+        if identifier is not None and self.session.get(ProductIssue, identifier):
+            return identifier
+        matches = ProductIssueService(self.session).search(
+            query=target,
+            domain_key=_optional_text(arguments.get("domain_key")),
+            project_key=_optional_text(arguments.get("project_key")),
+            limit=3,
+        )
+        if len(matches) != 1:
+            raise ValueError(f"I could not find one unambiguous product issue matching '{target}'.")
+        return matches[0].id
 
     def _create(
         self,

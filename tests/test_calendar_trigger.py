@@ -38,14 +38,16 @@ class FakeCalendarChangeSource:
         })
         if sync_token is None:
             return {"items": [], "nextSyncToken": "sync-1"}
+        start = datetime.now(UTC) + timedelta(days=2)
+        end = start + timedelta(minutes=30)
         return {
             "items": [{
                 "id": "event-1",
                 "etag": self.version,
                 "status": "confirmed",
                 "summary": "Partner review",
-                "start": {"dateTime": "2026-08-24T14:00:00-04:00"},
-                "end": {"dateTime": "2026-08-24T14:30:00-04:00"},
+                "start": {"dateTime": start.isoformat()},
+                "end": {"dateTime": end.isoformat()},
             }],
             "nextSyncToken": f"sync-{self.version}",
         }

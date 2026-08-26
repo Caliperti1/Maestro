@@ -13,6 +13,7 @@ from app.db.models import (
     CalendarEvent,
     CalendarEventAttendee,
     CalendarEventOrganization,
+    CalendarEventWorkLink,
     Contact,
     ContactAlias,
     ContactDomainNote,
@@ -23,6 +24,8 @@ from app.db.models import (
     MemoryProposal,
     OrganizationIdentifier,
     OrganizationRelationship,
+    ProductIssue,
+    ProductProject,
     RoutedItem,
     SeedPackage,
     Todo,
@@ -2116,3 +2119,139 @@ def test_memory_context_bundle_endpoint_returns_grouped_prompt_context(
     )
     assert "[Global Memory]" in payload["rendered_text"]
     assert str(praxis_memory.id) in payload["rendered_text"]
+
+
+def test_event_work_links_are_bidirectional_and_updatable(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    event = CalendarEvent(
+        domain_id=praxis.id,
+        title="Partner design review",
+        summary="Review the partner design.",
+        start_at=datetime(2026, 9, 2, 14, tzinfo=UTC),
+        end_at=datetime(2026, 9, 2, 15, tzinfo=UTC),
+        attendees=[],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    todo = Todo(
+        domain_id=praxis.id,
+        title="Prepare partner slides",
+        description="Finish the slides before the review.",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    project = ProductProject(
+        domain_id=praxis.id,
+        key="groundtruth",
+        name="GroundTruth",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([event, todo, project])
+    session.flush()
+    issue = ProductIssue(
+        domain_id=praxis.id,
+        project_id=project.id,
+        title="Capture design review feedback",
+        normalized_title="capture design review feedback",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(issue)
+    session.commit()
+    client = _client(session, tmp_path)
+
+    prerequisite = client.post(
+        f"/memory/routed-objects/events/{event.id}/work-links",
+        json={
+            "target_type": "todo",
+            "target_id": str(todo.id),
+            "relationship_type": "prerequisite",
+        },
+    )
+    follow_up = client.post(
+        f"/memory/routed-objects/events/{event.id}/work-links",
+        json={
+            "target_type": "product_issue",
+            "target_id": str(issue.id),
+            "relationship_type": "follow_up",
+        },
+    )
+
+    assert prerequisite.status_code == 200
+    assert follow_up.status_code == 200
+    assert session.query(CalendarEventWorkLink).count() == 2
+    events = client.get("/memory/routed-objects/events?limit=10").json()["events"]
+    event_payload = next(item for item in events if item["id"] == str(event.id))
+    assert {(item["title"], item["relationship_type"]) for item in event_payload["work_links"]} == {
+        ("Prepare partner slides", "prerequisite"),
+        ("Capture design review feedback", "follow_up"),
+    }
+    todos = client.get("/memory/routed-objects/todos?limit=10").json()["todos"]
+    todo_payload = next(item for item in todos if item["id"] == str(todo.id))
+    assert todo_payload["event_links"][0]["event_title"] == "Partner design review"
+    issues = client.get("/issues?limit=10").json()["issues"]
+    issue_payload = next(item for item in issues if item["id"] == str(issue.id))
+    assert issue_payload["event_links"][0]["relationship_type"] == "follow_up"
+
+    link_id = prerequisite.json()["link"]["id"]
+    updated = client.patch(
+        f"/memory/routed-objects/events/{event.id}/work-links/{link_id}",
+        json={"relationship_type": "during"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["link"]["relationship_type"] == "during"
+
+    removed = client.delete(
+        f"/memory/routed-objects/events/{event.id}/work-links/{link_id}"
+    )
+    assert removed.status_code == 200
+    assert session.query(CalendarEventWorkLink).count() == 1
+
+
+def test_event_work_link_rejects_cross_domain_work(session: Session, tmp_path: Path) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    personal = DomainRepository(session).get_by_key("personal")
+    assert praxis is not None and personal is not None
+    event = CalendarEvent(
+        domain_id=praxis.id,
+        title="Praxis review",
+        attendees=[],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    todo = Todo(
+        domain_id=personal.id,
+        title="Personal task",
+        description="Personal task",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([event, todo])
+    session.commit()
+
+    response = _client(session, tmp_path).post(
+        f"/memory/routed-objects/events/{event.id}/work-links",
+        json={
+            "target_type": "todo",
+            "target_id": str(todo.id),
+            "relationship_type": "prerequisite",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "same domain" in response.json()["detail"]

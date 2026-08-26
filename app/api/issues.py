@@ -26,6 +26,7 @@ from app.issues.github_sync import GitHubIssueSyncService
 from app.issues.repositories import ensure_repository_workflows
 from app.issues.service import ProductIssueService, issue_payload, slug
 from app.issues.worker import RepositoryIntelligenceWorker
+from app.memory.event_work_links import EventWorkLinkService
 from app.memory.repository_observer import RepositoryObserverService
 
 router = APIRouter(prefix="/issues", tags=["issues"])
@@ -236,6 +237,7 @@ def _issue_detail(db: Session, issue: ProductIssue) -> dict[str, Any]:
         "project": {"key": project.key, "name": project.name} if project else None,
         "repository": _repository_payload(repository) if repository else None,
         "relations": [_relation_payload(relation) for relation in relations],
+        "event_links": EventWorkLinkService(db).for_issue(issue.id),
     })
     return payload
 

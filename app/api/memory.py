@@ -16,6 +16,7 @@ from app.core.time import ensure_aware_utc, home_isoformat, home_timezone
 from app.db.models import (
     Artifact,
     CalendarEvent,
+    CalendarEventWorkLink,
     Contact,
     ContactHydrationJob,
     DecisionRecord,
@@ -46,6 +47,7 @@ from app.memory.context_mailbox import ContextMailboxError, ContextMailboxServic
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.embeddings import MemoryEmbeddingService
+from app.memory.event_work_links import EventWorkLinkService
 from app.memory.federated_retrieval import (
     FederatedIndexService,
     FederatedRetrievalRequest,
@@ -137,6 +139,18 @@ class CreateCalendarEventRequest(BaseModel):
     conferencing_url: str | None = None
     attendees: list[dict[str, Any]] = Field(default_factory=list)
     organizations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CreateEventWorkLinkRequest(BaseModel):
+    target_type: str
+    target_id: uuid.UUID
+    relationship_type: str
+    notes: str = ""
+
+
+class UpdateEventWorkLinkRequest(BaseModel):
+    relationship_type: str | None = None
+    notes: str | None = None
 
 
 class CreateTodoRequest(BaseModel):
@@ -699,6 +713,60 @@ def update_calendar_event(
         status_code = 422 if "occurrence_start_at" in str(exc) else 404
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     return {"event": _calendar_event_payload(db, event)}
+
+
+@router.post("/routed-objects/events/{event_id}/work-links")
+def create_event_work_link(
+    event_id: uuid.UUID,
+    body: CreateEventWorkLinkRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        link = EventWorkLinkService(db).link(
+            event_id=event_id,
+            target_type=body.target_type,
+            target_id=body.target_id,
+            relationship_type=body.relationship_type,
+            notes=body.notes,
+            provenance={"source_system": "maestro_calendar_ui"},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"link": EventWorkLinkService(db).payload(link)}
+
+
+@router.patch("/routed-objects/events/{event_id}/work-links/{link_id}")
+def update_event_work_link(
+    event_id: uuid.UUID,
+    link_id: uuid.UUID,
+    body: UpdateEventWorkLinkRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    link = db.get(CalendarEventWorkLink, link_id)
+    if link is None or link.event_id != event_id:
+        raise HTTPException(status_code=404, detail="Event work link not found.")
+    try:
+        link = EventWorkLinkService(db).update(
+            link_id,
+            relationship_type=body.relationship_type,
+            notes=body.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"link": EventWorkLinkService(db).payload(link)}
+
+
+@router.delete("/routed-objects/events/{event_id}/work-links/{link_id}")
+def delete_event_work_link(
+    event_id: uuid.UUID,
+    link_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    link = db.get(CalendarEventWorkLink, link_id)
+    if link is None or link.event_id != event_id:
+        raise HTTPException(status_code=404, detail="Event work link not found.")
+    EventWorkLinkService(db).unlink(link_id)
+    return {"deleted": True}
 
 
 @router.get("/routed-objects/todos")
@@ -1649,6 +1717,7 @@ def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
         "source_refs": todo.source_refs,
         "provenance": todo.provenance,
         "metadata": todo.metadata_,
+        "event_links": EventWorkLinkService(db).for_todo(todo.id),
         "created_at": todo.created_at.isoformat() if todo.created_at else None,
     }
 

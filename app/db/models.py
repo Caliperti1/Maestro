@@ -6,6 +6,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -482,6 +483,37 @@ class CalendarEventOrganization(TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(80), default="related", nullable=False)
     source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class CalendarEventWorkLink(TimestampMixin, Base):
+    """A planning relationship between an event and one canonical work item."""
+
+    __tablename__ = "calendar_event_work_links"
+    __table_args__ = (
+        CheckConstraint(
+            "(todo_id IS NOT NULL AND product_issue_id IS NULL) OR "
+            "(todo_id IS NULL AND product_issue_id IS NOT NULL)",
+            name="ck_calendar_event_work_link_one_target",
+        ),
+        UniqueConstraint("event_id", "todo_id", name="uq_calendar_event_work_link_todo"),
+        UniqueConstraint(
+            "event_id", "product_issue_id", name="uq_calendar_event_work_link_issue"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("calendar_events.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    todo_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("todos.id", ondelete="CASCADE"), index=True
+    )
+    product_issue_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("product_issues.id", ondelete="CASCADE"), index=True
+    )
+    relationship_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class Entity(TimestampMixin, Base):

@@ -368,6 +368,30 @@ export type RoutedItem = {
   created_at: string | null;
 };
 
+export type EventWorkLink = {
+  id: string;
+  event_id: string;
+  target_type: "todo" | "product_issue";
+  target_id: string;
+  title: string;
+  status: string;
+  relationship_type: "prerequisite" | "during" | "follow_up";
+  notes: string;
+  estimated_minutes: number | null;
+  provenance: Record<string, unknown>;
+};
+
+export type EventReference = {
+  id: string;
+  event_id: string;
+  event_title: string;
+  event_status: string;
+  start_at: string | null;
+  end_at: string | null;
+  relationship_type: "prerequisite" | "during" | "follow_up";
+  notes: string;
+};
+
 export type RoutedEvent = {
   id: string;
   domain_key: string | null;
@@ -400,6 +424,7 @@ export type RoutedEvent = {
     is_user: boolean;
   }>;
   organizations: Array<{ id: string; name: string; role: string }>;
+  work_links: EventWorkLink[];
   conflicts: Array<{
     id: string;
     title: string;
@@ -441,6 +466,7 @@ export type RoutedTodo = {
   source_refs: Array<Record<string, unknown>>;
   provenance: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  event_links: EventReference[];
   created_at: string | null;
 };
 
@@ -681,6 +707,7 @@ export type ProductIssue = {
     rationale: string;
     confidence: number;
   }>;
+  event_links: EventReference[];
   created_at: string | null;
   updated_at: string | null;
 };

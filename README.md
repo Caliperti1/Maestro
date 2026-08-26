@@ -18,11 +18,12 @@ chat responses toward persistent execution.
 - Domain-aware agent registry with editable global/domain/agent prompts.
 - Prompt aggregation with scoped memory retrieval.
 - Federated, explainable retrieval across durable memory, contacts, organizations, events, todos,
-  decisions, ideas, reports, run logs, artifacts, and authoritative identity.
+  decisions, product issues, reports, run logs, artifacts, and authoritative identity.
 - Durable memory ingestion from drag-and-drop dropbox folders.
 - Context ingestion ledger with source registrations, checkpoints, provenance, idempotency, and
   local-only egress enforcement for sanitized USMA/L3 context.
-- Routed operational stores for contacts, events, todos, organizations, decisions, RFIs, and ideas.
+- Routed operational stores for contacts, events, todos, organizations, decisions, RFIs, and
+  canonical product issues.
 - Scheduler and queue foundation for manual, recurring, and trigger-shaped workflows.
 - Background scheduler worker that can be toggled from the UI.
 - Tool runtime with approval gates, domain credential resolution, and agent permissions.
@@ -34,6 +35,8 @@ chat responses toward persistent execution.
 - Canonical workflow artifacts staged for memory curation at workflow completion.
 - Resumable historical Gmail hydration for contact and organization intelligence with shadow review.
 - Cross-domain calendar with linked contacts/organizations, conflict detection, and completed-meeting history.
+- Typed event links for prerequisite work, work performed during an event, and post-event follow-ups
+  across both todos and Product Issues.
 - Scheduled routed tasks projected onto the calendar, with duration estimates and completion state.
 - Optional agent-owned todos that become linked one-time background workflows and report back through Maestro.
 - React/Vite frontend for Maestro chat, memory, domains, agents, tools, and queue surfaces.
@@ -191,6 +194,7 @@ Relevant code:
 - `app/memory/contact_intelligence.py`
 - `app/memory/contact_hydration.py`
 - `app/memory/calendar_intelligence.py`
+- `app/memory/event_work_links.py`
 - `app/memory/organization_intelligence.py`
 - `app/memory/routed_service.py`
 - `app/memory/routed_resolver.py`
