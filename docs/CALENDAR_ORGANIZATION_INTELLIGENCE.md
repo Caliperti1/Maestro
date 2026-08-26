@@ -33,7 +33,10 @@ Shared fields include:
 
 `calendar_event_attendees` links participants to canonical contacts when identity is known. It can
 also retain a source-provided name/email safely when a contact is unresolved. Chris's own identity is
-marked as the Maestro user and is never turned into a contact.
+marked as the Maestro user and is never turned into a contact. Large meeting rosters are marked as
+`roster_only`: existing contacts remain recognizable on the event, but unknown invitees do not enter
+the contact store and attendance alone does not become interaction history. The configurable default
+ceiling for automatic attendee promotion is 12 people.
 
 `calendar_event_organizations` links organizations to events with a role such as `partner`, `host`,
 or `related`.

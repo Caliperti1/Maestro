@@ -1173,6 +1173,63 @@ def test_routed_memory_service_canonicalizes_event_metadata_title(
     assert event.attendees == [{"name": "Ben Daniels", "contact_id": str(contact.id)}]
 
 
+def test_bulk_event_roster_does_not_create_contacts_or_interactions(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    known = Contact(
+        name="Known Person",
+        normalized_name="known person",
+        email="known@example.com",
+        summary="Known through direct correspondence.",
+        source_refs=[{"type": "gmail_message", "id": "known"}],
+        provenance={"source_system": "gmail"},
+        metadata_={},
+    )
+    session.add(known)
+    session.flush()
+    attendees = [
+        {"name": "Known Person", "email": "known@example.com"},
+        *[
+            {"name": f"Roster Person {index}", "email": f"person{index}@example.com"}
+            for index in range(1, 13)
+        ],
+    ]
+    routed_item = RoutedItem(
+        domain_id=praxis.id,
+        route_type="event",
+        title="Large working group",
+        content="Large working group meeting.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "google_calendar_event", "id": "large-roster"}],
+        metadata_={
+            "start_at": "2025-01-10T09:00:00-05:00",
+            "end_at": "2025-01-10T10:00:00-05:00",
+            "attendees": attendees,
+        },
+    )
+    session.add(routed_item)
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([routed_item])
+
+    event = session.query(CalendarEvent).one()
+    attendee_rows = session.scalars(
+        select(CalendarEventAttendee).where(CalendarEventAttendee.event_id == event.id)
+    ).all()
+    assert session.query(Contact).count() == 1
+    assert len(attendee_rows) == 13
+    assert sum(row.contact_id is not None for row in attendee_rows) == 1
+    assert all(row.metadata_["contact_relevance"] == "roster_only" for row in attendee_rows)
+    assert all(row.metadata_["counts_as_interaction"] is False for row in attendee_rows)
+    assert session.query(ContactInteraction).count() == 0
+    assert session.query(ContactDomainNote).count() == 0
+    assert known.source_refs == [{"type": "gmail_message", "id": "known"}]
+
+
 def test_routed_memory_service_enriches_event_fields_from_messy_text(
     session: Session,
     tmp_path: Path,
