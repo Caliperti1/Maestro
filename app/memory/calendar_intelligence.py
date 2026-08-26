@@ -25,6 +25,7 @@ from app.db.models import (
     OrganizationIdentifier,
     Todo,
 )
+from app.memory.event_work_links import EventWorkLinkService
 
 
 class CalendarIntelligenceService:
@@ -231,6 +232,7 @@ class CalendarIntelligenceService:
                 {"id": str(entity.id), "name": entity.name, "role": link.role}
                 for link, entity in organization_rows
             ],
+            "work_links": EventWorkLinkService(self.session).for_event(event.id),
             "conflicts": self.conflicts(event),
             "supporting_refs": event.supporting_refs,
             "source_refs": event.source_refs,

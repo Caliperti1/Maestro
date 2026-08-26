@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import CalendarEvent, Domain, RoutedItem
 from app.db.seed import seed_default_domains
+from app.maestro.calendar_sync import stage_google_calendar_event
 from app.memory.routed_service import RoutedMemoryService
 
 
@@ -69,3 +70,31 @@ def test_provider_calendar_changes_update_one_canonical_event(session: Session) 
     assert events[0].start_at.strftime("%Y-%m-%dT%H:%M") == "2026-08-24T14:30"
     assert events[0].status == "cancelled"
     assert events[0].external_etag == "v2"
+
+
+def test_cancelled_provider_tombstone_does_not_create_visible_event(session: Session) -> None:
+    seed_default_domains(session)
+    domain = session.scalar(select(Domain).where(Domain.key == "praxis"))
+    assert domain is not None
+
+    result = stage_google_calendar_event(
+        session,
+        domain=domain,
+        event_payload={
+            "calendar_id": "primary",
+            "event_id": "deleted-series_20260826T160000Z",
+            "event_version": "v1",
+            "google_event": {
+                "id": "deleted-series_20260826T160000Z",
+                "status": "cancelled",
+                "etag": "v1",
+                "summary": "CANCELLED",
+                "start": {"dateTime": "2026-08-26T12:00:00-04:00"},
+                "end": {"dateTime": "2026-08-26T13:00:00-04:00"},
+            },
+        },
+    )
+
+    assert result == {"status": "ignored_tombstone", "event_id": None}
+    assert session.query(CalendarEvent).count() == 0
+    assert session.query(RoutedItem).count() == 0

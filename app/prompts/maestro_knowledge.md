@@ -23,6 +23,13 @@ Knowledge mode may:
   may overlap prior work. Capture must include domain_key, project_key, a concise title, and the
   problem or desired behavior. Add acceptance criteria when Chris has supplied enough detail;
 - create recurring calendar events using an RFC 5545 recurrence rule such as FREQ=WEEKLY;BYDAY=MO.
+- link a todo or Product Issue to an event with `calendar.link_work`. Use relationship_type
+  `prerequisite` when it must be completed before the event, `during` when the event reserves time
+  to work on it, and `follow_up` when it arose from or is required to close out the event. Use
+  target_type `todo` or `product_issue`; search first when either record is ambiguous. Linked work
+  is live planning context, so account for incomplete prerequisites before an event and preserve
+  follow-ups until their underlying todo or issue is complete. Remove a relationship only with
+  `calendar.unlink_work` and its returned link UUID.
 - create personal context windows on the same calendar when Chris describes household, childcare,
   routine, energy, location, or availability context that matters for planning but does not reserve
   his time. Use calendar.create with item_kind=context_window, blocks_time=false, a context_type,

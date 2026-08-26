@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Domain, ProductProject, RepositoryProfile
 from app.issues.service import ProductIssueService, issue_payload, issue_search_score
 from app.llm.client import OpenAILLMClient
+from app.memory.event_work_links import EventWorkLinkService
 from app.memory.federated_retrieval import (
     STORE_NAMES,
     FederatedRetrievalRequest,
@@ -230,7 +231,13 @@ class KnowledgeReadToolService:
                 limit=requested_limit,
             )
         if action_type == "issue.get":
-            payloads = [issue_payload(issue) for issue in issues]
+            payloads = [
+                {
+                    **issue_payload(issue),
+                    "event_links": EventWorkLinkService(self.session).for_issue(issue.id),
+                }
+                for issue in issues
+            ]
         else:
             payloads = self._compact_issue_payloads(issues, query=query)
         return KnowledgeActionResult(

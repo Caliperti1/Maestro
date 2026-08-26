@@ -140,6 +140,17 @@ def stage_google_calendar_event(
     )
     if existing is not None and existing.external_etag == metadata.get("external_etag"):
         return {"status": "unchanged", "event_id": str(existing.id)}
+    if route["status"] == "cancelled":
+        if existing is None:
+            return {"status": "ignored_tombstone", "event_id": None}
+        existing.status = "cancelled"
+        existing.external_etag = metadata.get("external_etag")
+        existing.last_synced_at = datetime.now(UTC)
+        existing.sync_status = "synced"
+        existing.source_refs = [*(existing.source_refs or []), *route["source_refs"]]
+        existing.metadata_ = {**(existing.metadata_ or {}), **metadata}
+        session.commit()
+        return {"status": "updated", "event_id": str(existing.id)}
 
     item = RoutedItem(
         domain_id=domain.id,

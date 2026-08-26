@@ -80,6 +80,7 @@ import type {
   PromptPackage,
   FederatedRetrievedDocument,
   RoutedEvent,
+  EventWorkLink,
   RoutedContact,
   RoutedEntity,
   RoutedItem,
@@ -964,6 +965,11 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const [draftOrganizations, setDraftOrganizations] = useState<RoutedEvent["organizations"]>([]);
   const [contactOptions, setContactOptions] = useState<RoutedContact[]>([]);
   const [organizationOptions, setOrganizationOptions] = useState<RoutedEntity[]>([]);
+  const [todoOptions, setTodoOptions] = useState<RoutedTodo[]>([]);
+  const [issueOptions, setIssueOptions] = useState<ProductIssue[]>([]);
+  const [workTargetType, setWorkTargetType] = useState<EventWorkLink["target_type"]>("todo");
+  const [workTargetId, setWorkTargetId] = useState("");
+  const [workRelationship, setWorkRelationship] = useState<EventWorkLink["relationship_type"]>("prerequisite");
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [busy, setBusy] = useState(false);
   const [contactQuery, setContactQuery] = useState("");
@@ -1089,10 +1095,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     Promise.all([
       apiJson<{ contacts: RoutedContact[] }>("/memory/routed-objects/contacts?limit=500"),
       apiJson<{ entities: RoutedEntity[] }>("/memory/routed-objects/entities?limit=500"),
+      apiJson<{ todos: RoutedTodo[] }>("/memory/routed-objects/todos?limit=500"),
+      apiJson<{ issues: ProductIssue[] }>("/issues?status=open&limit=250"),
     ])
-      .then(([contacts, organizations]) => {
+      .then(([contacts, organizations, todos, issues]) => {
         setContactOptions(contacts.contacts);
         setOrganizationOptions(organizations.entities);
+        setTodoOptions(todos.todos.filter((todo) => todo.status !== "archived"));
+        setIssueOptions(issues.issues);
       })
       .catch(() => undefined);
   }, [surface]);
@@ -1303,6 +1313,91 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     ]);
   };
 
+  const addEventWorkLink = async (eventItem: RoutedEvent) => {
+    if (!workTargetId) return;
+    setBusy(true);
+    try {
+      await apiJson(`/memory/routed-objects/events/${eventItem.id}/work-links`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_type: workTargetType,
+          target_id: workTargetId,
+          relationship_type: workRelationship,
+        }),
+      });
+      setWorkTargetId("");
+      setStatusMessage("Linked work added to the event.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Unable to link work.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeEventWorkLink = async (eventItem: RoutedEvent, linkId: string) => {
+    setBusy(true);
+    try {
+      await apiJson(`/memory/routed-objects/events/${eventItem.id}/work-links/${linkId}`, {
+        method: "DELETE",
+      });
+      setStatusMessage("Linked work removed.");
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Unable to remove linked work.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const eventWorkEditor = (eventItem: RoutedEvent) => {
+    const options = workTargetType === "todo" ? todoOptions : issueOptions;
+    const linkedIds = new Set(eventItem.work_links.map((link) => link.target_id));
+    return <section className="calendar-link-editor event-work-editor">
+      <h4>Linked work</h4>
+      <div className="event-work-controls">
+        <select value={workRelationship} onChange={(event) => setWorkRelationship(event.target.value as EventWorkLink["relationship_type"])} aria-label="Work relationship">
+          <option value="prerequisite">Complete before event</option>
+          <option value="during">Work during event</option>
+          <option value="follow_up">Follow up after event</option>
+        </select>
+        <select value={workTargetType} onChange={(event) => { setWorkTargetType(event.target.value as EventWorkLink["target_type"]); setWorkTargetId(""); }} aria-label="Work type">
+          <option value="todo">To do</option>
+          <option value="product_issue">Product issue</option>
+        </select>
+        <select value={workTargetId} onChange={(event) => setWorkTargetId(event.target.value)} aria-label="Work item">
+          <option value="">Select work</option>
+          {options.filter((option) => !linkedIds.has(option.id)).map((option) => (
+            <option key={option.id} value={option.id}>{option.title}</option>
+          ))}
+        </select>
+        <button type="button" onClick={() => addEventWorkLink(eventItem)} disabled={!workTargetId || busy} title="Link work to event"><Plus size={15} /> Add</button>
+      </div>
+      <div className="event-work-list">
+        {eventItem.work_links.map((link) => (
+          <div className={`event-work-row ${link.relationship_type}`} key={link.id}>
+            <span><strong>{link.title}</strong><small>{link.target_type === "todo" ? "To do" : "Product issue"} / {link.relationship_type.replace("_", " ")} / {link.status}</small></span>
+            <button className="icon-button" type="button" onClick={() => removeEventWorkLink(eventItem, link.id)} disabled={busy} title={`Unlink ${link.title}`}><X size={14} /></button>
+          </div>
+        ))}
+        {eventItem.work_links.length === 0 && <p className="empty-state compact">No work linked to this event.</p>}
+      </div>
+    </section>;
+  };
+
+  const eventReferences = (links: RoutedTodo["event_links"]) => links.length > 0 && (
+    <section className="contact-intelligence-section event-reference-list">
+      <h4>Calendar links</h4>
+      {links.map((link) => (
+        <div className="contact-evidence-row" key={link.id}>
+          <strong>{link.event_title}</strong>
+          <span>{link.relationship_type.replace("_", " ")} / {formatDateTime(link.start_at)}</span>
+        </div>
+      ))}
+    </section>
+  );
+
   const archiveSelected = async () => {
     if (!selectedItem) return;
     const objectType =
@@ -1417,6 +1512,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           <label>Scheduled<input type="datetime-local" value={draft.scheduled_start_at ?? ""} onChange={(event) => updateDraft("scheduled_start_at", event.target.value)} /></label>
         </div>
         <label className="toggle-row"><input type="checkbox" checked={draft.agent_task === "true"} onChange={(event) => updateDraft("agent_task", event.target.checked ? "true" : "false")} />Agent task</label>
+        {eventReferences(item.event_links)}
       </>}
       {"email" in item && <>
         <label>Name<input value={draft.name ?? ""} onChange={(event) => updateDraft("name", event.target.value)} /></label>
@@ -1436,6 +1532,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           <label>Ends<input type="datetime-local" value={draft.end_at ?? ""} onChange={(event) => updateDraft("end_at", event.target.value)} /></label>
         </div>
         <label>Summary<textarea value={draft.summary ?? ""} onChange={(event) => updateDraft("summary", event.target.value)} /></label>
+        {eventWorkEditor(item)}
       </>}
       <div className="routed-detail-actions">
         <button className="planner-action" type="button" onClick={saveSelected} disabled={busy}>Save</button>
@@ -1854,6 +1951,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     ))}
                   </div>
                 </section>}
+                {selectedItem && "attendees" in selectedItem && draft.item_kind !== "context_window" && eventWorkEditor(selectedItem)}
                 {draft.item_kind !== "context_window" && <section className="calendar-link-editor">
                   <h4>Organizations</h4>
                   <select defaultValue="" onChange={(event) => { addCalendarOrganization(event.target.value); event.target.value = ""; }}>
@@ -1931,6 +2029,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     {selectedItem.agent_task_error && <span>{selectedItem.agent_task_error}</span>}
                   </div>
                 )}
+                {selectedItem && "todo_type" in selectedItem && eventReferences(selectedItem.event_links)}
                 <div className="two-column-fields">
                   <label>
                     Owner type
@@ -2577,6 +2676,13 @@ function IssuesWorkspace() {
         <label>Estimate (minutes)<input type="number" min="5" value={draft.estimated_minutes ?? ""} onChange={(event) => setDraft((current) => ({ ...current, estimated_minutes: event.target.value ? Number(event.target.value) : null }))} /></label>
       </div>
       <label className="checkbox-row"><input type="checkbox" checked={Boolean(draft.agent_task)} onChange={(event) => setDraft((current) => ({ ...current, agent_task: event.target.checked }))} /> Agent task</label>
+      {selected.event_links.length > 0 && <section className="contact-intelligence-section event-reference-list">
+        <h4>Calendar links</h4>
+        {selected.event_links.map((link) => <div className="contact-evidence-row" key={link.id}>
+          <strong>{link.event_title}</strong>
+          <span>{link.relationship_type.replace("_", " ")} / {formatDateTime(link.start_at)}</span>
+        </div>)}
+      </section>}
       <div className="routed-detail-actions"><button className="planner-action" type="button" onClick={save} disabled={busy}>Save issue</button>{selected.repository_id && <button type="button" onClick={syncRepository} disabled={busy}><RefreshCw size={15} /> Sync GitHub</button>}</div>
       {selected.relations.length > 0 && <details><summary>Issue relationships ({selected.relations.length})</summary><pre>{JSON.stringify(selected.relations, null, 2)}</pre></details>}
     </div>

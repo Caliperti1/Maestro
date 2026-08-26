@@ -2321,6 +2321,65 @@ h4 {
   font-weight: 800;
 }
 
+.event-work-controls {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(110px, 0.65fr) minmax(170px, 1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.event-work-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.event-work-list {
+  display: grid;
+  gap: 6px;
+}
+
+.event-work-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 8px 8px 10px;
+  background: #f7f9fc;
+  border-left: 3px solid var(--color-accent);
+}
+
+.event-work-row.during {
+  border-left-color: #16805a;
+}
+
+.event-work-row.follow_up {
+  border-left-color: #6f52a2;
+}
+
+.event-work-row span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.event-work-row strong,
+.event-work-row small {
+  overflow-wrap: anywhere;
+}
+
+.event-work-row small {
+  color: var(--color-muted);
+  text-transform: capitalize;
+}
+
+.empty-state.compact {
+  margin: 2px 0;
+  padding: 8px 0;
+}
+
 .calendar-chip.organization {
   color: #554189;
   background: #f3efff;
@@ -3084,6 +3143,14 @@ h4 {
 }
 
 @media (max-width: 640px) {
+  .event-work-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .event-work-controls select:nth-of-type(3) {
+    grid-column: 1 / -1;
+  }
+
   .calendar-shell {
     min-height: 560px;
     padding: 8px;

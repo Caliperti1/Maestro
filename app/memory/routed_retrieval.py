@@ -102,10 +102,27 @@ class RoutedRetrievalService:
                     lines.append(f"- {item.get('name')}: {context}")
                 elif label == "events":
                     when = item.get("start_at") or "unscheduled"
-                    lines.append(f"- {item.get('title')} ({when}): {item.get('summary') or ''}")
+                    work = "; ".join(
+                        f"{link.get('relationship_type')}: {link.get('title')} "
+                        f"[{link.get('status')}]"
+                        for link in item.get("work_links") or []
+                    )
+                    suffix = f"; linked work: {work}" if work else ""
+                    lines.append(
+                        f"- {item.get('title')} ({when}): {item.get('summary') or ''}{suffix}"
+                    )
                 elif label == "todos":
                     due = item.get("due_at") or "no due date"
-                    lines.append(f"- {item.get('title')} [{item.get('status')}, {due}]: {item.get('description')}")
+                    events = "; ".join(
+                        f"{link.get('relationship_type')} for {link.get('event_title')} "
+                        f"({link.get('start_at')})"
+                        for link in item.get("event_links") or []
+                    )
+                    suffix = f"; calendar links: {events}" if events else ""
+                    lines.append(
+                        f"- {item.get('title')} [{item.get('status')}, {due}]: "
+                        f"{item.get('description')}{suffix}"
+                    )
                 else:
                     text = item.get("content") or item.get("decision") or item.get("summary") or ""
                     lines.append(f"- {item.get('title') or item.get('name')}: {text}")

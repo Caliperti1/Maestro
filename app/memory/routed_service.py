@@ -46,6 +46,7 @@ from app.memory.calendar_intelligence import (
 )
 from app.memory.calendar_recurrence import event_occurs_on, query_calendar_date
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
+from app.memory.event_work_links import EventWorkLinkService
 from app.memory.organization_intelligence import (
     OrganizationEmbeddingService,
     OrganizationIntelligenceService,
@@ -1218,6 +1219,7 @@ class RoutedMemoryService:
             "blocks_time": item.blocks_time,
             "location": item.location,
             "status": item.status,
+            "work_links": EventWorkLinkService(self.session).for_event(item.id),
             "metadata": item.metadata_,
         }
 
@@ -1237,6 +1239,7 @@ class RoutedMemoryService:
             "agent_task_status": item.agent_task_status,
             "priority": item.priority,
             "status": item.status,
+            "event_links": EventWorkLinkService(self.session).for_todo(item.id),
             "metadata": item.metadata_,
         }
 

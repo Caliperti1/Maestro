@@ -8,6 +8,7 @@ from app.api import maestro as maestro_api
 from app.api.main import create_app
 from app.db.models import (
     CalendarEvent,
+    CalendarEventWorkLink,
     Contact,
     Conversation,
     Domain,
@@ -596,6 +597,66 @@ def test_knowledge_mode_can_search_update_and_verify_in_one_turn(session: Sessio
     assert "Immediate action results: round 1" in planner.contexts[1]
     assert "Room 204" in planner.contexts[3]
     assert session.scalar(select(func.count()).select_from(Task)) == 0
+
+
+def test_knowledge_mode_links_todo_to_event_as_prerequisite(session: Session) -> None:
+    seed_default_domains(session)
+    praxis = next(domain for domain in session.query(Domain).all() if domain.key == "praxis")
+    event = CalendarEvent(
+        domain_id=praxis.id,
+        title="Partner review",
+        summary="Review the partner plan.",
+        status="scheduled",
+        attendees=[],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    todo = Todo(
+        domain_id=praxis.id,
+        title="Prepare partner plan",
+        description="Prepare the partner plan.",
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([event, todo])
+    session.commit()
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am linking that preparation to the review.",
+                actions=[
+                    {
+                        "type": "calendar.link_work",
+                        "arguments": {
+                            "event_target": str(event.id),
+                            "work_target": str(todo.id),
+                            "target_type": "todo",
+                            "relationship_type": "prerequisite",
+                            "domain_key": "praxis",
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I linked the preparation task as a prerequisite to the partner review.",
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Make preparing the partner plan a prerequisite for the partner review."
+    )
+
+    link = session.scalar(select(CalendarEventWorkLink))
+    assert link is not None
+    assert link.event_id == event.id
+    assert link.todo_id == todo.id
+    assert link.relationship_type == "prerequisite"
+    assert response.action_results[0].status == "completed"
 
 
 def test_knowledge_mode_can_search_web_then_answer_without_workflow(session: Session) -> None:
