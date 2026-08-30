@@ -13,6 +13,9 @@
 - [009 Explicit Knowledge And Workflow Modes](009_explicit_knowledge_and_workflow_modes.md)
 - [010 Calendar Context Windows](010_calendar_context_windows.md)
 - [011 Perti And Calendar Monitors](011_perti_and_calendar_monitors.md)
+- [012 Routed Tasks And Identity Hygiene](012_routed_tasks_and_identity_hygiene.md)
+- [013 Product Issue Intelligence](013_product_issue_intelligence.md)
+- [014 On-Demand Workflows](014_on_demand_workflows.md)
 
 This directory tracks end-to-end behavioral tests that are not fully automated yet. Use these
 matrices while manually testing Maestro through the UI and backend logs.
@@ -43,8 +46,8 @@ remove it rather than carrying UI/code bloat forward.
 Current operating-model checks:
 
 - Main chat remains the primary place Chris talks to Maestro.
-- Main chat defaults to Knowledge mode; subordinate workflow planning only begins after Chris selects
-  Build workflow.
+- Main chat defaults to Knowledge mode. It may invoke an existing active on-demand playbook;
+  designing new subordinate work begins only after Chris selects Build workflow.
 - Active/durable workflows are inspected from the Workflows surface.
 - Completed workflow history is inspected from Run Log.
 - Human/agent-readable workflow output is inspected from Reports.

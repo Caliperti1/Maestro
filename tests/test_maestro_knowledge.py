@@ -1,3 +1,4 @@
+import uuid
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -159,6 +160,75 @@ def test_knowledge_mode_never_creates_a_workflow_task(session: Session, monkeypa
     assert payload["workflow_suggestion"]
     assert payload["knowledge_iterations"] == 2
     assert session.scalar(select(func.count()).select_from(Task)) == 0
+
+
+def test_knowledge_mode_invokes_existing_on_demand_workflow_once(session: Session) -> None:
+    seed_default_domains(session)
+    definition = WorkflowDefinition(
+        key="daily-standup",
+        name="Daily Standup",
+        trigger_type="manual",
+        trigger_config={
+            "invocation_aliases": ["prepare my daily standup"],
+            "parameter_schema": {
+                "type": "object",
+                "properties": {"focus": {"type": "string"}},
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+        workflow_spec={"queue_items": []},
+        is_active=True,
+    )
+    session.add(definition)
+    session.commit()
+    message_id = uuid.uuid4()
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I found the standup playbook.",
+                actions=[
+                    {
+                        "type": "workflow.get",
+                        "arguments": {"query": "daily standup", "trigger_type": "manual"},
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I am starting your daily standup in the background.",
+                actions=[
+                    {
+                        "type": "workflow.run",
+                        "arguments": {
+                            "target": "daily-standup",
+                            "parameters": {"focus": "Praxis partner follow-through"},
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message=(
+                    "I started your Daily Standup in the background with extra attention on "
+                    "Praxis partner follow-through. I will bring any blockers or results back here."
+                ),
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Prepare my daily standup, focused on Praxis partner follow-through.",
+        message_id=message_id,
+    )
+
+    runs = session.scalars(select(WorkflowRun)).all()
+    assert len(runs) == 1
+    assert runs[0].source_type == "knowledge_on_demand"
+    assert runs[0].input_payload["invocation"]["parameters"] == {
+        "focus": "Praxis partner follow-through"
+    }
+    assert response.action_results[-1].action_type == "workflow.run"
+    assert "background" in response.message
 
 
 def test_knowledge_reply_resumes_waiting_agent_task_instead_of_answering_directly(

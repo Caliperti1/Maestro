@@ -74,6 +74,12 @@ export function unassignedDefinitionItemCount(definition: SchedulerDefinition) {
 }
 
 export function triggerSummary(triggerType: string, triggerConfig: Record<string, unknown>) {
+  if (triggerType === "manual") {
+    const aliases = Array.isArray(triggerConfig.invocation_aliases)
+      ? triggerConfig.invocation_aliases.map(String).filter(Boolean)
+      : [];
+    return aliases[0] ? `On demand: “${aliases[0]}”` : "On demand";
+  }
   if (triggerType === "event") {
     return `When ${String(triggerConfig.event_type ?? "event arrives")}`;
   }

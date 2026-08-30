@@ -1,5 +1,8 @@
 # Behavior Test 009: Explicit Knowledge And Workflow Modes
 
+> Note: Knowledge mode may now invoke an existing active on-demand playbook. It still may not
+> design a new workflow or directly delegate ad hoc work. See Behavior Test 014.
+
 ## Purpose
 
 Prove that Maestro's main channel has a dependable operating boundary: Knowledge mode can reason

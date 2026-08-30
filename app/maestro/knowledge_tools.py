@@ -9,9 +9,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Domain, ProductProject, RepositoryProfile
+from app.db.models import Domain, ProductProject, RepositoryProfile, WorkflowDefinition
 from app.issues.service import ProductIssueService, issue_payload, issue_search_score
 from app.llm.client import OpenAILLMClient
+from app.maestro.scheduler import SchedulerService
 from app.memory.event_work_links import EventWorkLinkService
 from app.memory.federated_retrieval import (
     STORE_NAMES,
@@ -20,7 +21,14 @@ from app.memory.federated_retrieval import (
 )
 from app.memory.routed_retrieval import RoutedRetrievalService
 
-READ_ACTIONS = {"context.search", "web.search", "issue.search", "issue.get"}
+READ_ACTIONS = {
+    "context.search",
+    "web.search",
+    "issue.search",
+    "issue.get",
+    "workflow.search",
+    "workflow.get",
+}
 ROUTED_CONTEXT_STORES = {"contacts", "organizations", "events", "todos", "decisions"}
 
 
@@ -63,7 +71,62 @@ class KnowledgeReadToolService:
             return self._search_web(arguments)
         if action_type in {"issue.search", "issue.get"}:
             return self._search_issues(action_type, arguments)
+        if action_type in {"workflow.search", "workflow.get"}:
+            return self._search_workflows(action_type, arguments)
         raise ValueError(f"Unsupported Knowledge read action: {action_type}")
+
+    def _search_workflows(
+        self,
+        action_type: str,
+        arguments: dict[str, Any],
+    ) -> KnowledgeActionResult:
+        query = str(
+            arguments.get("query")
+            or arguments.get("query_text")
+            or arguments.get("target")
+            or arguments.get("id")
+            or ""
+        ).strip()
+        if not query:
+            raise ValueError("A workflow search needs a name, key, ID, or focused query.")
+        include_inactive = bool(arguments.get("include_inactive", False))
+        trigger_type = str(arguments.get("trigger_type") or "").strip() or None
+        definitions = SchedulerService(self.session).list_definitions(
+            active_only=not include_inactive
+        )
+        if trigger_type:
+            definitions = [item for item in definitions if item.trigger_type == trigger_type]
+        ranked = sorted(
+            (
+                (_workflow_search_score(item, query), item)
+                for item in definitions
+            ),
+            key=lambda entry: (entry[0], entry[1].updated_at),
+            reverse=True,
+        )
+        matches = [item for score, item in ranked if score > 0]
+        if action_type == "workflow.get":
+            exact = [
+                item
+                for item in matches
+                if str(item.id) == query
+                or item.key.lower() == query.lower()
+                or item.name.lower() == query.lower()
+            ]
+            matches = exact or matches[:1]
+        else:
+            limit = _bounded_int(arguments.get("max_items"), default=6, minimum=1, maximum=10)
+            matches = matches[:limit]
+        service = SchedulerService(self.session)
+        payloads = [service.workflow_definition_payload(item) for item in matches]
+        return KnowledgeActionResult(
+            action_type,
+            "completed",
+            f"Found {len(payloads)} matching workflow{'s' if len(payloads) != 1 else ''}.",
+            "workflow",
+            payloads[0]["id"] if len(payloads) == 1 else None,
+            data={"query": query, "matches": payloads},
+        )
 
     def _search_context(self, arguments: dict[str, Any]) -> KnowledgeActionResult:
         query_text = str(
@@ -419,6 +482,29 @@ def _issue_summary(issue) -> str:
         text = "; ".join(criteria[:3])
     compact = " ".join(text.split())
     return compact if len(compact) <= 280 else compact[:277].rstrip() + "..."
+
+
+def _workflow_search_score(definition: WorkflowDefinition, query: str) -> float:
+    needle = " ".join(query.lower().replace("_", " ").replace("-", " ").split())
+    if not needle:
+        return 0.0
+    aliases = [
+        str(value)
+        for value in (definition.trigger_config or {}).get("invocation_aliases", [])
+        if str(value).strip()
+    ]
+    fields = [str(definition.id), definition.key, definition.name, definition.description or "", *aliases]
+    normalized = [" ".join(value.lower().replace("_", " ").replace("-", " ").split()) for value in fields]
+    if needle in normalized:
+        return 10.0
+    if any(needle in value for value in normalized):
+        return 6.0
+    query_terms = set(needle.split())
+    best_overlap = max(
+        (len(query_terms & set(value.split())) / max(1, len(query_terms)) for value in normalized),
+        default=0.0,
+    )
+    return best_overlap * 4.0
 
 
 def _public_store_name(value: str) -> str:

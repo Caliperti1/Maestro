@@ -18,6 +18,60 @@ from app.db.models import (
 )
 
 
+def _source_label(source_type: str) -> str:
+    return {
+        "knowledge_on_demand": "On-demand",
+        "event": "Triggered",
+        "replay": "Replayed",
+        "scheduled": "Scheduled",
+    }.get(source_type, "Queued")
+
+
+def _validate_workflow_parameters(
+    trigger_config: dict[str, Any], parameters: dict[str, Any]
+) -> dict[str, Any]:
+    schema = trigger_config.get("parameter_schema")
+    if not isinstance(schema, dict):
+        return dict(parameters)
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    resolved = {
+        key: property_schema.get("default")
+        for key, property_schema in properties.items()
+        if isinstance(property_schema, dict) and "default" in property_schema
+    }
+    resolved.update(parameters)
+    if schema.get("additionalProperties") is False:
+        unknown = set(resolved) - set(properties)
+        if unknown:
+            raise ValueError(
+                "Unknown workflow parameter(s): " + ", ".join(sorted(unknown)) + "."
+            )
+    missing = [
+        str(key)
+        for key in schema.get("required") or []
+        if str(key) not in resolved or resolved[str(key)] in (None, "")
+    ]
+    if missing:
+        raise ValueError("This workflow needs: " + ", ".join(missing) + ".")
+    for key, value in resolved.items():
+        property_schema = properties.get(key)
+        if not isinstance(property_schema, dict) or value is None:
+            continue
+        expected = property_schema.get("type")
+        valid = (
+            (expected == "string" and isinstance(value, str))
+            or (expected == "boolean" and isinstance(value, bool))
+            or (expected == "integer" and isinstance(value, int) and not isinstance(value, bool))
+            or (expected == "number" and isinstance(value, (int, float)) and not isinstance(value, bool))
+            or (expected == "array" and isinstance(value, list))
+            or (expected == "object" and isinstance(value, dict))
+            or expected in (None, "")
+        )
+        if not valid:
+            raise ValueError(f"Workflow parameter '{key}' must be {expected}.")
+    return resolved
+
+
 class SchedulerService:
     def __init__(self, session: Session):
         self.session = session
@@ -236,6 +290,8 @@ class SchedulerService:
         source_type: str = "scheduled",
         idempotency_suffix: str | None = None,
         event_payload: dict[str, Any] | None = None,
+        conversation_id: uuid.UUID | None = None,
+        invocation_payload: dict[str, Any] | None = None,
     ) -> WorkflowRun:
         scheduled_for = scheduled_for or datetime.now(UTC)
         idempotency_key = (
@@ -252,6 +308,7 @@ class SchedulerService:
         queue_items = spec.get("queue_items") if isinstance(spec.get("queue_items"), list) else []
         run = WorkflowRun(
             workflow_definition_id=definition.id,
+            conversation_id=conversation_id,
             domain_id=definition.domain_id,
             source_type=source_type,
             status="queued",
@@ -263,6 +320,7 @@ class SchedulerService:
                 "summary": definition.name,
                 "workflow_spec": spec,
                 "event": event_payload,
+                "invocation": invocation_payload,
             },
             scheduled_for=scheduled_for,
         )
@@ -272,13 +330,48 @@ class SchedulerService:
         self.record_event(
             run,
             event_type="workflow_enqueued",
-            message=f"Scheduled workflow `{definition.key}` was enqueued.",
+            message=f"{_source_label(source_type)} workflow `{definition.key}` was enqueued.",
             payload={"queue_item_count": len(queue_items)},
             commit=False,
         )
         self.session.commit()
         self.session.refresh(run)
         return run
+
+    def enqueue_on_demand_workflow(
+        self,
+        definition: WorkflowDefinition,
+        *,
+        parameters: dict[str, Any] | None = None,
+        invocation_text: str | None = None,
+        conversation_id: uuid.UUID | None = None,
+        message_id: uuid.UUID | None = None,
+        now: datetime | None = None,
+    ) -> WorkflowRun:
+        if definition.trigger_type != "manual":
+            raise ValueError("Only an on-demand workflow can be started from Knowledge mode.")
+        if not definition.is_active:
+            raise ValueError(f"Workflow '{definition.name}' is paused.")
+        resolved_parameters = _validate_workflow_parameters(
+            definition.trigger_config or {}, parameters or {}
+        )
+        now = now or datetime.now(UTC)
+        invocation_id = str(message_id or uuid.uuid4())
+        return self.enqueue_definition_run(
+            definition,
+            scheduled_for=now,
+            source_type="knowledge_on_demand",
+            idempotency_suffix=f"invocation:{invocation_id}",
+            conversation_id=conversation_id,
+            invocation_payload={
+                "message_id": str(message_id) if message_id else None,
+                "text": invocation_text,
+                "parameters": resolved_parameters,
+                "workflow_version": str(
+                    (definition.trigger_config or {}).get("workflow_version") or "1"
+                ),
+            },
+        )
 
     def replay_run(self, run_id: uuid.UUID) -> WorkflowRun:
         original = self.session.get(WorkflowRun, run_id)
