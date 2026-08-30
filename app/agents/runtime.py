@@ -4121,6 +4121,35 @@ def _scoped_skill_manifest(
 
 _SEED_SKILLS = [
     {
+        "key": "daily_standup",
+        "name": "Daily Standup",
+        "category": "workflow",
+        "description": "Prepare domain input or synthesize the cross-domain daily standup.",
+        "domain_key": None,
+        "instruction": """## Purpose
+Build a grounded daily operating picture for Chris from current canonical context.
+
+## Domain Input Procedure
+1. Retrieve current domain context for today and the next seven days: open todos, calendar events,
+   active Product Issues when applicable, recent reports, unresolved decisions, and blocked work.
+2. Separate facts from recommendations. Do not repeat stale completed work as current.
+3. Identify today's commitments, deadlines, prerequisites, conflicts, and the few highest-value
+   actions. Include source references or record identifiers when available.
+4. Report meaningful gaps as explicit unknowns; do not create routed items during standup review.
+
+## Synthesis Procedure
+1. Use the completed domain reports supplied as dependency context; do not invent absent domains.
+2. Reconcile timing conflicts and cross-domain dependencies.
+3. Produce one concise briefing with: Today's Schedule, Priority Outcomes, Domain Updates,
+   Conflicts/Risks, Decisions or Input Needed, and Recommended Plan.
+4. Keep proposed changes conversational until Chris asks Maestro to update canonical records.
+
+## Output Contract
+Write a human-readable report. Lead with what Chris needs to know or decide today, not a transcript
+of agent activity. Preserve links and identifiers needed to inspect supporting records.""",
+        "metadata": {"seeded_by": "maestro"},
+    },
+    {
         "key": "email_triage",
         "name": "Email Triage",
         "category": "workflow",
@@ -4298,6 +4327,7 @@ _SEED_AGENTS = [
         "model_profile": "openrouter:openai/gpt-5.6-luna",
         "tool_permissions": _connected_domain_tool_permissions("Personal"),
         "skill_permissions": {
+            "daily_standup": {"permission": "use"},
             "email_triage": {"permission": "use"}, "contact_manager": {"permission": "use"},
             "to_do_manager": {"permission": "use"}, "calendar_manager": {"permission": "use"},
             "organization_manager": {"permission": "use"},
@@ -4314,6 +4344,7 @@ _SEED_AGENTS = [
         "model_profile": "openrouter:openai/gpt-5.6-luna",
         "tool_permissions": _connected_domain_tool_permissions("Perti Laboratories"),
         "skill_permissions": {
+            "daily_standup": {"permission": "use"},
             "email_triage": {"permission": "use"}, "contact_manager": {"permission": "use"},
             "to_do_manager": {"permission": "use"}, "calendar_manager": {"permission": "use"},
             "organization_manager": {"permission": "use"},
@@ -4411,6 +4442,7 @@ _SEED_AGENTS = [
                 "description": "Read Praxis Gmail conversation threads.",
             },
         },
+        "skill_permissions": {"daily_standup": {"permission": "use"}},
     },
     {
         "domain_key": "praxis",
@@ -4518,6 +4550,41 @@ _SEED_AGENTS = [
             "calendar_manager": {"permission": "use"},
             "organization_manager": {"permission": "use"},
         },
+    },
+    {
+        "domain_key": "maestro-development",
+        "key": "maestro-briefing-agent",
+        "name": "Maestro Briefing Agent",
+        "agent_type": "domain_agent",
+        "role_summary": (
+            "Synthesizes completed domain reports into cross-domain briefings for Chris."
+        ),
+        "role_prompt": load_prompt("agents/maestro_briefing_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "openrouter:openai/gpt-5.6-terra",
+        "tool_permissions": {
+            "memory.context_bundle": {
+                "permission": "read",
+                "description": "Retrieve Maestro-level context for briefing synthesis.",
+            },
+            "reports.search": {
+                "permission": "read",
+                "description": "Search supporting workflow reports.",
+            },
+            "reports.get": {
+                "permission": "read",
+                "description": "Read supporting workflow reports.",
+            },
+            "artifact.stage_interaction": {
+                "permission": "write",
+                "description": "Stage completed briefing artifacts for memory curation.",
+            },
+            "llm.gateway": {
+                "permission": "use",
+                "description": "Use Maestro's shared LLM gateway.",
+            },
+        },
+        "skill_permissions": {"daily_standup": {"permission": "use"}},
     },
     {
         "domain_key": "maestro-development",

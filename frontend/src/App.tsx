@@ -3027,13 +3027,31 @@ export function App() {
     }
   }, []);
 
-  const installWorkflowTemplate = async (templateKey: string) => {
+  const installWorkflowTemplate = async (templateKey: string, isActive = false) => {
     await apiJson(`/scheduler/templates/${templateKey}/install`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ is_active: false }),
+      body: JSON.stringify({ is_active: isActive }),
     });
-    setSchedulerStatusMessage("Durable workflow was installed paused for review.");
+    setSchedulerStatusMessage(
+      isActive
+        ? "On-demand workflow was installed and activated."
+        : "Durable workflow was installed paused for review.",
+    );
+    await loadSchedulerDashboard();
+  };
+
+  const runOnDemandWorkflow = async (definitionId: string) => {
+    const response = await apiJson<{ run: SchedulerRun }>(
+      `/scheduler/definitions/${definitionId}/run`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    setSelectedSchedulerRun(response.run);
+    setSchedulerStatusMessage("On-demand workflow started in the background.");
     await loadSchedulerDashboard();
   };
 
@@ -4224,6 +4242,7 @@ export function App() {
             onResetCalendarDomain={resetCalendarTriggerDomain}
             onInstallTemplate={installWorkflowTemplate}
             onToggleDefinition={updateWorkflowDefinitionActivation}
+            onRunDefinition={runOnDemandWorkflow}
           />
         ) : activeSurface in routedSurfaceConfig ? (
           <RoutedObjectsWorkspace surface={activeSurface as RoutedObjectSurface} />
@@ -5010,6 +5029,7 @@ function WorkflowsWorkspace({
   onResetCalendarDomain,
   onInstallTemplate,
   onToggleDefinition,
+  onRunDefinition,
 }: {
   schedulerDashboard: SchedulerDashboard | null;
   schedulerWorkerStatus: SchedulerWorkerStatus | null;
@@ -5037,8 +5057,9 @@ function WorkflowsWorkspace({
   onPollCalendarTriggers: () => Promise<void>;
   onResetGmailDomain: (domainKey: string) => Promise<void>;
   onResetCalendarDomain: (domainKey: string) => Promise<void>;
-  onInstallTemplate: (templateKey: string) => Promise<void>;
+  onInstallTemplate: (templateKey: string, isActive?: boolean) => Promise<void>;
   onToggleDefinition: (definitionId: string, isActive: boolean) => Promise<void>;
+  onRunDefinition: (definitionId: string) => Promise<void>;
 }) {
   const [selectedQueueItemId, setSelectedQueueItemId] = useState<string | null>(null);
   const runs = schedulerDashboard?.runs ?? [];
@@ -5047,6 +5068,15 @@ function WorkflowsWorkspace({
     ["scheduled", "recurring"].includes(definition.trigger_type),
   );
   const triggerDefinitions = definitions.filter((definition) => definition.trigger_type === "event");
+  const onDemandDefinitions = definitions.filter(
+    (definition) => definition.trigger_type === "manual",
+  );
+  const availableOnDemandTemplates = workflowTemplates.filter(
+    (template) => template.trigger_type === "manual" && !template.installed,
+  );
+  const availableTriggerTemplates = workflowTemplates.filter(
+    (template) => template.trigger_type !== "manual" && !template.installed,
+  );
   const selectedToolActivity = Array.isArray(selectedSchedulerRun?.output_payload?.tool_activity)
     ? selectedSchedulerRun.output_payload.tool_activity as MaestroRun["tool_activity"]
     : [];
@@ -5136,6 +5166,81 @@ function WorkflowsWorkspace({
         </section>
         <section>
           <div className="section-title-row">
+            <h4>On-demand</h4>
+            <span className="count-badge">
+              {onDemandDefinitions.length + availableOnDemandTemplates.length}
+            </span>
+          </div>
+          {availableOnDemandTemplates.map((template) => (
+            <article className="workflow-summary-card compact-run-card" key={template.key}>
+              <span>available playbook</span>
+              <h4>{template.name}</h4>
+              <p>{template.description}</p>
+              <div className="preview-meta">
+                <span>{template.readiness.ready ? "ready" : "setup needed"}</span>
+                {!template.readiness.ready && <span>{template.readiness.missing.join("; ")}</span>}
+              </div>
+              <div className="scheduler-action-row compact-actions">
+                <button
+                  type="button"
+                  disabled={!template.readiness.ready}
+                  onClick={() => onInstallTemplate(template.key, true)}
+                >
+                  Install and activate
+                </button>
+              </div>
+            </article>
+          ))}
+          {onDemandDefinitions.map((definition) => {
+            const aliases = Array.isArray(definition.trigger_config.invocation_aliases)
+              ? definition.trigger_config.invocation_aliases.map(String)
+              : [];
+            return (
+              <article className="workflow-summary-card compact-run-card" key={definition.id}>
+                <button
+                  type="button"
+                  className="card-reset"
+                  onClick={() => onSelectDefinition(definition)}
+                >
+                  <span>On-demand playbook</span>
+                  <h4>{definition.name}</h4>
+                </button>
+                <div className="preview-meta">
+                  <span>{definition.is_active ? "active" : "paused"}</span>
+                  <span>{definition.fairness_group || definition.domain_key || "global"}</span>
+                  {aliases[0] && <span>Say: “{aliases[0]}”</span>}
+                </div>
+                <div className="scheduler-action-row compact-actions">
+                  <button type="button" onClick={() => onSelectDefinition(definition)}>
+                    Inspect
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!definition.is_active}
+                    onClick={() => onRunDefinition(definition.id)}
+                  >
+                    Run now
+                  </button>
+                  <label className="worker-toggle">
+                    Active
+                    <input
+                      type="checkbox"
+                      checked={definition.is_active}
+                      onChange={(event) =>
+                        onToggleDefinition(definition.id, event.target.checked)
+                      }
+                    />
+                  </label>
+                </div>
+              </article>
+            );
+          })}
+          {onDemandDefinitions.length === 0 && availableOnDemandTemplates.length === 0 && (
+            <p className="empty-state">No on-demand workflows yet.</p>
+          )}
+        </section>
+        <section>
+          <div className="section-title-row">
             <h4>Scheduled</h4>
             <span className="count-badge">{scheduledDefinitions.length}</span>
           </div>
@@ -5159,7 +5264,7 @@ function WorkflowsWorkspace({
             <h4>Durable triggers</h4>
             <span className="count-badge">{triggerDefinitions.length}</span>
           </div>
-          {workflowTemplates.filter((template) => !template.installed).map((template) => (
+          {availableTriggerTemplates.map((template) => (
             <article className="workflow-summary-card compact-run-card" key={template.key}>
               <span>available template</span>
               <h4>{template.name}</h4>
@@ -5566,9 +5671,34 @@ function WorkflowsWorkspace({
           </div>
           <div className="preview-meta">
             <span>{selectedSchedulerDefinition.is_active ? "active" : "paused"}</span>
+            <span>{triggerSummary(
+              selectedSchedulerDefinition.trigger_type,
+              selectedSchedulerDefinition.trigger_config,
+            )}</span>
             <span>{selectedSchedulerDefinition.workflow_spec?.shadow_mode === true ? "shadow mode" : "live mode"}</span>
             <span>{selectedDefinitionRuns.length} recent runs</span>
           </div>
+          {selectedSchedulerDefinition.description && (
+            <p>{selectedSchedulerDefinition.description}</p>
+          )}
+          {definitionQueueItems(selectedSchedulerDefinition).length > 0 && (
+            <div className="workflow-detail-grid">
+              {definitionQueueItems(selectedSchedulerDefinition).map((item, index) => (
+                <article className="mini-row" key={String(item.id ?? index)}>
+                  <span>
+                    Stage {String(item.stage_index ?? 1)} / {String(item.domain_key ?? "global")}
+                  </span>
+                  <p>{String(item.objective ?? "Workflow step")}</p>
+                  <div className="preview-meta">
+                    <span>{String(item.agent_key ?? "Unassigned")}</span>
+                    {Array.isArray(item.depends_on) && item.depends_on.length > 0 && (
+                      <span>Waits for {item.depends_on.map(String).join(", ")}</span>
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
           <div className="output-card-grid">
             {selectedDefinitionRuns.map((run) => (
               <article className="workflow-summary-card compact-run-card" key={run.id}>

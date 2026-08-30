@@ -24,7 +24,9 @@ chat responses toward persistent execution.
   local-only egress enforcement for sanitized USMA/L3 context.
 - Routed operational stores for contacts, events, todos, organizations, decisions, RFIs, and
   canonical product issues.
-- Scheduler and queue foundation for manual, recurring, and trigger-shaped workflows.
+- Scheduler and queue foundation for on-demand, recurring, and trigger-shaped workflows.
+- Approved on-demand playbooks callable directly from Knowledge chat or the Workflows UI, including
+  a parallel cross-domain Daily Standup with dependent Maestro synthesis.
 - Background scheduler worker that can be toggled from the UI.
 - Tool runtime with approval gates, domain credential resolution, and agent permissions.
 - GitHub, Gmail, Codex, and app reload tool foundations.
@@ -89,7 +91,8 @@ The channel has two explicit operating modes:
   routed stores, and current web results within one turn; reason over exact results; make bounded
   canonical changes such as updating a contact, creating a recurring event, or pausing an existing
   durable workflow; and query again to verify. The immediate loop is capped and suppresses duplicate
-  writes. It cannot create tasks, queue work, or delegate to agents.
+  writes. It may invoke an existing active on-demand playbook, but it cannot design new workflows or
+  directly delegate ad hoc work.
 - **Build workflow** deliberately enters orchestration. Maestro creates or refines a proposed plan,
   shows it for approval, and only then queues subordinate agent work. After approval or dismissal,
   the UI returns to Knowledge mode.
@@ -360,6 +363,7 @@ pytest tests/test_scheduler_api.py -q
 - [Maestro orchestrator](docs/MAESTRO_ORCHESTRATOR.md)
 - [Agent runtime](docs/AGENT_RUNTIME.md)
 - [Scheduler and queue](docs/SCHEDULER_QUEUE.md)
+- [On-demand workflows](docs/ON_DEMAND_WORKFLOWS.md)
 - [Memory service](docs/MEMORY_SERVICE.md)
 - [Memory curator](docs/MEMORY_CURATOR.md)
 - [Memory dropbox](docs/MEMORY_DROPBOX.md)

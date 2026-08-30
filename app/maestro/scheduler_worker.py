@@ -435,14 +435,14 @@ class SchedulerWorkerService:
         if agent is None:
             blocked = self.scheduler.block_queue_item(
                 item.id,
-                error_message="No agent is assigned to this scheduled queue item.",
+                error_message="No agent is assigned to this workflow queue item.",
             )
             self._post_channel_update(
                 run,
                 item,
                 status="blocked",
                 message=(
-                    f"Scheduled workflow `{self._run_title(run)}` is blocked because "
+                    f"{self._run_kind(run).capitalize()} `{self._run_title(run)}` is blocked because "
                     f"`{item.external_key}` has no assigned agent."
                 ),
             )
@@ -529,7 +529,7 @@ class SchedulerWorkerService:
                 completed,
                 status="completed",
                 message=(
-                    f"Scheduled workflow `{self._run_title(run)}` completed `{item.external_key}` "
+                    f"{self._run_kind(run).capitalize()} `{self._run_title(run)}` completed `{item.external_key}` "
                     f"through {agent.name}."
                 ),
             )
@@ -552,7 +552,7 @@ class SchedulerWorkerService:
                 blocked,
                 status="blocked",
                 message=(
-                    f"Scheduled workflow `{self._run_title(run)}` is waiting on `{item.external_key}`: "
+                    f"{self._run_kind(run).capitalize()} `{self._run_title(run)}` is waiting on `{item.external_key}`: "
                     f"{blocked.error_message}"
                 ),
             )
@@ -570,7 +570,7 @@ class SchedulerWorkerService:
             failed,
             status="failed",
             message=(
-                f"Scheduled workflow `{self._run_title(run)}` failed `{item.external_key}`: "
+                f"{self._run_kind(run).capitalize()} `{self._run_title(run)}` failed `{item.external_key}`: "
                 f"{failed.error_message}"
             ),
         )
@@ -744,6 +744,7 @@ class SchedulerWorkerService:
             "source_type": run.source_type,
             "summary": (run.input_payload or {}).get("summary"),
             "event": (run.input_payload or {}).get("event"),
+            "invocation": (run.input_payload or {}).get("invocation"),
             "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else None,
             "workflow": {
                 "shadow_mode": workflow_spec.get("shadow_mode") is True,
@@ -882,10 +883,10 @@ class SchedulerWorkerService:
             agent_key=None,
             user_input=str((run.input_payload or {}).get("summary") or self._run_title(run)),
             maestro_tasking=str((run.input_payload or {}).get("summary") or "Scheduled Maestro workflow"),
-            agent_output="\n\n".join(output_sections) or f"Scheduled workflow {run.id} completed.",
+            agent_output="\n\n".join(output_sections) or f"Workflow {run.id} completed.",
             tool_calls=tool_calls,
             generated_artifacts=generated_artifacts,
-            next_steps=["Curate durable context from this scheduled workflow artifact."],
+            next_steps=["Curate durable context from this workflow artifact."],
             provenance={
                 "workflow_run_id": str(run.id),
                 "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
@@ -1003,7 +1004,7 @@ class SchedulerWorkerService:
                 ).strip()
                 agent_name = str(agent_run.get("agent_name") or item.external_key)
                 summaries.append(f"- {agent_name}: {self._plain_text_preview(preview, max_chars=260)}")
-            run_kind = "scheduled workflow" if run.workflow_definition_id else "workflow"
+            run_kind = self._run_kind(run)
             message = f"I finished the {run_kind} `{self._run_title(run)}`."
             if summaries:
                 message += "\n\nWhat came back:\n" + "\n".join(summaries)
@@ -1150,6 +1151,14 @@ class SchedulerWorkerService:
 
     def _run_title(self, run: WorkflowRun) -> str:
         return str((run.input_payload or {}).get("summary") or run.id)
+
+    def _run_kind(self, run: WorkflowRun) -> str:
+        return {
+            "knowledge_on_demand": "on-demand workflow",
+            "event": "triggered workflow",
+            "scheduled": "scheduled workflow",
+            "replay": "replayed workflow",
+        }.get(run.source_type, "workflow")
 
     def _plain_text_preview(self, value: str, *, max_chars: int) -> str:
         text = " ".join(value.replace("```", "").split())

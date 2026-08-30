@@ -1,5 +1,5 @@
-from typing import Any
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -8,17 +8,17 @@ from sqlalchemy.orm import Session
 from app.db.models import WorkflowDefinition, WorkflowQueueItem, WorkflowRun
 from app.db.repositories import DomainRepository
 from app.db.session import get_db
-from app.maestro.gmail_trigger import (
-    GmailTriggerError,
-    GmailTriggerService,
-    sync_gmail_trigger_worker_settings,
-    update_gmail_trigger_worker_settings,
-)
 from app.maestro.calendar_trigger import (
     CalendarTriggerError,
     CalendarTriggerService,
     sync_calendar_trigger_worker_settings,
     update_calendar_trigger_worker_settings,
+)
+from app.maestro.gmail_trigger import (
+    GmailTriggerError,
+    GmailTriggerService,
+    sync_gmail_trigger_worker_settings,
+    update_gmail_trigger_worker_settings,
 )
 from app.maestro.scheduler import SchedulerService
 from app.maestro.scheduler_worker import (
@@ -129,6 +129,12 @@ class WorkflowDefinitionShadowModeBody(BaseModel):
     enabled: bool
 
 
+class WorkflowDefinitionRunBody(BaseModel):
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    invocation_text: str | None = None
+    conversation_id: uuid.UUID | None = None
+
+
 @router.get("/templates")
 def list_workflow_templates(db: Session = Depends(get_db)) -> dict[str, Any]:
     return {"templates": WorkflowTemplateService(db).list_templates()}
@@ -202,6 +208,29 @@ def get_workflow_definition(
         "definition": service.workflow_definition_payload(definition),
         "runs": [service.workflow_run_payload(run, include_events=True) for run in runs],
     }
+
+
+@router.post("/definitions/{definition_id}/run")
+def run_on_demand_workflow_definition(
+    definition_id: uuid.UUID,
+    body: WorkflowDefinitionRunBody | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    definition = db.get(WorkflowDefinition, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow definition.")
+    request = body or WorkflowDefinitionRunBody()
+    service = SchedulerService(db)
+    try:
+        run = service.enqueue_on_demand_workflow(
+            definition,
+            parameters=request.parameters,
+            invocation_text=request.invocation_text or f"Run {definition.name}",
+            conversation_id=request.conversation_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"run": service.workflow_run_payload(run, include_events=True)}
 
 
 @router.patch("/definitions/{definition_id}")

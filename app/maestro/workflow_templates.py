@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import os
+from copy import deepcopy
 from typing import Any
 
 from sqlalchemy import select
@@ -21,6 +21,8 @@ PRAXIS_CALENDAR_MONITOR_KEY = "praxis-calendar-monitor"
 PRAXIS_CALENDAR_AGENT_KEY = "praxis-calendar-agent"
 PERTI_CALENDAR_MONITOR_KEY = "perti-calendar-monitor"
 PERTI_CALENDAR_AGENT_KEY = "perti-calendar-agent"
+DAILY_STANDUP_KEY = "daily-standup"
+MAESTRO_BRIEFING_AGENT_KEY = "maestro-briefing-agent"
 
 EMAIL_TRIAGE_SKILLS = [
     "email_triage",
@@ -112,6 +114,7 @@ def _email_template(
         },
         "priority": "normal",
         "fairness_group": domain_key,
+        "credential_family": "google",
     }
 
 
@@ -165,10 +168,110 @@ def _calendar_template(
         },
         "priority": "normal",
         "fairness_group": domain_key,
+        "credential_family": "google",
+    }
+
+
+def _daily_standup_template() -> dict[str, Any]:
+    domain_items = [
+        ("personal-input", "personal", "personal-operations-agent", "Personal"),
+        ("perti-input", "perti-laboratories", "perti-operations-agent", "Perti Laboratories"),
+        ("praxis-input", "praxis", "praxis-planning-agent", "Praxis"),
+    ]
+    queue_items = [
+        {
+            "id": item_id,
+            "objective": (
+                f"Prepare the {label} input for Chris's daily standup. Use the Daily Standup "
+                "skill and current canonical domain context. Focus on today's schedule, open "
+                "commitments, deadlines, blocked work, decisions, risks, and the few highest-value "
+                "actions. Produce a concise evidence-grounded report; do not create or edit routed "
+                "items during this review. Apply any invocation focus or date supplied in the "
+                "scheduler context."
+            ),
+            "domain_key": domain_key,
+            "agent_key": agent_key,
+            "stage_index": 1,
+            "position": position,
+            "priority": "normal",
+            "required_skills": ["daily_standup"],
+            "required_tools": ["memory.context_bundle"],
+            "model_tier": "luna",
+            "model_profile": "openrouter:openai/gpt-5.6-luna",
+            "model_rationale": "Focused domain retrieval and concise status synthesis.",
+            "max_attempts": 2,
+        }
+        for position, (item_id, domain_key, agent_key, label) in enumerate(domain_items, start=1)
+    ]
+    queue_items.append(
+        {
+            "id": "standup-synthesis",
+            "objective": (
+                "Synthesize the completed Personal, Perti Laboratories, and Praxis reports into "
+                "Chris's daily standup. Use the Daily Standup skill. Reconcile cross-domain timing "
+                "conflicts and dependencies; lead with what Chris needs to know, decide, or do; "
+                "and produce one polished report suitable for continued conversation with Maestro."
+            ),
+            "domain_key": "maestro-development",
+            "agent_key": MAESTRO_BRIEFING_AGENT_KEY,
+            "stage_index": 2,
+            "position": 1,
+            "depends_on": [item_id for item_id, *_ in domain_items],
+            "priority": "normal",
+            "required_skills": ["daily_standup"],
+            "required_tools": [],
+            "model_tier": "terra",
+            "model_profile": "openrouter:openai/gpt-5.6-terra",
+            "model_rationale": "Cross-domain reconciliation and decision-oriented synthesis.",
+            "max_attempts": 2,
+        }
+    )
+    return {
+        "key": DAILY_STANDUP_KEY,
+        "name": "Daily Standup",
+        "domain_key": "maestro-development",
+        "description": (
+            "Collect parallel operational inputs from active domains and synthesize one "
+            "cross-domain daily briefing for Chris."
+        ),
+        "trigger_type": "manual",
+        "trigger_config": {
+            "invocation_aliases": [
+                "prepare my daily standup",
+                "run my daily standup",
+                "daily briefing",
+                "prepare my morning briefing",
+            ],
+            "parameter_schema": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Optional ISO date to brief; defaults to today.",
+                    },
+                    "focus": {
+                        "type": "string",
+                        "description": "Optional emphasis for this run.",
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+            "approval_policy": "definition_approved",
+            "workflow_version": "1",
+        },
+        "workflow_spec": {
+            "model_profile": "openrouter:openai/gpt-5.6-luna",
+            "queue_items": queue_items,
+        },
+        "priority": "normal",
+        "fairness_group": "maestro-development",
+        "credential_family": None,
     }
 
 
 _TEMPLATES: dict[str, dict[str, Any]] = {
+    DAILY_STANDUP_KEY: _daily_standup_template(),
     PRAXIS_EMAIL_TRIAGE_KEY: _email_template(
         key=PRAXIS_EMAIL_TRIAGE_KEY,
         name="Praxis Email Triage",
@@ -205,6 +308,7 @@ class WorkflowTemplateService:
         self.session = session
 
     def list_templates(self) -> list[dict[str, Any]]:
+        AgentRegistryService(self.session).ensure_seed_agents()
         return [self.template_payload(key) for key in _TEMPLATES]
 
     def template_payload(self, key: str) -> dict[str, Any]:
@@ -270,25 +374,32 @@ class WorkflowTemplateService:
     def readiness(self, key: str) -> dict[str, Any]:
         template = self._template(key)
         domain = self.session.scalar(select(Domain).where(Domain.key == template["domain_key"]))
-        item = template["workflow_spec"]["queue_items"][0]
-        agent = self.session.scalar(select(Agent).where(Agent.key == item["agent_key"]))
         missing: list[str] = []
         if domain is None or not domain.is_active:
             missing.append(f"active {template['domain_key']} domain")
-        if agent is None or not agent.is_active:
-            missing.append(f"active {item['agent_key']} agent")
-
-        tool_permissions = set((agent.tool_permissions or {}).keys()) if agent else set()
-        skill_permissions = set((agent.skill_permissions or {}).keys()) if agent else set()
-        missing_tools = sorted(set(item["required_tools"]) - tool_permissions)
-        missing_skills = sorted(set(item["required_skills"]) - skill_permissions)
+        agents_ready = True
+        missing_tools_set: set[str] = set()
+        missing_skills_set: set[str] = set()
+        for item in template["workflow_spec"]["queue_items"]:
+            agent = self.session.scalar(select(Agent).where(Agent.key == item["agent_key"]))
+            if agent is None or not agent.is_active:
+                agents_ready = False
+                missing.append(f"active {item['agent_key']} agent")
+                continue
+            tool_permissions = set((agent.tool_permissions or {}).keys())
+            skill_permissions = set((agent.skill_permissions or {}).keys())
+            missing_tools_set.update(set(item.get("required_tools") or []) - tool_permissions)
+            missing_skills_set.update(set(item.get("required_skills") or []) - skill_permissions)
+        missing_tools = sorted(missing_tools_set)
+        missing_skills = sorted(missing_skills_set)
         if missing_tools:
             missing.append("agent tools: " + ", ".join(missing_tools))
         if missing_skills:
             missing.append("agent skills: " + ", ".join(missing_skills))
 
         connection = None
-        if domain is not None:
+        credential_family = template.get("credential_family")
+        if credential_family == "google" and domain is not None:
             connection = self.session.scalar(
                 select(ToolConnection).where(
                     ToolConnection.domain_id == domain.id,
@@ -296,16 +407,19 @@ class WorkflowTemplateService:
                     ToolConnection.is_active.is_(True),
                 )
             )
-        credentials_ready = bool(connection and _google_credentials_ready(connection))
-        if connection is None:
-            missing.append(f"active {template['domain_key']} Google connection")
-        elif not credentials_ready:
-            missing.append(f"configured {template['domain_key']} Google OAuth credentials")
+        credentials_ready = credential_family is None or bool(
+            connection and _google_credentials_ready(connection)
+        )
+        if credential_family == "google":
+            if connection is None:
+                missing.append(f"active {template['domain_key']} Google connection")
+            elif not credentials_ready:
+                missing.append(f"configured {template['domain_key']} Google OAuth credentials")
         return {
             "ready": not missing,
             "missing": missing,
             "domain_ready": bool(domain and domain.is_active),
-            "agent_ready": bool(agent and agent.is_active),
+            "agent_ready": agents_ready,
             "connection_ready": credentials_ready,
             "missing_tools": missing_tools,
             "missing_skills": missing_skills,

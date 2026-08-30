@@ -1,7 +1,7 @@
 """Knowledge-mode reasoning and validated direct actions.
 
-Knowledge mode is deliberately separate from orchestration. It can reason over Maestro context and
-mutate bounded canonical stores, but it cannot create tasks, plans, queue items, or agent runs.
+Knowledge mode can reason over Maestro context, mutate bounded canonical stores, and invoke an
+existing approved on-demand workflow. Designing new delegated work remains orchestration's job.
 """
 
 from __future__ import annotations
@@ -72,6 +72,9 @@ ALLOWED_ACTIONS = {
     "organization.update",
     "workflow.update",
     "workflow.archive",
+    "workflow.search",
+    "workflow.get",
+    "workflow.run",
     "issue.search",
     "issue.get",
     "issue.capture",
@@ -221,8 +224,8 @@ class MaestroKnowledgeService:
             include_sections=_knowledge_context_sections(message),
         )
         portfolio_context = self._product_portfolio_context_text()
-        workflow_context = (
-            self._workflow_context_text() if _message_needs_workflow_context(message) else ""
+        workflow_context = self._workflow_context_text(
+            include_all=_message_needs_workflow_context(message)
         )
         conversation_context = self._conversation_context_text(
             conversation_id=conversation_id,
@@ -433,16 +436,36 @@ class MaestroKnowledgeService:
             )
         return "\n\n".join(blocks)
 
-    def _workflow_context_text(self) -> str:
+    def _workflow_context_text(self, *, include_all: bool = False) -> str:
         definitions = SchedulerService(self.session).list_definitions()
+        if not include_all:
+            definitions = [
+                definition
+                for definition in definitions
+                if definition.trigger_type == "manual" and definition.is_active
+            ]
         if not definitions:
             return ""
-        lines = ["Existing durable workflows:"]
+        lines = ["Existing durable workflows available to this turn:"]
         for definition in definitions[:20]:
+            config = definition.trigger_config or {}
+            compact_config = {
+                key: config[key]
+                for key in (
+                    "invocation_aliases",
+                    "parameter_schema",
+                    "approval_policy",
+                    "workflow_version",
+                    "event_type",
+                    "time_of_day",
+                    "next_run_at",
+                )
+                if key in config
+            }
             lines.append(
                 f"- id={definition.id}; key={definition.key}; name={definition.name}; "
                 f"trigger={definition.trigger_type}; active={definition.is_active}; "
-                f"config={json.dumps(definition.trigger_config or {}, sort_keys=True)}"
+                f"config={json.dumps(compact_config, sort_keys=True)}"
             )
         return "\n".join(lines)
 
@@ -523,6 +546,14 @@ class MaestroKnowledgeService:
                 return self._update_workflow(arguments, provenance)
             if action_type == "workflow.archive":
                 return self._archive_workflow(arguments)
+            if action_type == "workflow.run":
+                return self._run_on_demand_workflow(
+                    arguments,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    now=now,
+                    source_message=source_message,
+                )
             return self._update_routed(action_type, arguments, provenance)
         except (ValueError, TypeError) as exc:
             self.session.rollback()
@@ -911,6 +942,47 @@ class MaestroKnowledgeService:
             str(definition.id),
         )
 
+    def _run_on_demand_workflow(
+        self,
+        arguments: dict[str, Any],
+        *,
+        conversation_id: uuid.UUID | None,
+        message_id: uuid.UUID | None,
+        now: datetime,
+        source_message: str,
+    ) -> KnowledgeActionResult:
+        definition = self._resolve_workflow(
+            str(arguments.get("target") or arguments.get("id") or "")
+        )
+        parameters = arguments.get("parameters")
+        if parameters is not None and not isinstance(parameters, dict):
+            raise ValueError("Workflow parameters must be an object.")
+        run = SchedulerService(self.session).enqueue_on_demand_workflow(
+            definition,
+            parameters=parameters or {},
+            invocation_text=str(arguments.get("invocation_text") or source_message).strip(),
+            conversation_id=conversation_id,
+            message_id=message_id,
+            now=now,
+        )
+        return KnowledgeActionResult(
+            "workflow.run",
+            "completed",
+            f"Started on-demand workflow '{definition.name}'.",
+            "workflow_run",
+            str(run.id),
+            data={
+                "workflow_definition_id": str(definition.id),
+                "workflow_key": definition.key,
+                "workflow_name": definition.name,
+                "run_id": str(run.id),
+                "status": run.status,
+                "parameters": ((run.input_payload or {}).get("invocation") or {}).get(
+                    "parameters", {}
+                ),
+            },
+        )
+
     def _domain(self, key: Any, *, required: bool) -> Domain | None:
         value = str(key or "").strip().lower()
         aliases = {
@@ -1044,6 +1116,11 @@ class MaestroKnowledgeService:
                 item
                 for item in SchedulerService(self.session).list_definitions()
                 if normalized in _normalize(item.name)
+                or _normalize(item.name) in normalized
+                or any(
+                    normalized == _normalize(str(alias))
+                    for alias in (item.trigger_config or {}).get("invocation_aliases", [])
+                )
             ]
         if len(matches) != 1:
             raise ValueError(f"I could not find one unambiguous workflow matching '{target}'.")

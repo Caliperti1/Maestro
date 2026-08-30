@@ -9,6 +9,8 @@ from app.core.config import get_settings
 from app.db.models import Domain, ToolConnection, WorkflowDefinition
 from app.db.session import get_db
 from app.maestro.workflow_templates import (
+    DAILY_STANDUP_KEY,
+    MAESTRO_BRIEFING_AGENT_KEY,
     PERTI_CALENDAR_AGENT_KEY,
     PERTI_EMAIL_AGENT_KEY,
     PRAXIS_EMAIL_AGENT_KEY,
@@ -72,6 +74,27 @@ def test_praxis_email_template_installs_paused_with_canonical_contract(
     assert item["max_attempts"] == 3
     assert "payload.message_id" in item["objective"]
     assert "latest email" in item["objective"]
+
+
+def test_daily_standup_template_installs_active_with_parallel_domain_inputs(
+    session: Session,
+) -> None:
+    service = WorkflowTemplateService(session)
+
+    definition = service.install(DAILY_STANDUP_KEY, is_active=True)
+
+    assert definition.trigger_type == "manual"
+    assert definition.is_active is True
+    assert "prepare my daily standup" in definition.trigger_config["invocation_aliases"]
+    items = definition.workflow_spec["queue_items"]
+    assert [item["stage_index"] for item in items] == [1, 1, 1, 2]
+    assert items[-1]["agent_key"] == MAESTRO_BRIEFING_AGENT_KEY
+    assert set(items[-1]["depends_on"]) == {
+        "personal-input",
+        "perti-input",
+        "praxis-input",
+    }
+    assert service.readiness(DAILY_STANDUP_KEY)["ready"] is True
 
 
 def test_praxis_email_template_requires_google_connection_before_activation(

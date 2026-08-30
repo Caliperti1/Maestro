@@ -400,6 +400,47 @@ def test_scheduler_api_creates_definition_and_enqueues_event_trigger(
     assert runs[0]["queue_items"][0]["external_key"] == "triage"
 
 
+def test_scheduler_api_runs_active_manual_definition_with_parameters(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    client = _client(session, tmp_path)
+    created = client.post(
+        "/scheduler/definitions",
+        json={
+            "key": "project-scrum",
+            "name": "Project Scrum",
+            "trigger_type": "manual",
+            "trigger_config": {
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {"project": {"type": "string"}},
+                    "required": ["project"],
+                    "additionalProperties": False,
+                }
+            },
+            "workflow_spec": {"queue_items": []},
+            "is_active": True,
+        },
+    )
+    definition_id = created.json()["definition"]["id"]
+
+    missing = client.post(f"/scheduler/definitions/{definition_id}/run", json={})
+    started = client.post(
+        f"/scheduler/definitions/{definition_id}/run",
+        json={"parameters": {"project": "GroundTruth"}},
+    )
+
+    assert missing.status_code == 409
+    assert "project" in missing.json()["detail"]
+    assert started.status_code == 200
+    assert started.json()["run"]["source_type"] == "knowledge_on_demand"
+    assert started.json()["run"]["input_payload"]["invocation"]["parameters"] == {
+        "project": "GroundTruth"
+    }
+
+
 def test_scheduler_api_controls_gmail_trigger_worker(
     session: Session,
     tmp_path: Path,
