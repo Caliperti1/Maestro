@@ -30,6 +30,7 @@ from app.db.models import (
     OrganizationAlias,
     ProductIssue,
     ProductProject,
+    Report,
     RepositoryProfile,
     RoutedItem,
     Todo,
@@ -418,12 +419,18 @@ class MaestroKnowledgeService:
         messages = list(reversed(list(self.session.scalars(statement).all())))
         lines: list[str] = []
         pending: str | None = None
+        standup_report_id: str | None = None
         for item in messages:
             if current_message_id is not None and item.id == current_message_id:
                 continue
             role = "Chris" if item.sender_type == "user" else "Maestro"
             lines.append(f"{role}: {item.content.strip()}")
-            candidate = (item.metadata_ or {}).get("pending_clarification")
+            item_metadata = item.metadata_ or {}
+            if item_metadata.get("workflow_key") == "daily-standup" and item_metadata.get(
+                "standup_report_id"
+            ):
+                standup_report_id = str(item_metadata["standup_report_id"])
+            candidate = item_metadata.get("pending_clarification")
             if item.sender_type == "maestro" and candidate:
                 pending = str(candidate).strip()
             elif (
@@ -440,7 +447,26 @@ class MaestroKnowledgeService:
                 f"Maestro was waiting for Chris to answer: {pending}\n"
                 "Interpret a terse reply against this pending question before treating it as a new request."
             )
+        if standup_report_id:
+            report = self._report_by_id(standup_report_id)
+            if report is not None:
+                blocks.append(
+                    "## Active Daily Standup Context\n"
+                    f"Report ID: {report.id}\n"
+                    f"{report.body_markdown[:4200]}\n\n"
+                    "Treat Chris's follow-up as feedback on this standup unless he clearly changes "
+                    "topics. Discuss recommendations conversationally and use validated Knowledge "
+                    "actions to create or update accepted calendar events, todos, or Product Issues. "
+                    "For an accepted agent handoff, create or update the associated todo with "
+                    "agent_task=true so the background task worker can plan it."
+                )
         return "\n\n".join(blocks)
+
+    def _report_by_id(self, report_id: str) -> Report | None:
+        try:
+            return self.session.get(Report, uuid.UUID(report_id))
+        except (TypeError, ValueError):
+            return None
 
     def _workflow_context_text(self, *, include_all: bool = False) -> str:
         definitions = SchedulerService(self.session).list_definitions()

@@ -30,6 +30,12 @@ Knowledge mode may:
 - start an active existing on-demand workflow with `workflow.run`. This is invocation of an
   already-approved playbook, not workflow design. Examples include "prepare my daily standup" or
   "run the GroundTruth scrum review" when that exact on-demand workflow exists;
+- continue a completed Daily Standup conversationally when the active standup report is supplied.
+  Treat Chris's feedback as proposed adjustments to that operating picture. Use validated calendar,
+  todo, and issue actions to apply changes he accepts; ask a focused clarification before writing
+  when the target, timing, ownership, or requested change is ambiguous. For an accepted agent
+  handoff, create or update the associated todo with `agent_task=true` so the background task
+  worker can plan it;
 - search, inspect, capture, and update canonical product issues. Product issues are project/code
   work, not Chris's personal todos. Use issue.search before issue.capture when a proposed change
   may overlap prior work. Capture must include domain_key, project_key, a concise title, and the

@@ -17,6 +17,7 @@ from app.db.models import (
     Message,
     ProductIssue,
     ProductProject,
+    Report,
     Task,
     Todo,
     ToolCall,
@@ -236,6 +237,56 @@ def test_voice_mode_adds_spoken_response_guidance_to_knowledge_context(session: 
     assert 'purpose="response_mode"' in planner.context_text
     assert "one to three short sentences" in planner.context_text
     assert "avoid Markdown and raw URLs" in planner.context_text
+
+
+def test_knowledge_follow_up_receives_active_daily_standup_report(session: Session) -> None:
+    seed_default_domains(session)
+    maestro_domain = session.scalar(select(Domain).where(Domain.key == "maestro-development"))
+    conversation = Conversation(
+        domain_id=maestro_domain.id if maestro_domain else None,
+        title="Maestro channel",
+        metadata_={"channel": "primary"},
+    )
+    report = Report(
+        domain_id=maestro_domain.id if maestro_domain else None,
+        title="Daily Standup",
+        report_type="daily_standup",
+        summary="One cross-domain priority needs Chris's decision.",
+        body_markdown=(
+            "# Daily Standup\n\n## Praxis\nSchedule partner follow-through at 14:00.\n\n"
+            "## Input Needed from Chris\nConfirm whether the partner call outranks product work."
+        ),
+        structured_data={},
+    )
+    session.add_all([conversation, report])
+    session.flush()
+    session.add(
+        Message(
+            conversation_id=conversation.id,
+            sender_type="maestro",
+            content="Chris, your standup is ready.",
+            metadata_={
+                "workflow_key": "daily-standup",
+                "standup_report_id": str(report.id),
+                "event_type": "workflow_completed",
+            },
+        )
+    )
+    session.commit()
+    planner = CapturingKnowledgePlanner(
+        KnowledgeTurn(message="I can move the partner work to 14:00.", actions=[])
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Move the partner follow-through to 2 PM and let the Praxis agent take the product review.",
+        conversation_id=conversation.id,
+    )
+
+    assert response.message == "I can move the partner work to 14:00."
+    assert "Active Daily Standup Context" in planner.context_text
+    assert "Schedule partner follow-through at 14:00" in planner.context_text
+    assert "create or update accepted calendar events, todos, or Product Issues" in planner.context_text
+    assert "agent_task=true" in planner.context_text
 
 
 def test_knowledge_mode_invokes_existing_on_demand_workflow_once(session: Session) -> None:

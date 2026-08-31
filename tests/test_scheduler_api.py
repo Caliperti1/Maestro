@@ -20,6 +20,7 @@ from app.db.models import (
     Message,
     Report,
     Task,
+    WorkflowDefinition,
     WorkflowNotification,
     WorkflowQueueItem,
     WorkflowRun,
@@ -116,6 +117,56 @@ def test_scheduler_completion_uses_agent_conversation_field(session: Session) ->
     assert payload["email_triage_shadow_mode"] is True
     assert message == payload["conversation"]
     assert "structured_report" not in message
+
+
+def test_daily_standup_completion_uses_synthesis_conversation(session: Session) -> None:
+    definition = WorkflowDefinition(
+        key="daily-standup",
+        name="Daily Standup",
+        trigger_type="manual",
+        trigger_config={},
+        workflow_spec={},
+    )
+    session.add(definition)
+    session.commit()
+    service = SchedulerWorkerService(session)
+    run = SimpleNamespace(
+        workflow_definition_id=definition.id,
+        input_payload={"summary": "Daily Standup"},
+    )
+    items = [
+        SimpleNamespace(
+            external_key="personal-input",
+            output_payload={
+                "agent_name": "Personal Operations Agent",
+                "conversation": "Personal input is ready.",
+            },
+        ),
+        SimpleNamespace(
+            external_key="standup-synthesis",
+            output_payload={
+                "agent_name": "Maestro Briefing Agent",
+                "conversation": (
+                    "Chris, your standup is ready. You have two fixed commitments and three "
+                    "recommended focus blocks to review."
+                ),
+            },
+        ),
+    ]
+
+    message = service._delivery_completion_message(run, items)
+
+    assert message.startswith("Chris, your standup is ready")
+    assert "Personal input is ready" not in message
+
+    items[-1].output_payload["report_id"] = "e1f4f324-442e-4b90-8f50-e85e9885b63d"
+    context = service._completion_context(run, items)
+    assert context == {
+        "workflow_key": "daily-standup",
+        "standup_report_id": "e1f4f324-442e-4b90-8f50-e85e9885b63d",
+        "synthesis_report_id": "e1f4f324-442e-4b90-8f50-e85e9885b63d",
+        "standup_context_active": True,
+    }
 
 
 def test_email_completion_posts_one_conversational_message_and_delivers_existing_notification(
