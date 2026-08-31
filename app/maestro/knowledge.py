@@ -257,7 +257,9 @@ class MaestroKnowledgeService:
             validation_source=validation_source,
         )
         result_lines = [
-            result.message for result in results if result.status not in {"completed", "skipped"}
+            result.message
+            for result in results
+            if result.status not in {"completed", "skipped", "invalid_action"}
         ]
         if result_lines:
             response_message = "I need one more detail before I can safely finish that change."
@@ -1016,9 +1018,19 @@ class MaestroKnowledgeService:
         now: datetime,
         source_message: str,
     ) -> KnowledgeActionResult:
-        definition = self._resolve_workflow(
-            str(arguments.get("target") or arguments.get("id") or "")
-        )
+        target = str(arguments.get("target") or arguments.get("id") or "").strip()
+        if not target:
+            return KnowledgeActionResult(
+                "workflow.run",
+                "invalid_action",
+                (
+                    "The generated workflow.run action omitted its required target. Reconsider "
+                    "Chris's request against the Authoritative Current Workflow Definitions. "
+                    "When one active manual workflow is semantically unambiguous, retry with its "
+                    "exact key in target; otherwise ask Chris one focused clarification."
+                ),
+            )
+        definition = self._resolve_workflow(target)
         parameters = arguments.get("parameters")
         if parameters is not None and not isinstance(parameters, dict):
             raise ValueError("Workflow parameters must be an object.")
@@ -1240,7 +1252,14 @@ def _knowledge_schema() -> dict[str, Any]:
         "required": ["type", "arguments_json", "reason"],
         "properties": {
             "type": {"type": "string", "enum": sorted(ALLOWED_ACTIONS)},
-            "arguments_json": {"type": "string"},
+            "arguments_json": {
+                "type": "string",
+                "description": (
+                    "A JSON object encoded as a string. workflow.run requires target set to the "
+                    "exact key, name, or ID of one workflow from the authoritative registry and "
+                    "parameters set to an object."
+                ),
+            },
             "reason": {"type": ["string", "null"]},
         },
     }

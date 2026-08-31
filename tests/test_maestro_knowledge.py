@@ -454,6 +454,58 @@ def test_semantic_paraphrase_can_invoke_on_demand_workflow_without_alias_match(
     assert response.action_results[-1].action_type == "workflow.run"
 
 
+def test_missing_workflow_target_is_repaired_without_asking_chris(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    session.add(
+        WorkflowDefinition(
+            key="daily-standup",
+            name="Daily Standup",
+            trigger_type="manual",
+            trigger_config={"invocation_aliases": ["prepare my daily standup"]},
+            workflow_spec={"queue_items": []},
+            is_active=True,
+        )
+    )
+    session.commit()
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am starting your standup.",
+                actions=[{"type": "workflow.run", "arguments": {}}],
+            ),
+            KnowledgeTurn(
+                message="I found the intended approved playbook.",
+                actions=[
+                    {
+                        "type": "workflow.run",
+                        "arguments": {"target": "daily-standup", "parameters": {}},
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I started your Daily Standup in the background.",
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Please run my morning standup."
+    )
+
+    runs = session.scalars(select(WorkflowRun)).all()
+    assert len(runs) == 1
+    assert response.message == "I started your Daily Standup in the background."
+    assert [result.status for result in response.action_results] == [
+        "invalid_action",
+        "completed",
+    ]
+    assert "required target" in planner.contexts[1]
+    assert "I need one more detail" not in response.message
+
+
 def test_knowledge_reply_resumes_waiting_agent_task_instead_of_answering_directly(
     session: Session,
 ) -> None:

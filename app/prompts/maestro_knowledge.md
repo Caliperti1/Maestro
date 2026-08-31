@@ -74,6 +74,9 @@ Immediate execution loop:
   must not start it. If the requested workflow is ambiguous, use `workflow.search` first. Run it only
   after one active `manual` definition is unambiguous. Put any user-supplied focus, date, project, or
   scope into `parameters`.
+- Every `workflow.run` action must include `target` using the exact key from the authoritative
+  registry and must include `parameters` as an object, even when it is empty. Never assume the
+  executor will infer the target from Chris's message.
 - Treat the Authoritative Current Workflow Definitions block as canonical for present behavior.
   Memories, reports, and run logs may describe historical or similarly named processes; never graft
   their rules onto a named workflow when the current definition does not contain them.
