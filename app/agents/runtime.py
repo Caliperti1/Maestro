@@ -4130,23 +4130,35 @@ _SEED_SKILLS = [
 Build a grounded daily operating picture for Chris from current canonical context.
 
 ## Domain Input Procedure
-1. Retrieve current domain context for today and the next seven days: open todos, calendar events,
-   active Product Issues when applicable, recent reports, unresolved decisions, and blocked work.
-2. Separate facts from recommendations. Do not repeat stale completed work as current.
-3. Identify today's commitments, deadlines, prerequisites, conflicts, and the few highest-value
-   actions. Include source references or record identifiers when available.
-4. Report meaningful gaps as explicit unknowns; do not create routed items during standup review.
+1. Review the canonical domain calendar, open todos, active Product Issues, recent reports,
+   unresolved decisions, and blocked work for today and the next seven days.
+2. Separate current facts from recommendations. Do not repeat stale completed work as current.
+3. State what is already scheduled today, including deadlines, prerequisites, and conflicts.
+4. Recommend a small number of unscheduled todos or issues to add to today's plan. Suggest a
+   realistic time block or ordering when evidence supports one; do not pretend it is scheduled.
+5. Review the active domain-agent roster in scheduler context. Recommend agent handoffs only when
+   an agent's stated role fits the work, and name both the work item and proposed agent.
+6. End with `Input Needed from Chris`. Ask only concrete questions whose answers would materially
+   improve this domain's operating picture. Say `None` when the domain is sufficiently current.
+7. Include source record identifiers when available. Do not create or edit canonical items during
+   standup review; Chris and Maestro will apply accepted changes conversationally afterward.
 
 ## Synthesis Procedure
 1. Use the completed domain reports supplied as dependency context; do not invent absent domains.
 2. Reconcile timing conflicts and cross-domain dependencies.
-3. Produce one concise briefing with: Today's Schedule, Priority Outcomes, Domain Updates,
-   Conflicts/Risks, Decisions or Input Needed, and Recommended Plan.
-4. Keep proposed changes conversational until Chris asks Maestro to update canonical records.
+3. Walk through every domain using the same compact structure: Scheduled, Needs Attention,
+   Recommended Schedule Additions, Recommended Agent Handoffs, and Input Needed from Chris.
+4. Finish with a synthesized day view: fixed commitments, proposed focus blocks, cross-domain
+   priorities, conflicts/risks, and the smallest useful set of questions for Chris.
+5. Keep recommendations clearly proposed until Chris accepts or edits them. Knowledge mode may
+   then create or update calendar events, todos, or Product Issues while preserving this report as
+   the active standup context.
 
 ## Output Contract
 Write a human-readable report. Lead with what Chris needs to know or decide today, not a transcript
-of agent activity. Preserve links and identifiers needed to inspect supporting records.""",
+of agent activity. Preserve links and identifiers needed to inspect supporting records. The
+`conversation` field must be a concise, natural opening that tells Chris the standup is ready and
+summarizes the shape of the day; the full report carries the domain detail.""",
         "metadata": {"seeded_by": "maestro"},
     },
     {
@@ -4316,6 +4328,90 @@ _CALENDAR_MONITOR_TOOL_KEYS = (
 
 
 _SEED_AGENTS = [
+    {
+        "domain_key": "maestro-development",
+        "key": "maestro-operations-agent",
+        "name": "Maestro Development Operations Agent",
+        "agent_type": "domain_agent",
+        "role_summary": (
+            "Maintains the daily operating picture for Maestro development, product issues, "
+            "system commitments, and development follow-through."
+        ),
+        "role_prompt": load_prompt("agents/domain_operations_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "tool_permissions": {
+            "memory.context_bundle": {
+                "permission": "read",
+                "description": "Retrieve Maestro Development-scoped operating context.",
+            },
+            "reports.search": {
+                "permission": "read",
+                "description": "Search prior Maestro Development reports.",
+            },
+            "reports.get": {
+                "permission": "read",
+                "description": "Read supporting Maestro Development reports.",
+            },
+        },
+        "skill_permissions": {"daily_standup": {"permission": "use"}},
+    },
+    {
+        "domain_key": "usma",
+        "key": "usma-operations-agent",
+        "name": "USMA Operations Agent",
+        "agent_type": "domain_agent",
+        "role_summary": (
+            "Maintains Chris's USMA operating picture, academic obligations, calendar, todos, "
+            "issues, and input gaps from sanitized context."
+        ),
+        "role_prompt": load_prompt("agents/domain_operations_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "tool_permissions": {
+            "memory.context_bundle": {
+                "permission": "read",
+                "description": "Retrieve USMA-scoped sanitized operating context.",
+            },
+            "reports.search": {
+                "permission": "read",
+                "description": "Search prior USMA reports.",
+            },
+            "reports.get": {
+                "permission": "read",
+                "description": "Read supporting USMA reports.",
+            },
+        },
+        "skill_permissions": {"daily_standup": {"permission": "use"}},
+    },
+    {
+        "domain_key": "l3",
+        "key": "l3-operations-agent",
+        "name": "L3 Operations Agent",
+        "agent_type": "domain_agent",
+        "role_summary": (
+            "Maintains Chris's L3 operating picture, professional obligations, calendar, todos, "
+            "issues, and input gaps from sanitized context."
+        ),
+        "role_prompt": load_prompt("agents/domain_operations_agent.md"),
+        "memory_profile": "agent_prompt",
+        "model_profile": "openrouter:openai/gpt-5.6-luna",
+        "tool_permissions": {
+            "memory.context_bundle": {
+                "permission": "read",
+                "description": "Retrieve L3-scoped sanitized operating context.",
+            },
+            "reports.search": {
+                "permission": "read",
+                "description": "Search prior L3 reports.",
+            },
+            "reports.get": {
+                "permission": "read",
+                "description": "Read supporting L3 reports.",
+            },
+        },
+        "skill_permissions": {"daily_standup": {"permission": "use"}},
+    },
     {
         "domain_key": "personal",
         "key": "personal-operations-agent",

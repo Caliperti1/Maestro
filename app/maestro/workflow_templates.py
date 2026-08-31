@@ -23,6 +23,9 @@ PERTI_CALENDAR_MONITOR_KEY = "perti-calendar-monitor"
 PERTI_CALENDAR_AGENT_KEY = "perti-calendar-agent"
 DAILY_STANDUP_KEY = "daily-standup"
 MAESTRO_BRIEFING_AGENT_KEY = "maestro-briefing-agent"
+MAESTRO_OPERATIONS_AGENT_KEY = "maestro-operations-agent"
+USMA_OPERATIONS_AGENT_KEY = "usma-operations-agent"
+L3_OPERATIONS_AGENT_KEY = "l3-operations-agent"
 
 EMAIL_TRIAGE_SKILLS = [
     "email_triage",
@@ -175,6 +178,14 @@ def _calendar_template(
 def _daily_standup_template() -> dict[str, Any]:
     domain_items = [
         ("personal-input", "personal", "personal-operations-agent", "Personal"),
+        (
+            "maestro-development-input",
+            "maestro-development",
+            MAESTRO_OPERATIONS_AGENT_KEY,
+            "Maestro Development",
+        ),
+        ("usma-input", "usma", USMA_OPERATIONS_AGENT_KEY, "USMA"),
+        ("l3-input", "l3", L3_OPERATIONS_AGENT_KEY, "L3"),
         ("perti-input", "perti-laboratories", "perti-operations-agent", "Perti Laboratories"),
         ("praxis-input", "praxis", "praxis-planning-agent", "Praxis"),
     ]
@@ -183,11 +194,13 @@ def _daily_standup_template() -> dict[str, Any]:
             "id": item_id,
             "objective": (
                 f"Prepare the {label} input for Chris's daily standup. Use the Daily Standup "
-                "skill and current canonical domain context. Focus on today's schedule, open "
-                "commitments, deadlines, blocked work, decisions, risks, and the few highest-value "
-                "actions. Produce a concise evidence-grounded report; do not create or edit routed "
-                "items during this review. Apply any invocation focus or date supplied in the "
-                "scheduler context."
+                "skill and current canonical domain context. Inspect the domain calendar, open "
+                "todos, active Product Issues, recent reports, unresolved decisions, and blocked "
+                "work. Report what is already scheduled, recommend what should be added to today's "
+                "schedule, identify work suited for delegation to an available domain agent, and "
+                "ask only the specific questions Chris must answer to keep this domain current. "
+                "Produce a concise evidence-grounded report; do not create or edit canonical items "
+                "during this review. Apply any invocation focus or date supplied in scheduler context."
             ),
             "domain_key": domain_key,
             "agent_key": agent_key,
@@ -207,10 +220,13 @@ def _daily_standup_template() -> dict[str, Any]:
         {
             "id": "standup-synthesis",
             "objective": (
-                "Synthesize the completed Personal, Perti Laboratories, and Praxis reports into "
-                "Chris's daily standup. Use the Daily Standup skill. Reconcile cross-domain timing "
-                "conflicts and dependencies; lead with what Chris needs to know, decide, or do; "
-                "and produce one polished report suitable for continued conversation with Maestro."
+                "Synthesize the completed Personal, Maestro Development, USMA, L3, Perti "
+                "Laboratories, and Praxis reports into Chris's daily standup. Use the Daily Standup "
+                "skill. Walk Chris through each domain's commitments, recommendations, and requested "
+                "input, then reconcile cross-domain timing conflicts and dependencies into one "
+                "feasible plan for the day. Distinguish existing commitments from proposed calendar "
+                "blocks and proposed agent handoffs. Produce one polished report that Maestro can "
+                "continue discussing and revise through Knowledge-mode actions after Chris responds."
             ),
             "domain_key": "maestro-development",
             "agent_key": MAESTRO_BRIEFING_AGENT_KEY,
@@ -258,7 +274,7 @@ def _daily_standup_template() -> dict[str, Any]:
                 "additionalProperties": False,
             },
             "approval_policy": "definition_approved",
-            "workflow_version": "1",
+            "workflow_version": "2",
         },
         "workflow_spec": {
             "model_profile": "openrouter:openai/gpt-5.6-luna",

@@ -738,6 +738,7 @@ class SchedulerWorkerService:
             definition = self.session.get(WorkflowDefinition, run.workflow_definition_id)
             if definition is not None and isinstance(definition.workflow_spec, dict):
                 workflow_spec = definition.workflow_spec
+        required_skills = _queue_item_required_skills(item)
         context = {
             "workflow_run_id": str(run.id),
             "workflow_definition_id": str(run.workflow_definition_id) if run.workflow_definition_id else None,
@@ -754,9 +755,14 @@ class SchedulerWorkerService:
                 "stage_index": item.stage_index,
                 "dependency_keys": item.dependency_keys,
                 "resource_locks": item.resource_locks,
-                "required_skills": _queue_item_required_skills(item),
+                "required_skills": required_skills,
                 "model_profile": _queue_item_model_profile(run, item),
             },
+            "available_domain_agents": (
+                self._domain_agent_roster(item)
+                if "daily_standup" in required_skills and item.stage_index == 1
+                else []
+            ),
             "completed_dependencies": self._completed_dependency_outputs(item),
         }
         return (
@@ -764,6 +770,23 @@ class SchedulerWorkerService:
             "context below as authoritative scheduling context.\n\n"
             f"{json.dumps(context, indent=2)}"
         )
+
+    def _domain_agent_roster(self, item: WorkflowQueueItem) -> list[dict[str, str]]:
+        if item.domain_id is None:
+            return []
+        agents = self.session.scalars(
+            select(Agent)
+            .where(Agent.domain_id == item.domain_id, Agent.is_active.is_(True))
+            .order_by(Agent.name)
+        ).all()
+        return [
+            {
+                "key": agent.key,
+                "name": agent.name,
+                "role_summary": str((agent.capabilities or {}).get("role_summary") or "").strip(),
+            }
+            for agent in agents
+        ]
 
     def _completed_dependency_outputs(self, item: WorkflowQueueItem) -> list[dict[str, Any]]:
         if not item.dependency_keys:
@@ -988,6 +1011,7 @@ class SchedulerWorkerService:
         message = str(output_payload.get("completion_channel_message") or "")
         if not message:
             message = self._delivery_completion_message(run, queue_items)
+        completion_context = self._completion_context(run, queue_items)
         if not message:
             summaries: list[str] = []
             for item in queue_items[:4]:
@@ -1024,6 +1048,7 @@ class SchedulerWorkerService:
                     "event_type": "email_attention" if attention_notification is not None else "workflow_completed",
                     "channel_visibility": "global",
                     "notification_id": str(attention_notification.id) if attention_notification is not None else None,
+                    **completion_context,
                 },
             )
             if attention_notification is not None:
@@ -1037,6 +1062,7 @@ class SchedulerWorkerService:
                 **(run.output_payload or {}),
                 "completion_channel_message_posted": True,
                 "completion_channel_message": message,
+                **completion_context,
             }
             self.session.commit()
 
@@ -1069,6 +1095,18 @@ class SchedulerWorkerService:
         run: WorkflowRun,
         queue_items: list[WorkflowQueueItem],
     ) -> str:
+        if self._workflow_key(run) == "daily-standup":
+            synthesis = self._queue_item_agent_output(queue_items, "standup-synthesis")
+            conversation = str(synthesis.get("conversation") or "").strip()
+            if conversation:
+                return conversation
+            report = self._report_from_agent_output(synthesis)
+            if report is not None:
+                return report.summary or self._plain_text_preview(
+                    report.body_markdown,
+                    max_chars=900,
+                )
+
         for item in queue_items:
             delivery = (item.output_payload or {}).get("delivery")
             if not isinstance(delivery, dict):
@@ -1125,6 +1163,54 @@ class SchedulerWorkerService:
             )
             return f"I finished the workflow. Here’s what matters:\n\n{summaries}"
         return ""
+
+    def _completion_context(
+        self,
+        run: WorkflowRun,
+        queue_items: list[WorkflowQueueItem],
+    ) -> dict[str, Any]:
+        workflow_key = self._workflow_key(run)
+        context: dict[str, Any] = {"workflow_key": workflow_key} if workflow_key else {}
+        if workflow_key != "daily-standup":
+            return context
+        synthesis = self._queue_item_agent_output(queue_items, "standup-synthesis")
+        report_id = synthesis.get("report_id")
+        if report_id:
+            context["standup_report_id"] = str(report_id)
+            context["synthesis_report_id"] = str(report_id)
+        context["standup_context_active"] = True
+        return context
+
+    def _workflow_key(self, run: WorkflowRun) -> str | None:
+        definition_id = getattr(run, "workflow_definition_id", None)
+        if definition_id is None:
+            return None
+        definition = self.session.get(WorkflowDefinition, definition_id)
+        return definition.key if definition is not None else None
+
+    def _queue_item_agent_output(
+        self,
+        queue_items: list[WorkflowQueueItem],
+        external_key: str,
+    ) -> dict[str, Any]:
+        item = next(
+            (candidate for candidate in queue_items if candidate.external_key == external_key),
+            None,
+        )
+        if item is None:
+            return {}
+        output = item.output_payload or {}
+        nested = output.get("agent_run")
+        return nested if isinstance(nested, dict) else output
+
+    def _report_from_agent_output(self, output: dict[str, Any]) -> Report | None:
+        report_id = output.get("report_id")
+        if not report_id:
+            return None
+        try:
+            return self.session.get(Report, uuid.UUID(str(report_id)))
+        except (TypeError, ValueError):
+            return None
 
     def _post_channel_update(
         self,

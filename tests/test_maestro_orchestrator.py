@@ -1029,8 +1029,8 @@ def test_orchestrator_registry_snapshot_is_prompt_compact(session: Session) -> N
     assert "allowed_tool_keys" in snapshot["agents"][0]
     assert "allowed_skill_keys" in snapshot["agents"][0]
     assert "allowed_tools" not in snapshot["agents"][0]
-    assert "connected_domains" not in snapshot["tools"][0]
-    assert "authorized_agents" not in snapshot["tools"][0]
+    assert "tools" not in snapshot
+    assert "exclusive_tool_keys" in snapshot
     assert "skills" in snapshot
     assert all("instruction" not in skill for skill in snapshot["skills"])
 

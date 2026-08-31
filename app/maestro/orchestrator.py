@@ -2716,14 +2716,7 @@ class MaestroOrchestratorService:
                 for domain in domains
             ],
             "agents": [self._selected_agent_payload(agent) for agent in agents],
-            "tools": [
-                {
-                    "key": tool.key,
-                    "name": tool.name,
-                    "exclusive": tool.exclusive,
-                }
-                for tool in tools
-            ],
+            "exclusive_tool_keys": [tool.key for tool in tools if tool.exclusive],
             "skills": [
                 {
                     "key": skill.key,
@@ -2748,7 +2741,7 @@ class MaestroOrchestratorService:
             "key": agent.key,
             "name": agent.name,
             "domain_key": agent.domain_key,
-            "role_summary": _truncate_registry_text(agent.role_summary, 220),
+            "role_summary": _truncate_registry_text(agent.role_summary, 150),
             "allowed_tool_keys": [
                 tool.key for tool in agent.allowed_tools if tool.key not in universal_tools
             ],
