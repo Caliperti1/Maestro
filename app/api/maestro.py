@@ -17,6 +17,7 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from app.core.config import get_settings
@@ -75,6 +76,9 @@ class MaestroRespondBody(BaseModel):
     # Legacy API callers retain the old classifier path. The UI always sends one of the two
     # explicit modes and defaults to Knowledge.
     interaction_mode: Literal["knowledge", "workflow_builder", "legacy_auto"] = "legacy_auto"
+    interface: str | None = Field(default=None, max_length=40)
+    response_mode: Literal["text", "voice"] = "text"
+    client_turn_id: uuid.UUID | None = None
 
 
 class MaestroRunBody(BaseModel):
@@ -164,9 +168,12 @@ def respond_to_maestro(
     x_maestro_async: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    cached = _cached_client_turn_response(db, body)
+    if cached is not None:
+        return _decorate_maestro_response(body, cached)
     if x_maestro_async == "true":
         background_tasks.add_task(_respond_to_maestro_in_background, body)
-        return {
+        return _decorate_maestro_response(body, {
             "kind": "pending",
             "classification": "pending",
             "message": "I received that and am working through it now.",
@@ -175,8 +182,112 @@ def respond_to_maestro(
             "active_plan": None,
             "channel_context": None,
             "conversation": None,
+        })
+    try:
+        response = _respond_to_maestro_sync(body, db)
+    except IntegrityError:
+        db.rollback()
+        cached = _cached_client_turn_response(db, body)
+        if cached is None:
+            raise
+        logger.info("Replayed concurrently submitted Maestro client turn %s.", body.client_turn_id)
+        response = cached
+    return _decorate_maestro_response(body, response)
+
+
+def _cached_client_turn_response(
+    db: Session,
+    body: MaestroRespondBody,
+) -> dict[str, Any] | None:
+    if body.client_turn_id is None:
+        return None
+    user_message = db.scalar(
+        select(Message).where(Message.client_turn_id == body.client_turn_id)
+    )
+    if user_message is None:
+        return None
+    response_message = next(
+        (
+            message
+            for message in db.scalars(
+                select(Message)
+                .where(
+                    Message.conversation_id == user_message.conversation_id,
+                    Message.sender_type != "user",
+                    Message.created_at >= user_message.created_at,
+                )
+                .order_by(Message.created_at, Message.id)
+            ).all()
+            if str((message.metadata_ or {}).get("in_reply_to_client_turn_id") or "")
+            == str(body.client_turn_id)
+        ),
+        None,
+    )
+    if response_message is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This Maestro client turn is still processing. Retry shortly.",
+        )
+    conversation = db.get(Conversation, user_message.conversation_id)
+    if conversation is None:
+        raise HTTPException(
+            status_code=409,
+            detail="The original Maestro conversation is unavailable.",
+        )
+    return {
+        "kind": "chat_only",
+        "classification": "idempotent_replay",
+        "interaction_mode": (user_message.metadata_ or {}).get(
+            "interaction_mode",
+            body.interaction_mode,
+        ),
+        "message": response_message.content,
+        "conversation": _conversation_payload(db, conversation),
+    }
+
+
+def _decorate_maestro_response(
+    body: MaestroRespondBody,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    payload = dict(response)
+    if body.client_turn_id is not None:
+        payload["client_turn_id"] = str(body.client_turn_id)
+    if body.interface:
+        payload["interface"] = body.interface
+    payload["response_mode"] = body.response_mode
+    if body.response_mode != "voice":
+        return payload
+
+    conversation = payload.get("conversation")
+    conversation_summary = None
+    if isinstance(conversation, dict):
+        conversation_summary = {
+            "id": conversation.get("id"),
+            "title": conversation.get("title"),
+            "message_count": conversation.get("message_count"),
         }
-    return _respond_to_maestro_sync(body, db)
+    return {
+        "kind": payload.get("kind", "chat_only"),
+        "classification": payload.get("classification", "voice_chat"),
+        "interaction_mode": payload.get("interaction_mode", body.interaction_mode),
+        "message": str(payload.get("message") or ""),
+        "conversation": conversation_summary,
+        "continue_listening": payload.get("continue_listening", True),
+        "client_turn_id": str(body.client_turn_id) if body.client_turn_id else None,
+    }
+
+
+def _client_turn_metadata(body: MaestroRespondBody) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "interaction_mode": body.interaction_mode,
+        "response_mode": body.response_mode,
+    }
+    if body.interface:
+        metadata["interface"] = body.interface
+    if body.client_turn_id is not None:
+        metadata["client_turn_id"] = str(body.client_turn_id)
+    return metadata
 
 
 def _respond_to_maestro_in_background(body: MaestroRespondBody) -> None:
@@ -200,8 +311,17 @@ def _respond_to_maestro_sync(
         body.message,
         explicit_active_plan=body.active_plan_id is not None,
     )
-    message_metadata = {"topic_id": topic_context.get("topic_id")} if topic_context.get("topic_id") else {}
-    user_message = _record_session_message(db, conversation, "user", body.message, metadata=message_metadata)
+    message_metadata = _client_turn_metadata(body)
+    if topic_context.get("topic_id"):
+        message_metadata["topic_id"] = topic_context.get("topic_id")
+    user_message = _record_session_message(
+        db,
+        conversation,
+        "user",
+        body.message,
+        metadata=message_metadata,
+        client_turn_id=body.client_turn_id,
+    )
     resumed_agent_task = _resume_waiting_agent_task_from_reply(
         db,
         conversation=conversation,
@@ -281,7 +401,9 @@ def _respond_to_maestro_sync(
             message=body.message,
         )
         restart_context = _current_topic_context(conversation)
-        restart_metadata = {"topic_id": restart_context.get("topic_id")} if restart_context.get("topic_id") else {}
+        restart_metadata = _client_turn_metadata(body)
+        if restart_context.get("topic_id"):
+            restart_metadata["topic_id"] = restart_context.get("topic_id")
         _record_session_message(db, conversation, "maestro", response_message, metadata=restart_metadata)
         return {
             "kind": "chat_only",
@@ -302,6 +424,7 @@ def _respond_to_maestro_sync(
                 body.message,
                 conversation_id=conversation.id,
                 message_id=user_message.id,
+                response_mode=body.response_mode,
             )
         except (LLMClientError, OSError, ValueError):
             logger.exception("Knowledge-mode reasoning failed after retrying.")
@@ -1290,12 +1413,17 @@ def _record_session_message(
     content: str,
     *,
     metadata: dict[str, Any] | None = None,
+    client_turn_id: uuid.UUID | None = None,
 ) -> Message:
+    stored_metadata = dict(metadata or {})
+    if sender != "user" and stored_metadata.get("client_turn_id"):
+        stored_metadata["in_reply_to_client_turn_id"] = stored_metadata["client_turn_id"]
     message = Message(
         conversation_id=conversation.id,
         sender_type="user" if sender == "user" else "maestro",
+        client_turn_id=client_turn_id if sender == "user" else None,
         content=content,
-        metadata_=metadata or {},
+        metadata_=stored_metadata,
     )
     db.add(message)
     if sender == "user" and (not conversation.title or conversation.title == "Maestro session"):
