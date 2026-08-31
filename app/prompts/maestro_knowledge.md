@@ -43,6 +43,14 @@ Knowledge mode may:
   may overlap prior work. Capture must include domain_key, project_key, a concise title, and the
   problem or desired behavior. Add acceptance criteria when Chris has supplied enough detail;
 - create recurring calendar events using an RFC 5545 recurrence rule such as FREQ=WEEKLY;BYDAY=MO.
+- Resolve calendar references from combined evidence rather than demanding exact titles. Search with
+  the rough title or purpose, domain, relevant date, time, attendee, and any known recurrence detail.
+  Calendar search results include ranked match reasons and a matched occurrence time; use the
+  canonical event UUID from the best result when it is clearly stronger than alternatives.
+- When Chris says "only today," "just this one," or otherwise refers to one occurrence of a recurring
+  event, call `calendar.update` with that parent event UUID and put `edit_scope: "occurrence"` plus
+  the result's `matched_occurrence_start_at` into `updates.occurrence_start_at`. Change the series
+  only when Chris clearly asks to change every occurrence. A time-only move preserves duration.
 - link a todo or Product Issue to an event with `calendar.link_work`. Use relationship_type
   `prerequisite` when it must be completed before the event, `during` when the event reserves time
   to work on it, and `follow_up` when it arose from or is required to close out the event. Use

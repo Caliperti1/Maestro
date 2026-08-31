@@ -26,6 +26,27 @@ WEEKDAY_NAMES = {
     "saturday": 5,
     "sunday": 6,
 }
+MONTH_NAMES = {
+    name: number
+    for number, names in enumerate(
+        (
+            (),
+            ("january", "jan"),
+            ("february", "feb"),
+            ("march", "mar"),
+            ("april", "apr"),
+            ("may",),
+            ("june", "jun"),
+            ("july", "jul"),
+            ("august", "aug"),
+            ("september", "sep", "sept"),
+            ("october", "oct"),
+            ("november", "nov"),
+            ("december", "dec"),
+        )
+    )
+    for name in names
+}
 
 
 def recurrence_options(rule: str | None) -> dict[str, str]:
@@ -98,6 +119,35 @@ def query_calendar_date(query: str, *, now: datetime | None = None) -> date | No
     if iso_match:
         try:
             return date(*(int(value) for value in iso_match.groups()))
+        except ValueError:
+            return None
+    month_match = re.search(
+        r"\b(" + "|".join(MONTH_NAMES) + r")\s+(\d{1,2})(?:,?\s+(20\d{2}))?\b",
+        normalized,
+    )
+    if month_match:
+        month = MONTH_NAMES[month_match.group(1)]
+        day = int(month_match.group(2))
+        year = int(month_match.group(3) or today.year)
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            return None
+        if month_match.group(3) is None and candidate < today - timedelta(days=7):
+            try:
+                candidate = date(year + 1, month, day)
+            except ValueError:
+                return None
+        return candidate
+    numeric_match = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(20\d{2}|\d{2}))?\b", normalized)
+    if numeric_match:
+        month, day = (int(value) for value in numeric_match.groups()[:2])
+        year_text = numeric_match.group(3)
+        year = int(year_text) if year_text else today.year
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day)
         except ValueError:
             return None
     return None

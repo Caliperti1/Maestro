@@ -944,6 +944,143 @@ def test_knowledge_mode_can_search_update_and_verify_in_one_turn(session: Sessio
     assert session.scalar(select(func.count()).select_from(Task)) == 0
 
 
+def test_knowledge_mode_moves_one_recurring_occurrence_from_ranked_calendar_match(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    l3 = next(domain for domain in session.query(Domain).all() if domain.key == "l3")
+    parent = CalendarEvent(
+        domain_id=l3.id,
+        title="Collaborative Autonomy Standup",
+        summary="Daily autonomy coordination.",
+        start_at=datetime(2026, 8, 24, 15, 0, tzinfo=UTC),
+        end_at=datetime(2026, 8, 24, 15, 30, tzinfo=UTC),
+        timezone="America/New_York",
+        recurrence_rule="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH;UNTIL=20261231T235959Z",
+        status="scheduled",
+        attendees=[],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(parent)
+    session.commit()
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am checking the L3 calendar and recurring occurrence.",
+                actions=[
+                    {
+                        "type": "context.search",
+                        "arguments": {
+                            "query_text": (
+                                "Collaborative Autonomy Standup scheduled August 31 2026 "
+                                "at 11:00 AM Eastern"
+                            ),
+                            "domain_key": "l3",
+                            "stores": ["events"],
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I found the recurring occurrence and am moving only that one.",
+                actions=[
+                    {
+                        "type": "calendar.update",
+                        "arguments": {
+                            "target": str(parent.id),
+                            "domain_key": "l3",
+                            "updates": {
+                                "edit_scope": "occurrence",
+                                "occurrence_start_at": "2026-08-31T15:00:00+00:00",
+                                "start_at": "2026-08-31T17:30:00+00:00",
+                            },
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message=(
+                    "I moved only today's Collaborative Autonomy Standup to 1:30 PM Eastern."
+                ),
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Shift my L3 collaborative autonomy standup for only today from 11 to 1330 EST."
+    )
+
+    assert response.action_results[-1].status == "completed", response.action_results[-1].message
+    session.refresh(parent)
+    exceptions = session.scalars(
+        select(CalendarEvent).where(CalendarEvent.id != parent.id)
+    ).all()
+    assert parent.start_at.replace(tzinfo=UTC) == datetime(2026, 8, 24, 15, 0, tzinfo=UTC)
+    assert len(exceptions) == 1
+    assert exceptions[0].start_at.replace(tzinfo=UTC) == datetime(
+        2026, 8, 31, 17, 30, tzinfo=UTC
+    )
+    assert exceptions[0].end_at.replace(tzinfo=UTC) == datetime(
+        2026, 8, 31, 18, 0, tzinfo=UTC
+    )
+    assert exceptions[0].metadata_["recurrence_parent_id"] == str(parent.id)
+    assert response.message.startswith("I moved only today's")
+    assert "matched_occurrence_start_at" in planner.contexts[1]
+
+
+def test_calendar_update_resolves_a_rough_recurring_event_reference(session: Session) -> None:
+    seed_default_domains(session)
+    l3 = next(domain for domain in session.query(Domain).all() if domain.key == "l3")
+    event = CalendarEvent(
+        domain_id=l3.id,
+        title="Collaborative Autonomy Standup",
+        start_at=datetime(2026, 8, 24, 15, 0, tzinfo=UTC),
+        end_at=datetime(2026, 8, 24, 15, 30, tzinfo=UTC),
+        timezone="America/New_York",
+        recurrence_rule="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH;UNTIL=20261231T235959Z",
+        status="scheduled",
+        attendees=[],
+        supporting_refs=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add(event)
+    session.commit()
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I found the L3 standup from its calendar context.",
+                actions=[
+                    {
+                        "type": "calendar.update",
+                        "arguments": {
+                            "target": (
+                                "my L3 autonomy standup at 11 AM on August 31 2026"
+                            ),
+                            "domain_key": "l3",
+                            "updates": {"location": "Teams"},
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(message="I updated the standup location to Teams.", actions=[]),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Make the L3 autonomy standup at 11 on August 31 a Teams meeting."
+    )
+
+    session.refresh(event)
+    assert event.location == "Teams"
+    assert response.action_results[-1].status == "completed"
+
+
 def test_knowledge_mode_links_todo_to_event_as_prerequisite(session: Session) -> None:
     seed_default_domains(session)
     praxis = next(domain for domain in session.query(Domain).all() if domain.key == "praxis")
