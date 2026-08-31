@@ -358,6 +358,102 @@ def test_knowledge_mode_invokes_existing_on_demand_workflow_once(session: Sessio
     assert "background" in response.message
 
 
+def test_workflow_context_is_authoritative_and_includes_current_execution_lanes(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    session.add(
+        WorkflowDefinition(
+            key="daily-standup",
+            name="Daily Standup",
+            description="Prepare Chris's current cross-domain operating picture.",
+            trigger_type="manual",
+            trigger_config={
+                "invocation_aliases": ["prepare my daily standup"],
+                "workflow_version": "2",
+            },
+            workflow_spec={
+                "queue_items": [
+                    {
+                        "id": "l3-input",
+                        "domain_key": "l3",
+                        "agent_key": "l3-operations-agent",
+                        "stage_index": 1,
+                        "objective": "Prepare the L3 input for Chris's daily standup.",
+                    },
+                    {
+                        "id": "standup-synthesis",
+                        "domain_key": "maestro-development",
+                        "agent_key": "maestro-briefing-agent",
+                        "stage_index": 2,
+                        "depends_on": ["l3-input"],
+                        "objective": "Synthesize the domain reports for Chris.",
+                    },
+                ]
+            },
+            is_active=True,
+        )
+    )
+    session.commit()
+    planner = CapturingKnowledgePlanner(
+        KnowledgeTurn(message="It includes L3 and then synthesizes the domain reports.", actions=[])
+    )
+
+    MaestroKnowledgeService(session, planner=planner).respond(
+        "What does my Daily Standup do?"
+    )
+
+    assert "Authoritative Current Workflow Definitions" in planner.context_text
+    assert "override memories, reports, run logs" in planner.context_text
+    assert "key=daily-standup" in planner.context_text
+    assert "domain=l3" in planner.context_text
+    assert "agent=l3-operations-agent" in planner.context_text
+    assert 'depends_on=["l3-input"]' in planner.context_text
+
+
+def test_semantic_paraphrase_can_invoke_on_demand_workflow_without_alias_match(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    session.add(
+        WorkflowDefinition(
+            key="daily-standup",
+            name="Daily Standup",
+            trigger_type="manual",
+            trigger_config={"invocation_aliases": ["prepare my daily standup"]},
+            workflow_spec={"queue_items": []},
+            is_active=True,
+        )
+    )
+    session.commit()
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am starting your morning operating picture.",
+                actions=[
+                    {
+                        "type": "workflow.run",
+                        "arguments": {"target": "daily-standup", "parameters": {}},
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I started your Daily Standup in the background.",
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Give me my morning operating picture."
+    )
+
+    runs = session.scalars(select(WorkflowRun)).all()
+    assert len(runs) == 1
+    assert runs[0].workflow_definition_id is not None
+    assert response.action_results[-1].action_type == "workflow.run"
+
+
 def test_knowledge_reply_resumes_waiting_agent_task_instead_of_answering_directly(
     session: Session,
 ) -> None:
