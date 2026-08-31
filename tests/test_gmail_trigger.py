@@ -1,4 +1,7 @@
+import errno
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.error import URLError
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -89,6 +92,11 @@ class ExpiredGmailHistorySource(FakeGmailHistorySource):
 class FailingGmailHistorySource(FakeGmailHistorySource):
     def history_page(self, *args, **kwargs) -> dict[str, Any]:
         raise RuntimeError("Gmail is temporarily unavailable.")
+
+
+class NetworkFailingGmailHistorySource(FakeGmailHistorySource):
+    def history_page(self, *args, **kwargs) -> dict[str, Any]:
+        raise URLError(OSError(errno.ENETUNREACH, "Network is unreachable"))
 
 
 class MissingMessageGmailHistorySource(FakeGmailHistorySource):
@@ -340,3 +348,75 @@ def test_gmail_trigger_surfaces_persistent_poll_failure_in_maestro_channel(
     )
     assert channel_message is not None
     assert "failed three times" in channel_message.content
+
+
+def test_gmail_trigger_waits_for_sustained_network_outage_and_reports_recovery(
+    session: Session,
+) -> None:
+    domain = _seed_trigger(session)
+    cursor = RuntimeSetting(
+        key=f"{GMAIL_TRIGGER_CURSOR_PREFIX}{domain.key}",
+        value={"domain_key": domain.key, "history_id": "100", "status": "healthy"},
+    )
+    session.add(cursor)
+    session.commit()
+    service = GmailTriggerService(session, source=NetworkFailingGmailHistorySource())
+
+    first = service.poll_once()
+    second = service.poll_once()
+    third = service.poll_once()
+
+    assert first["domains"][0]["status"] == "degraded"
+    assert second["domains"][0]["status"] == "degraded"
+    assert third["domains"][0]["status"] == "degraded"
+    assert third["domains"][0]["failure_kind"] == "transient_network"
+    assert session.scalars(select(WorkflowNotification)).all() == []
+
+    session.refresh(cursor)
+    cursor.value = {
+        **cursor.value,
+        "outage_started_at": (datetime.now(UTC) - timedelta(minutes=16)).isoformat(),
+    }
+    session.commit()
+
+    alerted = service.poll_once()
+
+    assert alerted["domains"][0]["alerted"] is True
+    notifications = session.scalars(
+        select(WorkflowNotification).order_by(WorkflowNotification.created_at)
+    ).all()
+    assert [notification.notification_type for notification in notifications] == [
+        "trigger_health"
+    ]
+    assert notifications[0].metadata_["failure_kind"] == "transient_network"
+    session.refresh(cursor)
+    assert cursor.value["health_alert_active"] is True
+
+    still_offline = service.poll_once()
+
+    assert still_offline["domains"][0]["alerted"] is False
+    assert len(session.scalars(select(WorkflowNotification)).all()) == 1
+
+    recovered = GmailTriggerService(session, source=FakeGmailHistorySource()).poll_once()
+
+    assert recovered["domains"][0]["status"] == "healthy"
+    session.refresh(cursor)
+    assert cursor.value["error_count"] == 0
+    assert cursor.value["health_alert_active"] is False
+    assert cursor.value["last_recovered_at"] is not None
+    notifications = session.scalars(
+        select(WorkflowNotification).order_by(WorkflowNotification.created_at)
+    ).all()
+    assert [notification.notification_type for notification in notifications] == [
+        "trigger_health",
+        "trigger_health_recovery",
+    ]
+    recovery_message = next(
+        message
+        for message in session.scalars(select(Message)).all()
+        if (message.metadata_ or {}).get("recovery") is True
+    )
+    assert "monitoring recovered" in recovery_message.content
+
+    GmailTriggerService(session, source=FakeGmailHistorySource()).poll_once()
+    assert len(session.scalars(select(WorkflowNotification)).all()) == 2

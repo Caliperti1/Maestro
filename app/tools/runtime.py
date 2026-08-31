@@ -7,6 +7,7 @@ contains several tool families; future cleanup should split adapters by provider
 """
 
 import base64
+import hashlib
 import html
 import json
 import os
@@ -15,10 +16,12 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -64,6 +67,11 @@ from app.memory.retrieval import (
 from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_service import RoutedMemoryService
+
+_GOOGLE_ACCESS_TOKEN_REFRESH_MARGIN_SECONDS = 60
+_GOOGLE_ACCESS_TOKEN_DEFAULT_LIFETIME_SECONDS = 3600
+_google_access_token_cache: dict[tuple[str, str], tuple[str, float]] = {}
+_google_access_token_cache_lock = threading.Lock()
 
 
 class ToolExecutionError(ValueError):
@@ -4239,6 +4247,21 @@ def _gmail_access_token(connection: ToolConnection | None) -> str:
             raise ToolExecutionError("Gmail refresh-token OAuth requires client_id or client_id_env.")
         if not client_secret:
             raise ToolExecutionError("Gmail refresh-token OAuth requires client_secret or client_secret_env.")
+        connection_key = str(connection.id) if connection is not None else "unscoped"
+        credential_fingerprint = hashlib.sha256(
+            f"{client_id}\0{refresh_token}".encode()
+        ).hexdigest()
+        cache_key = (connection_key, credential_fingerprint)
+        now = monotonic()
+        with _google_access_token_cache_lock:
+            for existing_key, (_, expires_at) in list(_google_access_token_cache.items()):
+                if expires_at <= now or (
+                    existing_key[0] == connection_key and existing_key != cache_key
+                ):
+                    _google_access_token_cache.pop(existing_key, None)
+            cached = _google_access_token_cache.get(cache_key)
+            if cached is not None and cached[1] > now:
+                return cached[0]
         token_payload = _google_oauth_refresh_access_token(
             client_id=client_id,
             client_secret=client_secret,
@@ -4247,6 +4270,23 @@ def _gmail_access_token(connection: ToolConnection | None) -> str:
         access_token = str(token_payload.get("access_token") or "").strip()
         if not access_token:
             raise ToolExecutionError("Google OAuth token refresh did not return an access token.")
+        try:
+            lifetime_seconds = int(
+                token_payload.get("expires_in")
+                or _GOOGLE_ACCESS_TOKEN_DEFAULT_LIFETIME_SECONDS
+            )
+        except (TypeError, ValueError):
+            lifetime_seconds = _GOOGLE_ACCESS_TOKEN_DEFAULT_LIFETIME_SECONDS
+        cache_seconds = max(
+            0,
+            lifetime_seconds - _GOOGLE_ACCESS_TOKEN_REFRESH_MARGIN_SECONDS,
+        )
+        if cache_seconds:
+            with _google_access_token_cache_lock:
+                _google_access_token_cache[cache_key] = (
+                    access_token,
+                    now + cache_seconds,
+                )
         return access_token
 
     env_names = [
@@ -4268,6 +4308,13 @@ def _gmail_access_token(connection: ToolConnection | None) -> str:
         "Gmail tools require refresh-token OAuth credentials. Configure client_id_env, "
         "client_secret_env, and refresh_token_env on the domain Gmail connection."
     )
+
+
+def _invalidate_google_access_token(access_token: str) -> None:
+    with _google_access_token_cache_lock:
+        for cache_key, (cached_token, _) in list(_google_access_token_cache.items()):
+            if cached_token == access_token:
+                _google_access_token_cache.pop(cache_key, None)
 
 
 def _secret_config_value(
@@ -4382,6 +4429,8 @@ def _gmail_api_json(
         with urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
+        if exc.code == 401:
+            _invalidate_google_access_token(token)
         detail = exc.read().decode("utf-8", errors="replace")
         raise ToolExecutionError(f"Gmail API {method} {path} failed: {exc.code} {detail}") from exc
     except URLError as exc:

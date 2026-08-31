@@ -156,5 +156,9 @@ processing. Later polls:
 Scheduler run idempotency prevents restarts or repeated history pages from creating duplicate runs.
 If Gmail has expired an old cursor, Maestro resets to the current cursor, records the warning in
 trigger health, and does not guess at the missing interval. Trigger health and manual cursor reset
-are visible in the Workflows UI. Keep the Gmail trigger worker off until the intended durable email
-workflow definition has been reviewed and activated.
+are visible in the Workflows UI. OAuth access tokens are reused until shortly before expiry.
+Credential and API failures notify after three consecutive attempts; routing, DNS, and timeout
+failures remain degraded and notify only after the configured sustained-outage window (15 minutes
+by default). A successful poll clears the outage and posts recovery only when an alert was sent.
+Keep the Gmail trigger worker off until the intended durable email workflow definition has been
+reviewed and activated.
