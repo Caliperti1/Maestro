@@ -697,6 +697,67 @@ def test_routed_context_returns_recurring_event_for_requested_date(
     assert response.json()["events"][0]["recurrence_rule"].endswith("20261231T235959Z")
 
 
+def test_routed_context_ranks_rough_calendar_reference_and_expands_occurrence(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    l3 = DomainRepository(session).get_by_key("l3")
+    assert l3 is not None
+    session.add_all(
+        [
+            CalendarEvent(
+                domain_id=l3.id,
+                title="Collaborative Autonomy Standup",
+                summary="Daily autonomy coordination.",
+                start_at=datetime(2026, 8, 24, 15, 0, tzinfo=UTC),
+                end_at=datetime(2026, 8, 24, 15, 30, tzinfo=UTC),
+                timezone="America/New_York",
+                recurrence_rule="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH;UNTIL=20261231T235959Z",
+                status="scheduled",
+                attendees=[],
+                supporting_refs=[],
+                source_refs=[],
+                provenance={"created_from": "test"},
+                metadata_={},
+            ),
+            CalendarEvent(
+                domain_id=l3.id,
+                title="Weekly Autonomy PM Sync",
+                start_at=datetime(2026, 8, 31, 17, 0, tzinfo=UTC),
+                end_at=datetime(2026, 8, 31, 17, 30, tzinfo=UTC),
+                timezone="America/New_York",
+                status="scheduled",
+                attendees=[],
+                supporting_refs=[],
+                source_refs=[],
+                provenance={"created_from": "test"},
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+
+    response = _client(session, tmp_path).get(
+        "/memory/routed-objects",
+        params={
+            "domain_key": "l3",
+            "query_text": (
+                "shift my collaborative autonomy standup scheduled August 31 2026 "
+                "at 11:00 AM Eastern"
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    match = response.json()["events"][0]
+    assert match["title"] == "Collaborative Autonomy Standup"
+    assert match["matched_occurrence_start_at"] == "2026-08-31T11:00:00-04:00"
+    assert match["matched_occurrence_end_at"] == "2026-08-31T11:30:00-04:00"
+    assert "recurring occurrence" in match["match_reasons"]
+    assert match["retrieval_score"] > 0.8
+
+
 def test_calendar_instance_edit_creates_exception_without_moving_series(
     session: Session,
     tmp_path: Path,

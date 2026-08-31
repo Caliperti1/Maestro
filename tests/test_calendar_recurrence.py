@@ -43,3 +43,10 @@ def test_query_calendar_date_understands_next_weekday() -> None:
         "What's on my schedule next Monday?",
         now=datetime(2026, 8, 20, 16, 0, tzinfo=UTC),
     ) == date(2026, 8, 24)
+
+
+def test_query_calendar_date_understands_written_month_date() -> None:
+    assert query_calendar_date(
+        "Collaborative Autonomy Standup on August 31, 2026 at 11:00 AM Eastern",
+        now=datetime(2026, 8, 20, 16, 0, tzinfo=UTC),
+    ) == date(2026, 8, 31)

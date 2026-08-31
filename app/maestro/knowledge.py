@@ -47,6 +47,7 @@ from app.maestro.knowledge_tools import (
     KnowledgeReadToolService,
 )
 from app.maestro.scheduler import SchedulerService
+from app.memory.calendar_intelligence import CalendarIntelligenceService
 from app.memory.calendar_recurrence import normalize_recurrence_rule
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.event_work_links import EventWorkLinkService
@@ -928,7 +929,13 @@ class MaestroKnowledgeService:
                 ContactEmbeddingService(self.session).upsert(updated)
                 self.session.commit()
         elif object_type == "calendar":
-            updated = editor.update_event(object_id, updates)
+            if (
+                str(updates.get("edit_scope") or "").lower() == "occurrence"
+                or updates.get("occurrence_start_at")
+            ):
+                updated = editor.create_event_exception(object_id, updates)
+            else:
+                updated = editor.update_event(object_id, updates)
             object_type = "event"
         elif object_type == "todo":
             updated = editor.update_todo(object_id, updates)
@@ -1146,6 +1153,28 @@ class MaestroKnowledgeService:
                     for result in results
                     if result.score >= 0.78
                 ]
+        elif object_type == "calendar":
+            exact = list(
+                self.session.scalars(
+                    select(CalendarEvent).where(
+                        func.lower(CalendarEvent.title) == target.lower(),
+                        CalendarEvent.status != "archived",
+                    )
+                )
+            )
+            if domain is not None:
+                exact = [item for item in exact if item.domain_id == domain.id]
+            if not exact:
+                results = CalendarIntelligenceService(self.session).search(
+                    target,
+                    domain_id=domain.id if domain else None,
+                    limit=3,
+                )
+                if results:
+                    top = results[0]
+                    runner_up = results[1].score if len(results) > 1 else 0.0
+                    if top.score >= 0.28 and top.score - runner_up >= 0.08:
+                        exact = [top.event]
         else:
             title_field = model.title
             query = select(model).where(
@@ -1581,7 +1610,13 @@ def _normalize_calendar_arguments(
             schedule["scheduling_effect"] = "hard"
     start_at = _parse_datetime(schedule.get("start_at"))
     end_at = _parse_datetime(schedule.get("end_at"))
-    explicit_range = _time_range_from_message(source_message, anchor=start_at)
+    is_occurrence_edit = (
+        str(schedule.get("edit_scope") or "").lower() == "occurrence"
+        or schedule.get("occurrence_start_at") is not None
+    )
+    explicit_range = (
+        None if is_occurrence_edit else _time_range_from_message(source_message, anchor=start_at)
+    )
     if explicit_range is not None:
         start_at, end_at = explicit_range
     if start_at is not None:
@@ -1632,7 +1667,8 @@ def _time_range_from_message(
         end_hour = _hour_with_meridiem(end_hour, end_meridiem)
     elif anchor.hour >= 12 and start_hour < 12:
         start_hour += 12
-        end_hour += 12
+        if end_hour < 12:
+            end_hour += 12
     start = anchor.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
     end = anchor.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
     return start, end

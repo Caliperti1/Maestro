@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.identity import is_maestro_user_reference, maestro_user_identity
-from app.core.time import home_timezone
+from app.core.time import home_isoformat, home_timezone
 from app.db.models import (
     CalendarEvent,
     Contact,
@@ -44,7 +44,6 @@ from app.memory.calendar_intelligence import (
     CalendarIntelligenceService,
     conferencing_url_from_values,
 )
-from app.memory.calendar_recurrence import event_occurs_on, query_calendar_date
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.event_work_links import EventWorkLinkService
 from app.memory.organization_intelligence import (
@@ -196,9 +195,7 @@ class RoutedMemoryService:
             ]
         calendar = CalendarIntelligenceService(self.session)
         return {
-            "events": [
-                calendar.event_payload(item) for item in self._events(domain_id, query, limit)
-            ],
+            "events": self._events(calendar, domain_id, query, limit),
             "todos": [self._todo_payload(item) for item in self._todos(domain_id, query, limit)],
             "contacts": contacts,
             "entities": organizations,
@@ -1152,40 +1149,28 @@ class RoutedMemoryService:
             "source_refs": item.source_refs,
         }
 
-    def _events(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[CalendarEvent]:
-        statement = select(CalendarEvent).where(CalendarEvent.status != "archived")
-        if domain_id is not None:
-            statement = statement.where(CalendarEvent.domain_id == domain_id)
-        target_date = query_calendar_date(query) if query else None
-        if target_date is not None:
-            candidates = list(
-                self.session.scalars(
-                    statement.where(CalendarEvent.start_at.is_not(None)).order_by(
-                        CalendarEvent.start_at
-                    )
-                ).all()
+    def _events(
+        self,
+        calendar: CalendarIntelligenceService,
+        domain_id: uuid.UUID | None,
+        query: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        results = calendar.search(query, domain_id=domain_id, limit=limit)
+        payloads: list[dict[str, Any]] = []
+        for result in results:
+            payloads.append(
+                {
+                    **calendar.event_payload(result.event),
+                    "retrieval_score": result.score,
+                    "match_reasons": result.match_reasons,
+                    "matched_occurrence_start_at": home_isoformat(
+                        result.occurrence_start_at
+                    ),
+                    "matched_occurrence_end_at": home_isoformat(result.occurrence_end_at),
+                }
             )
-            return [
-                item
-                for item in candidates
-                if event_occurs_on(
-                    start_at=item.start_at,
-                    recurrence_rule=item.recurrence_rule,
-                    target_date=target_date,
-                    timezone_name=item.timezone,
-                )
-            ][:limit]
-        if query:
-            statement = statement.where(
-                _text_match(CalendarEvent.title, CalendarEvent.summary, query=query)
-            )
-        return list(
-            self.session.scalars(
-                statement.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(
-                    limit
-                )
-            ).all()
-        )
+        return payloads
 
     def _todos(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[Todo]:
         statement = select(Todo).where(Todo.status.notin_(["done", "archived"]))

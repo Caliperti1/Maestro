@@ -371,6 +371,15 @@ class RoutedEditService:
             for key, value in updates.items()
             if key not in {"edit_scope", "occurrence_start_at", "recurrence_rule"}
         }
+        if (
+            "start_at" in instance_updates
+            and "end_at" not in instance_updates
+            and parent.start_at is not None
+            and parent.end_at is not None
+        ):
+            new_start = _parse_optional_datetime(instance_updates["start_at"])
+            if new_start is not None:
+                instance_updates["end_at"] = new_start + (parent.end_at - parent.start_at)
         instance_updates["metadata"] = {
             **(
                 instance_updates.get("metadata")

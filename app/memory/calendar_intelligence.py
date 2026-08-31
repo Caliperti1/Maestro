@@ -3,15 +3,17 @@
 import html
 import re
 import uuid
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.identity import is_maestro_user_reference
-from app.core.time import home_isoformat
+from app.core.time import home_isoformat, home_timezone
 from app.db.models import (
     CalendarEvent,
     CalendarEventAttendee,
@@ -25,7 +27,17 @@ from app.db.models import (
     OrganizationIdentifier,
     Todo,
 )
+from app.memory.calendar_recurrence import event_occurs_on, query_calendar_date
 from app.memory.event_work_links import EventWorkLinkService
+
+
+@dataclass(frozen=True)
+class CalendarSearchResult:
+    event: CalendarEvent
+    score: float
+    match_reasons: list[str]
+    occurrence_start_at: datetime | None
+    occurrence_end_at: datetime | None
 
 
 class CalendarIntelligenceService:
@@ -48,6 +60,96 @@ class CalendarIntelligenceService:
             self.replace_attendees(event, event.attendees, commit=False)
         self.materialize_contact_interactions(event, commit=False)
         self.session.flush()
+
+    def search(
+        self,
+        query_text: str,
+        *,
+        domain_id: uuid.UUID | None = None,
+        limit: int = 10,
+        now: datetime | None = None,
+    ) -> list[CalendarSearchResult]:
+        """Rank calendar records using title, time, date, domain, and recurrence evidence."""
+        statement = select(CalendarEvent).where(CalendarEvent.status != "archived")
+        if domain_id is not None:
+            statement = statement.where(CalendarEvent.domain_id == domain_id)
+        events = list(self.session.scalars(statement).all())
+        query = " ".join((query_text or "").split())
+        local_now = (now or datetime.now(UTC)).astimezone(home_timezone())
+        target_date = query_calendar_date(query, now=local_now) if query else None
+        target_time = _query_calendar_time(query)
+        query_tokens = _calendar_tokens(query)
+        results: list[CalendarSearchResult] = []
+        for event in events:
+            occurrence_start, occurrence_end = _matching_occurrence(event, target_date)
+            if target_date is not None and occurrence_start is None:
+                continue
+            domain_key = self._domain_key(event.domain_id) or ""
+            event_tokens = _calendar_tokens(f"{_calendar_search_text(event)} {domain_key}")
+            title_tokens = _calendar_tokens(event.title)
+            title_overlap = (
+                len(query_tokens & title_tokens) / len(title_tokens) if title_tokens else 0.0
+            )
+            context_overlap = (
+                len(query_tokens & event_tokens) / len(query_tokens) if query_tokens else 0.0
+            )
+            score = 0.52 * title_overlap + 0.18 * context_overlap
+            reasons: list[str] = []
+            normalized_query = _normalize(query)
+            normalized_title = _normalize(event.title)
+            if normalized_title and normalized_title in normalized_query:
+                score += 0.18
+                reasons.append("title phrase")
+            elif title_overlap:
+                reasons.append(f"title tokens {title_overlap:.0%}")
+            if context_overlap and not title_overlap:
+                reasons.append(f"event context {context_overlap:.0%}")
+            if target_date is not None and occurrence_start is not None:
+                score += 0.2
+                reasons.append(f"occurs on {target_date.isoformat()}")
+            if target_time is not None and occurrence_start is not None:
+                local_occurrence = occurrence_start.astimezone(_event_timezone(event))
+                difference = abs(
+                    local_occurrence.hour * 60
+                    + local_occurrence.minute
+                    - (target_time.hour * 60 + target_time.minute)
+                )
+                time_score = max(0.0, 1.0 - difference / 180.0)
+                score += 0.22 * time_score
+                if difference <= 30:
+                    reasons.append(
+                        f"time {local_occurrence.strftime('%-I:%M %p')}"
+                    )
+            elif occurrence_start is not None and target_date is None:
+                days_away = abs((occurrence_start.astimezone(home_timezone()) - local_now).days)
+                score += 0.08 * max(0.0, 1.0 - days_away / 30.0)
+            if domain_id is not None:
+                reasons.append("domain match")
+            elif domain_key and domain_key in query_tokens:
+                score += 0.08
+                reasons.append(f"domain reference {domain_key}")
+            if event.recurrence_rule and target_date is not None:
+                reasons.append("recurring occurrence")
+            if not query:
+                score = 1.0
+            if score >= 0.12:
+                results.append(
+                    CalendarSearchResult(
+                        event=event,
+                        score=round(min(score, 1.0), 4),
+                        match_reasons=reasons,
+                        occurrence_start_at=occurrence_start or event.start_at,
+                        occurrence_end_at=occurrence_end or event.end_at,
+                    )
+                )
+        results.sort(
+            key=lambda result: (
+                -result.score,
+                result.occurrence_start_at or datetime.max.replace(tzinfo=UTC),
+                result.event.title.lower(),
+            )
+        )
+        return results[:limit]
 
     def replace_attendees(
         self,
@@ -378,6 +480,144 @@ class CalendarIntelligenceService:
     def _domain_key(self, domain_id: uuid.UUID | None) -> str | None:
         domain = self.session.get(Domain, domain_id) if domain_id else None
         return domain.key if domain else None
+
+
+_CALENDAR_QUERY_STOPWORDS = {
+    "a",
+    "am",
+    "an",
+    "and",
+    "at",
+    "calendar",
+    "called",
+    "change",
+    "eastern",
+    "est",
+    "et",
+    "event",
+    "for",
+    "from",
+    "in",
+    "meeting",
+    "move",
+    "my",
+    "on",
+    "only",
+    "please",
+    "pm",
+    "scheduled",
+    "shift",
+    "the",
+    "this",
+    "time",
+    "to",
+    "today",
+    "tomorrow",
+}
+
+
+def _calendar_search_text(event: CalendarEvent) -> str:
+    attendee_text = " ".join(
+        str(item.get("name") or item.get("email") or item.get("value") or "")
+        for item in (event.attendees or [])
+        if isinstance(item, dict)
+    )
+    return " ".join(
+        str(value or "")
+        for value in (
+            event.title,
+            event.summary,
+            event.location,
+            event.organizer_name,
+            event.organizer_email,
+            attendee_text,
+        )
+    )
+
+
+def _calendar_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", (value or "").lower())
+        if len(token) > 1
+        and token not in _CALENDAR_QUERY_STOPWORDS
+        and not token.isdigit()
+    }
+
+
+def _query_calendar_time(query: str) -> time | None:
+    normalized = " ".join((query or "").lower().split())
+    colon = re.search(r"\b(\d{1,2}):(\d{2})\s*(am|pm)?\b", normalized)
+    if colon:
+        return _clock_time(int(colon.group(1)), int(colon.group(2)), colon.group(3))
+    meridiem = re.search(r"\b(\d{1,2})\s*(am|pm|est|edt|et)\b", normalized)
+    if meridiem:
+        marker = meridiem.group(2) if meridiem.group(2) in {"am", "pm"} else None
+        return _clock_time(int(meridiem.group(1)), 0, marker)
+    compact = re.search(
+        r"\b(?:at|from|around|to)\s+([01]?\d|2[0-3])([0-5]\d)\s*(?:est|edt|et)?\b",
+        normalized,
+    )
+    if compact:
+        return _clock_time(int(compact.group(1)), int(compact.group(2)), None)
+    return None
+
+
+def _clock_time(hour: int, minute: int, meridiem: str | None) -> time | None:
+    if minute > 59:
+        return None
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    if not 0 <= hour <= 23:
+        return None
+    return time(hour, minute)
+
+
+def _matching_occurrence(
+    event: CalendarEvent,
+    target_date: date | None,
+) -> tuple[datetime | None, datetime | None]:
+    if event.start_at is None:
+        return None, None
+    start = _aware(event.start_at)
+    end = _aware(event.end_at) if event.end_at else None
+    if target_date is None:
+        return start, end
+    if not event_occurs_on(
+        start_at=start,
+        recurrence_rule=event.recurrence_rule,
+        target_date=target_date,
+        timezone_name=event.timezone,
+    ):
+        return None, None
+    timezone = _event_timezone(event)
+    local_start = start.astimezone(timezone)
+    occurrence_start = datetime.combine(target_date, local_start.timetz().replace(tzinfo=None), timezone)
+    occurrence_start = occurrence_start.astimezone(UTC)
+    if _is_excluded_occurrence(event, occurrence_start):
+        return None, None
+    duration = end - start if end is not None else None
+    return occurrence_start, occurrence_start + duration if duration else None
+
+
+def _is_excluded_occurrence(event: CalendarEvent, occurrence_start: datetime) -> bool:
+    for raw in (event.metadata_ or {}).get("recurrence_exdates") or []:
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if _aware(parsed) == occurrence_start:
+            return True
+    return False
+
+
+def _event_timezone(event: CalendarEvent) -> ZoneInfo:
+    try:
+        return ZoneInfo(event.timezone or "America/New_York")
+    except ZoneInfoNotFoundError:
+        return home_timezone()
 
 
 _CONFERENCING_METADATA_KEYS = (
