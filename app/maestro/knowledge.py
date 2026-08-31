@@ -478,7 +478,15 @@ class MaestroKnowledgeService:
             ]
         if not definitions:
             return ""
-        lines = ["Existing durable workflows available to this turn:"]
+        lines = [
+            "## Authoritative Current Workflow Definitions",
+            (
+                "These database records are the source of truth for what each named workflow "
+                "currently does. They override memories, reports, run logs, and conversation "
+                "history that describe an older or similarly named process. Do not combine "
+                "details across different workflow keys."
+            ),
+        ]
         for definition in definitions[:20]:
             config = definition.trigger_config or {}
             compact_config = {
@@ -494,11 +502,36 @@ class MaestroKnowledgeService:
                 )
                 if key in config
             }
-            lines.append(
-                f"- id={definition.id}; key={definition.key}; name={definition.name}; "
-                f"trigger={definition.trigger_type}; active={definition.is_active}; "
-                f"config={json.dumps(compact_config, sort_keys=True)}"
+            lines.extend(
+                [
+                    f"### {definition.name}",
+                    (
+                        f"id={definition.id}; key={definition.key}; "
+                        f"trigger={definition.trigger_type}; active={definition.is_active}"
+                    ),
+                    f"description={definition.description or '(none)'}",
+                    f"config={json.dumps(compact_config, sort_keys=True)}",
+                ]
             )
+            if definition.trigger_type != "manual" or not definition.is_active:
+                continue
+            queue_items = (definition.workflow_spec or {}).get("queue_items") or []
+            if not isinstance(queue_items, list) or not queue_items:
+                continue
+            lines.append("Current execution lanes:")
+            for item in queue_items[:20]:
+                if not isinstance(item, dict):
+                    continue
+                objective = " ".join(str(item.get("objective") or "").split())
+                if len(objective) > 320:
+                    objective = f"{objective[:317].rstrip()}..."
+                lines.append(
+                    "- "
+                    f"item={item.get('id')}; domain={item.get('domain_key')}; "
+                    f"agent={item.get('agent_key')}; stage={item.get('stage_index')}; "
+                    f"depends_on={json.dumps(item.get('depends_on') or [])}; "
+                    f"objective={objective or '(none)'}"
+                )
         return "\n".join(lines)
 
     def _product_portfolio_context_text(self) -> str:
