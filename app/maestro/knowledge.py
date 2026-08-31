@@ -212,6 +212,7 @@ class MaestroKnowledgeService:
         *,
         conversation_id: uuid.UUID | None = None,
         message_id: uuid.UUID | None = None,
+        response_mode: str = "text",
     ) -> KnowledgeResponse:
         context = MaestroContextAssembler(self.session).build_bundle(
             query_text=message,
@@ -234,6 +235,7 @@ class MaestroKnowledgeService:
         context_text = "\n\n".join(
             part
             for part in (
+                _response_mode_context(response_mode),
                 conversation_context,
                 portfolio_context,
                 context.rendered_text,
@@ -258,14 +260,18 @@ class MaestroKnowledgeService:
         ]
         if result_lines:
             response_message = "I need one more detail before I can safely finish that change."
-            response_message += "\n\n" + "\n".join(f"- {line}" for line in result_lines)
+            if response_mode == "voice":
+                response_message += " " + " ".join(result_lines)
+            else:
+                response_message += "\n\n" + "\n".join(f"- {line}" for line in result_lines)
         else:
             response_message = turn.message or "I handled that."
         if (
             turn.workflow_suggestion
             and turn.workflow_suggestion.lower() not in response_message.lower()
         ):
-            response_message = f"{response_message}\n\n{turn.workflow_suggestion}"
+            separator = " " if response_mode == "voice" else "\n\n"
+            response_message = f"{response_message}{separator}{turn.workflow_suggestion}"
         return KnowledgeResponse(
             message=response_message,
             action_results=results,
@@ -1153,6 +1159,19 @@ class MaestroKnowledgeService:
             row.source_refs = [*(row.source_refs or []), provenance]
         ContactEmbeddingService(self.session).upsert(contact)
         self.session.commit()
+
+
+def _response_mode_context(response_mode: str) -> str:
+    if response_mode != "voice":
+        return ""
+    return (
+        '<maestro_hidden_context purpose="response_mode" do_not_copy="true">\n'
+        "Response mode is voice. Write the final user-facing message for natural speech: lead with "
+        "the answer, use one to three short sentences when possible, avoid Markdown and raw URLs, "
+        "and end with at most one useful follow-up question. Preserve all normal safety, approval, "
+        "and authority boundaries.\n"
+        "</maestro_hidden_context>"
+    )
 
 
 def _knowledge_schema() -> dict[str, Any]:

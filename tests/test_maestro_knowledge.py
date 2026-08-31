@@ -162,6 +162,82 @@ def test_knowledge_mode_never_creates_a_workflow_task(session: Session, monkeypa
     assert session.scalar(select(func.count()).select_from(Task)) == 0
 
 
+def test_voice_mode_returns_compact_spoken_contract_and_replays_client_turn_once(
+    session: Session,
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeKnowledgeService:
+        def __init__(self, _session):
+            pass
+
+        def respond(self, message, **kwargs):
+            calls.append(message)
+            assert kwargs["response_mode"] == "voice"
+            return KnowledgeResponse(
+                message="Focus on the phone reliability test next. Want the acceptance steps?",
+                action_results=[],
+            )
+
+    monkeypatch.setattr(maestro_api, "MaestroKnowledgeService", FakeKnowledgeService)
+    client_turn_id = uuid.uuid4()
+    request = {
+        "message": "What should I focus on next?",
+        "interaction_mode": "knowledge",
+        "interface": "voice",
+        "response_mode": "voice",
+        "client_turn_id": str(client_turn_id),
+    }
+    first = _client(session).post("/maestro/respond", json=request)
+    second = _client(session).post("/maestro/respond", json=request)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert calls == ["What should I focus on next?"]
+    assert first.json()["classification"] == "knowledge_chat"
+    assert second.json()["classification"] == "idempotent_replay"
+    assert second.json()["message"] == first.json()["message"]
+    assert first.json()["continue_listening"] is True
+    assert first.json()["client_turn_id"] == str(client_turn_id)
+    assert set(first.json()["conversation"]) == {"id", "title", "message_count"}
+
+    user_messages = session.scalars(
+        select(Message).where(Message.client_turn_id == client_turn_id)
+    ).all()
+    assert len(user_messages) == 1
+    responses = [
+        message
+        for message in session.scalars(
+            select(Message).where(
+                Message.conversation_id == user_messages[0].conversation_id,
+                Message.sender_type == "maestro",
+            )
+        ).all()
+        if (message.metadata_ or {}).get("in_reply_to_client_turn_id") == str(client_turn_id)
+    ]
+    assert len(responses) == 1
+
+
+def test_voice_mode_adds_spoken_response_guidance_to_knowledge_context(session: Session) -> None:
+    planner = CapturingKnowledgePlanner(
+        KnowledgeTurn(
+            message="Your first priority is the phone reliability test.",
+            actions=[],
+        )
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "What should I focus on?",
+        response_mode="voice",
+    )
+
+    assert response.message == "Your first priority is the phone reliability test."
+    assert 'purpose="response_mode"' in planner.context_text
+    assert "one to three short sentences" in planner.context_text
+    assert "avoid Markdown and raw URLs" in planner.context_text
+
+
 def test_knowledge_mode_invokes_existing_on_demand_workflow_once(session: Session) -> None:
     seed_default_domains(session)
     definition = WorkflowDefinition(

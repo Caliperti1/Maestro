@@ -150,12 +150,16 @@ class Conversation(TimestampMixin, Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        UniqueConstraint("client_turn_id", name="uq_messages_client_turn_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     sender_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    client_turn_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, index=True)
     agent_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("agents.id", ondelete="SET NULL"))
     content: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
