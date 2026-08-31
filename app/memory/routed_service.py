@@ -235,7 +235,7 @@ class RoutedMemoryService:
                 agent_task=agent_task,
                 agent_task_status="pending" if agent_task else "not_agent",
                 priority=item.priority,
-                status="needs_input" if item.route_type == "human_input" else "open",
+                status=_todo_status_for_routed_item(item),
                 source_refs=item.source_refs,
                 provenance=self._provenance(item),
                 metadata_=self._canonical_metadata(item),
@@ -2019,6 +2019,13 @@ def _merge_source_refs(
         if ref not in merged:
             merged.append(ref)
     return merged
+
+
+def _todo_status_for_routed_item(item: RoutedItem) -> str:
+    if item.route_type != "human_input":
+        return "open"
+    metadata = item.metadata_ or {}
+    return "needs_input" if metadata.get("blocks_execution") is True else "open"
 
 
 def _priority_rank(priority: str | None) -> int:

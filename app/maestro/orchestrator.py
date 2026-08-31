@@ -511,7 +511,11 @@ class MaestroOrchestratorService:
                     title=item.title,
                     content=item.description,
                     priority=item.priority,
-                    status="needs_input" if route_type == "human_input" else "open",
+                    status=(
+                        "needs_input"
+                        if route_type == "human_input" and item.blocks_execution
+                        else "open"
+                    ),
                     source_refs=[
                         {
                             "type": "maestro_chat",

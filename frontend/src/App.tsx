@@ -2341,25 +2341,9 @@ function NeedsAttentionPanel({
   onSubmitAttentionResponse: (run: SchedulerRun, message: string) => Promise<void>;
   onArchiveRun: (runId: string) => Promise<void>;
 }) {
-  const [todos, setTodos] = useState<RoutedTodo[]>([]);
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [responseDrafts, setResponseDrafts] = useState<Record<string, string>>({});
   const [busyResponseRunId, setBusyResponseRunId] = useState<string | null>(null);
-  const [busyTodoId, setBusyTodoId] = useState<string | null>(null);
-
-  const refreshTodos = useCallback(async () => {
-    const response = await apiJson<{ todos: RoutedTodo[] }>(
-      "/memory/routed-objects/todos?status=needs_input&limit=20",
-    );
-    setTodos(response.todos);
-    setStatusMessage("Ready");
-  }, []);
-
-  useEffect(() => {
-    refreshTodos().catch((error) =>
-      setStatusMessage(error instanceof Error ? error.message : "Unable to load attention items."),
-    );
-  }, [refreshTodos]);
 
   const blockedRuns =
     schedulerDashboard?.runs.filter((run) =>
@@ -2393,23 +2377,6 @@ function NeedsAttentionPanel({
     }
   };
 
-  const updateAttentionTodo = async (todoId: string, status: "done" | "archived") => {
-    setBusyTodoId(todoId);
-    try {
-      await apiJson(`/memory/routed-objects/todos/${todoId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ updates: { status } }),
-      });
-      setStatusMessage(status === "done" ? "Attention item marked done." : "Attention item archived.");
-      await refreshTodos();
-    } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Could not update attention item.");
-    } finally {
-      setBusyTodoId(null);
-    }
-  };
-
   return (
     <section className="attention-strip" aria-labelledby="attention-heading">
       <div className="section-heading">
@@ -2417,9 +2384,6 @@ function NeedsAttentionPanel({
           <p className="eyebrow">Action items</p>
           <h3 id="attention-heading">Needs attention</h3>
         </div>
-        <button className="icon-button" onClick={refreshTodos} title="Refresh attention items">
-          <RefreshCw size={18} />
-        </button>
       </div>
       <div className="attention-grid">
         {pendingToolApprovals.map((activity) => (
@@ -2528,37 +2492,7 @@ function NeedsAttentionPanel({
             </div>
           </article>
         ))}
-        {todos.map((todo) => (
-          <article className="attention-card" key={todo.id}>
-            <ListTodo size={18} />
-            <div>
-              <span>{domainLabels[todo.domain_key ?? "global"] ?? todo.domain_key ?? "Global"}</span>
-              <h4>{todo.title}</h4>
-              <p>{todo.description}</p>
-              <div className="attention-actions">
-                <button
-                  className="planner-action"
-                  onClick={() => updateAttentionTodo(todo.id, "done")}
-                  disabled={busyTodoId === todo.id}
-                  type="button"
-                >
-                  <CheckCircle2 size={15} />
-                  Done
-                </button>
-                <button
-                  className="danger-action"
-                  onClick={() => updateAttentionTodo(todo.id, "archived")}
-                  disabled={busyTodoId === todo.id}
-                  type="button"
-                >
-                  <Archive size={15} />
-                  Archive
-                </button>
-              </div>
-            </div>
-          </article>
-        ))}
-        {pendingToolApprovals.length === 0 && runToolApprovals.length === 0 && blockedRuns.length === 0 && todos.length === 0 && (
+        {pendingToolApprovals.length === 0 && runToolApprovals.length === 0 && blockedRuns.length === 0 && (
           <p className="empty-state">No blocked workflows, approvals, or RFIs are waiting right now.</p>
         )}
       </div>

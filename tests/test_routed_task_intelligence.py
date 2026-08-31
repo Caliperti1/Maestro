@@ -22,6 +22,7 @@ from app.maestro.todo_agent_tasks import TodoAgentTaskService
 from app.memory.routed_hygiene import RoutedHygieneService
 from app.memory.routed_resolver import RoutedObjectResolver
 from app.memory.routed_retrieval import RoutedEditService
+from app.memory.routed_service import RoutedMemoryService
 from app.memory.todo_scheduling import TodoSchedulingService
 
 
@@ -237,6 +238,52 @@ def test_organization_resolver_uses_llm_for_semantic_ambiguity(session) -> None:
     assert decision.action == "update_existing"
     assert decision.object_id == organization.id
     assert decision.strategy == "llm_resolver"
+
+
+def test_standalone_human_input_promotes_to_open_todo(session) -> None:
+    domain = _domain(session)
+    item = RoutedItem(
+        domain_id=domain.id,
+        route_type="human_input",
+        title="Choose the trip villa",
+        content="Compare the remaining options and choose one.",
+        status="needs_input",
+        source_refs=[],
+        metadata_={"enriched_at": datetime.now(UTC).isoformat()},
+    )
+    session.add(item)
+    session.flush()
+
+    result = RoutedMemoryService(session, enable_llm_resolver=False).promote_item(item)
+    todo = session.get(Todo, result.object_id)
+
+    assert todo is not None
+    assert todo.todo_type == "human_input"
+    assert todo.status == "open"
+
+
+def test_explicitly_blocking_human_input_retains_needs_input_status(session) -> None:
+    domain = _domain(session)
+    item = RoutedItem(
+        domain_id=domain.id,
+        route_type="human_input",
+        title="Confirm the deployment target",
+        content="The workflow cannot continue until Chris confirms the target.",
+        status="needs_input",
+        source_refs=[],
+        metadata_={
+            "blocks_execution": True,
+            "enriched_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    session.add(item)
+    session.flush()
+
+    result = RoutedMemoryService(session, enable_llm_resolver=False).promote_item(item)
+    todo = session.get(Todo, result.object_id)
+
+    assert todo is not None
+    assert todo.status == "needs_input"
 
 
 class FakeOrchestrator:
