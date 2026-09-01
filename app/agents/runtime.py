@@ -4243,7 +4243,8 @@ Create todo/reminder candidates only for obligations that Chris personally needs
    `owner_ref=Chris`, `related_contact`, `related_event`, and `blocking`.
 4. When the source clearly describes a repeating obligation, include an RFC 5545
    `recurrence_rule`, `recurrence_timezone`, and the first actionable `due_at` or
-   `scheduled_start_at`. Do not flatten a monthly, weekly, or annual obligation into a one-time task.
+   `scheduled_start_at`. Use `FREQ=MONTHLY;BYMONTHDAY=-1` for the last day of every month. Do not
+   flatten a monthly, weekly, or annual obligation into a one-time task.
 5. Set priority based on deadline/impact.
 6. Include source_refs.
 

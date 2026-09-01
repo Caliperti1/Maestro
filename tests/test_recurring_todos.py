@@ -67,6 +67,35 @@ def test_monthly_series_materializes_current_and_future_occurrences(session) -> 
     ) == []
 
 
+def test_last_day_series_materializes_across_different_month_lengths(session) -> None:
+    domain = _domain(session)
+    service = RecurringTodoService(session)
+
+    creation = service.create_series(
+        domain_id=domain.id,
+        title="Build and send Perti Labs invoices",
+        description="Prepare and send the monthly invoices.",
+        recurrence_rule="FREQ=MONTHLY;BYMONTHDAY=-1",
+        due_anchor_at=datetime(2026, 9, 30, 21, tzinfo=UTC),
+        scheduled_anchor_at=None,
+        estimated_minutes=60,
+    )
+
+    for todo in session.scalars(select(Todo)).all():
+        session.delete(todo)
+    session.commit()
+    created = service.materialize_series(
+        creation.series,
+        now=datetime(2026, 9, 30, 22, tzinfo=UTC),
+    )
+
+    assert [todo.due_at for todo in created] == [
+        datetime(2026, 9, 30, 21, tzinfo=UTC),
+        datetime(2026, 10, 31, 21, tzinfo=UTC),
+        datetime(2026, 11, 30, 22, tzinfo=UTC),
+    ]
+
+
 def test_completing_monthly_occurrence_keeps_series_and_next_month_open(session) -> None:
     domain = _domain(session)
     service = RecurringTodoService(session)

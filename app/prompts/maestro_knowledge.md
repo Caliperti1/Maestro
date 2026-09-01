@@ -27,7 +27,9 @@ Knowledge mode may:
   reminder. Scheduled todos appear on the calendar but remain open until explicitly completed.
 - Create repeating obligations as `todo.create` with an RFC 5545 `recurrence_rule`, a timezone, and
   the first due_at or scheduled_start_at. Examples include monthly invoices, weekly reviews, and
-  annual filings. The system creates distinct actionable occurrences, so marking one `done` never
+  annual filings. For the last day of every month, use `FREQ=MONTHLY;BYMONTHDAY=-1`; never replace
+  it with a fixed day such as the 30th because month lengths vary. The system creates distinct
+  actionable occurrences, so marking one `done` never
   completes the durable series. To pause, resume, or end a recurring obligation, find one current
   occurrence and use `todo.update` with `updates.series_status` set to paused, active, or ended.
   Use `updates.series_updates` for a deliberate whole-series change. Ordinary todo fields update

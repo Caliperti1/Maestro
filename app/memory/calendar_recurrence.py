@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from calendar import monthrange
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -192,7 +193,11 @@ def event_occurs_on(
             for value in options.get("BYMONTHDAY", str(local_start.day)).split(",")
             if value.lstrip("-").isdigit()
         }
-        return months >= 0 and months % interval == 0 and target_date.day in month_days
+        return (
+            months >= 0
+            and months % interval == 0
+            and _matches_month_day(target_date, month_days)
+        )
     if frequency == "YEARLY":
         years = target_date.year - local_start.year
         return (
@@ -220,6 +225,16 @@ def _positive_int(value: str | None, *, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def _matches_month_day(target_date: date, month_days: set[int]) -> bool:
+    days_in_month = monthrange(target_date.year, target_date.month)[1]
+    resolved_days = {
+        value if value > 0 else days_in_month + value + 1
+        for value in month_days
+        if value != 0
+    }
+    return target_date.day in resolved_days
 
 
 def _timezone(name: str | None) -> ZoneInfo:

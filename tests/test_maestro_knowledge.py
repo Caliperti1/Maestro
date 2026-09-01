@@ -1122,6 +1122,58 @@ def test_knowledge_mode_creates_recurring_todo_series(session: Session) -> None:
     assert session.query(Todo).filter(Todo.recurring_series_id == series.id).count() >= 2
 
 
+def test_knowledge_mode_creates_last_day_recurring_todo_series(session: Session) -> None:
+    seed_default_domains(session)
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am setting up the monthly Perti Labs invoice obligation.",
+                actions=[
+                    {
+                        "type": "todo.create",
+                        "arguments": {
+                            "domain_key": "perti-laboratories",
+                            "title": "Build and send monthly invoices",
+                            "description": "Prepare and send Perti Labs invoices.",
+                            "due_at": "2026-09-30T17:00:00-04:00",
+                            "estimated_minutes": 60,
+                            "priority": "normal",
+                            "recurrence_rule": "FREQ=MONTHLY;BYMONTHDAY=-1",
+                            "recurrence_timezone": "America/New_York",
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I set up the invoice task for the last day of every month.",
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Set up a recurring Perti Labs task to build and send monthly invoices on the last day "
+        "of every month. It normally takes 60 minutes. The first one is due September 30th at "
+        "5 PM Eastern."
+    )
+
+    series = session.scalar(select(RecurringTodoSeries))
+    assert series is not None
+    assert series.recurrence_rule == "FREQ=MONTHLY;BYMONTHDAY=-1"
+    assert response.action_results[0].status == "completed"
+    assert [
+        (todo.due_at.year, todo.due_at.month, todo.due_at.day, todo.due_at.hour)
+        for todo in session.scalars(
+            select(Todo)
+            .where(Todo.recurring_series_id == series.id)
+            .order_by(Todo.due_at)
+        ).all()
+    ] == [
+        (2026, 9, 30, 21),
+        (2026, 10, 31, 21),
+    ]
+
+
 def test_knowledge_mode_completes_current_occurrence_by_series_title(session: Session) -> None:
     seed_default_domains(session)
     perti = session.scalar(select(Domain).where(Domain.key == "perti-laboratories"))
