@@ -26,6 +26,9 @@ materialization safe to repeat after restarts. The service keeps the latest due 
 next two future occurrences available. Todo retrieval groups those occurrences to one current card
 by default while preserving completed and upcoming rows for inspection.
 
+Rules use RFC 5545 month-day semantics, including negative positions. `BYMONTHDAY=-1` means the
+last day of each month, so February, 30-day months, and 31-day months resolve correctly.
+
 ## Lifecycle
 
 - Completing an occurrence changes only that Todo. The series stays active.

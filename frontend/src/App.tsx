@@ -742,6 +742,16 @@ function calendarRecurrence(item: RoutedEvent): CalendarRecurrenceOptions | unde
   return recurrence;
 }
 
+function recurringTodoRuleLabel(rule: string): string {
+  const fields = Object.fromEntries(
+    rule.split(";").map((part) => part.split("=", 2)),
+  ) as Record<string, string>;
+  if (fields.FREQ === "MONTHLY" && fields.BYMONTHDAY === "-1") {
+    return "Last day of every month";
+  }
+  return rule.replace(/;/g, " / ");
+}
+
 function calendarRecurrenceExdates(item: RoutedEvent): string[] {
   const values = item.metadata.recurrence_exdates;
   if (!Array.isArray(values)) return [];
@@ -1489,7 +1499,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         <div>
           <Repeat2 size={16} />
           <span>
-            <strong>{series.recurrence_rule.replace(/;/g, " / ")}</strong>
+            <strong>{recurringTodoRuleLabel(series.recurrence_rule)}</strong>
             <small>
               {series.status} / next {formatDateTime(series.next_due_at)} / {series.completed_occurrence_count} completed
             </small>

@@ -38,6 +38,20 @@ def test_recurring_event_occurs_on_configured_weekdays() -> None:
     assert not event_occurs_on(target_date=date(2026, 8, 30), **values)
 
 
+def test_monthly_recurrence_supports_last_day_of_each_month() -> None:
+    values = {
+        "start_at": datetime(2026, 9, 30, 21, 0, tzinfo=UTC),
+        "recurrence_rule": "FREQ=MONTHLY;BYMONTHDAY=-1",
+        "timezone_name": "America/New_York",
+    }
+
+    assert event_occurs_on(target_date=date(2026, 9, 30), **values)
+    assert event_occurs_on(target_date=date(2026, 10, 31), **values)
+    assert event_occurs_on(target_date=date(2026, 11, 30), **values)
+    assert event_occurs_on(target_date=date(2027, 2, 28), **values)
+    assert not event_occurs_on(target_date=date(2026, 10, 30), **values)
+
+
 def test_query_calendar_date_understands_next_weekday() -> None:
     assert query_calendar_date(
         "What's on my schedule next Monday?",
