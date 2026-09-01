@@ -17,6 +17,7 @@ from app.db.models import (
     OrganizationAlias,
     OrganizationIdentifier,
     OrganizationRelationship,
+    RecurringTodoSeries,
     Todo,
 )
 from app.memory.calendar_intelligence import (
@@ -113,6 +114,13 @@ class RoutedRetrievalService:
                     )
                 elif label == "todos":
                     due = item.get("due_at") or "no due date"
+                    series = item.get("recurring_series") or {}
+                    recurrence = (
+                        f"; repeats {series.get('recurrence_rule')} "
+                        f"[{series.get('status')}]"
+                        if series
+                        else ""
+                    )
                     events = "; ".join(
                         f"{link.get('relationship_type')} for {link.get('event_title')} "
                         f"({link.get('start_at')})"
@@ -121,7 +129,7 @@ class RoutedRetrievalService:
                     suffix = f"; calendar links: {events}" if events else ""
                     lines.append(
                         f"- {item.get('title')} [{item.get('status')}, {due}]: "
-                        f"{item.get('description')}{suffix}"
+                        f"{item.get('description')}{recurrence}{suffix}"
                     )
                 else:
                     text = item.get("content") or item.get("decision") or item.get("summary") or ""
@@ -422,6 +430,12 @@ class RoutedEditService:
         if todo.estimated_minutes is None:
             todo.estimated_minutes = TodoSchedulingService(self.session).estimate_minutes(todo)
         TodoSchedulingService(self.session).sync_projection(todo, commit=False)
+        if todo.recurring_series_id:
+            from app.memory.recurring_todos import RecurringTodoService
+
+            series = self.session.get(RecurringTodoSeries, todo.recurring_series_id)
+            if series is not None:
+                RecurringTodoService(self.session).materialize_series(series, commit=False)
         self.session.commit()
         self.session.refresh(todo)
         return todo

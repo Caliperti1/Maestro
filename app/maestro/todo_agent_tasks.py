@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import Domain, Report, Task, Todo, WorkflowQueueItem, WorkflowRun
@@ -23,6 +23,7 @@ class TodoAgentTaskService:
     def run_once(self, *, claim_limit: int = 2) -> dict[str, int]:
         reconciled = self._reconcile_active()
         started = 0
+        now = datetime.now(UTC)
         pending = self.session.scalars(
             select(Todo)
             .where(
@@ -30,6 +31,18 @@ class TodoAgentTaskService:
                 Todo.agent_task_status.in_(["not_agent", "pending", "retry"]),
                 Todo.status.notin_(["done", "archived"]),
                 Todo.workflow_task_id.is_(None),
+                or_(
+                    Todo.recurring_series_id.is_(None),
+                    and_(
+                        Todo.scheduled_start_at.is_not(None),
+                        Todo.scheduled_start_at <= now,
+                    ),
+                    and_(
+                        Todo.scheduled_start_at.is_(None),
+                        Todo.due_at.is_not(None),
+                        Todo.due_at <= now,
+                    ),
+                ),
             )
             .order_by(Todo.priority.desc(), Todo.created_at)
             .limit(claim_limit)

@@ -530,7 +530,11 @@ class RoutedHygieneService:
         merged = 0
         by_key: dict[str, Todo] = {}
         for todo in sorted(todos, key=lambda item: item.created_at or datetime.now(UTC)):
-            key = f"{todo.domain_id}:{_normalize(todo.title)}"
+            key = (
+                f"series:{todo.recurring_series_id}:{todo.recurrence_original_at}"
+                if todo.recurring_series_id
+                else f"{todo.domain_id}:{_normalize(todo.title)}"
+            )
             survivor = by_key.get(key)
             if survivor is None:
                 by_key[key] = todo
@@ -882,6 +886,8 @@ class RoutedHygieneService:
         suggestions: list[dict[str, Any]] = []
         for index, left in enumerate(todos):
             for right in todos[index + 1:]:
+                if left.recurring_series_id or right.recurring_series_id:
+                    continue
                 if left.domain_id == right.domain_id and _normalize(left.title) == _normalize(right.title):
                     suggestions.append(_suggestion("todo", left.id, right.id, 0.88, "same_title"))
         return suggestions

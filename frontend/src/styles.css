@@ -2506,6 +2506,30 @@ h4 {
   gap: 8px;
 }
 
+.recurring-todo-summary {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: var(--color-primary-soft);
+  border: 1px solid var(--color-primary);
+  border-radius: 8px;
+}
+
+.recurring-todo-summary > div:first-child {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.recurring-todo-summary span {
+  display: grid;
+  gap: 3px;
+}
+
+.recurring-todo-summary small {
+  color: var(--color-muted);
+}
+
 .routed-object-detail details,
 .routed-object-meta details {
   padding: 10px;

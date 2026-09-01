@@ -867,8 +867,46 @@ class ContactHydrationCandidate(TimestampMixin, Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
 
+class RecurringTodoSeries(TimestampMixin, Base):
+    """Durable recurrence policy whose generated occurrences remain ordinary todos."""
+
+    __tablename__ = "recurring_todo_series"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("domains.id", ondelete="SET NULL"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    recurrence_rule: Mapped[str] = mapped_column(Text, nullable=False)
+    timezone: Mapped[str] = mapped_column(
+        String(80), default="America/New_York", nullable=False
+    )
+    due_anchor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    scheduled_anchor_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    estimated_minutes: Mapped[int | None] = mapped_column(Integer)
+    owner_type: Mapped[str] = mapped_column(String(80), default="user", nullable=False)
+    owner_ref: Mapped[str | None] = mapped_column(String(240))
+    agent_task: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    priority: Mapped[str] = mapped_column(String(40), default="normal", nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
+    last_materialized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
 class Todo(TimestampMixin, Base):
     __tablename__ = "todos"
+    __table_args__ = (
+        UniqueConstraint(
+            "recurring_series_id",
+            "recurrence_original_at",
+            name="uq_todos_recurring_series_occurrence",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     domain_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -882,6 +920,12 @@ class Todo(TimestampMixin, Base):
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     estimated_minutes: Mapped[int | None] = mapped_column(Integer)
     scheduled_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    recurring_series_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("recurring_todo_series.id", ondelete="SET NULL"), index=True
+    )
+    recurrence_original_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     agent_task: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     agent_task_status: Mapped[str] = mapped_column(
         String(40), default="not_agent", nullable=False, index=True

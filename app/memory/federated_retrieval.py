@@ -34,6 +34,7 @@ from app.db.models import (
     OrganizationAlias,
     OrganizationEmbedding,
     ProductIssue,
+    RecurringTodoSeries,
     Report,
     RetrievalDocument,
     Todo,
@@ -354,7 +355,31 @@ class FederatedIndexService:
             lambda item: item.start_at,
             domains,
         )
-        yield from self._simple_projections(Todo, "todos", lambda item: "\n".join(value for value in [item.description, f"Due: {item.due_at.isoformat()}" if item.due_at else None, f"Owner: {item.owner_ref or item.owner_type}"] if value), lambda item: item.due_at or item.updated_at, domains)
+        recurring_series = {
+            item.id: item for item in self.session.scalars(select(RecurringTodoSeries)).all()
+        }
+        yield from self._simple_projections(
+            Todo,
+            "todos",
+            lambda item: "\n".join(
+                value
+                for value in [
+                    item.description,
+                    f"Due: {item.due_at.isoformat()}" if item.due_at else None,
+                    f"Owner: {item.owner_ref or item.owner_type}",
+                    (
+                        "Recurring obligation: "
+                        f"{recurring_series[item.recurring_series_id].recurrence_rule}; "
+                        f"series {recurring_series[item.recurring_series_id].status}"
+                        if item.recurring_series_id in recurring_series
+                        else None
+                    ),
+                ]
+                if value
+            ),
+            lambda item: item.due_at or item.updated_at,
+            domains,
+        )
         yield from self._simple_projections(DecisionRecord, "decisions", lambda item: "\n".join(value for value in [item.decision, item.rationale] if value), lambda item: item.updated_at, domains)
         yield from self._simple_projections(
             ProductIssue,

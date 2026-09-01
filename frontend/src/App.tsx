@@ -21,6 +21,7 @@ import {
   PanelLeftClose,
   Plus,
   RefreshCw,
+  Repeat2,
   Search,
   Settings,
   ShieldCheck,
@@ -570,6 +571,8 @@ function routedDraftFor(item: RoutedObjectRecord | null): Record<string, string>
       status: item.status ?? "open",
       owner_type: item.owner_type ?? "user",
       owner_ref: item.owner_ref ?? "",
+      recurrence_rule: item.recurring_series?.recurrence_rule ?? "",
+      recurrence_timezone: item.recurring_series?.timezone ?? "America/New_York",
     };
   }
   if ("email" in item) {
@@ -985,9 +988,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const supportsDomainFilter = surface === "calendar" || surface === "contacts" || surface === "todos" || surface === "organizations";
   const supportsLifecycleFilters = surface === "calendar" || surface === "todos";
   const supportsDoneFilter = surface === "todos";
-  const visibleItems = useMemo(
-    () =>
-      items.filter((item) => {
+  const visibleItems = useMemo(() => {
+      const filtered = items.filter((item) => {
         if (!showArchived && item.status === "archived") return false;
         if (supportsDoneFilter && !showDone && item.status === "done") return false;
         if (
@@ -997,7 +999,13 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           && item.item_kind === "context_window"
         ) return false;
         return true;
-      }),
+      });
+      if (surface !== "todos" || showDone) return filtered;
+      return filtered.filter((item) => {
+        if (!("todo_type" in item) || !item.recurring_series) return true;
+        return item.id === item.recurring_series.next_todo_id;
+      });
+    },
     [items, showArchived, showCalendarContext, showDone, supportsDoneFilter, surface],
   );
   const selectedItem = creatingEvent || creatingTodo
@@ -1142,6 +1150,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             scheduled_start_at: calendarApiValue(draft.scheduled_start_at ?? ""),
             estimated_minutes: draft.estimated_minutes ? Number(draft.estimated_minutes) : null,
             agent_task: draft.agent_task === "true",
+            recurrence_rule: draft.recurrence_rule || null,
+            recurrence_timezone: draft.recurrence_timezone || "America/New_York",
           }
         : null;
       const response = await apiJson<{ event?: RoutedEvent }>(
@@ -1278,6 +1288,8 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
       agent_task: "false",
       priority: "normal",
       status: "open",
+      recurrence_rule: "",
+      recurrence_timezone: "America/New_York",
     });
   };
 
@@ -1440,6 +1452,69 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     }
   };
 
+  const updateSelectedRecurringSeries = async (
+    status: "active" | "paused" | "ended",
+  ) => {
+    if (!selectedItem || !("todo_type" in selectedItem) || !selectedItem.recurring_series) return;
+    setBusy(true);
+    try {
+      await apiJson(
+        `/memory/routed-objects/todo-series/${selectedItem.recurring_series.id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ updates: { status } }),
+        },
+      );
+      setStatusMessage(
+        status === "active"
+          ? "Recurring task resumed."
+          : status === "paused"
+            ? "Recurring task paused."
+            : "Recurring task ended.",
+      );
+      await refreshItems();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Series update failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recurringTodoControls = (todo: RoutedTodo) => {
+    const series = todo.recurring_series;
+    if (!series) return null;
+    return (
+      <section className="recurring-todo-summary">
+        <div>
+          <Repeat2 size={16} />
+          <span>
+            <strong>{series.recurrence_rule.replace(/;/g, " / ")}</strong>
+            <small>
+              {series.status} / next {formatDateTime(series.next_due_at)} / {series.completed_occurrence_count} completed
+            </small>
+          </span>
+        </div>
+        <div className="routed-detail-actions">
+          {series.status === "active" ? (
+            <button type="button" onClick={() => updateSelectedRecurringSeries("paused")} disabled={busy}>
+              Pause series
+            </button>
+          ) : series.status === "paused" ? (
+            <button type="button" onClick={() => updateSelectedRecurringSeries("active")} disabled={busy}>
+              Resume series
+            </button>
+          ) : null}
+          {series.status !== "ended" && (
+            <button className="danger-action" type="button" onClick={() => updateSelectedRecurringSeries("ended")} disabled={busy}>
+              End series
+            </button>
+          )}
+        </div>
+      </section>
+    );
+  };
+
   const setSelectedEventStatus = async (status: "scheduled" | "cancelled") => {
     if (!selectedItem || surface !== "calendar") return;
     setBusy(true);
@@ -1512,6 +1587,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           <label>Scheduled<input type="datetime-local" value={draft.scheduled_start_at ?? ""} onChange={(event) => updateDraft("scheduled_start_at", event.target.value)} /></label>
         </div>
         <label className="toggle-row"><input type="checkbox" checked={draft.agent_task === "true"} onChange={(event) => updateDraft("agent_task", event.target.checked ? "true" : "false")} />Agent task</label>
+        {recurringTodoControls(item)}
         {eventReferences(item.event_links)}
       </>}
       {"email" in item && <>
@@ -1772,7 +1848,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 <strong>{routedObjectTitle(item)}</strong>
                 <small>
                   {surface === "todos" && "due_at" in item
-                      ? `${domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"} / ${item.status} / ${item.priority}`
+                      ? `${domainLabels[item.domain_key ?? "global"] ?? item.domain_key ?? "Global"} / ${item.status} / ${item.priority}${item.recurring_series ? " / repeats" : ""}`
                       : (surface === "contacts" || surface === "organizations") && "match_reasons" in item && item.match_reasons?.length
                         ? item.match_reasons.join(" / ")
                         : item.status}
@@ -2019,6 +2095,16 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     <input type="datetime-local" value={draft.scheduled_start_at ?? ""} onChange={(event) => updateDraft("scheduled_start_at", event.target.value)} />
                   </label>
                 </div>
+                {creatingTodo && <label>
+                  Repeat
+                  <select value={draft.recurrence_rule ?? ""} onChange={(event) => updateDraft("recurrence_rule", event.target.value)}>
+                    <option value="">Does not repeat</option>
+                    <option value="FREQ=DAILY">Daily</option>
+                    <option value="FREQ=WEEKLY">Weekly</option>
+                    <option value="FREQ=MONTHLY">Monthly</option>
+                    <option value="FREQ=YEARLY">Yearly</option>
+                  </select>
+                </label>}
                 <label className="toggle-row">
                   <input type="checkbox" checked={draft.agent_task === "true"} onChange={(event) => updateDraft("agent_task", event.target.checked ? "true" : "false")} />
                   Assign to Maestro agents in the background
@@ -2029,6 +2115,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                     {selectedItem.agent_task_error && <span>{selectedItem.agent_task_error}</span>}
                   </div>
                 )}
+                {selectedItem && "todo_type" in selectedItem && recurringTodoControls(selectedItem)}
                 {selectedItem && "todo_type" in selectedItem && eventReferences(selectedItem.event_links)}
                 <div className="two-column-fields">
                   <label>

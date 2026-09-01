@@ -36,6 +36,7 @@ from app.memory.contact_hydration import ContactHydrationService
 from app.memory.context_mailbox import ContextMailboxService
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.hygiene import DurableMemoryHygieneService
+from app.memory.recurring_todos import RecurringTodoService
 from app.memory.routed_hygiene import RoutedHygieneService
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ def create_app() -> FastAPI:
             AgentRegistryService(session).ensure_domain_provider_connections()
             ensure_runtime_repository(session)
             ensure_default_repository_portfolio(session)
+            RecurringTodoService(session).materialize_all()
         worker_tasks.extend(
             [
                 asyncio.create_task(_scheduler_worker_loop()),
@@ -139,6 +141,7 @@ async def _todo_agent_task_worker_loop() -> None:
 
 def _process_todo_agent_tasks_once() -> None:
     with SessionLocal() as session:
+        RecurringTodoService(session).materialize_all()
         TodoAgentTaskService(session).run_once(
             claim_limit=get_settings().todo_agent_worker_claim_limit
         )

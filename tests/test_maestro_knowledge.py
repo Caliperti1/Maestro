@@ -17,6 +17,7 @@ from app.db.models import (
     Message,
     ProductIssue,
     ProductProject,
+    RecurringTodoSeries,
     Report,
     Task,
     Todo,
@@ -1079,6 +1080,98 @@ def test_calendar_update_resolves_a_rough_recurring_event_reference(session: Ses
     session.refresh(event)
     assert event.location == "Teams"
     assert response.action_results[-1].status == "completed"
+
+
+def test_knowledge_mode_creates_recurring_todo_series(session: Session) -> None:
+    seed_default_domains(session)
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am setting up the monthly Perti Labs invoice obligation.",
+                actions=[
+                    {
+                        "type": "todo.create",
+                        "arguments": {
+                            "domain_key": "perti-laboratories",
+                            "title": "Build and send monthly invoices",
+                            "description": "Prepare and send Perti Labs invoices.",
+                            "due_at": "2026-09-05T17:00:00-04:00",
+                            "estimated_minutes": 90,
+                            "priority": "high",
+                            "recurrence_rule": "FREQ=MONTHLY;BYMONTHDAY=5",
+                            "recurrence_timezone": "America/New_York",
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I set up the Perti Labs invoice task to repeat monthly.",
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "Build and send Perti Labs invoices every month by the fifth."
+    )
+
+    series = session.scalar(select(RecurringTodoSeries))
+    assert series is not None
+    assert series.recurrence_rule == "FREQ=MONTHLY;BYMONTHDAY=5"
+    assert response.action_results[0].object_type == "recurring_todo_series"
+    assert session.query(Todo).filter(Todo.recurring_series_id == series.id).count() >= 2
+
+
+def test_knowledge_mode_completes_current_occurrence_by_series_title(session: Session) -> None:
+    seed_default_domains(session)
+    perti = session.scalar(select(Domain).where(Domain.key == "perti-laboratories"))
+    assert perti is not None
+    from app.memory.recurring_todos import RecurringTodoService
+
+    creation = RecurringTodoService(session).create_series(
+        domain_id=perti.id,
+        title="Build and send monthly invoices",
+        description="Prepare and send Perti Labs invoices.",
+        recurrence_rule="FREQ=MONTHLY;BYMONTHDAY=5",
+        due_anchor_at=datetime(2026, 8, 5, 17, tzinfo=UTC),
+        scheduled_anchor_at=None,
+        estimated_minutes=90,
+    )
+    planner = SequenceKnowledgePlanner(
+        [
+            KnowledgeTurn(
+                message="I am completing this month's invoice occurrence.",
+                actions=[
+                    {
+                        "type": "todo.update",
+                        "arguments": {
+                            "target": "Build and send monthly invoices",
+                            "domain_key": "perti-laboratories",
+                            "updates": {"status": "done"},
+                        },
+                    }
+                ],
+            ),
+            KnowledgeTurn(
+                message="I marked this month's invoices done; the monthly series remains active.",
+                actions=[],
+            ),
+        ]
+    )
+
+    response = MaestroKnowledgeService(session, planner=planner).respond(
+        "I finished the Perti Labs invoices for this month."
+    )
+
+    occurrences = session.scalars(
+        select(Todo)
+        .where(Todo.recurring_series_id == creation.series.id)
+        .order_by(Todo.due_at)
+    ).all()
+    assert occurrences[0].status == "done"
+    assert all(todo.status == "open" for todo in occurrences[1:])
+    assert creation.series.status == "active"
+    assert response.action_results[0].status == "completed"
 
 
 def test_knowledge_mode_links_todo_to_event_as_prerequisite(session: Session) -> None:

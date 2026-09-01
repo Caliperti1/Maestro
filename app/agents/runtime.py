@@ -4239,9 +4239,13 @@ Create todo/reminder candidates only for obligations that Chris personally needs
 ## Procedure
 1. Title must be a concrete action phrase.
 2. Description explains context, source, and why it matters.
-3. Metadata may include `due_at`, `owner_type=user`, `owner_ref=Chris`, `related_contact`, `related_event`, `blocking`.
-4. Set priority based on deadline/impact.
-5. Include source_refs.
+3. Metadata may include `due_at`, `scheduled_start_at`, `estimated_minutes`, `owner_type=user`,
+   `owner_ref=Chris`, `related_contact`, `related_event`, and `blocking`.
+4. When the source clearly describes a repeating obligation, include an RFC 5545
+   `recurrence_rule`, `recurrence_timezone`, and the first actionable `due_at` or
+   `scheduled_start_at`. Do not flatten a monthly, weekly, or annual obligation into a one-time task.
+5. Set priority based on deadline/impact.
+6. Include source_refs.
 
 ## Output Contract
 Call `routed.item.create` with route_type `task`, title, description/content, priority, metadata, and source_refs.

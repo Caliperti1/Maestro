@@ -445,6 +445,27 @@ export type RoutedEvent = {
   created_at: string | null;
 };
 
+export type RecurringTodoSeries = {
+  id: string;
+  domain_key: string | null;
+  title: string;
+  description: string;
+  recurrence_rule: string;
+  timezone: string;
+  due_anchor_at: string | null;
+  scheduled_anchor_at: string | null;
+  estimated_minutes: number | null;
+  owner_type: string;
+  owner_ref: string | null;
+  agent_task: boolean;
+  priority: string;
+  status: "active" | "paused" | "ended";
+  next_todo_id: string | null;
+  next_due_at: string | null;
+  open_occurrence_count: number;
+  completed_occurrence_count: number;
+};
+
 export type RoutedTodo = {
   id: string;
   domain_key: string | null;
@@ -456,6 +477,9 @@ export type RoutedTodo = {
   due_at: string | null;
   estimated_minutes: number | null;
   scheduled_start_at: string | null;
+  recurring_series_id: string | null;
+  recurrence_original_at: string | null;
+  recurring_series: RecurringTodoSeries | null;
   agent_task: boolean;
   agent_task_status: string;
   workflow_task_id: string | null;
