@@ -35,6 +35,7 @@ from app.db.models import (
     OrganizationAlias,
     OrganizationIdentifier,
     OrganizationRelationship,
+    RecurringTodoSeries,
     RoutedItem,
     RoutedObjectChangeLog,
     RoutedObjectLink,
@@ -50,6 +51,7 @@ from app.memory.organization_intelligence import (
     OrganizationEmbeddingService,
     OrganizationIntelligenceService,
 )
+from app.memory.recurring_todos import RecurringTodoService
 from app.memory.routed_resolver import (
     RoutedObjectResolver,
     contact_aliases_for,
@@ -209,6 +211,16 @@ class RoutedMemoryService:
         scheduled_start_at = _datetime_from_metadata(item.metadata_, "scheduled_start_at")
         estimated_minutes = _integer_from_metadata(item.metadata_, "estimated_minutes")
         agent_task = _boolean_from_metadata(item.metadata_, "agent_task")
+        recurrence_rule = _string_from_metadata(item.metadata_, "recurrence_rule")
+        if recurrence_rule:
+            return self._promote_recurring_todo(
+                item,
+                due_at=due_at,
+                scheduled_start_at=scheduled_start_at,
+                estimated_minutes=estimated_minutes,
+                agent_task=agent_task,
+                recurrence_rule=recurrence_rule,
+            )
         decision = self.resolver.resolve_todo(item, due_at=due_at)
         self._attach_resolution(item, decision)
         todo = (
@@ -261,6 +273,78 @@ class RoutedMemoryService:
             todo.estimated_minutes = TodoSchedulingService(self.session).estimate_minutes(todo)
         TodoSchedulingService(self.session).sync_projection(todo, commit=False)
         return self._link(item, "todo", todo.id, action)
+
+    def _promote_recurring_todo(
+        self,
+        item: RoutedItem,
+        *,
+        due_at: datetime | None,
+        scheduled_start_at: datetime | None,
+        estimated_minutes: int | None,
+        agent_task: bool,
+        recurrence_rule: str,
+    ) -> RoutedPromotionResult:
+        existing = self.session.scalar(
+            select(RecurringTodoSeries).where(
+                RecurringTodoSeries.domain_id == item.domain_id,
+                func.lower(RecurringTodoSeries.title) == item.title.lower(),
+                RecurringTodoSeries.status != "ended",
+            )
+        )
+        service = RecurringTodoService(self.session)
+        if existing is None:
+            creation = service.create_series(
+                domain_id=item.domain_id,
+                title=item.title,
+                description=item.content,
+                recurrence_rule=recurrence_rule,
+                due_anchor_at=due_at,
+                scheduled_anchor_at=scheduled_start_at,
+                timezone=(
+                    _string_from_metadata(item.metadata_, "recurrence_timezone")
+                    or "America/New_York"
+                ),
+                estimated_minutes=estimated_minutes,
+                owner_type="maestro" if agent_task else "user",
+                owner_ref=(
+                    "Maestro" if agent_task else get_settings().user_display_name
+                ),
+                agent_task=agent_task,
+                priority=item.priority,
+                source_refs=item.source_refs,
+                provenance=self._provenance(item),
+                metadata=self._canonical_metadata(item),
+                commit=False,
+            )
+            occurrences = creation.occurrences
+            action = "created"
+        else:
+            existing.description = _append_note(existing.description, item.content)
+            existing.source_refs = _merge_source_refs(existing.source_refs, item.source_refs)
+            existing.metadata_ = {
+                **(existing.metadata_ or {}),
+                **self._canonical_metadata(item),
+            }
+            occurrences = service.materialize_series(existing, commit=False)
+            if not occurrences:
+                occurrences = list(
+                    self.session.scalars(
+                        select(Todo)
+                        .where(
+                            Todo.recurring_series_id == existing.id,
+                            Todo.status.notin_(["done", "archived"]),
+                        )
+                        .order_by(Todo.due_at, Todo.scheduled_start_at)
+                    ).all()
+                )
+            action = "updated"
+        if not occurrences:
+            raise ValueError("The recurring todo rule did not produce an actionable occurrence.")
+        occurrence = min(
+            occurrences,
+            key=lambda todo: todo.due_at or todo.scheduled_start_at or todo.created_at,
+        )
+        return self._link(item, "todo", occurrence.id, action)
 
     def _promote_event(self, item: RoutedItem) -> RoutedPromotionResult:
         start_at = _datetime_from_metadata(item.metadata_, "start_at")
@@ -1173,16 +1257,28 @@ class RoutedMemoryService:
         return payloads
 
     def _todos(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[Todo]:
+        RecurringTodoService(self.session).materialize_all()
         statement = select(Todo).where(Todo.status.notin_(["done", "archived"]))
         if domain_id is not None:
             statement = statement.where(Todo.domain_id == domain_id)
         if query:
             statement = statement.where(_text_match(Todo.title, Todo.description, query=query))
-        return list(
+        candidates = list(
             self.session.scalars(
-                statement.order_by(Todo.due_at, Todo.created_at.desc()).limit(limit)
+                statement.order_by(Todo.due_at, Todo.created_at.desc()).limit(limit * 4)
             ).all()
         )
+        grouped: list[Todo] = []
+        seen_series: set[uuid.UUID] = set()
+        for todo in candidates:
+            if todo.recurring_series_id:
+                if todo.recurring_series_id in seen_series:
+                    continue
+                seen_series.add(todo.recurring_series_id)
+            grouped.append(todo)
+            if len(grouped) >= limit:
+                break
+        return grouped
 
     def _contacts(self, domain_id: uuid.UUID | None, query: str, limit: int) -> list[Contact]:
         statement = select(Contact).where(Contact.status != "archived")
@@ -1243,6 +1339,11 @@ class RoutedMemoryService:
         }
 
     def _todo_payload(self, item: Todo) -> dict[str, Any]:
+        series = (
+            self.session.get(RecurringTodoSeries, item.recurring_series_id)
+            if item.recurring_series_id
+            else None
+        )
         return {
             "id": str(item.id),
             "title": item.title,
@@ -1254,6 +1355,17 @@ class RoutedMemoryService:
             "scheduled_start_at": item.scheduled_start_at.isoformat()
             if item.scheduled_start_at
             else None,
+            "recurring_series_id": (
+                str(item.recurring_series_id) if item.recurring_series_id else None
+            ),
+            "recurrence_original_at": (
+                item.recurrence_original_at.isoformat()
+                if item.recurrence_original_at
+                else None
+            ),
+            "recurring_series": (
+                RecurringTodoService(self.session).series_payload(series) if series else None
+            ),
             "agent_task": item.agent_task,
             "agent_task_status": item.agent_task_status,
             "priority": item.priority,

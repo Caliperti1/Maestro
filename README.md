@@ -40,6 +40,8 @@ chat responses toward persistent execution.
 - Typed event links for prerequisite work, work performed during an event, and post-event follow-ups
   across both todos and Product Issues.
 - Scheduled routed tasks projected onto the calendar, with duration estimates and completion state.
+- Recurring todo series with independent actionable occurrences, completion history, calendar
+  projection, pause/resume/end controls, and time-gated background-agent execution.
 - Optional agent-owned todos that become linked one-time background workflows and report back through Maestro.
 - React/Vite frontend for Maestro chat, memory, domains, agents, tools, and queue surfaces.
 
@@ -198,6 +200,7 @@ Relevant code:
 - `app/memory/contact_hydration.py`
 - `app/memory/calendar_intelligence.py`
 - `app/memory/event_work_links.py`
+- `app/memory/recurring_todos.py`
 - `app/memory/organization_intelligence.py`
 - `app/memory/routed_service.py`
 - `app/memory/routed_resolver.py`

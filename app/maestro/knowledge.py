@@ -55,6 +55,7 @@ from app.memory.organization_intelligence import (
     OrganizationEmbeddingService,
     OrganizationIntelligenceService,
 )
+from app.memory.recurring_todos import RecurringTodoService
 from app.memory.routed_retrieval import RoutedEditService
 from app.memory.routed_service import RoutedMemoryService
 from app.prompts import load_prompt
@@ -810,6 +811,46 @@ class MaestroKnowledgeService:
         }
         if route_type == "task":
             agent_task = bool(arguments.get("agent_task", False))
+            recurrence_rule = _optional_text(arguments.get("recurrence_rule"))
+            if recurrence_rule:
+                creation = RecurringTodoService(self.session).create_series(
+                    domain_id=domain.id if domain else None,
+                    title=title,
+                    description=content,
+                    recurrence_rule=recurrence_rule,
+                    due_anchor_at=_parse_datetime(arguments.get("due_at")),
+                    scheduled_anchor_at=_parse_datetime(
+                        arguments.get("scheduled_start_at")
+                    ),
+                    timezone=str(
+                        arguments.get("recurrence_timezone") or "America/New_York"
+                    ),
+                    estimated_minutes=(
+                        int(arguments["estimated_minutes"])
+                        if arguments.get("estimated_minutes") not in (None, "")
+                        else None
+                    ),
+                    owner_type="maestro" if agent_task else "user",
+                    owner_ref=(
+                        "Maestro" if agent_task else get_settings().user_display_name
+                    ),
+                    agent_task=agent_task,
+                    priority=str(arguments.get("priority") or "normal"),
+                    source_refs=[provenance],
+                    provenance=provenance,
+                    metadata={**metadata, "knowledge_mode": True},
+                )
+                return KnowledgeActionResult(
+                    action_type,
+                    "completed",
+                    f"Created recurring todo '{title}'.",
+                    "recurring_todo_series",
+                    str(creation.series.id),
+                    data={
+                        "occurrence_ids": [str(todo.id) for todo in creation.occurrences],
+                        "recurrence_rule": creation.series.recurrence_rule,
+                    },
+                )
             todo = Todo(
                 domain_id=domain.id if domain else None,
                 title=title,
@@ -938,7 +979,22 @@ class MaestroKnowledgeService:
                 updated = editor.update_event(object_id, updates)
             object_type = "event"
         elif object_type == "todo":
-            updated = editor.update_todo(object_id, updates)
+            todo = self.session.get(Todo, object_id)
+            series_status = updates.pop("series_status", None)
+            series_updates = updates.pop("series_updates", None)
+            if todo and todo.recurring_series_id and (
+                series_status is not None or isinstance(series_updates, dict)
+            ):
+                recurring_updates = dict(series_updates or {})
+                if series_status is not None:
+                    recurring_updates["status"] = series_status
+                updated = RecurringTodoService(self.session).update_series(
+                    todo.recurring_series_id,
+                    recurring_updates,
+                )
+                object_type = "recurring_todo_series"
+            else:
+                updated = editor.update_todo(object_id, updates)
         elif object_type == "organization":
             updated = editor.update_entity(object_id, updates)
             OrganizationEmbeddingService(self.session).upsert(updated)
@@ -1175,6 +1231,40 @@ class MaestroKnowledgeService:
                     runner_up = results[1].score if len(results) > 1 else 0.0
                     if top.score >= 0.28 and top.score - runner_up >= 0.08:
                         exact = [top.event]
+        elif object_type == "todo":
+            query = select(Todo).where(
+                func.lower(Todo.title) == target.lower(),
+                Todo.status.notin_(["done", "archived"]),
+            )
+            if domain is not None:
+                query = query.where(Todo.domain_id == domain.id)
+            exact = list(self.session.scalars(query))
+            series_ids = {item.recurring_series_id for item in exact}
+            if len(exact) > 1 and len(series_ids) == 1 and None not in series_ids:
+                now = datetime.now(UTC)
+                overdue = [
+                    item
+                    for item in exact
+                    if (item.due_at or item.scheduled_start_at)
+                    and _aware_utc(item.due_at or item.scheduled_start_at) <= now
+                ]
+                exact = [
+                    max(
+                        overdue,
+                        key=lambda item: _aware_utc(
+                            item.due_at or item.scheduled_start_at
+                        ),
+                    )
+                    if overdue
+                    else min(
+                        exact,
+                        key=lambda item: (
+                            _aware_utc(item.due_at or item.scheduled_start_at)
+                            if item.due_at or item.scheduled_start_at
+                            else datetime.max.replace(tzinfo=UTC)
+                        ),
+                    )
+                ]
         else:
             title_field = model.title
             query = select(model).where(
@@ -1364,6 +1454,10 @@ def _parse_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         raise ValueError("Dates and times must include a timezone offset.")
     return parsed
+
+
+def _aware_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 def _optional_text(value: Any) -> str | None:

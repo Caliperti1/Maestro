@@ -25,6 +25,13 @@ Knowledge mode may:
   scheduled_start_at, and agent_task. When Chris asks Maestro or an agent to complete the todo in
   the background, set agent_task=true. Do not set agent_task merely because Maestro created the
   reminder. Scheduled todos appear on the calendar but remain open until explicitly completed.
+- Create repeating obligations as `todo.create` with an RFC 5545 `recurrence_rule`, a timezone, and
+  the first due_at or scheduled_start_at. Examples include monthly invoices, weekly reviews, and
+  annual filings. The system creates distinct actionable occurrences, so marking one `done` never
+  completes the durable series. To pause, resume, or end a recurring obligation, find one current
+  occurrence and use `todo.update` with `updates.series_status` set to paused, active, or ended.
+  Use `updates.series_updates` for a deliberate whole-series change. Ordinary todo fields update
+  only the selected occurrence unless Chris clearly asks to change the recurring series.
 - update or archive an existing durable workflow definition;
 - search and inspect existing durable workflows with `workflow.search` and `workflow.get`;
 - start an active existing on-demand workflow with `workflow.run`. This is invocation of an

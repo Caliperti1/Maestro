@@ -48,7 +48,7 @@ class TodoSchedulingService:
 
     def sync_projection(self, todo: Todo, *, commit: bool = True) -> CalendarEvent | None:
         event = self.session.scalar(select(CalendarEvent).where(CalendarEvent.todo_id == todo.id))
-        if todo.scheduled_start_at is None:
+        if todo.scheduled_start_at is None or todo.status == "archived":
             if event is not None:
                 self.session.delete(event)
             if commit:

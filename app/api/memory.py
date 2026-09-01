@@ -26,6 +26,7 @@ from app.db.models import (
     MemoryHygieneRun,
     MemoryItem,
     MemoryProposal,
+    RecurringTodoSeries,
     RoutedItem,
     SeedPackage,
     SourceRegistration,
@@ -60,6 +61,7 @@ from app.memory.organization_intelligence import (
     OrganizationEmbeddingService,
     OrganizationIntelligenceService,
 )
+from app.memory.recurring_todos import RecurringTodoService
 from app.memory.repository_observer import RepositoryObserverService
 from app.memory.retrieval import (
     MemoryContextBundle,
@@ -162,6 +164,8 @@ class CreateTodoRequest(BaseModel):
     scheduled_start_at: datetime | None = None
     priority: str = "normal"
     agent_task: bool = False
+    recurrence_rule: str | None = None
+    recurrence_timezone: str = "America/New_York"
 
 
 class RepositorySourceRequest(BaseModel):
@@ -776,6 +780,7 @@ def list_todos(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    RecurringTodoService(db).materialize_all()
     RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(Todo)
@@ -795,6 +800,37 @@ def create_todo(
     domain_id = _domain_id_for_key(db, body.domain_key)
     if domain_id is None:
         raise HTTPException(status_code=404, detail="Domain not found.")
+    if body.recurrence_rule:
+        try:
+            creation = RecurringTodoService(db).create_series(
+                domain_id=domain_id,
+                title=body.title,
+                description=body.description or body.title,
+                recurrence_rule=body.recurrence_rule,
+                due_anchor_at=body.due_at,
+                scheduled_anchor_at=body.scheduled_start_at,
+                timezone=body.recurrence_timezone,
+                estimated_minutes=body.estimated_minutes,
+                owner_type="maestro" if body.agent_task else "user",
+                owner_ref=(
+                    "Maestro" if body.agent_task else get_settings().user_display_name
+                ),
+                agent_task=body.agent_task,
+                priority=body.priority,
+                source_refs=[],
+                provenance={"source": "maestro_todo_ui"},
+                metadata={"created_in_ui": True},
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        first = min(
+            creation.occurrences,
+            key=lambda item: item.due_at or item.scheduled_start_at or item.created_at,
+        )
+        return {
+            "todo": _todo_payload(db, first),
+            "series": _recurring_todo_series_payload(db, creation.series),
+        }
     todo = Todo(
         domain_id=domain_id,
         title=body.title.strip(),
@@ -836,6 +872,36 @@ def update_todo(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"todo": _todo_payload(db, todo)}
+
+
+@router.get("/routed-objects/todo-series")
+def list_recurring_todo_series(
+    domain_key: str | None = None,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    RecurringTodoService(db).materialize_all()
+    domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
+    query = select(RecurringTodoSeries)
+    if domain_id is not None:
+        query = query.where(RecurringTodoSeries.domain_id == domain_id)
+    if status:
+        query = query.where(RecurringTodoSeries.status == status)
+    rows = db.scalars(query.order_by(RecurringTodoSeries.title)).all()
+    return {"series": [_recurring_todo_series_payload(db, row) for row in rows]}
+
+
+@router.patch("/routed-objects/todo-series/{series_id}")
+def update_recurring_todo_series(
+    series_id: uuid.UUID,
+    body: UpdateRoutedObjectRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        series = RecurringTodoService(db).update_series(series_id, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"series": _recurring_todo_series_payload(db, series)}
 
 
 @router.get("/routed-objects/contacts")
@@ -1696,6 +1762,11 @@ def _calendar_semantics(
 
 
 def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
+    series = (
+        db.get(RecurringTodoSeries, todo.recurring_series_id)
+        if todo.recurring_series_id
+        else None
+    )
     return {
         "id": str(todo.id),
         "domain_key": _domain_key_for_id(db, todo.domain_id),
@@ -1707,6 +1778,11 @@ def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
         "due_at": todo.due_at.isoformat() if todo.due_at else None,
         "estimated_minutes": todo.estimated_minutes,
         "scheduled_start_at": home_isoformat(todo.scheduled_start_at),
+        "recurring_series_id": str(todo.recurring_series_id) if todo.recurring_series_id else None,
+        "recurrence_original_at": home_isoformat(todo.recurrence_original_at),
+        "recurring_series": (
+            _recurring_todo_series_payload(db, series) if series else None
+        ),
         "agent_task": todo.agent_task,
         "agent_task_status": todo.agent_task_status,
         "workflow_task_id": str(todo.workflow_task_id) if todo.workflow_task_id else None,
@@ -1720,6 +1796,15 @@ def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
         "event_links": EventWorkLinkService(db).for_todo(todo.id),
         "created_at": todo.created_at.isoformat() if todo.created_at else None,
     }
+
+
+def _recurring_todo_series_payload(
+    db: Session,
+    series: RecurringTodoSeries,
+) -> dict[str, Any]:
+    payload = RecurringTodoService(db).series_payload(series)
+    payload["domain_key"] = _domain_key_for_id(db, series.domain_id)
+    return payload
 
 
 def _contact_payload(db: Session, contact: Contact) -> dict[str, Any]:

@@ -41,7 +41,10 @@ Routed structured_data guidance:
 - Return structured_data as a list of `{ "key": ..., "value": ... }` entries. Include entries only
   when the source explicitly provides or directly supports the field; use an empty list otherwise.
 - event keys may include start_at, end_at, date, time, location, attendees, and supporting_refs.
-- task and human_input keys may include due_at, owner, assignee, blocking, and related_contact.
+- task and human_input keys may include due_at, owner, assignee, blocking, related_contact,
+  estimated_minutes, scheduled_start_at, agent_task, recurrence_rule, and recurrence_timezone.
+  When the source explicitly describes a repeating obligation, preserve it as an RFC 5545 rule
+  such as FREQ=MONTHLY;BYMONTHDAY=5 and provide the first actionable due or scheduled datetime.
 - contact keys may include name, email, phone, linkedin, organization, role, origination, and last_contact_at.
 - entity keys may include name, website, organization_type, and aliases.
 - decision_log keys may include decision_maker, decided_at, and supersedes.
