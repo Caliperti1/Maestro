@@ -147,7 +147,15 @@ OPENROUTER_HTTP_REFERER=http://localhost:5173
 OPENROUTER_APP_TITLE=Maestro
 LLM_MODEL=openai/gpt-5.5
 MEMORY_DROPBOX_ROOT=maestro_dropbox
+MEMORY_EXTRACTION_CHUNK_CHARS=60000
+MEMORY_EXTRACTION_MAX_SOURCE_CHARS=500000
 ```
+
+Long documents are split at paragraph or line boundaries before extraction. Sources larger than
+the configured per-source maximum fail before any model request and remain inspectable in the
+failed folder. Workflow interaction packages contain compact tool outcomes and durable tool-call
+references; raw tool evidence is retained in the execution ledger instead of duplicated into the
+curator prompt.
 
 Install dependencies after pulling this change:
 

@@ -36,10 +36,14 @@ class Settings(BaseSettings):
     llm_terra_model_profile: str = "openrouter:openai/gpt-5.6-terra"
     llm_sol_model_profile: str = "openrouter:openai/gpt-5.6-sol"
     llm_max_output_tokens: Annotated[int, Field(ge=256, le=32768)] = 8192
+    llm_external_prompt_max_chars: Annotated[int, Field(ge=10000, le=2000000)] = 200000
+    llm_daily_cost_warning_usd: Annotated[float, Field(ge=0.01, le=1000)] = 1.0
     ollama_llm_timeout_seconds: float = 300.0
     memory_dropbox_root: str = "maestro_dropbox"
     memory_dropbox_autorun: bool = True
     memory_dropbox_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 30
+    memory_extraction_chunk_chars: Annotated[int, Field(ge=5000, le=150000)] = 60000
+    memory_extraction_max_source_chars: Annotated[int, Field(ge=10000, le=5000000)] = 500000
     contact_hydration_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 10
     home_timezone: str = "America/New_York"
     embedding_provider: str = "ollama"

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Domain, ProductProject, RepositoryProfile, WorkflowDefinition
 from app.issues.service import ProductIssueService, issue_payload, issue_search_score
 from app.llm.client import OpenAILLMClient
+from app.llm.telemetry import record_llm_call
 from app.maestro.scheduler import SchedulerService
 from app.memory.event_work_links import EventWorkLinkService
 from app.memory.federated_retrieval import (
@@ -227,14 +228,34 @@ class KnowledgeReadToolService:
             raise ValueError("A web search needs a focused query.")
         parameters = _web_search_parameters(arguments)
         client = self.web_client or OpenAILLMClient()
-        result = client.web_search_response(
-            instructions=(
-                "You are Maestro's immediate web research capability. Search only as needed, "
-                "return concise factual findings, preserve source citations, and distinguish "
-                "facts from inference."
-            ),
-            input_text=query,
-            search_parameters=parameters,
+        instructions = (
+            "You are Maestro's immediate web research capability. Search only as needed, "
+            "return concise factual findings, preserve source citations, and distinguish "
+            "facts from inference."
+        )
+        try:
+            result = client.web_search_response(
+                instructions=instructions,
+                input_text=query,
+                search_parameters=parameters,
+            )
+        except Exception as exc:
+            record_llm_call(
+                self.session,
+                component="maestro.knowledge_web_search",
+                client=client,
+                prompt_chars=len(instructions) + len(query),
+                prompt_sections={"instructions": len(instructions), "query": len(query)},
+                status="failed",
+                error_message=str(exc),
+            )
+            raise
+        record_llm_call(
+            self.session,
+            component="maestro.knowledge_web_search",
+            client=client,
+            prompt_chars=len(instructions) + len(query),
+            prompt_sections={"instructions": len(instructions), "query": len(query)},
         )
         annotations = result.get("annotations") or []
         return KnowledgeActionResult(

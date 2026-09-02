@@ -1,8 +1,10 @@
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
+from sqlalchemy.orm import Session
 
 from app.llm.client import LLMClient, LLMClientError
+from app.llm.telemetry import record_llm_call
 from app.prompts import load_prompt
 
 WorkItemType = Literal[
@@ -54,8 +56,9 @@ class MaestroPlannerResponse(BaseModel):
 
 
 class LLMMaestroPlanner:
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClient, session: Session | None = None):
         self.llm_client = llm_client
+        self.session = session
         self.last_prompt_metrics: dict[str, int] = {}
 
     def decompose(
@@ -79,17 +82,39 @@ class LLMMaestroPlanner:
             "registry_chars": len(str(planning_context.get("registry", ""))),
             "memory_chars": len(str((planning_context.get("retrieved_memory") or {}).get("rendered_text", ""))),
         }
-        raw_response = self.llm_client.structured_response(
-            instructions=MAESTRO_PLANNER_INSTRUCTIONS,
-            input_text=input_text,
-            schema_name="maestro_planner_response",
-            schema=schema,
-        )
+        try:
+            raw_response = self.llm_client.structured_response(
+                instructions=MAESTRO_PLANNER_INSTRUCTIONS,
+                input_text=input_text,
+                schema_name="maestro_planner_response",
+                schema=schema,
+            )
+        except (LLMClientError, OSError, TypeError, ValueError) as exc:
+            self._record_call(status="failed", error_message=str(exc))
+            raise
+        self._record_call(status="complete", error_message=None)
         try:
             normalized = _normalize_planner_response(raw_response)
             return MaestroPlannerResponse.model_validate(normalized)
         except ValidationError as exc:
             raise LLMClientError("LLM Maestro planner did not match the expected schema.") from exc
+
+    def _record_call(self, *, status: str, error_message: str | None) -> None:
+        if self.session is None:
+            return
+        record_llm_call(
+            self.session,
+            component="maestro.workflow_planner",
+            client=self.llm_client,
+            prompt_chars=(
+                self.last_prompt_metrics.get("system_prompt_chars", 0)
+                + self.last_prompt_metrics.get("input_chars", 0)
+                + self.last_prompt_metrics.get("schema_chars", 0)
+            ),
+            prompt_sections=self.last_prompt_metrics,
+            status=status,
+            error_message=error_message,
+        )
 
 
 def _normalize_planner_response(raw_response: Any) -> Any:

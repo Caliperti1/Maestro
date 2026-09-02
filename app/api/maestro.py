@@ -37,6 +37,7 @@ from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal, get_db
 from app.llm.client import LLMClientError, OpenAILLMClient
+from app.llm.telemetry import record_llm_call
 from app.maestro.channel import (
     MAESTRO_CHANNEL_KEY,
     get_or_create_maestro_channel,
@@ -2275,13 +2276,38 @@ def _direct_chat_response(db: Session, message: str) -> str:
         f"Chris's message:\n{message}\n\n"
         f"Relevant Maestro context, if any:\n{context_text or '(none retrieved)'}"
     )
+    client = OpenAILLMClient()
     try:
-        response = OpenAILLMClient().text_response(
+        response = client.text_response(
             instructions=instructions,
             input_text=input_text,
         )
-    except (LLMClientError, OSError, ValueError):
+    except (LLMClientError, OSError, ValueError) as exc:
+        record_llm_call(
+            db,
+            component="maestro.direct_chat",
+            client=client,
+            prompt_chars=len(instructions) + len(input_text),
+            prompt_sections={
+                "instructions": len(instructions),
+                "message": len(message),
+                "context": len(context_text),
+            },
+            status="failed",
+            error_message=str(exc),
+        )
         return _fallback_direct_chat_response(message)
+    record_llm_call(
+        db,
+        component="maestro.direct_chat",
+        client=client,
+        prompt_chars=len(instructions) + len(input_text),
+        prompt_sections={
+            "instructions": len(instructions),
+            "message": len(message),
+            "context": len(context_text),
+        },
+    )
     return _strip_hidden_context(response.strip()) or _fallback_direct_chat_response(message)
 
 

@@ -657,6 +657,63 @@ def test_workflow_outputs_api_attributes_llm_usage_to_workflow_run(
     assert payload["calls"][0]["component"] == "agent.email_triage_finalizer"
     assert payload["calls"][0]["prompt_sections"] == {"evidence": 3100}
 
+    daily = client.get("/workflow-outputs/llm-usage/daily?days=2")
+    assert daily.status_code == 200
+    assert daily.json()["components"][0] == {
+        "component": "agent.email_triage_finalizer",
+        "call_count": 1,
+        "cost": 0.0123,
+    }
+
+
+def test_dependency_context_uses_bounded_report_instead_of_raw_tool_payload(
+    session: Session,
+) -> None:
+    report = Report(
+        title="Domain briefing",
+        report_type="agent_report",
+        summary="Useful findings.",
+        body_markdown="useful report\n" * 2000,
+        structured_data={},
+    )
+    session.add(report)
+    session.commit()
+    dependency = SimpleNamespace(
+        external_key="praxis-brief",
+        status="completed",
+        output_payload={
+            "agent_run": {
+                "agent_key": "praxis-planning-agent",
+                "agent_name": "Praxis Planning Agent",
+                "task_id": "task-1",
+                "report_id": str(report.id),
+                "conversation": "I completed the Praxis briefing.",
+                "execution_note": "Complete.",
+                "output_preview": "Useful findings.",
+                "tool_calls": [
+                    {
+                        "tool_name": "memory.context_bundle",
+                        "output_payload": {"rendered_text": "raw evidence" * 100000},
+                    }
+                ],
+            }
+        },
+    )
+    item = SimpleNamespace(
+        dependency_keys=["praxis-brief"],
+        workflow_run_id=uuid.uuid4(),
+    )
+    worker = SchedulerWorkerService(session)
+    worker.scheduler._queue_items_for_run = lambda _run_id: [dependency]
+
+    outputs = worker._completed_dependency_outputs(item)
+
+    assert "output_payload" not in outputs[0]
+    assert "tool_calls" not in outputs[0]
+    assert outputs[0]["report_id"] == str(report.id)
+    assert len(outputs[0]["report_body"]) <= 12000
+    assert len(json.dumps(outputs)) < 17000
+
 
 def test_run_log_extracts_routed_ids_from_agent_tool_results(session: Session) -> None:
     routed_ids = WorkflowOutputService(session)._routed_item_ids(

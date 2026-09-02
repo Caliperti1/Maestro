@@ -4936,7 +4936,17 @@ def test_interaction_artifact_packager_stages_package_for_curation(
         user_input="What should I do before the partner call?",
         maestro_tasking="Prepare a concise partner-call brief.",
         agent_output="Focus on training needs and transition risks.",
-        tool_calls=[{"tool_name": "memory.context_bundle", "status": "complete"}],
+        tool_calls=[
+            {
+                "id": "tool-call-1",
+                "tool_name": "memory.context_bundle",
+                "status": "complete",
+                "output_payload": {
+                    "summary": "Retrieved relevant Praxis context.",
+                    "rendered_text": "raw evidence" * 50000,
+                },
+            }
+        ],
         generated_artifacts=[{"name": "partner-call-brief.md", "uri": "reports/brief.md"}],
         open_questions=["Who owns the next follow-up?"],
         next_steps=["Draft agenda."],
@@ -4949,6 +4959,17 @@ def test_interaction_artifact_packager_stages_package_for_curation(
     assert staged_path.is_file()
     assert staged_path.parent == tmp_path / "praxis" / "inbox"
     assert package.schema_version == "maestro.interaction_artifact.v1"
+    assert package.tool_calls == [
+        {
+            "id": "tool-call-1",
+            "tool_name": "memory.context_bundle",
+            "status": "complete",
+            "summary": "Retrieved relevant Praxis context.",
+            "error_message": None,
+            "output_reference": "tool-call-1",
+        }
+    ]
+    assert staged_path.stat().st_size < 10000
     artifact = session.query(Artifact).one()
     assert artifact.artifact_type == "interaction_package"
     assert artifact.metadata_["staged_for_curation"] is True

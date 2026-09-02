@@ -425,6 +425,51 @@ def test_llm_extractor_prompt_includes_memory_policy_and_domain_context() -> Non
     assert "Maestro Development domain" in input_text
 
 
+def test_llm_extractor_chunks_large_sources_and_deduplicates_exact_results() -> None:
+    payload = {
+        "candidates": [
+            {
+                "scope": "domain",
+                "memory_type": "fact",
+                "title": "Stable fact",
+                "content": "The same fact appeared in adjacent chunks.",
+                "rationale": "Explicit source evidence.",
+                "impact_level": "low",
+                "importance": 0.5,
+                "confidence": 0.9,
+            }
+        ],
+        "routed_items": [],
+    }
+    client = FakeLLMClient(payload)
+    extractor = LLMMemoryExtractor(client, chunk_chars=40, max_source_chars=240)
+
+    result = extractor.extract(
+        source_title="Long note",
+        source_text=("First paragraph contains useful context.\n\n" * 4),
+        domain_key="praxis",
+    )
+
+    assert len(client.calls) > 1
+    assert all(call["input_text"].count("Source chunk:") == 1 for call in client.calls)
+    assert len(result.candidates) == 1
+
+
+def test_llm_extractor_rejects_source_over_total_budget() -> None:
+    extractor = LLMMemoryExtractor(
+        FakeLLMClient({"candidates": [], "routed_items": []}),
+        chunk_chars=40,
+        max_source_chars=80,
+    )
+
+    with pytest.raises(LLMClientError, match="per-source limit"):
+        extractor.extract(
+            source_title="Oversized",
+            source_text="x" * 81,
+            domain_key="praxis",
+        )
+
+
 def test_memory_extraction_schema_requires_every_declared_property() -> None:
     schema = ExtractedMemoryResponse.model_json_schema()
 

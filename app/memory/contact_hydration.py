@@ -23,6 +23,7 @@ from app.db.models import (
     Task,
 )
 from app.llm.client import LLMClient, LLMClientError, OllamaLLMClient, OpenAILLMClient
+from app.llm.telemetry import record_llm_call
 from app.memory.contact_intelligence import ContactEmbeddingService
 from app.memory.organization_intelligence import OrganizationEmbeddingService
 from app.memory.routed_hygiene import RoutedHygieneService
@@ -808,58 +809,91 @@ class ContactHydrationService:
             ((global_setting.value or {}).get("context") if global_setting else "")
             or "Maestro is Chris Aliperti's cross-domain chief-of-staff system."
         )
-        return client.structured_response(
-            instructions=load_prompt("contact_hydration.md"),
-            input_text=str(
-                {
-                    "owner": {
-                        "name": identity.full_name,
-                        "email": identity.email,
-                        "role": "Maestro system owner; never a CRM contact candidate",
-                    },
-                    "global_context": global_context[:4000],
-                    "domain_context": str(domain.description or "")[:4000] if domain else "",
-                    "candidate_identity": {
-                        "name": candidate.display_name,
-                        "email": candidate.identity_key,
-                        "name_source": (candidate.metadata_ or {}).get("name_source"),
-                        "instruction": (
-                            "Header names are authoritative. An email-local name may be refined "
-                            "only from direct signature or header evidence."
-                        ),
-                    },
-                    "interaction_stats": candidate.evidence,
-                    "representative_threads": evidence_payload,
-                }
-            ),
-            schema_name="contact_hydration_enrichment",
-            schema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "canonical_name": {"type": "string"},
-                    "contact_aliases": {"type": "array", "items": {"type": "string"}},
-                    "organization": {"type": "string"},
-                    "organization_aliases": {"type": "array", "items": {"type": "string"}},
-                    "role": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "relationship_context": {"type": "string"},
-                    "identity_evidence": {"type": "array", "items": {"type": "string"}},
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        instructions = load_prompt("contact_hydration.md")
+        input_text = str(
+            {
+                "owner": {
+                    "name": identity.full_name,
+                    "email": identity.email,
+                    "role": "Maestro system owner; never a CRM contact candidate",
                 },
-                "required": [
-                    "canonical_name",
-                    "contact_aliases",
-                    "organization",
-                    "organization_aliases",
-                    "role",
-                    "summary",
-                    "relationship_context",
-                    "identity_evidence",
-                    "confidence",
-                ],
-            },
+                "global_context": global_context[:4000],
+                "domain_context": str(domain.description or "")[:4000] if domain else "",
+                "candidate_identity": {
+                    "name": candidate.display_name,
+                    "email": candidate.identity_key,
+                    "name_source": (candidate.metadata_ or {}).get("name_source"),
+                    "instruction": (
+                        "Header names are authoritative. An email-local name may be refined "
+                        "only from direct signature or header evidence."
+                    ),
+                },
+                "interaction_stats": candidate.evidence,
+                "representative_threads": evidence_payload,
+            }
         )
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "canonical_name": {"type": "string"},
+                "contact_aliases": {"type": "array", "items": {"type": "string"}},
+                "organization": {"type": "string"},
+                "organization_aliases": {"type": "array", "items": {"type": "string"}},
+                "role": {"type": "string"},
+                "summary": {"type": "string"},
+                "relationship_context": {"type": "string"},
+                "identity_evidence": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": [
+                "canonical_name",
+                "contact_aliases",
+                "organization",
+                "organization_aliases",
+                "role",
+                "summary",
+                "relationship_context",
+                "identity_evidence",
+                "confidence",
+            ],
+        }
+        try:
+            response = client.structured_response(
+                instructions=instructions,
+                input_text=input_text,
+                schema_name="contact_hydration_enrichment",
+                schema=schema,
+            )
+        except (LLMClientError, OSError, TypeError, ValueError) as exc:
+            record_llm_call(
+                self.session,
+                component="contacts.hydration",
+                client=client,
+                task_id=job.task_id,
+                prompt_chars=len(instructions) + len(input_text),
+                prompt_sections={
+                    "instructions": len(instructions),
+                    "contact_evidence": len(input_text),
+                },
+                status="failed",
+                error_message=str(exc),
+                metadata={"profile": profile},
+            )
+            raise
+        record_llm_call(
+            self.session,
+            component="contacts.hydration",
+            client=client,
+            task_id=job.task_id,
+            prompt_chars=len(instructions) + len(input_text),
+            prompt_sections={
+                "instructions": len(instructions),
+                "contact_evidence": len(input_text),
+            },
+            metadata={"profile": profile},
+        )
+        return response
 
     def _apply_enriched_organization(
         self,

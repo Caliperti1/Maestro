@@ -63,7 +63,10 @@ class ProductIssueHygieneService:
                 continue
             semantic_checks += 1
             try:
-                decision = LLMIssueMatcher().resolve(
+                matcher = LLMIssueMatcher()
+                if hasattr(matcher, "session"):
+                    matcher.session = self.session
+                decision = matcher.resolve(
                     proposed={
                         "title": issue.title, "problem": issue.problem,
                         "desired_outcome": issue.desired_outcome,

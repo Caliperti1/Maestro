@@ -42,7 +42,8 @@ from app.db.models import (
     WorkflowRun,
 )
 from app.db.repositories import AgentRepository, DomainRepository
-from app.llm.client import OpenAILLMClient
+from app.llm.client import LLMClientError, OpenAILLMClient
+from app.llm.telemetry import record_llm_call
 from app.maestro.channel import record_channel_message
 from app.maestro.workflow_outputs import WorkflowOutputService
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
@@ -196,7 +197,7 @@ class ToolExecutionService:
                 tool_call_id=str(tool_call.id),
                 connection_id=str(connection.id) if connection is not None else None,
             )
-        except Exception as exc:
+        except (LLMClientError, OSError, TypeError, ValueError) as exc:
             is_recoverable_runtime_block = (
                 tool_call.tool_name == "local.app.deploy_pr"
                 and "Runtime checkout has uncommitted changes" in str(exc)
@@ -380,7 +381,7 @@ class ToolExecutionService:
             tool_call.status = "complete"
             tool_call.output_payload = output
             tool_call.error_message = None
-        except Exception as exc:
+        except (LLMClientError, OSError, TypeError, ValueError) as exc:
             tool_call.status = "failed"
             tool_call.error_message = str(exc)
         tool_call.completed_at = datetime.now(UTC)
@@ -3015,7 +3016,36 @@ class LLMGatewayToolAdapter:
 
         model = str(payload.get("model") or _agent_model_profile(context.agent) or "").strip()
         client = OpenAILLMClient(model=model if model and model != "default" else None)
-        output_text = client.text_response(instructions=instructions, input_text=input_text)
+        try:
+            output_text = client.text_response(instructions=instructions, input_text=input_text)
+        except Exception as exc:
+            record_llm_call(
+                context.session,
+                component="tool.llm_gateway",
+                client=client,
+                task_id=context.task.id,
+                prompt_chars=len(instructions) + len(input_text),
+                prompt_sections={
+                    "instructions": len(instructions),
+                    "prompt": len(prompt),
+                    "context": len(context_text),
+                },
+                status="failed",
+                error_message=str(exc),
+            )
+            raise
+        record_llm_call(
+            context.session,
+            component="tool.llm_gateway",
+            client=client,
+            task_id=context.task.id,
+            prompt_chars=len(instructions) + len(input_text),
+            prompt_sections={
+                "instructions": len(instructions),
+                "prompt": len(prompt),
+                "context": len(context_text),
+            },
+        )
         return {
             "summary": {
                 "type": "llm_gateway_response",
@@ -3057,10 +3087,31 @@ class WebSearchToolAdapter:
                 "search_parameters": search_parameters,
             }
         client = OpenAILLMClient(model=model if model and model != "default" else None)
-        result = client.web_search_response(
-            instructions=instructions,
-            input_text=query,
-            search_parameters=search_parameters,
+        try:
+            result = client.web_search_response(
+                instructions=instructions,
+                input_text=query,
+                search_parameters=search_parameters,
+            )
+        except Exception as exc:
+            record_llm_call(
+                context.session,
+                component="tool.web_search",
+                client=client,
+                task_id=context.task.id,
+                prompt_chars=len(instructions) + len(query),
+                prompt_sections={"instructions": len(instructions), "query": len(query)},
+                status="failed",
+                error_message=str(exc),
+            )
+            raise
+        record_llm_call(
+            context.session,
+            component="tool.web_search",
+            client=client,
+            task_id=context.task.id,
+            prompt_chars=len(instructions) + len(query),
+            prompt_sections={"instructions": len(instructions), "query": len(query)},
         )
         annotations = result.get("annotations") or []
         citations = _citations_from_annotations(annotations)

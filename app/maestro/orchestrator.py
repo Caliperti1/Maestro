@@ -28,6 +28,7 @@ from app.core.time import home_isoformat
 from app.db.models import Artifact, Report, RoutedItem, Task, ToolCall
 from app.db.repositories import DomainRepository
 from app.llm.client import LLMClient, LLMClientError, OpenAILLMClient
+from app.llm.telemetry import record_llm_call
 from app.maestro.context_assembler import MaestroContextAssembler, maestro_context_payload
 from app.maestro.planner import (
     LLMMaestroPlanner,
@@ -1095,7 +1096,7 @@ class MaestroOrchestratorService:
                 if settings.llm_provider == "openai" and not settings.openai_api_key:
                     raise LLMClientError("OPENAI_API_KEY is not configured.")
                 llm_client = OpenAILLMClient()
-            planner = LLMMaestroPlanner(llm_client)
+            planner = LLMMaestroPlanner(llm_client, self.session)
             response = planner.decompose(
                 user_input=user_input,
                 planning_context=planning_context,
@@ -3885,13 +3886,36 @@ class MaestroOrchestratorService:
             },
             default=str,
         )
+        client = OpenAILLMClient()
         try:
-            response = OpenAILLMClient().text_response(
+            response = client.text_response(
                 instructions=instructions,
                 input_text=input_text,
             )
-        except (LLMClientError, OSError, ValueError):
+        except (LLMClientError, OSError, ValueError) as exc:
+            record_llm_call(
+                self.session,
+                component="maestro.workflow_completion",
+                client=client,
+                prompt_chars=len(instructions) + len(input_text),
+                prompt_sections={
+                    "instructions": len(instructions),
+                    "workflow_evidence": len(input_text),
+                },
+                status="failed",
+                error_message=str(exc),
+            )
             return fallback
+        record_llm_call(
+            self.session,
+            component="maestro.workflow_completion",
+            client=client,
+            prompt_chars=len(instructions) + len(input_text),
+            prompt_sections={
+                "instructions": len(instructions),
+                "workflow_evidence": len(input_text),
+            },
+        )
         return _strip_hidden_context(response.strip()) or fallback
 
     def _workflow_completion_lead(

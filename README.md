@@ -291,10 +291,14 @@ LLM_QWEN_MODEL_PROFILE=ollama:qwen3:8b
 LLM_LUNA_MODEL_PROFILE=openrouter:openai/gpt-5.6-luna
 LLM_TERRA_MODEL_PROFILE=openrouter:openai/gpt-5.6-terra
 LLM_SOL_MODEL_PROFILE=openrouter:openai/gpt-5.6-sol
+LLM_EXTERNAL_PROMPT_MAX_CHARS=200000
+LLM_DAILY_COST_WARNING_USD=1.00
 GMAIL_TRIGGER_AUTORUN=false
 GMAIL_TRIGGER_INTERVAL_SECONDS=30
 GMAIL_TRIGGER_PAGE_SIZE=100
 MEMORY_DROPBOX_ROOT=maestro_dropbox
+MEMORY_EXTRACTION_CHUNK_CHARS=60000
+MEMORY_EXTRACTION_MAX_SOURCE_CHARS=500000
 EMBEDDING_PROVIDER=ollama
 EMBEDDING_MODEL=nomic-embed-text
 ROUTED_RESOLVER_LLM_PROVIDER=ollama
@@ -316,6 +320,12 @@ context; domain agents receive only contact evidence visible to their domain.
 Domain-specific tool credentials are stored as tool connections in the database. Connection config
 can reference environment variable names for secrets, so secrets do not need to be stored directly
 in the database.
+
+LLM calls are attributed by component, model, task, and workflow in the durable call ledger.
+`GET /workflow-outputs/llm-usage/daily` returns daily, component, and model spend. External prompts
+over `LLM_EXTERNAL_PROMPT_MAX_CHARS` are rejected before transmission; memory sources are chunked
+within their separate extraction limits. Tool evidence remains in the tool-call ledger, while
+workflow artifacts and dependency handoffs carry bounded summaries and report references.
 
 ## Memory Dropbox
 

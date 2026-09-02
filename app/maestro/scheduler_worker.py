@@ -22,6 +22,7 @@ from app.agents.runtime import (
     InteractionArtifactPackager,
     PromptAggregationService,
     PromptPackageRequest,
+    compact_tool_calls_for_artifact,
 )
 from app.core.config import get_settings
 from app.db.models import (
@@ -43,7 +44,18 @@ from app.maestro.workflow_outputs import WorkflowOutputService
 from app.tools.runtime import ToolExecutionRequest, ToolExecutionService, tool_result_payload
 
 SCHEDULER_WORKER_SETTING_KEY = "scheduler_worker"
+DEPENDENCY_REPORT_MAX_CHARS = 12000
+DEPENDENCY_SUMMARY_MAX_CHARS = 2000
 logger = logging.getLogger(__name__)
+
+
+def _bounded_text(value: object, *, max_chars: int) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
 
 
 def _queue_item_required_skills(item: WorkflowQueueItem) -> list[str]:
@@ -184,31 +196,6 @@ def _email_triage_decision_from_queue_items(
         if isinstance(decision, dict):
             return decision
     return None
-
-
-def _compact_tool_calls_for_artifact(
-    tool_calls: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    compact: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for call in tool_calls:
-        call_id = str(call.get("id") or "")
-        if call_id and call_id in seen:
-            continue
-        if call_id:
-            seen.add(call_id)
-        output = call.get("output_payload")
-        output = output if isinstance(output, dict) else {}
-        compact.append(
-            {
-                "id": call_id or None,
-                "tool_name": call.get("tool_name"),
-                "status": call.get("status"),
-                "summary": output.get("summary"),
-                "error_message": call.get("error_message"),
-            }
-        )
-    return compact
 
 
 def _tool_call_blocker_message(call: dict[str, Any]) -> str:
@@ -801,17 +788,40 @@ class SchedulerWorkerService:
             if dependency is None:
                 continue
             output_payload = dependency.output_payload or {}
+            agent_run = (
+                output_payload.get("agent_run")
+                if isinstance(output_payload.get("agent_run"), dict)
+                else output_payload
+            )
             report_body = None
-            report_id = output_payload.get("report_id")
+            report_id = agent_run.get("report_id")
             if report_id:
                 report = self.session.get(Report, uuid.UUID(str(report_id)))
                 if report is not None:
-                    report_body = report.body_markdown
+                    report_body = _bounded_text(
+                        report.body_markdown,
+                        max_chars=DEPENDENCY_REPORT_MAX_CHARS,
+                    )
             outputs.append(
                 {
                     "external_key": dependency.external_key,
                     "status": dependency.status,
-                    "output_payload": output_payload,
+                    "agent_key": agent_run.get("agent_key"),
+                    "agent_name": agent_run.get("agent_name"),
+                    "task_id": agent_run.get("task_id"),
+                    "report_id": report_id,
+                    "conversation": _bounded_text(
+                        agent_run.get("conversation"),
+                        max_chars=DEPENDENCY_SUMMARY_MAX_CHARS,
+                    ),
+                    "execution_note": _bounded_text(
+                        agent_run.get("execution_note"),
+                        max_chars=DEPENDENCY_SUMMARY_MAX_CHARS,
+                    ),
+                    "output_preview": _bounded_text(
+                        agent_run.get("output_preview"),
+                        max_chars=DEPENDENCY_SUMMARY_MAX_CHARS,
+                    ),
                     "report_body": report_body,
                 }
             )
@@ -885,10 +895,7 @@ class SchedulerWorkerService:
                 }
             )
             if isinstance(agent_run.get("tool_calls"), list):
-                if email_decision is not None:
-                    tool_calls.extend(_compact_tool_calls_for_artifact(agent_run["tool_calls"]))
-                else:
-                    tool_calls.extend(agent_run["tool_calls"])
+                tool_calls.extend(compact_tool_calls_for_artifact(agent_run["tool_calls"]))
             preview = str(
                 agent_run.get("output_preview")
                 or agent_run.get("execution_note")
