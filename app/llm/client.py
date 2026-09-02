@@ -74,6 +74,7 @@ class OpenAILLMClient:
         schema_name: str,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
+        self._assert_prompt_budget(instructions=instructions, input_text=input_text)
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -119,6 +120,7 @@ class OpenAILLMClient:
         instructions: str,
         input_text: str,
     ) -> str:
+        self._assert_prompt_budget(instructions=instructions, input_text=input_text)
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -162,6 +164,7 @@ class OpenAILLMClient:
         input_text: str,
         search_parameters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._assert_prompt_budget(instructions=instructions, input_text=input_text)
         if self.provider != "openrouter":
             raise LLMClientError("web.search currently requires the OpenRouter LLM provider.")
         try:
@@ -201,6 +204,16 @@ class OpenAILLMClient:
             "annotations": annotations,
             "usage": _usage_to_dict(usage),
         }
+
+    def _assert_prompt_budget(self, *, instructions: str, input_text: str) -> None:
+        prompt_chars = len(instructions) + len(input_text)
+        limit = get_settings().llm_external_prompt_max_chars
+        if prompt_chars > limit:
+            raise LLMClientError(
+                "External LLM prompt blocked before transmission: "
+                f"{prompt_chars:,} characters exceeds the configured {limit:,}-character limit. "
+                "Compact or chunk the source before retrying."
+            )
 
     def _openrouter_structured_response(
         self,

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models import CalendarEvent, Domain, Todo
 from app.llm.client import LLMClient, LLMClientError, OllamaLLMClient
+from app.llm.telemetry import record_llm_call
 from app.prompts import load_prompt
 
 
@@ -20,18 +21,23 @@ class TodoSchedulingService:
     def estimate_minutes(self, todo: Todo) -> int:
         if todo.estimated_minutes:
             return _bounded_minutes(todo.estimated_minutes)
+        client: LLMClient | None = None
+        instructions = ""
+        input_text = ""
         try:
             client = self.estimator or OllamaLLMClient(
                 model=get_settings().routed_resolver_llm_model,
                 base_url=get_settings().routed_resolver_llm_base_url,
                 timeout_seconds=get_settings().routed_resolver_llm_timeout_seconds,
             )
+            instructions = load_prompt("todo_duration_estimation.md")
+            input_text = (
+                f"Title: {todo.title}\nDescription: {todo.description}\n"
+                f"Domain: {self._domain_key(todo.domain_id) or 'global'}\nDue: {todo.due_at or 'none'}"
+            )
             response = client.structured_response(
-                instructions=load_prompt("todo_duration_estimation.md"),
-                input_text=(
-                    f"Title: {todo.title}\nDescription: {todo.description}\n"
-                    f"Domain: {self._domain_key(todo.domain_id) or 'global'}\nDue: {todo.due_at or 'none'}"
-                ),
+                instructions=instructions,
+                input_text=input_text,
                 schema_name="todo_duration_estimate",
                 schema={
                     "type": "object",
@@ -42,8 +48,33 @@ class TodoSchedulingService:
                     "additionalProperties": False,
                 },
             )
+            record_llm_call(
+                self.session,
+                component="todos.duration_estimation",
+                client=client,
+                task_id=todo.workflow_task_id,
+                prompt_chars=len(instructions) + len(input_text),
+                prompt_sections={
+                    "instructions": len(instructions),
+                    "todo": len(input_text),
+                },
+            )
             return _bounded_minutes(response.get("estimated_minutes"))
-        except (LLMClientError, OSError, TypeError, ValueError):
+        except (LLMClientError, OSError, TypeError, ValueError) as exc:
+            if client is not None:
+                record_llm_call(
+                    self.session,
+                    component="todos.duration_estimation",
+                    client=client,
+                    task_id=todo.workflow_task_id,
+                    prompt_chars=len(instructions) + len(input_text),
+                    prompt_sections={
+                        "instructions": len(instructions),
+                        "todo": len(input_text),
+                    },
+                    status="failed",
+                    error_message=str(exc),
+                )
             return _fallback_minutes(todo)
 
     def sync_projection(self, todo: Todo, *, commit: bool = True) -> CalendarEvent | None:

@@ -21,6 +21,7 @@ from app.db.models import (
     RepositoryProfile,
 )
 from app.llm.client import LLMClientError, OpenAILLMClient
+from app.llm.telemetry import record_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,14 @@ class IssueMatcher(Protocol):
 class LLMIssueMatcher:
     """Adjudicates only plausible candidates; deterministic identity checks run first."""
 
-    def __init__(self, client: OpenAILLMClient | None = None):
+    def __init__(
+        self,
+        client: OpenAILLMClient | None = None,
+        *,
+        session: Session | None = None,
+    ):
         self.client = client or OpenAILLMClient()
+        self.session = session
 
     def resolve(
         self,
@@ -76,37 +83,45 @@ class LLMIssueMatcher:
     ) -> IssueMatchDecision:
         if not candidates:
             return IssueMatchDecision("create", confidence=1.0)
-        payload = self.client.structured_response(
-            instructions=(
-                "You reconcile product issues. Decide whether the proposed issue is the same work "
-                "as one candidate, a distinct but related issue, a contradiction/superseding change, "
-                "or new work. Never merge merely because two issues share a broad product area. "
-                "Use merge only when one canonical issue can preserve the intent and acceptance criteria "
-                "of both. Return candidate_id only from the provided candidates."
-            ),
-            input_text=json.dumps(
-                {
-                    "proposed": proposed,
-                    "candidates": [issue_payload(item, compact=True) for item in candidates],
-                },
-                default=str,
-            ),
-            schema_name="product_issue_match",
-            schema={
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["create", "merge", "relate", "conflict", "supersede"],
-                    },
-                    "candidate_id": {"type": ["string", "null"]},
-                    "rationale": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                },
-                "required": ["action", "candidate_id", "rationale", "confidence"],
-            },
+        instructions = (
+            "You reconcile product issues. Decide whether the proposed issue is the same work "
+            "as one candidate, a distinct but related issue, a contradiction/superseding change, "
+            "or new work. Never merge merely because two issues share a broad product area. "
+            "Use merge only when one canonical issue can preserve the intent and acceptance criteria "
+            "of both. Return candidate_id only from the provided candidates."
         )
+        input_text = json.dumps(
+            {
+                "proposed": proposed,
+                "candidates": [issue_payload(item, compact=True) for item in candidates],
+            },
+            default=str,
+        )
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "merge", "relate", "conflict", "supersede"],
+                },
+                "candidate_id": {"type": ["string", "null"]},
+                "rationale": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["action", "candidate_id", "rationale", "confidence"],
+        }
+        try:
+            payload = self.client.structured_response(
+                instructions=instructions,
+                input_text=input_text,
+                schema_name="product_issue_match",
+                schema=schema,
+            )
+        except (LLMClientError, OSError, TypeError, ValueError) as exc:
+            self._record_call(instructions, input_text, "failed", str(exc))
+            raise
+        self._record_call(instructions, input_text, "complete", None)
         action = str(payload.get("action") or "create")
         relation = {
             "relate": "related_to",
@@ -119,6 +134,28 @@ class LLMIssueMatcher:
             relation_type=relation,
             rationale=str(payload.get("rationale") or ""),
             confidence=float(payload.get("confidence") or 0),
+        )
+
+    def _record_call(
+        self,
+        instructions: str,
+        input_text: str,
+        status: str,
+        error_message: str | None,
+    ) -> None:
+        if self.session is None:
+            return
+        record_llm_call(
+            self.session,
+            component="issues.semantic_match",
+            client=self.client,
+            prompt_chars=len(instructions) + len(input_text),
+            prompt_sections={
+                "instructions": len(instructions),
+                "issue_candidates": len(input_text),
+            },
+            status=status,
+            error_message=error_message,
         )
 
 
@@ -396,7 +433,7 @@ class ProductIssueService:
         if score >= 0.82:
             return IssueMatchDecision("merge", str(best.id), rationale="Strong title and scope overlap.", confidence=score)
         if use_semantic_match:
-            matcher = self.matcher or LLMIssueMatcher()
+            matcher = self.matcher or LLMIssueMatcher(session=self.session)
             try:
                 return matcher.resolve(proposed=proposed, candidates=candidates)
             except (LLMClientError, OSError, ValueError, TypeError) as exc:

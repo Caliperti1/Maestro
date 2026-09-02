@@ -1,11 +1,13 @@
-from typing import Any
 import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.core.config import get_settings
 from app.db.models import Domain, LLMCallLog, Report, WorkflowNotification, WorkflowRunLogEntry
 from app.db.repositories import WorkflowNotificationRepository, WorkflowRunLogRepository
 from app.db.session import get_db
@@ -43,6 +45,78 @@ def list_llm_calls(
     return {
         "calls": [_llm_call_payload(call) for call in calls],
         "summary": _llm_call_summary(db, workflow_run_id),
+    }
+
+
+@router.get("/llm-usage/daily")
+def daily_llm_usage(
+    days: int = Query(default=14, ge=1, le=90),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    since = datetime.now(UTC) - timedelta(days=days - 1)
+    day_key = func.date(LLMCallLog.created_at)
+    daily_rows = db.execute(
+        select(
+            day_key,
+            func.count(LLMCallLog.id),
+            func.coalesce(func.sum(LLMCallLog.prompt_tokens), 0),
+            func.coalesce(func.sum(LLMCallLog.completion_tokens), 0),
+            func.coalesce(func.sum(LLMCallLog.cost), 0.0),
+        )
+        .where(LLMCallLog.created_at >= since)
+        .group_by(day_key)
+        .order_by(day_key)
+    ).all()
+    component_rows = db.execute(
+        select(
+            LLMCallLog.component,
+            func.count(LLMCallLog.id),
+            func.coalesce(func.sum(LLMCallLog.cost), 0.0),
+        )
+        .where(LLMCallLog.created_at >= since)
+        .group_by(LLMCallLog.component)
+        .order_by(func.coalesce(func.sum(LLMCallLog.cost), 0.0).desc())
+    ).all()
+    model_rows = db.execute(
+        select(
+            LLMCallLog.provider,
+            LLMCallLog.model,
+            func.count(LLMCallLog.id),
+            func.coalesce(func.sum(LLMCallLog.cost), 0.0),
+        )
+        .where(LLMCallLog.created_at >= since)
+        .group_by(LLMCallLog.provider, LLMCallLog.model)
+        .order_by(func.coalesce(func.sum(LLMCallLog.cost), 0.0).desc())
+    ).all()
+    warning_threshold = get_settings().llm_daily_cost_warning_usd
+    return {
+        "days": days,
+        "since": since.isoformat(),
+        "warning_threshold_usd": warning_threshold,
+        "daily": [
+            {
+                "date": value.isoformat() if hasattr(value, "isoformat") else str(value),
+                "call_count": int(call_count),
+                "prompt_tokens": int(prompt_tokens),
+                "completion_tokens": int(completion_tokens),
+                "cost": float(cost),
+                "over_warning_threshold": float(cost) >= warning_threshold,
+            }
+            for value, call_count, prompt_tokens, completion_tokens, cost in daily_rows
+        ],
+        "components": [
+            {"component": component, "call_count": int(call_count), "cost": float(cost)}
+            for component, call_count, cost in component_rows
+        ],
+        "models": [
+            {
+                "provider": provider,
+                "model": model,
+                "call_count": int(call_count),
+                "cost": float(cost),
+            }
+            for provider, model, call_count, cost in model_rows
+        ],
     }
 
 

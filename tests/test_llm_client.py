@@ -1,6 +1,6 @@
 import pytest
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.llm.client import LLMClientError, OllamaLLMClient, OpenAILLMClient
 from app.memory.routed_resolver import OllamaRoutedResolverLLM
 
@@ -71,3 +71,16 @@ def test_routed_resolver_uses_configured_ollama_timeout() -> None:
     client = OllamaRoutedResolverLLM(timeout_seconds=12.5)
 
     assert client.timeout_seconds == 12.5
+
+
+def test_external_client_blocks_oversized_prompt_before_network_call() -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.llm_external_prompt_max_chars = 20
+    client = OpenAILLMClient(provider="openrouter", api_key="test-key")
+
+    try:
+        with pytest.raises(LLMClientError, match="blocked before transmission"):
+            client.text_response(instructions="system", input_text="x" * 30)
+    finally:
+        get_settings.cache_clear()

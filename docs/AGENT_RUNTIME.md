@@ -109,6 +109,11 @@ Prompt aggregation assembles the package an agent would receive before an LLM ca
 The service uses the Memory context bundle endpoint internally. Agents should not query memory
 tables directly.
 
+Completed dependency handoffs contain bounded report bodies, conversational summaries, and IDs.
+They intentionally exclude raw sibling tool payloads. Agents can still inspect authoritative tool
+results through their original tool-call records, but synthesis and memory curation do not pay to
+resend the same evidence repeatedly.
+
 API:
 
 ```text

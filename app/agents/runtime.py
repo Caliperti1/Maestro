@@ -2102,7 +2102,7 @@ class InteractionArtifactPackager:
             user_input=user_input,
             maestro_tasking=maestro_tasking,
             agent_output=agent_output,
-            tool_calls=tool_calls or [],
+            tool_calls=compact_tool_calls_for_artifact(tool_calls or []),
             generated_artifacts=generated_artifacts or [],
             open_questions=open_questions or [],
             next_steps=next_steps or [],
@@ -2144,6 +2144,56 @@ class InteractionArtifactPackager:
 
     def _raise_unknown_domain(self, domain_key: str):
         raise AgentRuntimeError(f"Unknown domain: {domain_key}")
+
+
+def compact_tool_calls_for_artifact(
+    tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep provenance and outcomes while excluding raw tool evidence from memory prompts."""
+    compact: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for call in tool_calls:
+        call_id = str(call.get("id") or call.get("tool_call_id") or "").strip()
+        if call_id and call_id in seen:
+            continue
+        if call_id:
+            seen.add(call_id)
+        output = call.get("output_payload")
+        output = output if isinstance(output, dict) else {}
+        compact.append(
+            {
+                "id": call_id or None,
+                "tool_name": call.get("tool_name") or call.get("tool_key"),
+                "status": call.get("status"),
+                "summary": _bounded_artifact_value(
+                    call.get("summary")
+                    if call.get("summary") is not None
+                    else output.get("summary"),
+                    max_chars=1200,
+                ),
+                "error_message": _truncate_text(
+                    str(call.get("error_message") or "").strip(),
+                    1000,
+                )
+                or None,
+                "output_reference": call_id or None,
+            }
+        )
+    return compact
+
+
+def _bounded_artifact_value(value: Any, *, max_chars: int) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _truncate_text(value, max_chars)
+    rendered = json.dumps(value, default=str, sort_keys=True)
+    if len(rendered) <= max_chars:
+        return value
+    return {
+        "preview": _truncate_text(rendered, max_chars),
+        "truncated": True,
+    }
 
 
 def _slug(value: str) -> str:
