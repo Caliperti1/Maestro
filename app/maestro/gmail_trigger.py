@@ -320,6 +320,15 @@ class GmailTriggerService:
                 event_payload=event_payload,
                 event_id=event_id,
             )
+            if not runs:
+                skipped.append(
+                    {
+                        "message_id": message_id,
+                        "label_ids": sorted(labels),
+                        "reason": "workflow_filters",
+                    }
+                )
+                continue
             emitted.append(
                 {
                     "event_id": event_id,

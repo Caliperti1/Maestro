@@ -1,5 +1,5 @@
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -119,6 +119,10 @@ class WorkflowDefinitionActivationBody(BaseModel):
 
 class WorkflowDefinitionGmailWatchBody(BaseModel):
     enabled: bool
+
+
+class WorkflowDefinitionGmailFilterBody(BaseModel):
+    mode: Literal["focused", "focused_updates", "all_inbox"]
 
 
 class WorkflowDefinitionCalendarWatchBody(BaseModel):
@@ -342,6 +346,35 @@ def update_workflow_definition_calendar_watch(
         "worker": worker,
         "status": CalendarTriggerService(db).status(),
     }
+
+
+@router.patch("/definitions/{definition_id}/gmail-filter")
+def update_workflow_definition_gmail_filter(
+    definition_id: uuid.UUID,
+    body: WorkflowDefinitionGmailFilterBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    definition = db.get(WorkflowDefinition, definition_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Unknown workflow definition.")
+    trigger_config = dict(definition.trigger_config or {})
+    if (
+        definition.trigger_type != "event"
+        or trigger_config.get("event_type") != "gmail.message.received"
+    ):
+        raise HTTPException(status_code=400, detail="Workflow is not triggered by Gmail.")
+    trigger_config["filters"] = {
+        **(
+            trigger_config.get("filters")
+            if isinstance(trigger_config.get("filters"), dict)
+            else {}
+        ),
+        "gmail_scope": body.mode,
+    }
+    definition.trigger_config = trigger_config
+    db.commit()
+    db.refresh(definition)
+    return {"definition": SchedulerService(db).workflow_definition_payload(definition)}
 
 
 @router.patch("/definitions/{definition_id}/shadow-mode")

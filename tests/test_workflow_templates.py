@@ -66,7 +66,7 @@ def test_praxis_email_template_installs_paused_with_canonical_contract(
     assert definition.trigger_type == "event"
     assert definition.trigger_config == {
         "event_type": "gmail.message.received",
-        "filters": {"domain_key": "praxis"},
+        "filters": {"domain_key": "praxis", "gmail_scope": "all_inbox"},
         "gmail_watch_enabled": False,
     }
     assert definition.workflow_spec["shadow_mode"] is True
@@ -284,6 +284,88 @@ def test_perti_email_and_calendar_templates_seed_dedicated_agents(
     assert calendar.workflow_spec["queue_items"][0]["agent_key"] == PERTI_CALENDAR_AGENT_KEY
     assert service.readiness("perti-email-triage")["ready"] is True
     assert service.readiness("perti-calendar-monitor")["ready"] is True
+
+
+def test_personal_monitors_use_focused_email_scope_and_shared_operations_agent(
+    session: Session,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PERSONAL_GOOGLE_CLIENT_ID", "client")
+    monkeypatch.setenv("PERSONAL_GOOGLE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("PERSONAL_GOOGLE_CLIENT_REFRESH_TOKEN", "refresh")
+    service = WorkflowTemplateService(session)
+
+    email = service.install("personal-email-triage")
+    calendar = service.install("personal-calendar-monitor")
+
+    assert email.trigger_config["filters"] == {
+        "domain_key": "personal",
+        "gmail_scope": "focused",
+    }
+    assert email.workflow_spec["queue_items"][0]["agent_key"] == "personal-operations-agent"
+    assert calendar.workflow_spec["queue_items"][0]["agent_key"] == "personal-operations-agent"
+    assert service.readiness("personal-email-triage")["ready"] is True
+    assert service.readiness("personal-calendar-monitor")["ready"] is True
+
+
+def test_personal_email_scope_filters_noise_and_is_editable(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PERSONAL_GOOGLE_CLIENT_ID", "client")
+    monkeypatch.setenv("PERSONAL_GOOGLE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("PERSONAL_GOOGLE_CLIENT_REFRESH_TOKEN", "refresh")
+    client = _client(session, tmp_path)
+    installed = client.post(
+        "/scheduler/templates/personal-email-triage/install",
+        json={"is_active": False},
+    )
+    definition_id = installed.json()["definition"]["id"]
+    assert client.patch(
+        f"/scheduler/definitions/{definition_id}/activation",
+        json={"is_active": True},
+    ).status_code == 200
+    assert client.patch(
+        f"/scheduler/definitions/{definition_id}/gmail-watch",
+        json={"enabled": True},
+    ).status_code == 200
+
+    def emit(message_id: str, labels: list[str]) -> list[dict]:
+        response = client.post(
+            "/scheduler/triggers/event",
+            json={
+                "event_type": "gmail.message.received",
+                "event_id": f"personal:{message_id}",
+                "event_payload": {
+                    "domain_key": "personal",
+                    "message_id": message_id,
+                    "label_ids": labels,
+                },
+            },
+        )
+        assert response.status_code == 200
+        return response.json()["runs"]
+
+    assert emit("promotion", ["INBOX", "CATEGORY_PROMOTIONS"]) == []
+    assert emit("routine-update", ["INBOX", "CATEGORY_UPDATES"]) == []
+    assert len(emit("primary", ["INBOX", "CATEGORY_PERSONAL"])) == 1
+    assert len(emit("important-update", ["INBOX", "CATEGORY_UPDATES", "IMPORTANT"])) == 1
+
+    updated = client.patch(
+        f"/scheduler/definitions/{definition_id}/gmail-filter",
+        json={"mode": "focused_updates"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["definition"]["trigger_config"]["filters"]["gmail_scope"] == "focused_updates"
+    assert len(emit("included-update", ["INBOX", "CATEGORY_UPDATES"])) == 1
+    assert emit("social", ["INBOX", "CATEGORY_SOCIAL"]) == []
+
+    assert client.patch(
+        f"/scheduler/definitions/{definition_id}/gmail-filter",
+        json={"mode": "all_inbox"},
+    ).status_code == 200
+    assert len(emit("included-promotion", ["INBOX", "CATEGORY_PROMOTIONS"])) == 1
 
 
 def test_calendar_watch_is_scoped_to_active_template(
