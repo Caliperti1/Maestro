@@ -8,8 +8,11 @@ cursor so enabling the worker never processes an old inbox unexpectedly.
 
 from __future__ import annotations
 
+import errno
+import socket
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 
 from sqlalchemy import select
@@ -247,7 +250,7 @@ class GmailTriggerService:
                 results.append(self._reset_domain(domain, reason=str(exc), status="cursor_reset"))
             except Exception as exc:
                 self.session.rollback()
-                results.append(self._record_error(domain, str(exc)))
+                results.append(self._record_error(domain, exc))
         return {
             "event_type": GMAIL_TRIGGER_EVENT_TYPE,
             "domain_count": len(results),
@@ -317,6 +320,15 @@ class GmailTriggerService:
                 event_payload=event_payload,
                 event_id=event_id,
             )
+            if not runs:
+                skipped.append(
+                    {
+                        "message_id": message_id,
+                        "label_ids": sorted(labels),
+                        "reason": "workflow_filters",
+                    }
+                )
+                continue
             emitted.append(
                 {
                     "event_id": event_id,
@@ -325,7 +337,14 @@ class GmailTriggerService:
                 }
             )
 
-        now = datetime.now(UTC).isoformat()
+        now_datetime = datetime.now(UTC)
+        now = now_datetime.isoformat()
+        prior_was_unhealthy = cursor_payload.get("status") in {"degraded", "error"}
+        health_alert_was_active = bool(cursor_payload.get("health_alert_active"))
+        outage_seconds = _outage_duration_seconds(
+            cursor_payload.get("outage_started_at"),
+            now_datetime,
+        )
         self._write_cursor(
             domain,
             {
@@ -344,8 +363,19 @@ class GmailTriggerService:
                 "last_skipped_count": len(skipped),
                 "last_missing_count": len(missing),
                 "error_count": 0,
+                "failure_kind": None,
+                "outage_started_at": None,
+                "health_alert_active": False,
+                "last_recovered_at": now if prior_was_unhealthy else cursor_payload.get("last_recovered_at"),
+                "last_outage_seconds": outage_seconds if prior_was_unhealthy else cursor_payload.get("last_outage_seconds"),
             },
         )
+        if health_alert_was_active:
+            self._record_recovery(
+                domain,
+                recovered_at=now_datetime,
+                outage_seconds=outage_seconds,
+            )
         return {
             "domain_key": domain.key,
             "status": "healthy",
@@ -406,61 +436,172 @@ class GmailTriggerService:
             "bootstrap": True,
         }
 
-    def _record_error(self, domain: Domain, message: str) -> dict[str, Any]:
+    def _record_error(self, domain: Domain, error: Exception) -> dict[str, Any]:
         prior = self._cursor_setting(domain)
         payload = dict(prior.value or {}) if prior else {}
-        now = datetime.now(UTC).isoformat()
+        now_datetime = datetime.now(UTC)
+        now = now_datetime.isoformat()
+        message = str(error)
+        transient_network = _is_transient_network_failure(error)
         error_count = int(payload.get("error_count") or 0) + 1
+        prior_status = str(payload.get("status") or "")
+        outage_started_at = (
+            _parse_timestamp(payload.get("outage_started_at"))
+            if prior_status in {"degraded", "error"}
+            else None
+        ) or now_datetime
+        outage_seconds = max(0, int((now_datetime - outage_started_at).total_seconds()))
+        health_alert_active = bool(payload.get("health_alert_active"))
+        should_alert = not health_alert_active and (
+            (
+                transient_network
+                and outage_seconds >= get_settings().gmail_trigger_network_alert_seconds
+            )
+            or (not transient_network and error_count >= 3)
+        )
         updated = {
             **payload,
             "domain_key": domain.key,
-            "status": "error",
+            "status": "degraded" if transient_network else "error",
             "last_polled_at": now,
             "last_error": message,
             "error_count": error_count,
+            "failure_kind": "transient_network" if transient_network else "poll_error",
+            "outage_started_at": outage_started_at.isoformat(),
+            "health_alert_active": health_alert_active or should_alert,
+            "health_alerted_at": now if should_alert else payload.get("health_alerted_at"),
         }
         self._write_cursor(
             domain,
             updated,
         )
-        if error_count == 3:
-            notification = WorkflowNotification(
-                domain_id=domain.id,
-                severity="warning",
-                status="delivered",
-                title=f"{domain.name} Gmail monitoring needs attention",
-                message=(
-                    f"Gmail trigger polling has failed three times and is not detecting new "
-                    f"messages. {message}"
-                ),
-                notification_type="trigger_health",
-                target="maestro_chat",
-                delivered_at=datetime.now(UTC),
-                metadata_={"domain_key": domain.key, "error_count": error_count},
-            )
-            self.session.add(notification)
-            self.session.commit()
-            record_channel_message(
-                self.session,
-                sender="maestro",
-                content=(
-                    f"I need your attention: {domain.name} Gmail monitoring has failed three "
-                    f"times, so new-email workflows may be delayed. {message}"
-                ),
-                metadata={
-                    "source": "gmail_trigger_worker",
-                    "notification_id": str(notification.id),
-                    "domain_key": domain.key,
-                    "channel_visibility": "global",
-                },
+        if should_alert:
+            self._record_health_alert(
+                domain,
+                message=message,
+                error_count=error_count,
+                transient_network=transient_network,
+                outage_started_at=outage_started_at,
+                outage_seconds=outage_seconds,
             )
         return {
             "domain_key": domain.key,
-            "status": "error",
+            "status": "degraded" if transient_network else "error",
             "emitted_count": 0,
             "error": message,
             "error_count": error_count,
+            "failure_kind": "transient_network" if transient_network else "poll_error",
+            "outage_seconds": outage_seconds,
+            "alerted": should_alert,
         }
+
+    def _record_health_alert(
+        self,
+        domain: Domain,
+        *,
+        message: str,
+        error_count: int,
+        transient_network: bool,
+        outage_started_at: datetime,
+        outage_seconds: int,
+    ) -> None:
+        if transient_network:
+            duration_minutes = max(1, round(outage_seconds / 60))
+            notification_message = (
+                f"Gmail monitoring has been unable to reach Google for about "
+                f"{duration_minutes} minutes, so new-email workflows are delayed. {message}"
+            )
+            channel_content = (
+                f"I need your attention: {domain.name} Gmail monitoring has been unable to "
+                f"reach Google for about {duration_minutes} minutes, so new-email workflows "
+                f"are delayed. {message}"
+            )
+        else:
+            failure_phrase = (
+                "three times consecutively"
+                if error_count == 3
+                else f"{error_count} consecutive times"
+            )
+            notification_message = (
+                f"Gmail trigger polling has failed {failure_phrase} and is "
+                f"not detecting new messages. {message}"
+            )
+            channel_content = (
+                f"I need your attention: {domain.name} Gmail monitoring has failed "
+                f"{failure_phrase}, so new-email workflows may be delayed. "
+                f"{message}"
+            )
+        notification = WorkflowNotification(
+            domain_id=domain.id,
+            severity="warning",
+            status="delivered",
+            title=f"{domain.name} Gmail monitoring needs attention",
+            message=notification_message,
+            notification_type="trigger_health",
+            target="maestro_chat",
+            delivered_at=datetime.now(UTC),
+            metadata_={
+                "domain_key": domain.key,
+                "error_count": error_count,
+                "failure_kind": "transient_network" if transient_network else "poll_error",
+                "outage_started_at": outage_started_at.isoformat(),
+                "outage_seconds": outage_seconds,
+            },
+        )
+        self.session.add(notification)
+        self.session.commit()
+        record_channel_message(
+            self.session,
+            sender="maestro",
+            content=channel_content,
+            metadata={
+                "source": "gmail_trigger_worker",
+                "notification_id": str(notification.id),
+                "domain_key": domain.key,
+                "channel_visibility": "global",
+            },
+        )
+
+    def _record_recovery(
+        self,
+        domain: Domain,
+        *,
+        recovered_at: datetime,
+        outage_seconds: int,
+    ) -> None:
+        duration_minutes = max(1, round(outage_seconds / 60))
+        message = (
+            f"Gmail monitoring recovered after about {duration_minutes} minutes. Polling has "
+            f"resumed and retained Gmail history has been processed."
+        )
+        notification = WorkflowNotification(
+            domain_id=domain.id,
+            severity="info",
+            status="delivered",
+            title=f"{domain.name} Gmail monitoring recovered",
+            message=message,
+            notification_type="trigger_health_recovery",
+            target="maestro_chat",
+            delivered_at=recovered_at,
+            metadata_={
+                "domain_key": domain.key,
+                "outage_seconds": outage_seconds,
+            },
+        )
+        self.session.add(notification)
+        self.session.commit()
+        record_channel_message(
+            self.session,
+            sender="maestro",
+            content=f"Good news: {domain.name} {message}",
+            metadata={
+                "source": "gmail_trigger_worker",
+                "notification_id": str(notification.id),
+                "domain_key": domain.key,
+                "channel_visibility": "global",
+                "recovery": True,
+            },
+        )
 
     def _watched_domains(self) -> list[Domain]:
         definitions = self.session.scalars(
@@ -524,6 +665,78 @@ class GmailTriggerService:
             self.session.add(setting)
         setting.value = payload
         self.session.commit()
+
+
+_TRANSIENT_NETWORK_ERRNOS = {
+    code
+    for code in (
+        getattr(errno, "ENETDOWN", None),
+        getattr(errno, "ENETUNREACH", None),
+        getattr(errno, "EHOSTUNREACH", None),
+        getattr(errno, "ETIMEDOUT", None),
+        getattr(errno, "ECONNRESET", None),
+        getattr(errno, "ECONNABORTED", None),
+        getattr(errno, "ECONNREFUSED", None),
+    )
+    if code is not None
+}
+_TRANSIENT_NETWORK_MARKERS = (
+    "network is down",
+    "network is unreachable",
+    "no route to host",
+    "nodename nor servname provided",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "handshake operation timed out",
+    "timed out",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+)
+
+
+def _is_transient_network_failure(error: BaseException) -> bool:
+    pending: list[BaseException] = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, HTTPError) and (current.code == 429 or current.code >= 500):
+            return True
+        if isinstance(current, socket.gaierror | TimeoutError | ConnectionError):
+            return True
+        if isinstance(current, OSError) and current.errno in _TRANSIENT_NETWORK_ERRNOS:
+            return True
+        if any(marker in str(current).lower() for marker in _TRANSIENT_NETWORK_MARKERS):
+            return True
+        if isinstance(current, URLError) and isinstance(current.reason, BaseException):
+            pending.append(current.reason)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return False
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _outage_duration_seconds(value: Any, now: datetime) -> int:
+    started_at = _parse_timestamp(value)
+    if started_at is None:
+        return 0
+    return max(0, int((now - started_at).total_seconds()))
 
 
 def _history_message_ids(response: dict[str, Any]) -> list[str]:

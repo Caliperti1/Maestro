@@ -340,6 +340,34 @@ real file. The major configuration groups are:
 - domain-specific Google Workspace and GitHub secret references;
 - prompt-size and daily-cost warning limits.
 
+```bash
+DATABASE_URL=postgresql+psycopg://maestro:maestro@localhost:55432/maestro
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
+LLM_MODEL=openai/gpt-5.6-terra
+LLM_QWEN_MODEL_PROFILE=ollama:qwen3:8b
+LLM_LUNA_MODEL_PROFILE=openrouter:openai/gpt-5.6-luna
+LLM_TERRA_MODEL_PROFILE=openrouter:openai/gpt-5.6-terra
+LLM_SOL_MODEL_PROFILE=openrouter:openai/gpt-5.6-sol
+LLM_EXTERNAL_PROMPT_MAX_CHARS=200000
+LLM_DAILY_COST_WARNING_USD=1.00
+GMAIL_TRIGGER_AUTORUN=false
+GMAIL_TRIGGER_INTERVAL_SECONDS=30
+GMAIL_TRIGGER_PAGE_SIZE=100
+GMAIL_TRIGGER_NETWORK_ALERT_SECONDS=900
+MEMORY_DROPBOX_ROOT=maestro_dropbox
+MEMORY_EXTRACTION_CHUNK_CHARS=60000
+MEMORY_EXTRACTION_MAX_SOURCE_CHARS=500000
+EMBEDDING_PROVIDER=ollama
+EMBEDDING_MODEL=nomic-embed-text
+ROUTED_RESOLVER_LLM_PROVIDER=ollama
+MAESTRO_INTENT_CLASSIFIER_PROVIDER=ollama
+SCHEDULER_WORKER_AUTORUN=false
+USER_DISPLAY_NAME=Chris
+USER_FULL_NAME=Chris Aliperti
+USER_EMAIL=chris.aliperti@praxis-defense.com
+```
+
 LLM calls are attributed by component, model, task, workflow, token count, and estimated cost in a
 durable usage ledger. `GET /workflow-outputs/llm-usage/daily` returns daily, component, and model
 usage. External prompts above the configured hard limit are rejected before transmission.

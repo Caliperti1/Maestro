@@ -16,6 +16,10 @@ CONTEXT_MAILBOX_INTERVAL_SECONDS=30
 CONTEXT_MAILBOX_PAGE_SIZE=25
 ```
 
+`MAESTRO_INTAKE_ALLOWED_SENDERS` is an exact, comma-separated sender allowlist. Add every address
+that may deliver approved context packages, including the actual From address used by Power
+Automate. Do not allow an entire organization or email domain merely to simplify setup.
+
 The OAuth grant needs Gmail read and modify access. Modify is required to apply terminal labels,
 mark handled messages read, and archive successfully staged handoffs.
 
