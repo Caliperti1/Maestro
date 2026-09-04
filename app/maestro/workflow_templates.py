@@ -12,15 +12,17 @@ from app.db.models import Agent, Domain, ToolConnection, WorkflowDefinition
 from app.maestro.scheduler import SchedulerService
 from app.tools.runtime import _dotenv_value
 
-
 PRAXIS_EMAIL_TRIAGE_KEY = "praxis-email-triage"
 PRAXIS_EMAIL_AGENT_KEY = "praxis-email-agent"
 PERTI_EMAIL_TRIAGE_KEY = "perti-email-triage"
 PERTI_EMAIL_AGENT_KEY = "perti-email-agent"
+PERSONAL_EMAIL_TRIAGE_KEY = "personal-email-triage"
+PERSONAL_OPERATIONS_AGENT_KEY = "personal-operations-agent"
 PRAXIS_CALENDAR_MONITOR_KEY = "praxis-calendar-monitor"
 PRAXIS_CALENDAR_AGENT_KEY = "praxis-calendar-agent"
 PERTI_CALENDAR_MONITOR_KEY = "perti-calendar-monitor"
 PERTI_CALENDAR_AGENT_KEY = "perti-calendar-agent"
+PERSONAL_CALENDAR_MONITOR_KEY = "personal-calendar-monitor"
 DAILY_STANDUP_KEY = "daily-standup"
 MAESTRO_BRIEFING_AGENT_KEY = "maestro-briefing-agent"
 MAESTRO_OPERATIONS_AGENT_KEY = "maestro-operations-agent"
@@ -64,7 +66,13 @@ PRAXIS_EMAIL_TOOLS = EMAIL_TRIAGE_TOOLS
 
 
 def _email_template(
-    *, key: str, name: str, domain_key: str, domain_name: str, agent_key: str
+    *,
+    key: str,
+    name: str,
+    domain_key: str,
+    domain_name: str,
+    agent_key: str,
+    gmail_scope: str = "all_inbox",
 ) -> dict[str, Any]:
     return {
         "key": key,
@@ -78,7 +86,10 @@ def _email_template(
         "trigger_type": "event",
         "trigger_config": {
             "event_type": "gmail.message.received",
-            "filters": {"domain_key": domain_key},
+            "filters": {
+                "domain_key": domain_key,
+                "gmail_scope": gmail_scope,
+            },
             "gmail_watch_enabled": False,
         },
         "workflow_spec": {
@@ -302,6 +313,14 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         domain_name="Perti Laboratories",
         agent_key=PERTI_EMAIL_AGENT_KEY,
     ),
+    PERSONAL_EMAIL_TRIAGE_KEY: _email_template(
+        key=PERSONAL_EMAIL_TRIAGE_KEY,
+        name="Personal Email Triage",
+        domain_key="personal",
+        domain_name="Personal",
+        agent_key=PERSONAL_OPERATIONS_AGENT_KEY,
+        gmail_scope="focused",
+    ),
     PRAXIS_CALENDAR_MONITOR_KEY: _calendar_template(
         key=PRAXIS_CALENDAR_MONITOR_KEY,
         name="Praxis Calendar Monitor",
@@ -315,6 +334,13 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         domain_key="perti-laboratories",
         domain_name="Perti Laboratories",
         agent_key=PERTI_CALENDAR_AGENT_KEY,
+    ),
+    PERSONAL_CALENDAR_MONITOR_KEY: _calendar_template(
+        key=PERSONAL_CALENDAR_MONITOR_KEY,
+        name="Personal Calendar Monitor",
+        domain_key="personal",
+        domain_name="Personal",
+        agent_key=PERSONAL_OPERATIONS_AGENT_KEY,
     ),
 }
 

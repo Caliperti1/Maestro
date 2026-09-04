@@ -72,6 +72,35 @@ def _validate_workflow_parameters(
     return resolved
 
 
+_GMAIL_CATEGORY_LABELS = {
+    "CATEGORY_FORUMS",
+    "CATEGORY_PERSONAL",
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL",
+    "CATEGORY_UPDATES",
+}
+_GMAIL_NOISE_CATEGORY_LABELS = {
+    "CATEGORY_FORUMS",
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL",
+}
+
+
+def _gmail_event_matches_scope(event_payload: dict[str, Any], scope: str) -> bool:
+    labels = {str(value).upper() for value in event_payload.get("label_ids") or []}
+    normalized_scope = scope.strip().lower()
+    if normalized_scope == "all_inbox":
+        return True
+    if labels & {"IMPORTANT", "STARRED"}:
+        return True
+    if normalized_scope == "focused_updates":
+        return not bool(labels & _GMAIL_NOISE_CATEGORY_LABELS)
+    if normalized_scope == "focused":
+        category_labels = labels & _GMAIL_CATEGORY_LABELS
+        return not category_labels or category_labels == {"CATEGORY_PERSONAL"}
+    return False
+
+
 class SchedulerService:
     def __init__(self, session: Session):
         self.session = session
@@ -1055,6 +1084,10 @@ class SchedulerService:
         filters: dict[str, Any],
     ) -> bool:
         for key, expected in filters.items():
+            if key == "gmail_scope":
+                if not _gmail_event_matches_scope(event_payload, str(expected)):
+                    return False
+                continue
             actual: Any = event_payload
             for part in str(key).split("."):
                 if not isinstance(actual, dict) or part not in actual:

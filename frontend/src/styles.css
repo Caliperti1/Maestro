@@ -958,6 +958,18 @@ h4 {
   font-weight: 800;
 }
 
+.gmail-filter-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-text);
+  font-size: 0.78rem;
+}
+
+.gmail-filter-control select {
+  min-width: 150px;
+}
+
 .worker-toggle input {
   width: 16px;
   height: 16px;

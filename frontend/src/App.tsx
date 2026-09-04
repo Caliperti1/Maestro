@@ -3170,6 +3170,16 @@ export function App() {
     await loadSchedulerDashboard();
   };
 
+  const updateDefinitionGmailFilter = async (definitionId: string, mode: string) => {
+    await apiJson(`/scheduler/definitions/${definitionId}/gmail-filter`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    setSchedulerStatusMessage("Gmail inbox scope updated for this workflow.");
+    await loadSchedulerDashboard();
+  };
+
   const updateDefinitionCalendarWatch = async (definitionId: string, enabled: boolean) => {
     const response = await apiJson<{ worker: CalendarTriggerStatus["worker"]; status: CalendarTriggerStatus }>(
       `/scheduler/definitions/${definitionId}/calendar-watch`,
@@ -4264,6 +4274,7 @@ export function App() {
             onApproveToolCall={approveToolCall}
             onRejectToolCall={rejectToolCall}
             onToggleDefinitionGmailWatch={updateDefinitionGmailWatch}
+            onUpdateDefinitionGmailFilter={updateDefinitionGmailFilter}
             onToggleDefinitionCalendarWatch={updateDefinitionCalendarWatch}
             onToggleDefinitionShadowMode={updateDefinitionShadowMode}
             onToggleSchedulerWorker={(enabled) => updateSchedulerWorkerStatus({ enabled })}
@@ -5051,6 +5062,7 @@ function WorkflowsWorkspace({
   onApproveToolCall,
   onRejectToolCall,
   onToggleDefinitionGmailWatch,
+  onUpdateDefinitionGmailFilter,
   onToggleDefinitionCalendarWatch,
   onToggleDefinitionShadowMode,
   onToggleSchedulerWorker,
@@ -5081,6 +5093,7 @@ function WorkflowsWorkspace({
   onApproveToolCall: (toolCallId: string) => Promise<void>;
   onRejectToolCall: (toolCallId: string) => Promise<void>;
   onToggleDefinitionGmailWatch: (definitionId: string, enabled: boolean) => Promise<void>;
+  onUpdateDefinitionGmailFilter: (definitionId: string, mode: string) => Promise<void>;
   onToggleDefinitionCalendarWatch: (definitionId: string, enabled: boolean) => Promise<void>;
   onToggleDefinitionShadowMode: (definitionId: string, enabled: boolean) => Promise<void>;
   onToggleSchedulerWorker: (enabled: boolean) => Promise<void>;
@@ -5325,6 +5338,10 @@ function WorkflowsWorkspace({
             const gmailWatchEnabled =
               configuredWatch === true
               || (configuredWatch === undefined && definition.key !== "praxis-email-triage");
+            const rawFilters = definition.trigger_config.filters;
+            const gmailFilterMode = rawFilters && typeof rawFilters === "object"
+              ? String((rawFilters as Record<string, unknown>).gmail_scope ?? "all_inbox")
+              : "all_inbox";
             const shadowMode = definition.workflow_spec?.shadow_mode === true;
             const gmailDomainStatus = gmailTriggerStatus?.domains.find(
               (domain) => domain.domain_key === definition.domain_key,
@@ -5353,11 +5370,19 @@ function WorkflowsWorkspace({
                   {triggerDomainStatus?.last_polled_at && (
                     <span>polled {formatDateTime(triggerDomainStatus.last_polled_at)}</span>
                   )}
-                  {triggerDomainStatus?.status === "error" && triggerDomainStatus.last_error && (
-                    <span className="warning-pill">Last poll failed</span>
+                  {triggerDomainStatus
+                    && ["degraded", "error"].includes(triggerDomainStatus.status)
+                    && triggerDomainStatus.last_error && (
+                    <span className="warning-pill">
+                      {triggerDomainStatus.status === "degraded"
+                        ? "Connectivity degraded"
+                        : "Last poll failed"}
+                    </span>
                   )}
                 </div>
-                {triggerDomainStatus?.status === "error" && triggerDomainStatus.last_error && (
+                {triggerDomainStatus
+                  && ["degraded", "error"].includes(triggerDomainStatus.status)
+                  && triggerDomainStatus.last_error && (
                   <details className="inline-error-details">
                     <summary>{isCalendarTrigger ? "Calendar" : "Gmail"} watcher diagnostic</summary>
                     <p>{triggerDomainStatus.last_error}</p>
@@ -5374,18 +5399,34 @@ function WorkflowsWorkspace({
                     />
                   </label>
                   {isGmailTrigger && (
-                    <label className="worker-toggle">
-                      Gmail watch
-                      <input
-                        type="checkbox"
-                        checked={gmailWatchEnabled}
-                        disabled={!definition.is_active}
-                        onChange={(event) => onToggleDefinitionGmailWatch(
-                          definition.id,
-                          event.target.checked,
-                        )}
-                      />
-                    </label>
+                    <>
+                      <label className="worker-toggle">
+                        Gmail watch
+                        <input
+                          type="checkbox"
+                          checked={gmailWatchEnabled}
+                          disabled={!definition.is_active}
+                          onChange={(event) => onToggleDefinitionGmailWatch(
+                            definition.id,
+                            event.target.checked,
+                          )}
+                        />
+                      </label>
+                      <label className="gmail-filter-control">
+                        Inbox scope
+                        <select
+                          value={gmailFilterMode}
+                          onChange={(event) => onUpdateDefinitionGmailFilter(
+                            definition.id,
+                            event.target.value,
+                          )}
+                        >
+                          <option value="focused">Focused</option>
+                          <option value="focused_updates">Focused + Updates</option>
+                          <option value="all_inbox">All inbox</option>
+                        </select>
+                      </label>
+                    </>
                   )}
                   {isCalendarTrigger && (
                     <label className="worker-toggle">

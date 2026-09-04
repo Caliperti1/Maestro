@@ -6,8 +6,10 @@ correct even when an invitation or later edit never appears in an inbox.
 
 ## Installed Patterns
 
-The Workflows screen exposes four templates:
+The Workflows screen exposes six templates:
 
+- Personal Email Triage
+- Personal Calendar Monitor
 - Praxis Email Triage
 - Perti Email Triage
 - Praxis Calendar Monitor
@@ -23,6 +25,18 @@ The shared Gmail History producer keeps one cursor per watched domain. It emits 
 message ID and versioned source metadata to the matching domain workflow. The dedicated email agent
 reads that message, applies the manager skills, routes supported objects, and notifies Chris only
 when he personally needs to act.
+
+Each email workflow also owns its inbox scope:
+
+- **Focused** runs Primary/Personal, Important, Starred, and uncategorized inbox mail. It skips
+  Promotions, Social, Forums, and routine Updates before an LLM workflow is created.
+- **Focused + Updates** also includes the Updates category while still skipping Promotions, Social,
+  and Forums.
+- **All inbox** processes every otherwise eligible inbox message.
+
+Personal Email Triage defaults to Focused because personal inbox volume is noisy. Praxis and Perti
+default to All inbox. The scope is editable directly on each durable Gmail workflow card. Calendar
+monitoring is independent and is never constrained by the email scope.
 
 ## Calendar Flow
 
@@ -75,3 +89,19 @@ GitHub when a single repository is appropriate, or leave it unset and pass a rep
 8. Repeat with new source objects and verify canonical routed outputs and quiet/notification rules.
 
 The Praxis Calendar Monitor follows the same steps and uses the existing Praxis Google connection.
+
+## Personal Credentials And Activation
+
+Create a refresh token while signed into Chris's personal Google account using the scopes in
+[GOOGLE_WORKSPACE_SETUP.md](GOOGLE_WORKSPACE_SETUP.md), then add:
+
+```env
+PERSONAL_GOOGLE_CLIENT_ID=
+PERSONAL_GOOGLE_CLIENT_SECRET=
+PERSONAL_GOOGLE_CLIENT_REFRESH_TOKEN=
+```
+
+Restart the backend, install Personal Email Triage and Personal Calendar Monitor paused, and follow
+the same activation order above. Leave Personal Email Triage on Focused for the first live test. A
+controlled Primary-category email should create one shadow run; a Promotions-category email should
+create none. Calendar activation records the current provider cursor and seeds only upcoming events.
