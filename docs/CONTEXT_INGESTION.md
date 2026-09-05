@@ -73,9 +73,8 @@ The initial policy profiles are:
 | Perti Laboratories | business confidential | user provided | external allowed |
 | Maestro Development | business confidential | user provided | external allowed |
 | USMA | sanitized work context | user reviewed | external allowed |
-| L3 | sanitized work context | user reviewed | external allowed |
 
-USMA and L3 evidence is sanitized before it reaches Maestro, so it follows the same configured
+USMA evidence is sanitized before it reaches Maestro, so it follows the same configured
 curation and retrieval path as other domains. Its source classification remains attached for
 provenance and future policy decisions. The generic `local_only` policy remains available for an
 individual source that must never enter a cloud-bound prompt; when selected it is enforced during
@@ -112,7 +111,7 @@ The background dropbox worker recovers ingestion records and source files left i
 more than 30 minutes. Failed records can be retried by placing the same source version back in its
 inbox.
 
-## USMA And L3 Sanitized Context Drops
+## USMA Sanitized Context Drops
 
 The safe initial pattern is to automate collection on each work machine but retain a human review
 gate before transfer.
@@ -124,7 +123,7 @@ Authorized work sources
   -> maestro_context.md plus manifest
   -> human review
   -> approved transfer
-  -> Maestro USMA or L3 inbox
+  -> Maestro USMA inbox
 ```
 
 The exported context should describe obligations and user-relevant state, not reproduce source
@@ -150,7 +149,7 @@ See the transfer recommendations below before adding automated email or network 
 
 1. ChatGPT export importer with stable conversation IDs, content versions, and incremental exports.
 2. Local repository observer with full-baseline and commit-aware incremental state reports.
-3. Reviewed USMA and L3 sanitized Markdown context manifests.
+3. Reviewed USMA sanitized Markdown context manifests.
 4. Gmail, Calendar, Drive, and GitHub tool-result evidence accounting.
 5. Dedicated Gmail context mailbox intake for ChatGPT and approved cross-environment handoffs.
 

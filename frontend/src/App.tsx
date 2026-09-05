@@ -123,7 +123,6 @@ const calendarColors: Record<string, string> = {
   praxis: "#ef7d32",
   "perti-laboratories": "#7c3aed",
   usma: "#b42318",
-  l3: "#536471",
   global: "#111827",
 };
 

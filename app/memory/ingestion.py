@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
-import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -95,7 +94,7 @@ class IngestionClaim:
 
 
 def policy_for_domain(domain_key: str) -> SourcePolicy:
-    if domain_key in {"usma", "l3"}:
+    if domain_key == "usma":
         return SourcePolicy(
             sensitivity="sanitized_work_context",
             trust_level="user_reviewed",

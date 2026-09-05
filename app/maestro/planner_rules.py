@@ -6,7 +6,6 @@ DOMAIN_HINTS: dict[str, list[str]] = {
     "praxis": ["praxis", "partner", "tactical innovation", "transition", "training"],
     "perti-laboratories": ["perti", "product", "software", "market", "research", "irad", "prototype"],
     "usma": ["usma", "cadet", "class", "teaching", "academic"],
-    "l3": ["l3"],
 }
 
 INTENT_TYPE_BY_WORK_ITEM: dict[str, str] = {

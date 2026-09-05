@@ -53,12 +53,6 @@ maestro_dropbox/
     processed/
     failed/
     previews/
-  l3/
-    inbox/
-    processing/
-    processed/
-    failed/
-    previews/
 ```
 
 Domain folder names match the domain keys in Postgres. Use `global/inbox` for material that
