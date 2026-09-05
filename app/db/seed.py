@@ -39,7 +39,6 @@ DEFAULT_DOMAINS = [
         "USMA",
         "USMA teaching, admin, research, and academic operations.",
     ),
-    DomainSeed("l3", "L3", "L3 domain operations and memory."),
 ]
 
 

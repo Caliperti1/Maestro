@@ -126,7 +126,7 @@ def test_ingestion_status_lists_registered_sources(session: Session, tmp_path: P
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["source_registrations"] == 7
+    assert payload["source_registrations"] == 6
     assert payload["records"] == {}
     assert payload["duplicates_skipped"] == 0
     assert payload["recent"] == []
@@ -668,11 +668,11 @@ def test_routed_context_returns_recurring_event_for_requested_date(
     tmp_path: Path,
 ) -> None:
     seed_default_domains(session)
-    l3 = DomainRepository(session).get_by_key("l3")
-    assert l3 is not None
+    usma = DomainRepository(session).get_by_key("usma")
+    assert usma is not None
     session.add(
         CalendarEvent(
-            domain_id=l3.id,
+            domain_id=usma.id,
             title="Collaborative Autonomy Standup",
             start_at=datetime(2026, 8, 24, 15, 0, tzinfo=UTC),
             end_at=datetime(2026, 8, 24, 15, 30, tzinfo=UTC),
@@ -689,7 +689,7 @@ def test_routed_context_returns_recurring_event_for_requested_date(
     session.commit()
 
     response = _client(session, tmp_path).get(
-        "/memory/routed-objects?domain_key=l3&query_text=2026-08-31"
+        "/memory/routed-objects?domain_key=usma&query_text=2026-08-31"
     )
 
     assert response.status_code == 200
@@ -702,12 +702,12 @@ def test_routed_context_ranks_rough_calendar_reference_and_expands_occurrence(
     tmp_path: Path,
 ) -> None:
     seed_default_domains(session)
-    l3 = DomainRepository(session).get_by_key("l3")
-    assert l3 is not None
+    usma = DomainRepository(session).get_by_key("usma")
+    assert usma is not None
     session.add_all(
         [
             CalendarEvent(
-                domain_id=l3.id,
+                domain_id=usma.id,
                 title="Collaborative Autonomy Standup",
                 summary="Daily autonomy coordination.",
                 start_at=datetime(2026, 8, 24, 15, 0, tzinfo=UTC),
@@ -722,7 +722,7 @@ def test_routed_context_ranks_rough_calendar_reference_and_expands_occurrence(
                 metadata_={},
             ),
             CalendarEvent(
-                domain_id=l3.id,
+                domain_id=usma.id,
                 title="Weekly Autonomy PM Sync",
                 start_at=datetime(2026, 8, 31, 17, 0, tzinfo=UTC),
                 end_at=datetime(2026, 8, 31, 17, 30, tzinfo=UTC),
@@ -741,7 +741,7 @@ def test_routed_context_ranks_rough_calendar_reference_and_expands_occurrence(
     response = _client(session, tmp_path).get(
         "/memory/routed-objects",
         params={
-            "domain_key": "l3",
+            "domain_key": "usma",
             "query_text": (
                 "shift my collaborative autonomy standup scheduled August 31 2026 "
                 "at 11:00 AM Eastern"

@@ -16,7 +16,7 @@ from urllib.parse import quote
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.models import Domain, RuntimeSetting
+from app.db.models import RuntimeSetting
 from app.db.repositories import DomainRepository
 from app.memory.context_gateway import ContextGatewayService, GatewayItem
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES, extract_dropbox_text
@@ -49,8 +49,6 @@ DOMAIN_ALIASES = {
     "praxis": "praxis",
     "usma": "usma",
     "west point": "usma",
-    "l3": "l3",
-    "l3harris": "l3",
 }
 MAX_BODY_CHARS = 250_000
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -474,7 +472,7 @@ def parse_context_handoff(message: dict[str, Any]) -> ParsedContextHandoff:
         fallback_date=str(message.get("date") or ""),
         internal_date=str(message.get("internal_date") or ""),
     )
-    if source_system in {"usma_sanitized_context_drop", "l3_sanitized_context_drop"}:
+    if source_system == "usma_sanitized_context_drop":
         _validate_sanitized_manifest(metadata)
     title = _handoff_title(body, source_system=source_system, fallback=subject_match.group(3))
     return ParsedContextHandoff(

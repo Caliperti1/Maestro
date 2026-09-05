@@ -155,8 +155,8 @@ def parse_sanitized_context_manifest(text: str, *, expected_domain: str | None =
     missing = sorted(required - metadata.keys())
     if missing:
         raise ValueError(f"Sanitized context metadata is missing: {', '.join(missing)}")
-    if metadata["domain"] not in {"usma", "l3"}:
-        raise ValueError("Sanitized context domain must be usma or l3.")
+    if metadata["domain"] != "usma":
+        raise ValueError("Sanitized context domain must be usma.")
     if expected_domain and metadata["domain"] != expected_domain:
         raise ValueError("Manifest domain does not match the selected destination.")
     if metadata["contains_restricted"].lower() not in {"false", "no"}:

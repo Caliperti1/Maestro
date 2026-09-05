@@ -17,7 +17,12 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.repositories import DomainRepository
 from app.memory.dropbox import MemoryDropboxProcessor
-from app.memory.ingestion import ContextEnvelope, IngestionLedgerService, SourcePolicy, policy_for_domain
+from app.memory.ingestion import (
+    ContextEnvelope,
+    IngestionLedgerService,
+    SourcePolicy,
+    policy_for_domain,
+)
 
 
 @dataclass(frozen=True)
@@ -138,7 +143,6 @@ class ChatGPTExportImporter:
             "praxis": ("praxis", "groundtruth"),
             "perti-laboratories": ("perti labs", "perti laboratories", "maestro", "ophi"),
             "usma": ("west point", "usma"),
-            "l3": ("l3harris", "l3 harris"),
         }
         matches = [key for key, terms in aliases.items() if any(term in haystack for term in terms)]
         return matches[0] if len(matches) == 1 else default

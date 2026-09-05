@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -131,12 +131,13 @@ def test_completing_monthly_occurrence_keeps_series_and_next_month_open(session)
 def test_pausing_series_archives_future_occurrences_but_keeps_overdue_work(session) -> None:
     domain = _domain(session)
     service = RecurringTodoService(session)
+    now = datetime.now(UTC)
     creation = service.create_series(
         domain_id=domain.id,
         title="Monthly close",
         description="Close the monthly books.",
         recurrence_rule="FREQ=MONTHLY;BYMONTHDAY=5",
-        due_anchor_at=datetime(2026, 8, 5, 13, tzinfo=UTC),
+        due_anchor_at=now - timedelta(days=40),
         scheduled_anchor_at=None,
         estimated_minutes=120,
     )
@@ -145,10 +146,9 @@ def test_pausing_series_archives_future_occurrences_but_keeps_overdue_work(sessi
     session.commit()
     service.materialize_series(
         creation.series,
-        now=datetime(2026, 8, 31, 12, tzinfo=UTC),
+        now=now,
     )
 
-    # Freeze the comparison by making the generated future dates future relative to wall time.
     service.update_series(creation.series.id, {"status": "paused"})
 
     assert session.get(RecurringTodoSeries, creation.series.id).status == "paused"

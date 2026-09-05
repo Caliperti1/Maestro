@@ -10,7 +10,6 @@ from app.db.models import Domain, ToolConnection, WorkflowDefinition
 from app.db.session import get_db
 from app.maestro.workflow_templates import (
     DAILY_STANDUP_KEY,
-    L3_OPERATIONS_AGENT_KEY,
     MAESTRO_BRIEFING_AGENT_KEY,
     MAESTRO_OPERATIONS_AGENT_KEY,
     PERTI_CALENDAR_AGENT_KEY,
@@ -90,26 +89,23 @@ def test_daily_standup_template_installs_active_with_parallel_domain_inputs(
     assert definition.is_active is True
     assert "prepare my daily standup" in definition.trigger_config["invocation_aliases"]
     items = definition.workflow_spec["queue_items"]
-    assert [item["stage_index"] for item in items] == [1, 1, 1, 1, 1, 1, 2]
+    assert [item["stage_index"] for item in items] == [1, 1, 1, 1, 1, 2]
     assert {item["domain_key"] for item in items[:-1]} == {
         "personal",
         "maestro-development",
         "usma",
-        "l3",
         "perti-laboratories",
         "praxis",
     }
     assert {item["agent_key"] for item in items[:-1]} >= {
         MAESTRO_OPERATIONS_AGENT_KEY,
         USMA_OPERATIONS_AGENT_KEY,
-        L3_OPERATIONS_AGENT_KEY,
     }
     assert items[-1]["agent_key"] == MAESTRO_BRIEFING_AGENT_KEY
     assert set(items[-1]["depends_on"]) == {
         "personal-input",
         "maestro-development-input",
         "usma-input",
-        "l3-input",
         "perti-input",
         "praxis-input",
     }

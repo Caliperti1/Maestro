@@ -139,7 +139,7 @@ Expected:
 - assembled prompt includes Praxis domain context
 - assembled prompt includes the Praxis agent role prompt
 - memory context is scoped to Praxis
-- unrelated Perti Laboratories/L3 domain context is absent
+- unrelated Perti Laboratories/Praxis domain context is absent
 - tool manifest only includes tools allowed for the agent
 
 ### Run Once

@@ -364,8 +364,8 @@ async def ingest_sanitized_context(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     domain = DomainRepository(db).get_by_key(domain_key)
-    if domain is None or domain_key not in {"usma", "l3"}:
-        raise HTTPException(status_code=404, detail="Sanitized context destination must be usma or l3.")
+    if domain is None or domain_key != "usma":
+        raise HTTPException(status_code=404, detail="Sanitized context destination must be usma.")
     try:
         text = (await file.read()).decode("utf-8")
         metadata, body = parse_sanitized_context_manifest(text, expected_domain=domain_key)

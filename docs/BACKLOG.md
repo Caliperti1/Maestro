@@ -11,7 +11,7 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Maestro web UI is reachable from a phone while the Mac is running.
 - User can chat with Maestro from the web UI.
 - System persists users, domains, agents, conversations, tasks, reports, artifacts, tool calls, and memory in Postgres.
-- Default domains exist: Personal, Maestro Development, Praxis, Perti Laboratories, USMA, and L3.
+- Default domains exist: Personal, Maestro Development, Praxis, Perti Laboratories, and USMA.
 - Domain agents can produce task logs and reports.
 - Agents can propose memory, and the Memory Curator can auto-write low-impact canonical memory.
 - Very high-impact memory can be queued for user approval.
@@ -53,15 +53,16 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - [x] Add source registrations, pull-source checkpoints, and an idempotent ingestion ledger.
 - [x] Standardize provenance and source timestamps across seed packages, artifacts, memories,
   proposals, and routed items.
-- [x] Preserve sanitized USMA/L3 source classification while using the standard memory models.
+- [x] Preserve sanitized USMA source classification while using the standard memory models.
 - [x] Retire superseded memory from active retrieval while retaining its history and links.
 - [x] Add stale-ingestion recovery and Memory UI health indicators.
 - [x] Add a ChatGPT export adapter with stable conversation and message IDs.
 - [x] Add a repository observer adapter with full-baseline and commit-aware incremental modes.
 - [x] Converge Gmail, Calendar, Drive, and GitHub memory outputs on the ingestion ledger.
-- [x] Add reviewed USMA and L3 Markdown context-drop manifests.
+- [x] Add reviewed USMA Markdown context-drop manifests.
 - [x] Add a dedicated allowlisted Gmail context-intake adapter with labels, health, attachment
   extraction, and source-version idempotency.
+- [x] Retire the L3 tenant and remove it from active ingestion, retrieval, agents, and standups.
 
 ### Identity grounding and expert retrieval
 
@@ -166,7 +167,7 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
 - Add Alembic config.
 - Add local Postgres setup instructions.
 - Apply initial migration.
-- Seed default domains: Personal, Maestro Development, Praxis, Perti Laboratories, USMA, L3.
+- Seed default domains: Personal, Maestro Development, Praxis, Perti Laboratories, USMA.
 
 ### 2.2 Core repositories
 
@@ -359,7 +360,6 @@ Each domain brief should return:
 - Perti Laboratories Research/Product stub.
 - USMA Teaching/Admin stub.
 - Perti Laboratories project scaffolding stub.
-- L3 stub.
 
 ### 6.4 Standup interaction loop
 

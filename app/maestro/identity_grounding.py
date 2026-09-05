@@ -128,15 +128,6 @@ class IdentityGroundingService:
                 "domain_key": "usma",
                 "metadata": {},
             },
-            {
-                "key": "domain:l3",
-                "node_type": "domain",
-                "display_name": "L3",
-                "aliases": [],
-                "description": "L3 is a professional work context connected to Chris.",
-                "domain_key": "l3",
-                "metadata": {},
-            },
         ]
         nodes: dict[str, IdentityNode] = {}
         changed = False
@@ -208,14 +199,6 @@ class IdentityGroundingService:
                 "professional_context",
                 "USMA and West Point references concern Chris's professional and academic "
                 "obligations; do not invent an unstated title.",
-            ),
-            (
-                "chris-affiliated-l3",
-                "person:chris-aliperti",
-                "domain:l3",
-                "professional_context",
-                "L3 references concern Chris's professional obligations; do not invent an "
-                "unstated title.",
             ),
             (
                 "praxis-domain-organization",

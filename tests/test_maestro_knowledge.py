@@ -376,18 +376,18 @@ def test_workflow_context_is_authoritative_and_includes_current_execution_lanes(
             workflow_spec={
                 "queue_items": [
                     {
-                        "id": "l3-input",
-                        "domain_key": "l3",
-                        "agent_key": "l3-operations-agent",
+                        "id": "usma-input",
+                        "domain_key": "usma",
+                        "agent_key": "usma-operations-agent",
                         "stage_index": 1,
-                        "objective": "Prepare the L3 input for Chris's daily standup.",
+                        "objective": "Prepare the USMA input for Chris's daily standup.",
                     },
                     {
                         "id": "standup-synthesis",
                         "domain_key": "maestro-development",
                         "agent_key": "maestro-briefing-agent",
                         "stage_index": 2,
-                        "depends_on": ["l3-input"],
+                        "depends_on": ["usma-input"],
                         "objective": "Synthesize the domain reports for Chris.",
                     },
                 ]
@@ -397,7 +397,7 @@ def test_workflow_context_is_authoritative_and_includes_current_execution_lanes(
     )
     session.commit()
     planner = CapturingKnowledgePlanner(
-        KnowledgeTurn(message="It includes L3 and then synthesizes the domain reports.", actions=[])
+        KnowledgeTurn(message="It includes USMA and then synthesizes the domain reports.", actions=[])
     )
 
     MaestroKnowledgeService(session, planner=planner).respond(
@@ -407,9 +407,9 @@ def test_workflow_context_is_authoritative_and_includes_current_execution_lanes(
     assert "Authoritative Current Workflow Definitions" in planner.context_text
     assert "override memories, reports, run logs" in planner.context_text
     assert "key=daily-standup" in planner.context_text
-    assert "domain=l3" in planner.context_text
-    assert "agent=l3-operations-agent" in planner.context_text
-    assert 'depends_on=["l3-input"]' in planner.context_text
+    assert "domain=usma" in planner.context_text
+    assert "agent=usma-operations-agent" in planner.context_text
+    assert 'depends_on=["usma-input"]' in planner.context_text
 
 
 def test_semantic_paraphrase_can_invoke_on_demand_workflow_without_alias_match(
@@ -723,7 +723,7 @@ def test_knowledge_mode_continues_clarification_and_repairs_event_schedule(
                 conversation_id=conversation.id,
                 sender_type="user",
                 content=(
-                    "Create an L3 calendar event every Monday through Thursday from now until "
+                    "Create an USMA calendar event every Monday through Thursday from now until "
                     "the end of the year called Collaborative Autonomy Standup."
                 ),
                 metadata_={},
@@ -735,7 +735,7 @@ def test_knowledge_mode_continues_clarification_and_repairs_event_schedule(
                 metadata_={
                     "interaction_mode": "knowledge",
                     "pending_clarification": (
-                        "Create the L3 Collaborative Autonomy Standup Monday through Thursday "
+                        "Create the USMA Collaborative Autonomy Standup Monday through Thursday "
                         "through the end of 2026; waiting for time and duration."
                     ),
                 },
@@ -759,7 +759,7 @@ def test_knowledge_mode_continues_clarification_and_repairs_event_schedule(
                     "reason": "Chris answered the pending time question.",
                     "arguments": {
                         "title": "Collaborative Autonomy Standup",
-                        "domain_key": "l3",
+                        "domain_key": "usma",
                         "start_at": "2026-08-24T11:00:00-04:00",
                         "end_at": "2026-08-24T12:00:00-04:00",
                         "timezone": "America/New_York",
@@ -865,11 +865,11 @@ def test_knowledge_mode_edits_existing_workflow_without_creating_one(session: Se
 
 def test_knowledge_mode_can_search_update_and_verify_in_one_turn(session: Session) -> None:
     seed_default_domains(session)
-    l3 = next(domain for domain in session.query(Domain).all() if domain.key == "l3")
+    usma = next(domain for domain in session.query(Domain).all() if domain.key == "usma")
     event = CalendarEvent(
-        domain_id=l3.id,
+        domain_id=usma.id,
         title="Collaborative Autonomy Standup",
-        summary="L3 team standup.",
+        summary="USMA team standup.",
         status="scheduled",
         attendees=[],
         supporting_refs=[],
@@ -888,7 +888,7 @@ def test_knowledge_mode_can_search_update_and_verify_in_one_turn(session: Sessio
                         "type": "context.search",
                         "arguments": {
                             "query_text": "Collaborative Autonomy Standup",
-                            "domain_key": "l3",
+                            "domain_key": "usma",
                             "stores": ["events"],
                         },
                     }
@@ -901,7 +901,7 @@ def test_knowledge_mode_can_search_update_and_verify_in_one_turn(session: Sessio
                         "type": "calendar.update",
                         "arguments": {
                             "target": str(event.id),
-                            "domain_key": "l3",
+                            "domain_key": "usma",
                             "updates": {"location": "Room 204"},
                         },
                     }
@@ -914,7 +914,7 @@ def test_knowledge_mode_can_search_update_and_verify_in_one_turn(session: Sessio
                         "type": "context.search",
                         "arguments": {
                             "query_text": "Collaborative Autonomy Standup",
-                            "domain_key": "l3",
+                            "domain_key": "usma",
                             "stores": ["events"],
                         },
                     }
@@ -949,9 +949,9 @@ def test_knowledge_mode_moves_one_recurring_occurrence_from_ranked_calendar_matc
     session: Session,
 ) -> None:
     seed_default_domains(session)
-    l3 = next(domain for domain in session.query(Domain).all() if domain.key == "l3")
+    usma = next(domain for domain in session.query(Domain).all() if domain.key == "usma")
     parent = CalendarEvent(
-        domain_id=l3.id,
+        domain_id=usma.id,
         title="Collaborative Autonomy Standup",
         summary="Daily autonomy coordination.",
         start_at=datetime(2026, 8, 24, 15, 0, tzinfo=UTC),
@@ -970,7 +970,7 @@ def test_knowledge_mode_moves_one_recurring_occurrence_from_ranked_calendar_matc
     planner = SequenceKnowledgePlanner(
         [
             KnowledgeTurn(
-                message="I am checking the L3 calendar and recurring occurrence.",
+                message="I am checking the USMA calendar and recurring occurrence.",
                 actions=[
                     {
                         "type": "context.search",
@@ -979,7 +979,7 @@ def test_knowledge_mode_moves_one_recurring_occurrence_from_ranked_calendar_matc
                                 "Collaborative Autonomy Standup scheduled August 31 2026 "
                                 "at 11:00 AM Eastern"
                             ),
-                            "domain_key": "l3",
+                            "domain_key": "usma",
                             "stores": ["events"],
                         },
                     }
@@ -992,7 +992,7 @@ def test_knowledge_mode_moves_one_recurring_occurrence_from_ranked_calendar_matc
                         "type": "calendar.update",
                         "arguments": {
                             "target": str(parent.id),
-                            "domain_key": "l3",
+                            "domain_key": "usma",
                             "updates": {
                                 "edit_scope": "occurrence",
                                 "occurrence_start_at": "2026-08-31T15:00:00+00:00",
@@ -1012,7 +1012,7 @@ def test_knowledge_mode_moves_one_recurring_occurrence_from_ranked_calendar_matc
     )
 
     response = MaestroKnowledgeService(session, planner=planner).respond(
-        "Shift my L3 collaborative autonomy standup for only today from 11 to 1330 EST."
+        "Shift my USMA collaborative autonomy standup for only today from 11 to 1330 EST."
     )
 
     assert response.action_results[-1].status == "completed", response.action_results[-1].message
@@ -1035,9 +1035,9 @@ def test_knowledge_mode_moves_one_recurring_occurrence_from_ranked_calendar_matc
 
 def test_calendar_update_resolves_a_rough_recurring_event_reference(session: Session) -> None:
     seed_default_domains(session)
-    l3 = next(domain for domain in session.query(Domain).all() if domain.key == "l3")
+    usma = next(domain for domain in session.query(Domain).all() if domain.key == "usma")
     event = CalendarEvent(
-        domain_id=l3.id,
+        domain_id=usma.id,
         title="Collaborative Autonomy Standup",
         start_at=datetime(2026, 8, 24, 15, 0, tzinfo=UTC),
         end_at=datetime(2026, 8, 24, 15, 30, tzinfo=UTC),
@@ -1055,15 +1055,15 @@ def test_calendar_update_resolves_a_rough_recurring_event_reference(session: Ses
     planner = SequenceKnowledgePlanner(
         [
             KnowledgeTurn(
-                message="I found the L3 standup from its calendar context.",
+                message="I found the USMA standup from its calendar context.",
                 actions=[
                     {
                         "type": "calendar.update",
                         "arguments": {
                             "target": (
-                                "my L3 autonomy standup at 11 AM on August 31 2026"
+                                "my USMA autonomy standup at 11 AM on August 31 2026"
                             ),
-                            "domain_key": "l3",
+                            "domain_key": "usma",
                             "updates": {"location": "Teams"},
                         },
                     }
@@ -1074,7 +1074,7 @@ def test_calendar_update_resolves_a_rough_recurring_event_reference(session: Ses
     )
 
     response = MaestroKnowledgeService(session, planner=planner).respond(
-        "Make the L3 autonomy standup at 11 on August 31 a Teams meeting."
+        "Make the USMA autonomy standup at 11 on August 31 a Teams meeting."
     )
 
     session.refresh(event)
