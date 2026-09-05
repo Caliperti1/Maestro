@@ -21,7 +21,7 @@ chat responses toward persistent execution.
   decisions, product issues, reports, run logs, artifacts, and authoritative identity.
 - Durable memory ingestion from drag-and-drop dropbox folders.
 - Context ingestion ledger with source registrations, checkpoints, provenance, idempotency, and
-  local-only egress enforcement for sanitized USMA/L3 context.
+  local-only egress enforcement for sanitized USMA context.
 - Routed operational stores for contacts, events, todos, organizations, decisions, RFIs, and
   canonical product issues.
 - Scheduler and queue foundation for on-demand, recurring, and trigger-shaped workflows.

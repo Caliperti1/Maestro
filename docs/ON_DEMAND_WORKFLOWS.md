@@ -25,7 +25,6 @@ sequenceDiagram
         S->>A: Personal input
         S->>A: Maestro Development input
         S->>A: USMA input
-        S->>A: L3 input
         S->>A: Perti input
         S->>A: Praxis input
     end
@@ -55,12 +54,12 @@ launch the same run twice.
 
 ## Initial Playbook
 
-`Daily Standup` runs Personal, Maestro Development, USMA, L3, Perti Laboratories, and Praxis input
+`Daily Standup` runs Personal, Maestro Development, USMA, Perti Laboratories, and Praxis input
 tasks in parallel. Every domain lane reviews its canonical calendar, todos, Product Issues, recent
 reports, decisions, and durable memory. It separates existing commitments from recommended schedule
 additions, proposes role-matched agent handoffs, and asks Chris for material missing input.
 
-A dedicated Maestro Briefing Agent receives all six completed reports and produces a per-domain
+A dedicated Maestro Briefing Agent receives all five completed reports and produces a per-domain
 walkthrough plus one feasible cross-domain plan for the day. It does not bypass domain memory
 boundaries. The synthesis report is attached to the completion message as active standup context,
 allowing Chris to discuss it and apply accepted calendar, todo, or issue changes in Knowledge mode.

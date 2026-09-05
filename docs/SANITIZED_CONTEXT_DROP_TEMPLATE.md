@@ -1,6 +1,6 @@
 # Sanitized Context Drop Template
 
-Use this template on an authorized USMA or L3 machine only after confirming the local rules for
+Use this template on an authorized USMA machine only after confirming the local rules for
 collection, sanitization, and transfer. Delete empty sections. Keep entries concise and describe
 Chris's obligations and allowed context rather than copying source documents.
 
@@ -51,5 +51,4 @@ contains_proprietary_technical_data: false
 - Stable local reference or record ID only. Do not include an inaccessible document body.
 ```
 
-For L3, use `source_system: l3_sanitized_context_drop`, `domain: l3`, and the same policy flags.
 If any prohibited-content flag would be `true`, stop and do not transfer the drop.

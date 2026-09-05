@@ -3141,7 +3141,6 @@ _DOMAIN_CONTEXTS = {
     "usma": (
         "USMA domain for teaching, cadet support, academic prep, and institutional obligations."
     ),
-    "l3": "L3 domain for professional obligations and L3-related work context.",
 }
 
 _DEFAULT_OUTPUT_CONTRACT = {
@@ -4435,34 +4434,6 @@ _SEED_AGENTS = [
             "reports.get": {
                 "permission": "read",
                 "description": "Read supporting USMA reports.",
-            },
-        },
-        "skill_permissions": {"daily_standup": {"permission": "use"}},
-    },
-    {
-        "domain_key": "l3",
-        "key": "l3-operations-agent",
-        "name": "L3 Operations Agent",
-        "agent_type": "domain_agent",
-        "role_summary": (
-            "Maintains Chris's L3 operating picture, professional obligations, calendar, todos, "
-            "issues, and input gaps from sanitized context."
-        ),
-        "role_prompt": load_prompt("agents/domain_operations_agent.md"),
-        "memory_profile": "agent_prompt",
-        "model_profile": "openrouter:openai/gpt-5.6-luna",
-        "tool_permissions": {
-            "memory.context_bundle": {
-                "permission": "read",
-                "description": "Retrieve L3-scoped sanitized operating context.",
-            },
-            "reports.search": {
-                "permission": "read",
-                "description": "Search prior L3 reports.",
-            },
-            "reports.get": {
-                "permission": "read",
-                "description": "Read supporting L3 reports.",
             },
         },
         "skill_permissions": {"daily_standup": {"permission": "use"}},

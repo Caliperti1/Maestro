@@ -7,7 +7,6 @@ export const domainLabels: Record<string, string> = {
   praxis: "Praxis",
   usma: "USMA",
   "perti-laboratories": "Perti Laboratories",
-  l3: "L3",
 };
 
 export const dropboxDomainDefaults: DropboxDomain[] = Object.keys(domainLabels).map((key) => ({
@@ -25,7 +24,6 @@ export const domains = [
   "Praxis",
   "USMA",
   "Perti Laboratories",
-  "L3",
 ];
 
 export const domainKeysByLabel: Record<string, string> = Object.fromEntries(

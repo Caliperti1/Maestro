@@ -68,7 +68,6 @@ docker compose exec -T postgres psql -U maestro -d maestro -c "select key, name 
 
 Expected domains:
 
-- `l3`
 - `maestro-development`
 - `perti-laboratories`
 - `personal`

@@ -16,7 +16,7 @@ The initial seed records:
 - Maestro is Chris's system-level assistant.
 - Praxis Defense is Chris's company.
 - Chris started Perti Laboratories.
-- USMA and L3 are professional contexts connected to Chris, without inventing job titles.
+- USMA is a professional and academic context connected to Chris, without inventing a job title.
 
 Seeding is additive. It creates missing records and canonical organization links but does not
 overwrite later user edits.

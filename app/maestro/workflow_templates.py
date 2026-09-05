@@ -27,7 +27,6 @@ DAILY_STANDUP_KEY = "daily-standup"
 MAESTRO_BRIEFING_AGENT_KEY = "maestro-briefing-agent"
 MAESTRO_OPERATIONS_AGENT_KEY = "maestro-operations-agent"
 USMA_OPERATIONS_AGENT_KEY = "usma-operations-agent"
-L3_OPERATIONS_AGENT_KEY = "l3-operations-agent"
 
 EMAIL_TRIAGE_SKILLS = [
     "email_triage",
@@ -196,7 +195,6 @@ def _daily_standup_template() -> dict[str, Any]:
             "Maestro Development",
         ),
         ("usma-input", "usma", USMA_OPERATIONS_AGENT_KEY, "USMA"),
-        ("l3-input", "l3", L3_OPERATIONS_AGENT_KEY, "L3"),
         ("perti-input", "perti-laboratories", "perti-operations-agent", "Perti Laboratories"),
         ("praxis-input", "praxis", "praxis-planning-agent", "Praxis"),
     ]
@@ -231,8 +229,8 @@ def _daily_standup_template() -> dict[str, Any]:
         {
             "id": "standup-synthesis",
             "objective": (
-                "Synthesize the completed Personal, Maestro Development, USMA, L3, Perti "
-                "Laboratories, and Praxis reports into Chris's daily standup. Use the Daily Standup "
+                "Synthesize the completed Personal, Maestro Development, USMA, Perti Laboratories, "
+                "and Praxis reports into Chris's daily standup. Use the Daily Standup "
                 "skill. Walk Chris through each domain's commitments, recommendations, and requested "
                 "input, then reconcile cross-domain timing conflicts and dependencies into one "
                 "feasible plan for the day. Distinguish existing commitments from proposed calendar "

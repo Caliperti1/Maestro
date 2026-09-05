@@ -83,7 +83,6 @@ DOMAIN_CONTEXTS = {
         "market development, and technical operations."
     ),
     "usma": "USMA domain covering teaching, administration, cadet support, and academic work.",
-    "l3": "L3 domain covering L3 work context and related professional obligations.",
 }
 
 ModelT = TypeVar("ModelT", bound=BaseModel)

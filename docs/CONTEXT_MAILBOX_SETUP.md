@@ -50,10 +50,10 @@ domain: perti
 - Decide which CAD execution environment to standardize.
 ```
 
-Accepted domain labels include `personal`, `praxis`, `perti`, `maestro`, `usma`, and `l3`. The
+Accepted domain labels include `personal`, `praxis`, `perti`, `maestro`, and `usma`. The
 normalized Maestro domain key is stored in the ingestion record.
 
-For USMA or L3 handoffs, use the sanitized template and include `review_status: reviewed`, reviewer
+For USMA handoffs, use the sanitized template and include `review_status: reviewed`, reviewer
 identity/time, and false restricted-content flags. Sanitization happens before delivery; the intake
 adapter rejects a handoff marked as containing restricted material.
 
