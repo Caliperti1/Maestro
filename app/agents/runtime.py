@@ -2829,11 +2829,7 @@ def _should_finalize_email_triage(
 ) -> bool:
     skill_keys = {skill.key for skill in package.skill_manifest}
     has_email_evidence = _has_tool_result(prior_results, "gmail.message.get")
-    return (
-        package.agent.key.endswith("email-agent")
-        and "email_triage" in skill_keys
-        and has_email_evidence
-    )
+    return "email_triage" in skill_keys and has_email_evidence
 
 
 def _is_triggered_email_package(package: PromptPackage) -> bool:

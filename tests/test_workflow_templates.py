@@ -344,6 +344,8 @@ def test_personal_email_scope_filters_noise_and_is_editable(
         return response.json()["runs"]
 
     assert emit("promotion", ["INBOX", "CATEGORY_PROMOTIONS"]) == []
+    assert emit("important-promotion", ["INBOX", "CATEGORY_PROMOTIONS", "IMPORTANT"]) == []
+    assert len(emit("starred-promotion", ["INBOX", "CATEGORY_PROMOTIONS", "STARRED"])) == 1
     assert emit("routine-update", ["INBOX", "CATEGORY_UPDATES"]) == []
     assert len(emit("primary", ["INBOX", "CATEGORY_PERSONAL"])) == 1
     assert len(emit("important-update", ["INBOX", "CATEGORY_UPDATES", "IMPORTANT"])) == 1

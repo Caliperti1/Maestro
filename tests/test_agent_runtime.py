@@ -17,6 +17,7 @@ from app.agents.runtime import (
     _deterministic_tool_plan,
     _harden_email_tool_plan,
     _llm_client_for_model_profile,
+    _should_finalize_email_triage,
     _tool_request_is_auto_executable,
 )
 from app.core.config import get_settings
@@ -1075,6 +1076,31 @@ def test_gmail_mark_read_is_the_only_autonomous_message_modify_action() -> None:
     assert not _tool_request_is_auto_executable(
         "gmail.message.modify",
         {"message_id": "msg-1", "remove_label_ids": ["INBOX"]},
+    )
+
+
+def test_email_triage_finalizer_supports_shared_domain_operations_agent(
+    session: Session,
+) -> None:
+    _seed_memory(session)
+    package = PromptAggregationService(session).build_prompt_package(
+        PromptPackageRequest(
+            agent_key="personal-operations-agent",
+            task_instruction="Triage the exact triggered Personal Gmail message.",
+            required_skills=["email_triage"],
+            use_semantic=False,
+        )
+    )
+
+    assert _should_finalize_email_triage(
+        package,
+        [
+            {
+                "tool_name": "gmail.message.get",
+                "status": "complete",
+                "output_payload": {"message_id": "msg-personal-1"},
+            }
+        ],
     )
 
 
