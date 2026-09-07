@@ -62,6 +62,48 @@ class CalendarChangeSource(Protocol):
         time_max: datetime,
     ) -> dict[str, Any]: ...
 
+    def calendars_page(
+        self,
+        connection: ToolConnection,
+        *,
+        page_token: str | None,
+        page_size: int,
+    ) -> dict[str, Any]: ...
+
+    def calendar_changes_page(
+        self,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        sync_token: str | None,
+        page_token: str | None,
+        page_size: int,
+        bootstrap_at: datetime | None = None,
+    ) -> dict[str, Any]: ...
+
+    def calendar_upcoming_page(
+        self,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        page_token: str | None,
+        page_size: int,
+        time_min: datetime,
+        time_max: datetime,
+    ) -> dict[str, Any]: ...
+
+    def calendar_series_instances_page(
+        self,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        event_id: str,
+        page_token: str | None,
+        page_size: int,
+        time_min: datetime,
+        time_max: datetime,
+    ) -> dict[str, Any]: ...
+
 
 class GoogleCalendarChangeSource:
     def __init__(self) -> None:
@@ -84,6 +126,43 @@ class GoogleCalendarChangeSource:
     ) -> dict[str, Any]:
         config = connection.config or {}
         calendar_id = str(config.get("calendar_id") or "primary")
+        return self.calendar_changes_page(
+            connection,
+            calendar_id=calendar_id,
+            sync_token=sync_token,
+            page_token=page_token,
+            page_size=page_size,
+            bootstrap_at=bootstrap_at,
+        )
+
+    def calendars_page(
+        self,
+        connection: ToolConnection,
+        *,
+        page_token: str | None,
+        page_size: int,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"maxResults": page_size, "showDeleted": "false"}
+        if page_token:
+            params["pageToken"] = page_token
+        return _google_api_json(
+            "GET",
+            "https://www.googleapis.com",
+            "/calendar/v3/users/me/calendarList",
+            token=self._token(connection),
+            params=params,
+        )
+
+    def calendar_changes_page(
+        self,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        sync_token: str | None,
+        page_token: str | None,
+        page_size: int,
+        bootstrap_at: datetime | None = None,
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "maxResults": page_size,
             "showDeleted": "true",
@@ -119,6 +198,25 @@ class GoogleCalendarChangeSource:
     ) -> dict[str, Any]:
         config = connection.config or {}
         calendar_id = str(config.get("calendar_id") or "primary")
+        return self.calendar_upcoming_page(
+            connection,
+            calendar_id=calendar_id,
+            page_token=page_token,
+            page_size=page_size,
+            time_min=time_min,
+            time_max=time_max,
+        )
+
+    def calendar_upcoming_page(
+        self,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        page_token: str | None,
+        page_size: int,
+        time_min: datetime,
+        time_max: datetime,
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "maxResults": page_size,
             "showDeleted": "true",
@@ -149,6 +247,27 @@ class GoogleCalendarChangeSource:
     ) -> dict[str, Any]:
         config = connection.config or {}
         calendar_id = str(config.get("calendar_id") or "primary")
+        return self.calendar_series_instances_page(
+            connection,
+            calendar_id=calendar_id,
+            event_id=event_id,
+            page_token=page_token,
+            page_size=page_size,
+            time_min=time_min,
+            time_max=time_max,
+        )
+
+    def calendar_series_instances_page(
+        self,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        event_id: str,
+        page_token: str | None,
+        page_size: int,
+        time_min: datetime,
+        time_max: datetime,
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "maxResults": page_size,
             "showDeleted": "true",
@@ -251,7 +370,7 @@ class CalendarTriggerService:
             except CalendarSyncTokenExpired as exc:
                 self.session.rollback()
                 results.append(self._bootstrap_domain(domain, status="token_reset", reason=str(exc)))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 self.session.rollback()
                 results.append(self._record_error(domain, str(exc)))
         return {
@@ -348,6 +467,14 @@ class CalendarTriggerService:
                 "workflow_run_ids": [str(run.id) for run in runs],
             })
 
+        secondary = self._sync_secondary_calendars(
+            domain,
+            connection,
+            payload=payload,
+            page_size=page_size,
+        )
+        emitted.extend(secondary["emitted"])
+
         now = datetime.now(UTC).isoformat()
         self._write_cursor(domain, {
             **payload,
@@ -362,6 +489,11 @@ class CalendarTriggerService:
             "last_emitted_count": len(emitted),
             "last_skipped_past_count": skipped_past,
             "last_refreshed_series_count": refreshed_series,
+            "secondary_sync_tokens": secondary["sync_tokens"],
+            "secondary_calendar_state": secondary["calendar_state"],
+            "secondary_calendar_count": secondary["calendar_count"],
+            "last_secondary_seeded_count": secondary["seeded_count"],
+            "last_secondary_filtered_count": secondary["filtered_count"],
             "last_error": None,
             "error_count": 0,
         })
@@ -373,6 +505,7 @@ class CalendarTriggerService:
             "skipped_past_count": skipped_past,
             "refreshed_series_count": refreshed_series,
             "future_seed": future_seed,
+            "secondary_calendars": secondary["results"],
             "page_count": page_count,
             "emitted": emitted,
         }
@@ -563,6 +696,388 @@ class CalendarTriggerService:
                 raise CalendarTriggerError("Recurring calendar refresh exceeded 100 pages.")
         return {"status": "complete", "staged_count": staged_count, "page_count": page_count}
 
+    def _sync_secondary_calendars(
+        self,
+        domain: Domain,
+        connection: ToolConnection,
+        *,
+        payload: dict[str, Any],
+        page_size: int,
+    ) -> dict[str, Any]:
+        required_methods = (
+            "calendars_page",
+            "calendar_changes_page",
+            "calendar_upcoming_page",
+            "calendar_series_instances_page",
+        )
+        if not all(callable(getattr(self.source, name, None)) for name in required_methods):
+            return {
+                "calendar_count": 0,
+                "seeded_count": 0,
+                "filtered_count": 0,
+                "sync_tokens": dict(payload.get("secondary_sync_tokens") or {}),
+                "calendar_state": dict(payload.get("secondary_calendar_state") or {}),
+                "emitted": [],
+                "results": [],
+            }
+
+        calendars, owner_emails = self._secondary_calendar_specs(connection)
+        prior_tokens = dict(payload.get("secondary_sync_tokens") or {})
+        prior_state = dict(payload.get("secondary_calendar_state") or {})
+        sync_tokens: dict[str, str] = {}
+        calendar_state: dict[str, dict[str, Any]] = {}
+        emitted: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
+        seeded_count = 0
+        filtered_count = 0
+        for calendar in calendars:
+            calendar_id = str(calendar["id"])
+            summary = str(calendar.get("summary") or "Secondary calendar")
+            try:
+                token = str(prior_tokens.get(calendar_id) or "").strip()
+                if token:
+                    result = self._poll_secondary_calendar(
+                        domain,
+                        connection,
+                        calendar_id=calendar_id,
+                        calendar_summary=summary,
+                        sync_token=token,
+                        owner_emails=owner_emails,
+                        page_size=page_size,
+                    )
+                else:
+                    result = self._bootstrap_secondary_calendar(
+                        domain,
+                        connection,
+                        calendar_id=calendar_id,
+                        calendar_summary=summary,
+                        owner_emails=owner_emails,
+                        page_size=page_size,
+                    )
+            except CalendarSyncTokenExpired:
+                result = self._bootstrap_secondary_calendar(
+                    domain,
+                    connection,
+                    calendar_id=calendar_id,
+                    calendar_summary=summary,
+                    owner_emails=owner_emails,
+                    page_size=page_size,
+                )
+                result["status"] = "token_reset"
+            except (CalendarTriggerError, ToolExecutionError, TypeError, ValueError) as exc:
+                result = {
+                    "calendar_id": calendar_id,
+                    "calendar_summary": summary,
+                    "status": "error",
+                    "sync_token": prior_tokens.get(calendar_id),
+                    "emitted": [],
+                    "seeded_count": 0,
+                    "filtered_count": 0,
+                    "error": str(exc),
+                }
+
+            if result.get("sync_token"):
+                sync_tokens[calendar_id] = str(result["sync_token"])
+            state = {
+                **dict(prior_state.get(calendar_id) or {}),
+                "calendar_summary": summary,
+                "status": result["status"],
+                "last_polled_at": datetime.now(UTC).isoformat(),
+                "last_error": result.get("error"),
+                "last_emitted_count": len(result["emitted"]),
+                "last_seeded_count": int(result.get("seeded_count") or 0),
+                "last_filtered_count": int(result.get("filtered_count") or 0),
+            }
+            calendar_state[calendar_id] = state
+            emitted.extend(result["emitted"])
+            seeded_count += int(result.get("seeded_count") or 0)
+            filtered_count += int(result.get("filtered_count") or 0)
+            results.append({
+                key: value
+                for key, value in result.items()
+                if key not in {"sync_token", "emitted"}
+            })
+
+        return {
+            "calendar_count": len(calendars),
+            "seeded_count": seeded_count,
+            "filtered_count": filtered_count,
+            "sync_tokens": sync_tokens,
+            "calendar_state": calendar_state,
+            "emitted": emitted,
+            "results": results,
+        }
+
+    def _secondary_calendar_specs(
+        self,
+        connection: ToolConnection,
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        source_method = self.source.calendars_page
+        page_token: str | None = None
+        calendars: list[dict[str, Any]] = []
+        while True:
+            response = source_method(connection, page_token=page_token, page_size=250)
+            calendars.extend(
+                item for item in response.get("items") or [] if isinstance(item, dict)
+            )
+            page_token = str(response.get("nextPageToken") or "").strip() or None
+            if not page_token:
+                break
+            if len(calendars) >= 2500:
+                raise CalendarTriggerError("Calendar discovery exceeded 10 pages.")
+
+        owner_emails = set(get_settings().user_emails)
+        owner_emails.update(
+            str(item.get("id") or "").strip().lower()
+            for item in calendars
+            if item.get("primary") and item.get("id")
+        )
+        excluded = {
+            str(value).strip()
+            for value in (connection.config or {}).get("calendar_excluded_ids") or []
+            if str(value).strip()
+        }
+        secondary = [
+            {
+                "id": str(item["id"]),
+                "summary": item.get("summaryOverride") or item.get("summary"),
+            }
+            for item in calendars
+            if item.get("id")
+            and not item.get("primary")
+            and item.get("selected") is True
+            and item.get("accessRole") in {"owner", "writer"}
+            and str(item["id"]) not in excluded
+        ]
+        return secondary, owner_emails
+
+    def _bootstrap_secondary_calendar(
+        self,
+        domain: Domain,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        calendar_summary: str,
+        owner_emails: set[str],
+        page_size: int,
+    ) -> dict[str, Any]:
+        changes_method = self.source.calendar_changes_page
+        page_token: str | None = None
+        next_sync_token = ""
+        bootstrap_at = datetime.now(UTC)
+        while True:
+            response = changes_method(
+                connection,
+                calendar_id=calendar_id,
+                sync_token=None,
+                page_token=page_token,
+                page_size=page_size,
+                bootstrap_at=bootstrap_at,
+            )
+            page_token = str(response.get("nextPageToken") or "").strip() or None
+            next_sync_token = str(response.get("nextSyncToken") or next_sync_token).strip()
+            if not page_token:
+                break
+        if not next_sync_token:
+            raise CalendarTriggerError(
+                f"Google Calendar did not return a sync token for {calendar_summary}."
+            )
+        seed = self._seed_secondary_calendar(
+            domain,
+            connection,
+            calendar_id=calendar_id,
+            owner_emails=owner_emails,
+            page_size=page_size,
+        )
+        return {
+            "calendar_id": calendar_id,
+            "calendar_summary": calendar_summary,
+            "status": "initialized",
+            "sync_token": next_sync_token,
+            "emitted": [],
+            **seed,
+        }
+
+    def _seed_secondary_calendar(
+        self,
+        domain: Domain,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        owner_emails: set[str],
+        page_size: int,
+    ) -> dict[str, int]:
+        source_method = self.source.calendar_upcoming_page
+        time_min = datetime.now(UTC)
+        time_max = time_min + timedelta(days=DEFAULT_CALENDAR_FUTURE_HORIZON_DAYS)
+        page_token: str | None = None
+        seeded_count = 0
+        filtered_count = 0
+        while True:
+            response = source_method(
+                connection,
+                calendar_id=calendar_id,
+                page_token=page_token,
+                page_size=page_size,
+                time_min=time_min,
+                time_max=time_max,
+            )
+            for event in response.get("items") or []:
+                if not isinstance(event, dict) or not event.get("id"):
+                    continue
+                if not _has_external_attendee(event, owner_emails=owner_emails):
+                    filtered_count += 1
+                    continue
+                result = stage_google_calendar_event(
+                    self.session,
+                    domain=domain,
+                    event_payload=_provider_event_payload(
+                        domain=domain,
+                        calendar_id=calendar_id,
+                        event=event,
+                    ),
+                )
+                if result["status"] != "unchanged":
+                    seeded_count += 1
+            page_token = str(response.get("nextPageToken") or "").strip() or None
+            if not page_token:
+                break
+        return {"seeded_count": seeded_count, "filtered_count": filtered_count}
+
+    def _poll_secondary_calendar(
+        self,
+        domain: Domain,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        calendar_summary: str,
+        sync_token: str,
+        owner_emails: set[str],
+        page_size: int,
+    ) -> dict[str, Any]:
+        source_method = self.source.calendar_changes_page
+        page_token: str | None = None
+        next_sync_token = sync_token
+        events: list[dict[str, Any]] = []
+        while True:
+            response = source_method(
+                connection,
+                calendar_id=calendar_id,
+                sync_token=sync_token,
+                page_token=page_token,
+                page_size=page_size,
+            )
+            events.extend(item for item in response.get("items") or [] if isinstance(item, dict))
+            page_token = str(response.get("nextPageToken") or "").strip() or None
+            next_sync_token = str(response.get("nextSyncToken") or next_sync_token).strip()
+            if not page_token:
+                break
+
+        emitted: list[dict[str, Any]] = []
+        filtered_count = 0
+        for event in events:
+            event_id = str(event.get("id") or "").strip()
+            if not event_id or self._is_past_event(domain, calendar_id, event_id, event):
+                continue
+            existing = self._provider_event(domain, calendar_id, event_id)
+            if event.get("recurrence"):
+                self._sync_secondary_series_instances(
+                    domain,
+                    connection,
+                    calendar_id=calendar_id,
+                    event_id=event_id,
+                    owner_emails=owner_emails,
+                    page_size=page_size,
+                )
+                continue
+            if existing is None and not _has_external_attendee(event, owner_emails=owner_emails):
+                filtered_count += 1
+                continue
+            version = str(event.get("etag") or event.get("updated") or "unknown").strip()
+            event_payload = _provider_event_payload(
+                domain=domain,
+                calendar_id=calendar_id,
+                event=event,
+            )
+            delivery_id = f"{domain.key}:{calendar_id}:{event_id}:{version}"
+            runs = self.scheduler.enqueue_event_workflows(
+                event_type=CALENDAR_TRIGGER_EVENT_TYPE,
+                event_payload=event_payload,
+                event_id=delivery_id,
+            )
+            emitted.append({
+                "event_id": event_id,
+                "delivery_id": delivery_id,
+                "workflow_run_ids": [str(run.id) for run in runs],
+            })
+        return {
+            "calendar_id": calendar_id,
+            "calendar_summary": calendar_summary,
+            "status": "healthy",
+            "sync_token": next_sync_token,
+            "emitted": emitted,
+            "seeded_count": 0,
+            "filtered_count": filtered_count,
+        }
+
+    def _sync_secondary_series_instances(
+        self,
+        domain: Domain,
+        connection: ToolConnection,
+        *,
+        calendar_id: str,
+        event_id: str,
+        owner_emails: set[str],
+        page_size: int,
+    ) -> None:
+        source_method = self.source.calendar_series_instances_page
+        time_min = datetime.now(UTC)
+        time_max = time_min + timedelta(days=DEFAULT_CALENDAR_FUTURE_HORIZON_DAYS)
+        page_token: str | None = None
+        while True:
+            response = source_method(
+                connection,
+                calendar_id=calendar_id,
+                event_id=event_id,
+                page_token=page_token,
+                page_size=page_size,
+                time_min=time_min,
+                time_max=time_max,
+            )
+            for event in response.get("items") or []:
+                if not isinstance(event, dict) or not event.get("id"):
+                    continue
+                existing = self._provider_event(domain, calendar_id, str(event["id"]))
+                if existing is None and not _has_external_attendee(event, owner_emails=owner_emails):
+                    continue
+                stage_google_calendar_event(
+                    self.session,
+                    domain=domain,
+                    event_payload=_provider_event_payload(
+                        domain=domain,
+                        calendar_id=calendar_id,
+                        event=event,
+                    ),
+                )
+            page_token = str(response.get("nextPageToken") or "").strip() or None
+            if not page_token:
+                break
+
+    def _provider_event(
+        self,
+        domain: Domain,
+        calendar_id: str,
+        event_id: str,
+    ) -> CalendarEvent | None:
+        return self.session.scalar(
+            select(CalendarEvent).where(
+                CalendarEvent.domain_id == domain.id,
+                CalendarEvent.external_provider == "google_calendar",
+                CalendarEvent.external_calendar_id == calendar_id,
+                CalendarEvent.external_event_id == event_id,
+            )
+        )
+
     def _record_error(self, domain: Domain, message: str) -> dict[str, Any]:
         prior = self._cursor_setting(domain)
         payload = dict(prior.value or {}) if prior else {}
@@ -614,10 +1129,12 @@ class CalendarTriggerService:
         setting = self._cursor_setting(domain)
         payload = dict(setting.value or {}) if setting else {"status": "not_initialized"}
         sync_token_present = bool(payload.pop("sync_token", None))
+        secondary_sync_tokens = dict(payload.pop("secondary_sync_tokens", {}) or {})
         return {
             "domain_key": domain.key,
             **payload,
             "sync_token_present": sync_token_present,
+            "secondary_sync_token_count": len(secondary_sync_tokens),
         }
 
     def _write_cursor(self, domain: Domain, payload: dict[str, Any]) -> None:
@@ -651,6 +1168,22 @@ def _google_event_datetime(value: Any) -> datetime | None:
 def _google_timestamp(value: datetime) -> str:
     aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     return aware.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _has_external_attendee(
+    event: dict[str, Any],
+    *,
+    owner_emails: set[str],
+) -> bool:
+    for attendee in event.get("attendees") or []:
+        if not isinstance(attendee, dict) or attendee.get("self") or attendee.get("resource"):
+            continue
+        email = str(attendee.get("email") or "").strip().lower()
+        if email and email in owner_emails:
+            continue
+        if email or attendee.get("displayName"):
+            return True
+    return False
 
 
 def _provider_event_payload(
