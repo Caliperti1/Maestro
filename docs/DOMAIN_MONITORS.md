@@ -29,7 +29,8 @@ when he personally needs to act.
 Each email workflow also owns its inbox scope:
 
 - **Focused** runs Primary/Personal, Important, Starred, and uncategorized inbox mail. It skips
-  Promotions, Social, Forums, and routine Updates before an LLM workflow is created.
+  Promotions, Social, Forums, and routine Updates before an LLM workflow is created. A Gmail-added
+  Important label does not override a noise category; explicitly starring a message does.
 - **Focused + Updates** also includes the Updates category while still skipping Promotions, Social,
   and Forums.
 - **All inbox** processes every otherwise eligible inbox message.

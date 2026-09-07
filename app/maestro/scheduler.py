@@ -91,10 +91,16 @@ def _gmail_event_matches_scope(event_payload: dict[str, Any], scope: str) -> boo
     normalized_scope = scope.strip().lower()
     if normalized_scope == "all_inbox":
         return True
-    if labels & {"IMPORTANT", "STARRED"}:
+    # STARRED is an explicit user signal. Gmail's automatic IMPORTANT label is not
+    # strong enough to promote mail out of a known noise category.
+    if "STARRED" in labels:
+        return True
+    if labels & _GMAIL_NOISE_CATEGORY_LABELS:
+        return False
+    if "IMPORTANT" in labels:
         return True
     if normalized_scope == "focused_updates":
-        return not bool(labels & _GMAIL_NOISE_CATEGORY_LABELS)
+        return True
     if normalized_scope == "focused":
         category_labels = labels & _GMAIL_CATEGORY_LABELS
         return not category_labels or category_labels == {"CATEGORY_PERSONAL"}
