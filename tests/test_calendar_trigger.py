@@ -89,6 +89,97 @@ class ExpiredCalendarChangeSource(FakeCalendarChangeSource):
         )
 
 
+class SecondaryCalendarSource(FakeCalendarChangeSource):
+    def calendars_page(self, connection, *, page_token, page_size):
+        return {
+            "items": [
+                {
+                    "id": "chris@example.com",
+                    "summary": "Primary",
+                    "primary": True,
+                    "selected": True,
+                    "accessRole": "owner",
+                },
+                {
+                    "id": "team-calendar",
+                    "summary": "Team",
+                    "selected": True,
+                    "accessRole": "owner",
+                },
+                {
+                    "id": "read-only-calendar",
+                    "summary": "Read only",
+                    "selected": True,
+                    "accessRole": "reader",
+                },
+            ]
+        }
+
+    def calendar_changes_page(
+        self,
+        connection,
+        *,
+        calendar_id,
+        sync_token,
+        page_token,
+        page_size,
+        bootstrap_at=None,
+    ):
+        return {"items": [], "nextSyncToken": f"sync-{calendar_id}"}
+
+    def calendar_upcoming_page(
+        self,
+        connection,
+        *,
+        calendar_id,
+        page_token,
+        page_size,
+        time_min,
+        time_max,
+    ):
+        start = datetime.now(UTC) + timedelta(days=3)
+        return {
+            "items": [
+                {
+                    "id": "team-meeting",
+                    "etag": "team-v1",
+                    "status": "confirmed",
+                    "summary": "Chris and partner",
+                    "creator": {"email": "chris@example.com", "self": True},
+                    "organizer": {"email": calendar_id, "self": True},
+                    "attendees": [
+                        {"email": "partner@example.com", "responseStatus": "accepted"}
+                    ],
+                    "start": {"dateTime": start.isoformat()},
+                    "end": {"dateTime": (start + timedelta(hours=1)).isoformat()},
+                },
+                {
+                    "id": "solo-block",
+                    "etag": "solo-v1",
+                    "status": "confirmed",
+                    "summary": "Solo block",
+                    "creator": {"email": "chris@example.com", "self": True},
+                    "organizer": {"email": calendar_id, "self": True},
+                    "start": {"dateTime": start.isoformat()},
+                    "end": {"dateTime": (start + timedelta(hours=1)).isoformat()},
+                },
+            ]
+        }
+
+    def calendar_series_instances_page(
+        self,
+        connection,
+        *,
+        calendar_id,
+        event_id,
+        page_token,
+        page_size,
+        time_min,
+        time_max,
+    ):
+        return {"items": []}
+
+
 def _seed_calendar_trigger(session: Session) -> Domain:
     seed_default_domains(session)
     domain = session.scalar(select(Domain).where(Domain.key == "praxis"))
@@ -222,3 +313,32 @@ def test_calendar_trigger_bootstrap_stages_upcoming_recurring_instances_without_
     assert event.metadata_["recurrence_original_start_at"] == occurrence_start.isoformat()
     assert result["domains"][0]["future_seed"]["staged_count"] == 1
     assert session.scalars(select(WorkflowRun)).all() == []
+
+
+def test_calendar_trigger_imports_self_organized_secondary_event_with_external_attendee(
+    session: Session,
+) -> None:
+    _seed_calendar_trigger(session)
+    service = CalendarTriggerService(session, source=SecondaryCalendarSource())
+
+    service.poll_once()
+    result = service.poll_once()
+
+    imported = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "team-meeting")
+    )
+    solo = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "solo-block")
+    )
+    assert imported is not None
+    assert imported.external_calendar_id == "team-calendar"
+    assert imported.attendees[0]["email"] == "partner@example.com"
+    assert solo is None
+    secondary = result["domains"][0]["secondary_calendars"]
+    assert len(secondary) == 1
+    assert secondary[0]["status"] == "initialized"
+    assert secondary[0]["seeded_count"] == 1
+    assert secondary[0]["filtered_count"] == 1
+    status = service.status()["domains"][0]
+    assert status["secondary_sync_token_count"] == 1
+    assert "secondary_sync_tokens" not in status

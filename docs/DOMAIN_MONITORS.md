@@ -41,12 +41,16 @@ monitoring is independent and is never constrained by the email scope.
 
 ## Calendar Flow
 
-The shared Calendar producer keeps one Google incremental sync token per watched domain. First
-enablement records the current token without importing past events, then deterministically seeds a
-bounded window of upcoming event instances. Expanding future instances is important for recurring
-series whose master record may not have changed recently. This seed bypasses agent reasoning and
-therefore adds no LLM cost. Later changes emit the exact calendar ID, event ID, provider version,
-and Google event payload; changes to a recurring master refresh its upcoming instances.
+The shared Calendar producer keeps an incremental Google cursor for the primary calendar and each
+eligible secondary calendar. First enablement records the current cursors without importing past
+events, then deterministically seeds a bounded window of upcoming event instances. The primary
+calendar is imported normally. Selected secondary calendars with owner or writer access contribute
+only events that include at least one attendee other than Chris; this includes meetings Chris
+organized himself. Personal blocks from secondary calendars therefore stay out of Maestro while
+real meetings are not missed. Expanding future instances is important for recurring series whose
+master record may not have changed recently. This seed bypasses agent reasoning and therefore adds
+no LLM cost. Later changes emit the exact calendar ID, event ID, provider version, and Google event
+payload; changes to a recurring master refresh its upcoming instances.
 
 The calendar workflow performs a deterministic routed write before its reasoning pass. Canonical
 events are keyed by domain plus external provider/calendar/event IDs. A retry of one provider
