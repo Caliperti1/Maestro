@@ -410,6 +410,34 @@ def test_scheduler_enqueues_event_triggered_workflows_with_filters(session: Sess
     assert runs[0].input_payload["event"]["event_id"] == "msg-1"
 
 
+def test_scheduler_hashes_long_event_idempotency_keys(session: Session) -> None:
+    definition = SchedulerService(session).upsert_definition(
+        key="long-calendar-event-monitor",
+        name="Long Calendar Event Monitor",
+        trigger_type="event",
+        trigger_config={"event_type": "google.calendar.event.changed"},
+        workflow_spec={"queue_items": []},
+    )
+    event_id = f"calendar:{'c' * 220}:event:{'e' * 220}:v1"
+
+    first = SchedulerService(session).enqueue_event_workflows(
+        event_type="google.calendar.event.changed",
+        event_id=event_id,
+    )
+    duplicate = SchedulerService(session).enqueue_event_workflows(
+        event_type="google.calendar.event.changed",
+        event_id=event_id,
+    )
+
+    assert len(first) == 1
+    assert duplicate == first
+    assert first[0].workflow_definition_id == definition.id
+    assert first[0].idempotency_key is not None
+    assert len(first[0].idempotency_key) <= 200
+    assert ":digest:" in first[0].idempotency_key
+    assert first[0].input_payload["event"]["event_id"] == event_id
+
+
 def test_scheduler_tick_enqueues_due_work_and_claims_ready_items(session: Session) -> None:
     now = datetime.now(UTC)
     SchedulerService(session).upsert_definition(
