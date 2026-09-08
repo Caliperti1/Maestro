@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
@@ -200,8 +201,17 @@ def test_structured_calendar_ingest_promotes_exact_event_without_llm(session, tm
     assert event is not None
     assert event.title == "Weekly project sync"
     assert event.domain_id == DomainRepository(session).get_by_key("usma").id
-    assert event.start_at.timetuple()[:5] == (2026, 9, 9, 14, 35)
+    routed_start = datetime.fromisoformat(event.metadata_["start_at"])
+    assert routed_start.astimezone(UTC).timetuple()[:5] == (2026, 9, 9, 14, 35)
+    assert routed_start.astimezone(ZoneInfo("America/New_York")).timetuple()[:5] == (
+        2026,
+        9,
+        9,
+        10,
+        35,
+    )
     assert event.timezone == "America/New_York"
+    assert event.metadata_["source_timezone"] == "UTC"
     assert event.external_provider == "usma_outlook"
     assert len(event.attendees) == 2
     assert event.attendees[0]["is_user"] is True
@@ -215,6 +225,29 @@ def test_structured_calendar_ingest_promotes_exact_event_without_llm(session, tm
             select(CalendarEvent).where(CalendarEvent.external_event_id == "outlook-event-123")
         ).all()
     ) == 1
+
+
+def test_structured_calendar_ingest_honors_explicit_outlook_timezone(
+    session, tmp_path
+) -> None:
+    message = _message(
+        sender="Chris Aliperti <approved@example.com>",
+        subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+        body=_calendar_body().replace(
+            "start: 2026-09-09T14:35:00.0000000",
+            "timezone: Eastern Standard Time\nstart: 2026-09-09T14:35:00.0000000",
+        ),
+    )
+
+    _service(session, tmp_path, FakeMailboxSource([message])).poll_once()
+
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "outlook-event-123")
+    )
+    assert event is not None
+    routed_start = datetime.fromisoformat(event.metadata_["start_at"])
+    assert routed_start.astimezone(ZoneInfo("America/New_York")).hour == 14
+    assert event.metadata_["source_timezone"] == "America/New_York"
 
 
 def test_valid_handoff_stages_with_original_provenance(session, tmp_path) -> None:

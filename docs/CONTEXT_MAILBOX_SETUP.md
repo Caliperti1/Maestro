@@ -41,6 +41,11 @@ For this form, the second token is the domain and the third is the record type. 
 declare `source_system`, `source_id`, `domain`, and a matching `record_type`. `CALENDAR`, `EVENT`,
 and `calendar_event` normalize to the canonical `calendar_event` type.
 
+Outlook timed values without an explicit offset are interpreted as UTC. Include `timezone: UTC`
+in Power Automate payloads to make the transport contract explicit. Existing recurring series need
+a scheduled calendar-view reconciliation flow in addition to event-change triggers; see
+`docs/USMA_CALENDAR_RECONCILIATION.md`.
+
 Place machine-readable identity fields near the top of the message:
 
 ```markdown
