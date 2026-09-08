@@ -15,6 +15,7 @@ from app.memory.context_mailbox import (
     ContextHandoffError,
     ContextMailboxError,
     ContextMailboxService,
+    GoogleContextMailboxSource,
     parse_context_handoff,
 )
 from app.memory.ingestion import envelope_for_file, strip_context_envelope
@@ -127,6 +128,33 @@ def _service(session, tmp_path, source):
         source=source,
         settings=settings,
         gateway=ContextGatewayService(session, root=tmp_path),
+    )
+
+
+def test_google_source_excludes_terminal_labels_before_fetching_messages(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict = {}
+
+    def fake_gmail_api_json(method, path, *, token, params):
+        captured.update(
+            {"method": method, "path": path, "token": token, "params": params}
+        )
+        return {"messages": [{"id": "gmail-1"}]}
+
+    source = GoogleContextMailboxSource(_settings(tmp_path))
+    monkeypatch.setattr(source, "_access_token", lambda: "access-token")
+    monkeypatch.setattr(
+        "app.memory.context_mailbox._gmail_api_json", fake_gmail_api_json
+    )
+
+    assert source.inbox_message_ids(page_size=25) == ["gmail-1"]
+    assert captured["params"]["labelIds"] == "INBOX"
+    assert captured["params"]["maxResults"] == 25
+    assert captured["params"]["q"] == (
+        '-label:"Maestro/Processed" '
+        '-label:"Maestro/Failed" '
+        '-label:"Maestro/Quarantine"'
     )
 
 

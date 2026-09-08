@@ -160,7 +160,15 @@ class GoogleContextMailboxSource:
             "GET",
             "/gmail/v1/users/me/messages",
             token=self._access_token(),
-            params={"labelIds": "INBOX", "maxResults": page_size},
+            params={
+                "labelIds": "INBOX",
+                "maxResults": page_size,
+                "q": (
+                    '-label:"Maestro/Processed" '
+                    '-label:"Maestro/Failed" '
+                    '-label:"Maestro/Quarantine"'
+                ),
+            },
         )
         return [
             str(item["id"])
