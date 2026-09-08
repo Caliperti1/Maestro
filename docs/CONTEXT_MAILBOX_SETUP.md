@@ -31,6 +31,16 @@ Use this subject:
 [MAESTRO-CONTEXT][chatgpt][PERTI] CAD workflow discussion
 ```
 
+Structured Power Automate handoffs may instead use:
+
+```text
+[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync
+```
+
+For this form, the second token is the domain and the third is the record type. The body must
+declare `source_system`, `source_id`, `domain`, and a matching `record_type`. `CALENDAR`, `EVENT`,
+and `calendar_event` normalize to the canonical `calendar_event` type.
+
 Place machine-readable identity fields near the top of the message:
 
 ```markdown
@@ -63,8 +73,10 @@ adapter rejects a handoff marked as containing restricted material.
 2. Only allowlisted senders are accepted.
 3. The message and attachments are archived as raw evidence.
 4. The Context Gateway claims the stable source object/version and writes one staged Markdown file.
-5. The normal dropbox worker invokes the Memory Curator.
-6. Canonical memories and routed objects retain original source and Gmail provenance.
+5. Structured calendar handoffs are deterministically promoted to the canonical calendar before
+   curation. This preserves exact dates and prevents the LLM from creating duplicate routed items.
+6. The normal dropbox worker invokes the Memory Curator for durable contextual knowledge.
+7. Canonical memories and routed objects retain original source and Gmail provenance.
 
 Use **Memory > Memory Manager > Check mailbox** for an immediate poll. The same screen reports the
 last health state and transport counts. Automatic polling continues while the backend is running.

@@ -4,17 +4,16 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.llm.memory_extraction import LLMMemoryExtractor
 from app.db.models import RoutedItem
+from app.llm.memory_extraction import LLMMemoryExtractor
 from app.memory.curator import CuratedMemoryBatch, StagedMemorySource
+from app.memory.routed_service import RoutedMemoryService
 from app.memory.service import (
     MemoryCandidate,
     MemoryScope,
     MemorySemanticEvaluator,
     MemoryService,
-    MemoryWriteResult,
 )
-from app.memory.routed_service import RoutedMemoryService
 
 
 @dataclass(frozen=True)
@@ -172,6 +171,8 @@ class LLMMemoryCurator:
         source: StagedMemorySource,
         extracted_items,
     ) -> list[RoutedItem]:
+        if source.metadata.get("structured_route_promoted"):
+            return []
         items: list[RoutedItem] = []
         seed_package_id = _uuid_or_none(source.metadata.get("seed_package_id"))
         artifact_id = _uuid_or_none(source.metadata.get("artifact_id"))
