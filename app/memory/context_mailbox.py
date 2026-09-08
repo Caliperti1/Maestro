@@ -12,7 +12,7 @@ from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
@@ -59,6 +59,11 @@ DOMAIN_ALIASES = {
 }
 MAX_BODY_CHARS = 250_000
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+OUTLOOK_SOURCE_SYSTEMS = {"microsoft_outlook", "office365_outlook", "usma_outlook"}
+WINDOWS_TIMEZONE_ALIASES = {
+    "eastern standard time": "America/New_York",
+    "utc": "UTC",
+}
 
 
 class ContextMailboxError(RuntimeError):
@@ -396,8 +401,19 @@ class ContextMailboxService:
         if handoff.record_type != "calendar_event":
             return None
         metadata = handoff.metadata
-        start_at = _handoff_datetime(metadata.get("start"), self.settings.home_timezone)
-        end_at = _handoff_datetime(metadata.get("end"), self.settings.home_timezone)
+        all_day = str(metadata.get("all_day") or "false").strip().lower() in {
+            "true",
+            "yes",
+            "1",
+        }
+        source_timezone = _handoff_source_timezone(
+            metadata,
+            source_system=handoff.source_system,
+            fallback_timezone=self.settings.home_timezone,
+            all_day=all_day,
+        )
+        start_at = _handoff_datetime(metadata.get("start"), source_timezone)
+        end_at = _handoff_datetime(metadata.get("end"), source_timezone)
         if start_at is None:
             raise ContextHandoffError("Calendar handoff is missing a valid start time.")
         action = _slug_token(metadata.get("action") or "added")
@@ -432,11 +448,13 @@ class ContextMailboxService:
                 "start_at": start_at.isoformat(),
                 "end_at": end_at.isoformat() if end_at else None,
                 "timezone": self.settings.home_timezone,
-                "all_day": str(metadata.get("all_day") or "false").strip().lower()
-                in {"true", "yes", "1"},
+                "source_timezone": source_timezone,
+                "all_day": all_day,
                 "location": str(metadata.get("location") or "").strip() or None,
                 "organizer_email": organizer_email,
                 "attendees": attendees,
+                "recurrence_rule": str(metadata.get("recurrence_rule") or "").strip() or None,
+                "series_master_id": str(metadata.get("series_master_id") or "").strip() or None,
                 "external_provider": handoff.source_system,
                 "external_calendar_id": handoff.domain_key,
                 "external_event_id": handoff.source_id,
@@ -677,6 +695,35 @@ def _handoff_datetime(value: str | None, timezone: str) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=ZoneInfo(timezone))
     return parsed
+
+
+def _handoff_source_timezone(
+    metadata: dict[str, str],
+    *,
+    source_system: str,
+    fallback_timezone: str,
+    all_day: bool,
+) -> str:
+    explicit = next(
+        (
+            str(metadata.get(key) or "").strip()
+            for key in ("timezone", "time_zone", "start_timezone")
+            if str(metadata.get(key) or "").strip()
+        ),
+        None,
+    )
+    if explicit:
+        timezone = WINDOWS_TIMEZONE_ALIASES.get(explicit.lower(), explicit)
+        try:
+            ZoneInfo(timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ContextHandoffError(f"Unknown calendar timezone: {explicit}") from exc
+        return timezone
+    if all_day:
+        return fallback_timezone
+    if _slug_token(source_system) in OUTLOOK_SOURCE_SYSTEMS:
+        return "UTC"
+    return fallback_timezone
 
 
 def _handoff_attendees(
