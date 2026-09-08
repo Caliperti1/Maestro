@@ -161,10 +161,14 @@ The dedicated mailbox is a transport adapter, not a second memory system:
 allowlisted sender -> Gmail intake -> Context Gateway -> domain inbox -> Memory Curator
 ```
 
-Messages must use `[MAESTRO-CONTEXT][SOURCE][DOMAIN]` at the start of the subject and declare
-`source_system`, `source_id`, `source_timestamp`, and `domain` near the top of the body. The stable
-`source_id` identifies the source object; a hash of normalized content identifies its version.
-Resending unchanged content is therefore harmless, while a corrected handoff is reconsidered.
+General messages use `[MAESTRO-CONTEXT][SOURCE][DOMAIN]` at the start of the subject. Structured
+Power Automate messages may use `[MAESTRO-INGEST][DOMAIN][RECORD_TYPE]`. Both declare
+`source_system`, `source_id`, and `domain` near the top of the body; `source_timestamp` is preferred
+and otherwise falls back to the trusted transport timestamp. The stable `source_id` identifies the
+source object, and a hash of normalized content identifies its version. Resending unchanged content
+is therefore harmless, while a corrected handoff is reconsidered. Structured calendar records are
+promoted directly to the canonical calendar before curation while the full evidence still proceeds
+through staging and the Memory Curator.
 
 The adapter preserves Gmail message/thread IDs, sender, source timestamps, raw message evidence,
 attachment hashes, policy, and transfer method through canonical memory provenance. Supported

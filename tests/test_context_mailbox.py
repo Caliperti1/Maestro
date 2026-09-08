@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.db.models import IngestionRecord, RuntimeSetting
+from app.db.models import CalendarEvent, IngestionRecord, RuntimeSetting
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.memory.context_gateway import ContextGatewayService
@@ -50,6 +50,24 @@ def _message(
         "body_text": body if body is not None else _body(),
         "attachments": [],
     }
+
+
+def _calendar_body() -> str:
+    return """source_system: usma_outlook
+domain: USMA
+record_type: calendar_event
+action: updated
+source_id: outlook-event-123
+ical_uid: calendar-series-456
+title: Weekly project sync
+start: 2026-09-09T14:35:00.0000000
+end: 2026-09-09T15:05:00.0000000
+location: Washington Hall
+organizer: approved@example.com
+required_attendees: approved@example.com;partner@example.com;
+optional_attendees:
+all_day: false
+"""
 
 
 class FakeMailboxSource:
@@ -120,6 +138,55 @@ def test_parse_context_handoff_normalizes_source_and_domain() -> None:
     assert handoff.domain_key == "perti-laboratories"
     assert handoff.title == "CAD workflow discussion"
     assert handoff.source_timestamp == datetime(2026, 8, 15, 18, 0, tzinfo=UTC)
+
+
+def test_parse_ingest_subject_uses_body_source_and_normalizes_record_type() -> None:
+    handoff = parse_context_handoff(
+        _message(
+            subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+            body=_calendar_body(),
+        )
+    )
+
+    assert handoff.source_system == "usma_outlook"
+    assert handoff.domain_key == "usma"
+    assert handoff.record_type == "calendar_event"
+    assert handoff.title == "Weekly project sync"
+
+
+def test_structured_calendar_ingest_promotes_exact_event_without_llm(session, tmp_path) -> None:
+    message = _message(
+        sender="Chris Aliperti <approved@example.com>",
+        subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+        body=_calendar_body(),
+    )
+    source = FakeMailboxSource([message])
+
+    result = _service(session, tmp_path, source).poll_once()
+
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "outlook-event-123")
+    )
+    assert result["counts"]["staged"] == 1
+    assert result["messages"][0]["structured_route"]["route_type"] == "event"
+    assert event is not None
+    assert event.title == "Weekly project sync"
+    assert event.domain_id == DomainRepository(session).get_by_key("usma").id
+    assert event.start_at.timetuple()[:5] == (2026, 9, 9, 14, 35)
+    assert event.timezone == "America/New_York"
+    assert event.external_provider == "usma_outlook"
+    assert len(event.attendees) == 2
+    assert event.attendees[0]["is_user"] is True
+
+    source.messages = {"gmail-2": {**message, "message_id": "gmail-2"}}
+    duplicate = _service(session, tmp_path, source).poll_once()
+
+    assert duplicate["counts"]["duplicate"] == 1
+    assert len(
+        session.scalars(
+            select(CalendarEvent).where(CalendarEvent.external_event_id == "outlook-event-123")
+        ).all()
+    ) == 1
 
 
 def test_valid_handoff_stages_with_original_provenance(session, tmp_path) -> None:

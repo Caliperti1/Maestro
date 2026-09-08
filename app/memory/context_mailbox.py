@@ -12,15 +12,18 @@ from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.models import RuntimeSetting
+from app.core.identity import is_maestro_user_reference
+from app.db.models import Domain, RoutedItem, RuntimeSetting
 from app.db.repositories import DomainRepository
 from app.memory.context_gateway import ContextGatewayService, GatewayItem
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES, extract_dropbox_text
 from app.memory.ingestion import SourcePolicy, policy_for_domain
+from app.memory.routed_service import RoutedMemoryService
 from app.tools.runtime import (
     ToolExecutionError,
     _gmail_api_json,
@@ -31,6 +34,10 @@ from app.tools.runtime import (
 CONTEXT_MAILBOX_SETTING_KEY = "context_mailbox_worker"
 CONTEXT_SUBJECT_PATTERN = re.compile(
     r"^\s*\[MAESTRO-CONTEXT\]\[([^\]]+)\]\[([^\]]+)\](?:\s+(.+))?$",
+    re.IGNORECASE,
+)
+INGEST_SUBJECT_PATTERN = re.compile(
+    r"^\s*\[MAESTRO-INGEST\]\[([^\]]+)\]\[([^\]]+)\](?:\s+(.+))?$",
     re.IGNORECASE,
 )
 TERMINAL_LABELS = {
@@ -71,6 +78,7 @@ class ParsedContextHandoff:
     title: str
     content: str
     metadata: dict[str, str]
+    record_type: str | None = None
 
 
 class ContextMailboxSource(Protocol):
@@ -305,6 +313,12 @@ class ContextMailboxService:
             content, attachments, raw_path = self._context_content(message, handoff)
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             source_policy = _mailbox_policy(handoff)
+            structured_route = self._route_structured_handoff(
+                handoff,
+                domain=domain,
+                message=message,
+                content_hash=content_hash,
+            )
             result = self.gateway.ingest(
                 GatewayItem(
                     source_registration_key=f"context-mailbox:{handoff.source_system}:{domain.key}",
@@ -327,6 +341,8 @@ class ContextMailboxService:
                         "raw_archive_path": str(raw_path),
                         "attachments": attachments,
                         "manifest": handoff.metadata,
+                        "structured_route_promoted": structured_route is not None,
+                        "structured_route": structured_route,
                         "source_config": {"mailbox": self.settings.maestro_intake_email},
                     },
                 ),
@@ -340,6 +356,7 @@ class ContextMailboxService:
                 "domain_key": domain.key,
                 "source_id": handoff.source_id,
                 "ingestion_record_id": result.ingestion_record_id,
+                "structured_route": structured_route,
             }
         except ContextHandoffError as exc:
             self.session.rollback()
@@ -350,7 +367,7 @@ class ContextMailboxService:
                 "count_key": "quarantined",
                 "reason": str(exc),
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.session.rollback()
             self._finish_message(message_id, labels, state="failed")
             return {
@@ -359,6 +376,86 @@ class ContextMailboxService:
                 "count_key": "failed",
                 "reason": str(exc),
             }
+
+    def _route_structured_handoff(
+        self,
+        handoff: ParsedContextHandoff,
+        *,
+        domain: Domain,
+        message: dict[str, Any],
+        content_hash: str,
+    ) -> dict[str, Any] | None:
+        if handoff.record_type != "calendar_event":
+            return None
+        metadata = handoff.metadata
+        start_at = _handoff_datetime(metadata.get("start"), self.settings.home_timezone)
+        end_at = _handoff_datetime(metadata.get("end"), self.settings.home_timezone)
+        if start_at is None:
+            raise ContextHandoffError("Calendar handoff is missing a valid start time.")
+        action = _slug_token(metadata.get("action") or "added")
+        organizer_email = str(metadata.get("organizer") or "").strip().lower() or None
+        attendees = _handoff_attendees(
+            metadata,
+            organizer_email=organizer_email,
+            owner_emails={
+                *self.settings.user_emails,
+                parseaddr(str(message.get("from") or ""))[1].strip().lower(),
+            },
+        )
+        source_ref = {
+            "type": "context_mailbox_calendar_event",
+            "source_system": handoff.source_system,
+            "source_id": handoff.source_id,
+            "source_timestamp": handoff.source_timestamp.isoformat(),
+            "gmail_message_id": message.get("message_id"),
+            "gmail_thread_id": message.get("thread_id"),
+            "ical_uid": metadata.get("ical_uid"),
+            "content_hash": content_hash,
+        }
+        item = RoutedItem(
+            domain_id=domain.id,
+            route_type="event",
+            title=str(metadata.get("title") or handoff.title or "Untitled calendar event")[:240],
+            content=handoff.content,
+            priority="normal",
+            status="cancelled" if action in {"cancelled", "canceled", "deleted", "removed"} else "open",
+            source_refs=[source_ref],
+            metadata_={
+                "start_at": start_at.isoformat(),
+                "end_at": end_at.isoformat() if end_at else None,
+                "timezone": self.settings.home_timezone,
+                "all_day": str(metadata.get("all_day") or "false").strip().lower()
+                in {"true", "yes", "1"},
+                "location": str(metadata.get("location") or "").strip() or None,
+                "organizer_email": organizer_email,
+                "attendees": attendees,
+                "external_provider": handoff.source_system,
+                "external_calendar_id": handoff.domain_key,
+                "external_event_id": handoff.source_id,
+                "external_etag": content_hash,
+                "sync_status": "synced",
+                "ical_uid": metadata.get("ical_uid"),
+                "source_adapter": "context_mailbox",
+                "domain_key": handoff.domain_key,
+                "enriched_at": datetime.now(UTC).isoformat(),
+                "enrichment_source": "structured_context_mailbox_adapter",
+            },
+        )
+        self.session.add(item)
+        self.session.flush()
+        promotions = RoutedMemoryService(
+            self.session,
+            enable_llm_resolver=False,
+        ).promote_items([item])
+        if not promotions:
+            raise ContextHandoffError("Calendar handoff could not be promoted.")
+        promotion = promotions[0]
+        return {
+            "route_type": "event",
+            "action": promotion.action,
+            "object_id": str(promotion.object_id),
+            "routed_item_id": str(item.id),
+        }
 
     def _context_content(
         self,
@@ -449,18 +546,38 @@ class ContextMailboxService:
 
 def parse_context_handoff(message: dict[str, Any]) -> ParsedContextHandoff:
     subject = str(message.get("subject") or "")
-    subject_match = CONTEXT_SUBJECT_PATTERN.match(subject)
-    if not subject_match:
-        raise ContextHandoffError("Subject must use [MAESTRO-CONTEXT][SOURCE][DOMAIN].")
-    subject_source = _slug_token(subject_match.group(1))
-    subject_domain = _domain_key(subject_match.group(2), allow_placeholder=True)
+    context_match = CONTEXT_SUBJECT_PATTERN.match(subject)
+    ingest_match = INGEST_SUBJECT_PATTERN.match(subject)
+    if not context_match and not ingest_match:
+        raise ContextHandoffError(
+            "Subject must use [MAESTRO-CONTEXT][SOURCE][DOMAIN] or "
+            "[MAESTRO-INGEST][DOMAIN][RECORD_TYPE]."
+        )
     body = str(message.get("body_text") or "").strip()
     if not body:
         raise ContextHandoffError("Context handoff email has no readable body.")
     metadata = _manifest_fields(body)
-    source_system = _slug_token(metadata.get("source_system") or subject_source)
-    if source_system != subject_source:
-        raise ContextHandoffError("Subject source and body source_system do not match.")
+    if context_match:
+        subject_source = _slug_token(context_match.group(1))
+        subject_domain = _domain_key(context_match.group(2), allow_placeholder=True)
+        source_system = _slug_token(metadata.get("source_system") or subject_source)
+        if source_system != subject_source:
+            raise ContextHandoffError("Subject source and body source_system do not match.")
+        record_type = _normalized_record_type(metadata.get("record_type"))
+        title_fallback = context_match.group(3)
+    else:
+        assert ingest_match is not None
+        subject_domain = _domain_key(ingest_match.group(1), allow_placeholder=True)
+        subject_record_type = _normalized_record_type(ingest_match.group(2))
+        record_type = _normalized_record_type(metadata.get("record_type"))
+        if not record_type:
+            record_type = subject_record_type
+        if record_type != subject_record_type:
+            raise ContextHandoffError("Subject and body record_type do not match.")
+        source_system = _slug_token(metadata.get("source_system") or "")
+        if not source_system:
+            raise ContextHandoffError("Ingest handoff is missing source_system.")
+        title_fallback = ingest_match.group(3)
     domain_key = _domain_key(metadata.get("domain") or subject_domain)
     if subject_domain and subject_domain != "domain" and subject_domain != domain_key:
         raise ContextHandoffError("Subject domain and body domain do not match.")
@@ -474,7 +591,7 @@ def parse_context_handoff(message: dict[str, Any]) -> ParsedContextHandoff:
     )
     if source_system == "usma_sanitized_context_drop":
         _validate_sanitized_manifest(metadata)
-    title = _handoff_title(body, source_system=source_system, fallback=subject_match.group(3))
+    title = _handoff_title(body, source_system=source_system, fallback=title_fallback)
     return ParsedContextHandoff(
         source_system=source_system,
         source_id=source_id,
@@ -483,6 +600,7 @@ def parse_context_handoff(message: dict[str, Any]) -> ParsedContextHandoff:
         title=title,
         content=body,
         metadata=metadata,
+        record_type=record_type,
     )
 
 
@@ -512,10 +630,20 @@ def _slug_token(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
 
+def _normalized_record_type(value: str | None) -> str | None:
+    token = _slug_token(str(value or ""))
+    if not token:
+        return None
+    return {
+        "calendar": "calendar_event",
+        "event": "calendar_event",
+    }.get(token, token)
+
+
 def _source_timestamp(value: str | None, *, fallback_date: str, internal_date: str) -> datetime:
     if value:
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
             return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
         except ValueError:
             pass
@@ -528,6 +656,59 @@ def _source_timestamp(value: str | None, *, fallback_date: str, internal_date: s
     if internal_date.isdigit():
         return datetime.fromtimestamp(int(internal_date) / 1000, tz=UTC)
     return datetime.now(UTC)
+
+
+def _handoff_datetime(value: str | None, timezone: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ContextHandoffError(f"Invalid calendar timestamp: {raw}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo(timezone))
+    return parsed
+
+
+def _handoff_attendees(
+    metadata: dict[str, str],
+    *,
+    organizer_email: str | None,
+    owner_emails: set[str],
+) -> list[dict[str, Any]]:
+    attendees: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    owner_emails = {email for email in owner_emails if email}
+    attendee_groups = (
+        (metadata.get("required_attendees"), "required"),
+        (metadata.get("optional_attendees"), "optional"),
+    )
+    candidates: list[tuple[str, str]] = []
+    if organizer_email:
+        candidates.append((organizer_email, "required"))
+    for raw, attendee_type in attendee_groups:
+        candidates.extend(
+            (email.strip().lower(), attendee_type)
+            for email in re.split(r"[;,]", str(raw or ""))
+            if email.strip()
+        )
+    for email, attendee_type in candidates:
+        if email in seen:
+            continue
+        seen.add(email)
+        attendees.append(
+            {
+                "name": email,
+                "email": email,
+                "attendee_type": attendee_type,
+                "response_status": "needs_action",
+                "is_organizer": email == organizer_email,
+                "is_user": email in owner_emails
+                or is_maestro_user_reference(email=email),
+            }
+        )
+    return attendees
 
 
 def _handoff_title(body: str, *, source_system: str, fallback: str | None) -> str:
