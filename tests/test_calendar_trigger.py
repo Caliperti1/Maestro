@@ -17,6 +17,7 @@ from app.maestro.scheduler import SchedulerService
 class FakeCalendarChangeSource:
     def __init__(self) -> None:
         self.version = "v1"
+        self.status = "confirmed"
         self.calls: list[dict[str, Any]] = []
         self.upcoming_events: list[dict[str, Any]] = []
         self.series_events: dict[str, list[dict[str, Any]]] = {}
@@ -44,8 +45,8 @@ class FakeCalendarChangeSource:
             "items": [{
                 "id": "event-1",
                 "etag": self.version,
-                "status": "confirmed",
-                "summary": "Partner review",
+                "status": self.status,
+                "summary": f"Partner review {self.version}",
                 "start": {"dateTime": start.isoformat()},
                 "end": {"dateTime": end.isoformat()},
             }],
@@ -232,6 +233,33 @@ def test_calendar_trigger_bootstraps_then_versions_exact_event_runs(session: Ses
     assert runs[0].input_payload["event"]["payload"]["event_id"] == "event-1"
     assert runs[0].input_payload["event"]["payload"]["event_version"] == "v1"
     assert runs[1].input_payload["event"]["payload"]["event_version"] == "v2"
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "event-1")
+    )
+    assert event is not None
+    assert event.title == "Partner review v2"
+    assert event.external_etag == "v2"
+    assert changed["domains"][0]["emitted"][0]["sync_result"]["status"] == "updated"
+
+
+def test_calendar_trigger_applies_cancellation_to_existing_event(session: Session) -> None:
+    _seed_calendar_trigger(session)
+    source = FakeCalendarChangeSource()
+    service = CalendarTriggerService(session, source=source)
+
+    service.poll_once()
+    service.poll_once()
+    source.version = "v2"
+    source.status = "cancelled"
+    result = service.poll_once()
+
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "event-1")
+    )
+    assert event is not None
+    assert event.status == "cancelled"
+    assert event.external_etag == "v2"
+    assert result["domains"][0]["emitted"][0]["sync_result"]["status"] == "updated"
 
 
 def test_calendar_trigger_resets_expired_token_without_emitting(session: Session) -> None:

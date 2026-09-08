@@ -243,12 +243,13 @@ def test_hygiene_does_not_merge_separate_occurrences_from_one_series(session) ->
 
 def test_future_recurring_agent_occurrence_waits_until_eligible(session) -> None:
     domain = _domain(session)
+    future_anchor = datetime.now(UTC) + timedelta(days=60)
     creation = RecurringTodoService(session).create_series(
         domain_id=domain.id,
         title="Prepare monthly finance report",
         description="Prepare the monthly finance report.",
-        recurrence_rule="FREQ=MONTHLY;BYMONTHDAY=5",
-        due_anchor_at=datetime(2026, 9, 5, 17, tzinfo=UTC),
+        recurrence_rule=f"FREQ=MONTHLY;BYMONTHDAY={future_anchor.day}",
+        due_anchor_at=future_anchor,
         scheduled_anchor_at=None,
         estimated_minutes=90,
         agent_task=True,
@@ -264,13 +265,14 @@ def test_future_recurring_agent_occurrence_waits_until_eligible(session) -> None
 def test_pausing_scheduled_series_removes_future_calendar_projections(session) -> None:
     domain = _domain(session)
     service = RecurringTodoService(session)
+    future_anchor = datetime.now(UTC) + timedelta(days=60)
     creation = service.create_series(
         domain_id=domain.id,
         title="Monthly finance block",
         description="Reserved time for monthly finance work.",
-        recurrence_rule="FREQ=MONTHLY;BYMONTHDAY=5",
-        due_anchor_at=datetime(2026, 9, 5, 21, tzinfo=UTC),
-        scheduled_anchor_at=datetime(2026, 9, 5, 17, tzinfo=UTC),
+        recurrence_rule=f"FREQ=MONTHLY;BYMONTHDAY={future_anchor.day}",
+        due_anchor_at=future_anchor + timedelta(hours=4),
+        scheduled_anchor_at=future_anchor,
         estimated_minutes=90,
     )
     assert session.query(CalendarEvent).count() >= 2

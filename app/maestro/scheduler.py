@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -17,6 +18,8 @@ from app.db.models import (
     WorkflowRun,
 )
 
+WORKFLOW_IDEMPOTENCY_KEY_MAX_CHARS = 200
+
 
 def _source_label(source_type: str) -> str:
     return {
@@ -25,6 +28,17 @@ def _source_label(source_type: str) -> str:
         "replay": "Replayed",
         "scheduled": "Scheduled",
     }.get(source_type, "Queued")
+
+
+def _bounded_workflow_idempotency_key(
+    raw_key: str,
+    *,
+    definition_id: uuid.UUID,
+) -> str:
+    if len(raw_key) <= WORKFLOW_IDEMPOTENCY_KEY_MAX_CHARS:
+        return raw_key
+    digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    return f"workflow-definition:{definition_id}:digest:{digest}"
 
 
 def _validate_workflow_parameters(
@@ -329,10 +343,14 @@ class SchedulerService:
         invocation_payload: dict[str, Any] | None = None,
     ) -> WorkflowRun:
         scheduled_for = scheduled_for or datetime.now(UTC)
-        idempotency_key = (
+        raw_idempotency_key = (
             f"workflow-definition:{definition.id}:{idempotency_suffix}"
             if idempotency_suffix
             else f"workflow-definition:{definition.id}:{scheduled_for.isoformat()}"
+        )
+        idempotency_key = _bounded_workflow_idempotency_key(
+            raw_idempotency_key,
+            definition_id=definition.id,
         )
         existing = self.session.scalar(
             select(WorkflowRun).where(WorkflowRun.idempotency_key == idempotency_key)

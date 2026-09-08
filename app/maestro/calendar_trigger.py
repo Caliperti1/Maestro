@@ -440,7 +440,8 @@ class CalendarTriggerService:
                 )
                 refreshed_series += 1
                 continue
-            if self._is_past_event(domain, calendar_id, event_id, event):
+            existing = self._provider_event(domain, calendar_id, event_id)
+            if existing is None and self._is_past_event(domain, calendar_id, event_id, event):
                 skipped_past += 1
                 continue
             version = str(event.get("etag") or event.get("updated") or "unknown").strip()
@@ -455,6 +456,11 @@ class CalendarTriggerService:
                 "google_event": event,
                 "detected_at": datetime.now(UTC).isoformat(),
             }
+            sync_result = stage_google_calendar_event(
+                self.session,
+                domain=domain,
+                event_payload=event_payload,
+            )
             delivery_id = f"{domain.key}:{calendar_id}:{event_id}:{version}"
             runs = self.scheduler.enqueue_event_workflows(
                 event_type=CALENDAR_TRIGGER_EVENT_TYPE,
@@ -464,6 +470,7 @@ class CalendarTriggerService:
             emitted.append({
                 "event_id": event_id,
                 "delivery_id": delivery_id,
+                "sync_result": sync_result,
                 "workflow_run_ids": [str(run.id) for run in runs],
             })
 
@@ -977,9 +984,11 @@ class CalendarTriggerService:
         filtered_count = 0
         for event in events:
             event_id = str(event.get("id") or "").strip()
-            if not event_id or self._is_past_event(domain, calendar_id, event_id, event):
+            if not event_id:
                 continue
             existing = self._provider_event(domain, calendar_id, event_id)
+            if existing is None and self._is_past_event(domain, calendar_id, event_id, event):
+                continue
             if event.get("recurrence"):
                 self._sync_secondary_series_instances(
                     domain,
@@ -999,6 +1008,11 @@ class CalendarTriggerService:
                 calendar_id=calendar_id,
                 event=event,
             )
+            sync_result = stage_google_calendar_event(
+                self.session,
+                domain=domain,
+                event_payload=event_payload,
+            )
             delivery_id = f"{domain.key}:{calendar_id}:{event_id}:{version}"
             runs = self.scheduler.enqueue_event_workflows(
                 event_type=CALENDAR_TRIGGER_EVENT_TYPE,
@@ -1008,6 +1022,7 @@ class CalendarTriggerService:
             emitted.append({
                 "event_id": event_id,
                 "delivery_id": delivery_id,
+                "sync_result": sync_result,
                 "workflow_run_ids": [str(run.id) for run in runs],
             })
         return {
