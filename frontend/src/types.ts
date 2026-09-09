@@ -3,6 +3,9 @@ export type ChatMessage = {
   sender: "user" | "maestro";
   content: string;
   metadata?: Record<string, unknown>;
+  created_at?: string | null;
+  seen_at?: string | null;
+  seen_via?: string | null;
 };
 
 export type MaestroSessionSummary = {
