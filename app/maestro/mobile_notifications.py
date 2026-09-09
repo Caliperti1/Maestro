@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.models import (
+    Conversation,
     Message,
     MessageReceipt,
     MobileDeviceEndpoint,
@@ -142,13 +143,17 @@ def mark_message_seen(
         select(MessageReceipt).where(MessageReceipt.message_id == message.id)
     )
     if receipt is None:
+        seen_at = datetime.now(UTC)
         receipt = MessageReceipt(
             message_id=message.id,
-            seen_at=datetime.now(UTC),
+            seen_at=seen_at,
             seen_via=via,
             metadata_=metadata or {},
         )
         session.add(receipt)
+        conversation = session.get(Conversation, message.conversation_id)
+        if conversation is not None:
+            conversation.updated_at = seen_at
         try:
             session.commit()
         except IntegrityError:
