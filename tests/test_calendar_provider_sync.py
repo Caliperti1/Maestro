@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -98,3 +100,104 @@ def test_cancelled_provider_tombstone_does_not_create_visible_event(session: Ses
     assert result == {"status": "ignored_tombstone", "event_id": None}
     assert session.query(CalendarEvent).count() == 0
     assert session.query(RoutedItem).count() == 0
+
+
+def test_cancelled_provider_tombstone_updates_existing_event_without_dates(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    domain = session.scalar(select(Domain).where(Domain.key == "praxis"))
+    assert domain is not None
+    start = datetime.now(UTC) + timedelta(days=2)
+    created = stage_google_calendar_event(
+        session,
+        domain=domain,
+        event_payload={
+            "calendar_id": "primary",
+            "event_id": "google-event-1",
+            "event_version": "v1",
+            "google_event": {
+                "id": "google-event-1",
+                "status": "confirmed",
+                "etag": "v1",
+                "summary": "Partner review",
+                "start": {"dateTime": start.isoformat()},
+                "end": {"dateTime": (start + timedelta(hours=1)).isoformat()},
+            },
+        },
+    )
+
+    deleted = stage_google_calendar_event(
+        session,
+        domain=domain,
+        event_payload={
+            "calendar_id": "primary",
+            "event_id": "google-event-1",
+            "event_version": "v2",
+            "google_event": {
+                "id": "google-event-1",
+                "status": "cancelled",
+                "etag": "v2",
+            },
+        },
+    )
+
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "google-event-1")
+    )
+    assert deleted == {"status": "updated", "event_id": created["event_id"]}
+    assert event is not None
+    assert event.status == "cancelled"
+    assert event.external_etag == "v2"
+    assert event.metadata_["provider_tombstone_event_id"] == "google-event-1"
+
+
+def test_series_master_tombstone_cancels_future_occurrences(session: Session) -> None:
+    seed_default_domains(session)
+    domain = session.scalar(select(Domain).where(Domain.key == "praxis"))
+    assert domain is not None
+    start = datetime.now(UTC) + timedelta(days=2)
+    for index in range(2):
+        occurrence_start = start + timedelta(days=7 * index)
+        result = stage_google_calendar_event(
+            session,
+            domain=domain,
+            event_payload={
+                "calendar_id": "primary",
+                "event_id": f"series-1-occurrence-{index}",
+                "event_version": "v1",
+                "google_event": {
+                    "id": f"series-1-occurrence-{index}",
+                    "recurringEventId": "series-1",
+                    "status": "confirmed",
+                    "etag": "v1",
+                    "summary": "Weekly sync",
+                    "start": {"dateTime": occurrence_start.isoformat()},
+                    "end": {
+                        "dateTime": (occurrence_start + timedelta(minutes=30)).isoformat()
+                    },
+                },
+            },
+        )
+        assert result["event_id"]
+
+    deleted = stage_google_calendar_event(
+        session,
+        domain=domain,
+        event_payload={
+            "calendar_id": "primary",
+            "event_id": "series-1",
+            "event_version": "v2",
+            "google_event": {
+                "id": "series-1",
+                "status": "cancelled",
+                "etag": "v2",
+            },
+        },
+    )
+
+    events = session.scalars(select(CalendarEvent)).all()
+    assert deleted["status"] == "cancelled_series"
+    assert deleted["updated_count"] == 2
+    assert all(event.status == "cancelled" for event in events)
+    assert all(event.external_etag == "v2" for event in events)

@@ -141,15 +141,35 @@ def stage_google_calendar_event(
     if existing is not None and existing.external_etag == metadata.get("external_etag"):
         return {"status": "unchanged", "event_id": str(existing.id)}
     if route["status"] == "cancelled":
-        if existing is None:
+        series_instances = _future_series_instances(
+            session,
+            domain=domain,
+            calendar_id=str(metadata["external_calendar_id"]),
+            series_event_id=str(metadata["external_event_id"]),
+        )
+        targets = ([existing] if existing is not None else []) + series_instances
+        if not targets:
             return {"status": "ignored_tombstone", "event_id": None}
-        existing.status = "cancelled"
-        existing.external_etag = metadata.get("external_etag")
-        existing.last_synced_at = datetime.now(UTC)
-        existing.sync_status = "synced"
-        existing.source_refs = [*(existing.source_refs or []), *route["source_refs"]]
-        existing.metadata_ = {**(existing.metadata_ or {}), **metadata}
+        cancelled_at = datetime.now(UTC)
+        for target in targets:
+            target.status = "cancelled"
+            target.external_etag = metadata.get("external_etag")
+            target.last_synced_at = cancelled_at
+            target.sync_status = "synced"
+            target.source_refs = [*(target.source_refs or []), *route["source_refs"]]
+            target.metadata_ = {
+                **(target.metadata_ or {}),
+                "provider_cancelled_at": cancelled_at.isoformat(),
+                "provider_tombstone_event_id": metadata["external_event_id"],
+            }
         session.commit()
+        if series_instances:
+            return {
+                "status": "cancelled_series",
+                "event_id": str(existing.id) if existing is not None else None,
+                "event_ids": [str(target.id) for target in targets],
+                "updated_count": len(targets),
+            }
         return {"status": "updated", "event_id": str(existing.id)}
 
     item = RoutedItem(
@@ -177,3 +197,32 @@ def stage_google_calendar_event(
         "event_id": str(promotion.object_id),
         "routed_item_id": str(item.id),
     }
+
+
+def _future_series_instances(
+    session: Session,
+    *,
+    domain: Domain,
+    calendar_id: str,
+    series_event_id: str,
+) -> list[CalendarEvent]:
+    now = datetime.now(UTC)
+    candidates = session.scalars(
+        select(CalendarEvent).where(
+            CalendarEvent.domain_id == domain.id,
+            CalendarEvent.external_provider == "google_calendar",
+            CalendarEvent.external_calendar_id == calendar_id,
+        )
+    ).all()
+    matches: list[CalendarEvent] = []
+    for event in candidates:
+        if str((event.metadata_ or {}).get("recurring_event_id") or "") != series_event_id:
+            continue
+        start_at = event.start_at
+        if start_at is not None:
+            if start_at.tzinfo is None:
+                start_at = start_at.replace(tzinfo=UTC)
+            if start_at.astimezone(UTC) < now:
+                continue
+        matches.append(event)
+    return matches
