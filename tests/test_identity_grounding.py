@@ -24,6 +24,9 @@ def test_identity_graph_seeds_authoritative_user_and_organization_relationships(
     assert "chris-founded-perti" in relationships
     assert "Praxis Defense is Chris Aliperti's company" in packet.rendered_text
     assert '"I", "me", and "my" refer to Chris Aliperti' in packet.rendered_text
+    assert "christopher.aliperti@gmail.com" in packet.rendered_text
+    owner = next(node for node in packet.nodes if node["key"] == "person:chris-aliperti")
+    assert "christopher.aliperti@westpoint.edu" in owner["aliases"]
 
 
 def test_domain_grounding_packet_is_compact_and_domain_scoped(session: Session) -> None:
@@ -69,6 +72,23 @@ def test_seed_preserves_edits_and_links_existing_canonical_organization(session:
 
     assert praxis_node.description == "User-edited authoritative Praxis description."
     assert praxis_node.entity_id is not None
+
+
+def test_seed_adds_new_owner_aliases_without_removing_existing_aliases(session: Session) -> None:
+    seed_default_domains(session)
+    service = IdentityGroundingService(session)
+    service.seed_defaults()
+    owner = session.scalar(select(IdentityNode).where(IdentityNode.key == "person:chris-aliperti"))
+    assert owner is not None
+    owner.aliases = [*owner.aliases, "User-added identity"]
+    session.commit()
+
+    service.seed_defaults()
+    session.refresh(owner)
+
+    assert "User-added identity" in owner.aliases
+    assert "christopher.aliperti@gmail.com" in owner.aliases
+    assert "christopher.aliperti@westpoint.edu" in owner.metadata_["emails"]
 
 
 def test_agent_prompt_and_maestro_context_receive_authoritative_grounding(

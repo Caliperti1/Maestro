@@ -34,22 +34,21 @@ class IdentityGroundingService:
         """Create missing defaults without replacing later user-authored edits."""
 
         settings = get_settings()
-        domains = {
-            domain.key: domain for domain in self.session.scalars(select(Domain)).all()
-        }
+        domains = {domain.key: domain for domain in self.session.scalars(select(Domain)).all()}
         entities = self._organization_entities()
         node_seeds = [
             {
                 "key": "person:chris-aliperti",
                 "node_type": "person",
                 "display_name": settings.user_full_name,
-                "aliases": ["Christopher Aliperti", settings.user_email],
+                "aliases": sorted({*settings.user_names, *settings.user_emails}),
                 "description": (
                     f"{settings.user_full_name} is the user and principal for whom Maestro works."
                 ),
                 "metadata": {
                     "is_maestro_user": True,
                     "email": settings.user_email,
+                    "emails": sorted(settings.user_emails),
                     "first_person_references": ["I", "me", "my", "myself"],
                 },
             },
@@ -132,9 +131,7 @@ class IdentityGroundingService:
         nodes: dict[str, IdentityNode] = {}
         changed = False
         for seed in node_seeds:
-            node = self.session.scalar(
-                select(IdentityNode).where(IdentityNode.key == seed["key"])
-            )
+            node = self.session.scalar(select(IdentityNode).where(IdentityNode.key == seed["key"]))
             domain = domains.get(str(seed.get("domain_key") or ""))
             if node is None:
                 node = IdentityNode(
@@ -151,6 +148,15 @@ class IdentityGroundingService:
                 self.session.add(node)
                 changed = True
             else:
+                if node.key == "person:chris-aliperti":
+                    aliases = sorted({*(node.aliases or []), *seed["aliases"]})
+                    metadata = {**(node.metadata_ or {}), **dict(seed["metadata"])}
+                    if aliases != node.aliases:
+                        node.aliases = aliases
+                        changed = True
+                    if metadata != node.metadata_:
+                        node.metadata_ = metadata
+                        changed = True
                 if node.domain_id is None and domain is not None:
                     node.domain_id = domain.id
                     changed = True
@@ -268,28 +274,29 @@ class IdentityGroundingService:
             nodes = all_nodes
         else:
             nodes = [
-                node
-                for node in all_nodes
-                if node.key in core_keys or node.domain_id == domain.id
+                node for node in all_nodes if node.key in core_keys or node.domain_id == domain.id
             ]
         node_ids = {node.id for node in nodes}
-        relationships = list(
-            self.session.scalars(
-                select(IdentityRelationship)
-                .where(
-                    IdentityRelationship.is_current.is_(True),
-                    IdentityRelationship.subject_node_id.in_(node_ids),
-                    IdentityRelationship.object_node_id.in_(node_ids),
-                )
-                .order_by(IdentityRelationship.key)
-            ).all()
-        ) if node_ids else []
+        relationships = (
+            list(
+                self.session.scalars(
+                    select(IdentityRelationship)
+                    .where(
+                        IdentityRelationship.is_current.is_(True),
+                        IdentityRelationship.subject_node_id.in_(node_ids),
+                        IdentityRelationship.object_node_id.in_(node_ids),
+                    )
+                    .order_by(IdentityRelationship.key)
+                ).all()
+            )
+            if node_ids
+            else []
+        )
         nodes = [node for node in all_nodes if node.id in node_ids]
         nodes_by_id = {node.id: node for node in nodes}
         node_payloads = [self._node_payload(node) for node in nodes]
         relationship_payloads = [
-            self._relationship_payload(relationship, nodes_by_id)
-            for relationship in relationships
+            self._relationship_payload(relationship, nodes_by_id) for relationship in relationships
         ]
         rendered = self._render(
             domain_key=domain_key,
@@ -372,6 +379,11 @@ class IdentityGroundingService:
             ),
             "- Keep Chris Aliperti distinct from any other person named Chris; do not create a "
             "contact record for the Maestro user.",
+            (
+                "- Verified email identities for the Maestro user: "
+                f"{', '.join(sorted(settings.user_emails))}. These all identify Chris, not "
+                "separate contacts."
+            ),
         ]
         descriptions: list[str] = []
         seen: set[str] = set()

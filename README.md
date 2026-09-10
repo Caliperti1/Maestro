@@ -308,6 +308,8 @@ SCHEDULER_WORKER_AUTORUN=false
 USER_DISPLAY_NAME=Chris
 USER_FULL_NAME=Chris Aliperti
 USER_EMAIL=chris.aliperti@praxis-defense.com
+USER_NAME_ALIASES=Christopher Aliperti
+USER_EMAIL_ALIASES=chris@perti.io,christopher.aliperti@gmail.com,christopher.aliperti@westpoint.edu
 ```
 
 The user identity is a system principal, not a CRM contact. Routed contact and event processing

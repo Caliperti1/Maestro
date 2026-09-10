@@ -45,6 +45,7 @@ from app.memory.calendar_intelligence import (
     CalendarIntelligenceService,
     conferencing_url_from_values,
 )
+from app.memory.contact_identity import is_non_person_mailbox
 from app.memory.contact_intelligence import ContactEmbeddingService, ContactIntelligenceService
 from app.memory.event_work_links import EventWorkLinkService
 from app.memory.organization_intelligence import (
@@ -306,9 +307,7 @@ class RoutedMemoryService:
                 ),
                 estimated_minutes=estimated_minutes,
                 owner_type="maestro" if agent_task else "user",
-                owner_ref=(
-                    "Maestro" if agent_task else get_settings().user_display_name
-                ),
+                owner_ref=("Maestro" if agent_task else get_settings().user_display_name),
                 agent_task=agent_task,
                 priority=item.priority,
                 source_refs=item.source_refs,
@@ -1095,7 +1094,7 @@ class RoutedMemoryService:
                 contact = candidates[0]
         if contact is None and not create_if_missing:
             return None
-        if contact is None and _is_role_or_group_attendee(name, email):
+        if contact is None and is_non_person_mailbox(name, email):
             return None
         if contact is None:
             contact = Contact(
@@ -1252,9 +1251,7 @@ class RoutedMemoryService:
                     **calendar.event_payload(result.event),
                     "retrieval_score": result.score,
                     "match_reasons": result.match_reasons,
-                    "matched_occurrence_start_at": home_isoformat(
-                        result.occurrence_start_at
-                    ),
+                    "matched_occurrence_start_at": home_isoformat(result.occurrence_start_at),
                     "matched_occurrence_end_at": home_isoformat(result.occurrence_end_at),
                 }
             )
@@ -1363,9 +1360,7 @@ class RoutedMemoryService:
                 str(item.recurring_series_id) if item.recurring_series_id else None
             ),
             "recurrence_original_at": (
-                item.recurrence_original_at.isoformat()
-                if item.recurrence_original_at
-                else None
+                item.recurrence_original_at.isoformat() if item.recurrence_original_at else None
             ),
             "recurring_series": (
                 RecurringTodoService(self.session).series_payload(series) if series else None
@@ -1846,43 +1841,6 @@ def _contact_name_from_email(name: str, email: str | None) -> str:
         if part and part not in ignored:
             parts.append(part.upper() if len(part) == 1 else part.capitalize())
     return " ".join(parts).strip() or name
-
-
-def _is_role_or_group_attendee(name: str, email: str) -> bool:
-    if not email or "@" not in email:
-        return False
-    local = email.split("@", 1)[0].lower()
-    normalized_name = _normalize_key(name)
-    identity_like_name = "@" in name or normalized_name == _normalize_key(local)
-    if not identity_like_name:
-        return False
-    exact_role_names = {
-        "admin",
-        "alerts",
-        "billing",
-        "calendar",
-        "contact",
-        "events",
-        "hello",
-        "info",
-        "marketing",
-        "newsletter",
-        "notifications",
-        "office",
-        "sales",
-        "support",
-        "team",
-    }
-    if local in exact_role_names:
-        return True
-    compact_local = re.sub(r"[^a-z0-9]+", "", local)
-    return any(
-        token in compact_local
-        for token in ("donotreply", "mailerdaemon", "newsletter", "notification", "noreply")
-    ) or any(
-        compact_local.endswith(token)
-        for token in ("group", "network", "office", "team")
-    )
 
 
 def _organization_name_from_identifier(name: str) -> str:

@@ -152,6 +152,11 @@ def test_hydration_pages_gmail_and_builds_contact_and_organization_candidates(se
             {
                 "messages": [
                     _message("3", sender="Chris Aliperti <chris.aliperti@praxis-defense.com>", to="Jane Smith <jane@example.com>"),
+                    _message(
+                        "4",
+                        sender="Christopher Aliperti <christopher.aliperti@gmail.com>",
+                        to="Jane Smith <jane@example.com>",
+                    ),
                 ],
                 "next_page_token": None,
             },
@@ -172,19 +177,20 @@ def test_hydration_pages_gmail_and_builds_contact_and_organization_candidates(se
     service.process_once()
     session.refresh(job)
     assert job.status == "review"
-    assert job.messages_scanned == 3
+    assert job.messages_scanned == 4
     assert tools.requests[1].payload["page_token"] == "page-2"
 
     candidates = list(session.scalars(select(ContactHydrationCandidate).where(ContactHydrationCandidate.job_id == job.id)))
     jane = next(item for item in candidates if item.identity_key == "jane@example.com")
     organization = next(item for item in candidates if item.candidate_type == "organization")
     excluded = next(item for item in candidates if item.identity_key == "no-reply@example.com")
-    assert jane.evidence["message_count"] == 2
+    assert jane.evidence["message_count"] == 3
     assert jane.evidence["inbound_count"] == 1
-    assert jane.evidence["outbound_count"] == 1
+    assert jane.evidence["outbound_count"] == 2
     assert organization.proposed_data["email_domain"] == "example.com"
     assert excluded.status == "excluded"
     assert not any(item.identity_key == "chris.aliperti@praxis-defense.com" for item in candidates)
+    assert not any(item.identity_key == "christopher.aliperti@gmail.com" for item in candidates)
 
 
 def test_hydration_same_name_different_email_requires_review(session: Session) -> None:
