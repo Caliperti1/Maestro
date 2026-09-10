@@ -293,7 +293,9 @@ def recover_stale_ingestion(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 @router.get("/ingestion/sources")
 def list_context_sources(db: Session = Depends(get_db)) -> dict[str, Any]:
-    registrations = db.scalars(select(SourceRegistration).order_by(SourceRegistration.display_name)).all()
+    registrations = db.scalars(
+        select(SourceRegistration).order_by(SourceRegistration.display_name)
+    ).all()
     domains = {domain.id: domain.key for domain in db.scalars(select(Domain)).all()}
     return {
         "sources": [
@@ -382,8 +384,17 @@ async def ingest_sanitized_context(
                 title=metadata.get("title") or f"{domain.name} sanitized context",
                 content=text,
                 source_timestamp=source_timestamp,
-                policy=SourcePolicy(sensitivity="sanitized_work_context", trust_level="user_reviewed", transfer_method="sanitized_context_drop", egress_policy="external_allowed"),
-                metadata={"reviewed_by": metadata["reviewed_by"], "contains_restricted": False, "body_chars": len(body)},
+                policy=SourcePolicy(
+                    sensitivity="sanitized_work_context",
+                    trust_level="user_reviewed",
+                    transfer_method="sanitized_context_drop",
+                    egress_policy="external_allowed",
+                ),
+                metadata={
+                    "reviewed_by": metadata["reviewed_by"],
+                    "contains_restricted": False,
+                    "body_chars": len(body),
+                },
             ),
             domain=domain,
         )
@@ -441,7 +452,9 @@ def process_dropbox(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 
 @router.get("/dropbox/previews")
-def list_dropbox_previews(domain_key: str | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
+def list_dropbox_previews(
+    domain_key: str | None = None, db: Session = Depends(get_db)
+) -> dict[str, Any]:
     root = _dropbox_root()
     domain_keys = [domain_key] if domain_key else _domain_keys(db)
     previews: list[dict[str, Any]] = []
@@ -577,6 +590,8 @@ def routed_context_bundle(
 def run_routed_hygiene(db: Session = Depends(get_db)) -> dict[str, Any]:
     report = RoutedHygieneService(db).run_once()
     return {
+        "self_contacts_suppressed": report.self_contacts_suppressed,
+        "mailbox_contacts_suppressed": report.mailbox_contacts_suppressed,
         "aliases_backfilled": report.aliases_backfilled,
         "organization_identifiers_backfilled": report.organization_identifiers_backfilled,
         "aliases_pruned": report.aliases_pruned,
@@ -614,7 +629,9 @@ def list_calendar_events(
         query = query.where(
             or_(CalendarEvent.recurrence_rule.is_not(None), CalendarEvent.start_at < end_at)
         )
-    events = db.scalars(query.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(limit)).all()
+    events = db.scalars(
+        query.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(limit)
+    ).all()
     calendar = CalendarIntelligenceService(db)
     for event in events:
         calendar.ensure_links(event)
@@ -688,8 +705,16 @@ def update_calendar_event(
     current = db.get(CalendarEvent, event_id)
     if current is None:
         raise HTTPException(status_code=404, detail="Event not found.")
-    proposed_start = _coerce_calendar_datetime(body.updates.get("start_at")) if "start_at" in body.updates else current.start_at
-    proposed_end = _coerce_calendar_datetime(body.updates.get("end_at")) if "end_at" in body.updates else current.end_at
+    proposed_start = (
+        _coerce_calendar_datetime(body.updates.get("start_at"))
+        if "start_at" in body.updates
+        else current.start_at
+    )
+    proposed_end = (
+        _coerce_calendar_datetime(body.updates.get("end_at"))
+        if "end_at" in body.updates
+        else current.end_at
+    )
     proposed_timezone = str(body.updates.get("timezone") or current.timezone)
     item_kind, context_type, scheduling_effect, blocks_time = _calendar_semantics(
         item_kind=body.updates.get("item_kind", current.item_kind),
@@ -812,9 +837,7 @@ def create_todo(
                 timezone=body.recurrence_timezone,
                 estimated_minutes=body.estimated_minutes,
                 owner_type="maestro" if body.agent_task else "user",
-                owner_ref=(
-                    "Maestro" if body.agent_task else get_settings().user_display_name
-                ),
+                owner_ref=("Maestro" if body.agent_task else get_settings().user_display_name),
                 agent_task=body.agent_task,
                 priority=body.priority,
                 source_refs=[],
@@ -1049,7 +1072,11 @@ def list_contact_hydration_jobs(
 ) -> dict[str, Any]:
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     service = ContactHydrationService(db)
-    return {"jobs": [service.job_payload(job) for job in service.list_jobs(domain_id=domain_id, limit=limit)]}
+    return {
+        "jobs": [
+            service.job_payload(job) for job in service.list_jobs(domain_id=domain_id, limit=limit)
+        ]
+    }
 
 
 @router.get("/contact-hydration/jobs/{job_id}")
@@ -1241,7 +1268,9 @@ def list_durable_memory_hygiene_runs(
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    runs = db.scalars(select(MemoryHygieneRun).order_by(MemoryHygieneRun.started_at.desc()).limit(limit)).all()
+    runs = db.scalars(
+        select(MemoryHygieneRun).order_by(MemoryHygieneRun.started_at.desc()).limit(limit)
+    ).all()
     return {"runs": [_memory_hygiene_payload(run) for run in runs]}
 
 
@@ -1253,11 +1282,15 @@ async def import_chatgpt_export(
 ) -> dict[str, Any]:
     filename = Path(file.filename or "conversations.json").name
     if not filename.lower().endswith((".json", ".zip")):
-        raise HTTPException(status_code=400, detail="Upload a ChatGPT export ZIP or conversations.json.")
+        raise HTTPException(
+            status_code=400, detail="Upload a ChatGPT export ZIP or conversations.json."
+        )
     if DomainRepository(db).get_by_key(domain_key) is None:
         raise HTTPException(status_code=404, detail=f"Unknown domain: {domain_key}")
     try:
-        result = ChatGPTExportImporter(db).import_bytes(await file.read(), filename=filename, default_domain_key=domain_key)
+        result = ChatGPTExportImporter(db).import_bytes(
+            await file.read(), filename=filename, default_domain_key=domain_key
+        )
     except (ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result.__dict__
@@ -1327,9 +1360,7 @@ def list_memory_artifacts(
     artifacts = db.scalars(query).all()
     if canonical_only:
         artifacts = [
-            artifact
-            for artifact in artifacts
-            if _artifact_is_canonical_memory_source(artifact)
+            artifact for artifact in artifacts if _artifact_is_canonical_memory_source(artifact)
         ]
     return {"artifacts": [_artifact_payload(db, artifact) for artifact in artifacts[:limit]]}
 
@@ -1499,7 +1530,12 @@ def build_memory_context_bundle(
 def list_memory_sources(limit: int = 20, db: Session = Depends(get_db)) -> dict[str, Any]:
     query = select(SeedPackage).order_by(SeedPackage.created_at.desc()).limit(limit)
     seed_packages = db.scalars(query).all()
-    return {"sources": [_source_payload(db, seed_package, include_generated=False) for seed_package in seed_packages]}
+    return {
+        "sources": [
+            _source_payload(db, seed_package, include_generated=False)
+            for seed_package in seed_packages
+        ]
+    }
 
 
 @router.get("/sources/{source_id}")
@@ -1603,7 +1639,9 @@ def _folder_count(path: Path, *, supported_only: bool = False, pattern: str = "*
         return 0
     paths = [candidate for candidate in path.glob(pattern) if candidate.is_file()]
     if supported_only:
-        return sum(1 for candidate in paths if candidate.suffix.lower() in SUPPORTED_DROPBOX_SUFFIXES)
+        return sum(
+            1 for candidate in paths if candidate.suffix.lower() in SUPPORTED_DROPBOX_SUFFIXES
+        )
     return len(paths)
 
 
@@ -1630,9 +1668,7 @@ def _preview_payload(path: Path, domain_key: str) -> dict[str, Any]:
     result_count = len(results)
     written_count = sum(1 for result in results if result.get("memory_item_id"))
     deduped_count = sum(
-        1
-        for result in results
-        if result.get("outcome") in {"duplicate_skipped", "reinforced"}
+        1 for result in results if result.get("outcome") in {"duplicate_skipped", "reinforced"}
     )
     pending_approval_count = sum(
         1 for result in results if result.get("outcome") == "pending_user_approval"
@@ -1712,7 +1748,9 @@ def _coerce_calendar_datetime(value: Any) -> datetime | None:
         try:
             return _ensure_aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail="Expected an ISO calendar date/time.") from exc
+            raise HTTPException(
+                status_code=422, detail="Expected an ISO calendar date/time."
+            ) from exc
     raise HTTPException(status_code=422, detail="Expected an ISO calendar date/time.")
 
 
@@ -1763,9 +1801,7 @@ def _calendar_semantics(
 
 def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
     series = (
-        db.get(RecurringTodoSeries, todo.recurring_series_id)
-        if todo.recurring_series_id
-        else None
+        db.get(RecurringTodoSeries, todo.recurring_series_id) if todo.recurring_series_id else None
     )
     return {
         "id": str(todo.id),
@@ -1780,9 +1816,7 @@ def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
         "scheduled_start_at": home_isoformat(todo.scheduled_start_at),
         "recurring_series_id": str(todo.recurring_series_id) if todo.recurring_series_id else None,
         "recurrence_original_at": home_isoformat(todo.recurrence_original_at),
-        "recurring_series": (
-            _recurring_todo_series_payload(db, series) if series else None
-        ),
+        "recurring_series": (_recurring_todo_series_payload(db, series) if series else None),
         "agent_task": todo.agent_task,
         "agent_task_status": todo.agent_task_status,
         "workflow_task_id": str(todo.workflow_task_id) if todo.workflow_task_id else None,
@@ -1894,7 +1928,9 @@ def _source_payload(
         "memory_count": len(memories),
         "proposal_count": len(proposals),
         "created_at": seed_package.created_at.isoformat() if seed_package.created_at else None,
-        "processed_at": seed_package.processed_at.isoformat() if seed_package.processed_at else None,
+        "processed_at": seed_package.processed_at.isoformat()
+        if seed_package.processed_at
+        else None,
     }
     if include_generated:
         payload["memories"] = [_memory_item_payload(item) for item in memories]
@@ -1904,11 +1940,7 @@ def _source_payload(
 
 def _items_for_seed_package(db: Session, seed_package_id: uuid.UUID) -> list[MemoryItem]:
     items = db.scalars(select(MemoryItem).order_by(MemoryItem.created_at.desc())).all()
-    return [
-        item
-        for item in items
-        if item.metadata_.get("seed_package_id") == str(seed_package_id)
-    ]
+    return [item for item in items if item.metadata_.get("seed_package_id") == str(seed_package_id)]
 
 
 def _proposals_for_seed_package(db: Session, seed_package_id: uuid.UUID) -> list[MemoryProposal]:

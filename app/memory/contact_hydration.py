@@ -413,7 +413,7 @@ class ContactHydrationService:
             self._finish_scan(job)
 
     def _ingest_message(self, job: ContactHydrationJob, message: dict[str, Any]) -> None:
-        self_addresses = {get_settings().user_email.lower()}
+        self_addresses = get_settings().user_emails
         headers = message.get("headers") if isinstance(message.get("headers"), dict) else {}
         raw_fields = [
             str(message.get("from") or headers.get("from") or ""),
@@ -814,7 +814,8 @@ class ContactHydrationService:
             {
                 "owner": {
                     "name": identity.full_name,
-                    "email": identity.email,
+                    "primary_email": identity.email,
+                    "email_identities": list(identity.emails),
                     "role": "Maestro system owner; never a CRM contact candidate",
                 },
                 "global_context": global_context[:4000],

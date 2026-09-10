@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.identity import is_maestro_user_reference, maestro_user_identity
 from app.db.models import (
     CalendarEvent,
     CalendarEventAttendee,
@@ -28,11 +29,14 @@ from app.db.models import (
     RuntimeSetting,
     Todo,
 )
+from app.memory.contact_identity import is_non_person_mailbox
 from app.memory.routed_resolver import contact_aliases_for
 
 
 @dataclass(frozen=True)
 class RoutedHygieneReport:
+    self_contacts_suppressed: int
+    mailbox_contacts_suppressed: int
     aliases_backfilled: int
     organization_identifiers_backfilled: int
     aliases_pruned: int
@@ -50,6 +54,7 @@ class RoutedHygieneService:
         self.session = session
 
     def run_once(self, *, persist_report: bool = True) -> RoutedHygieneReport:
+        self_contacts_suppressed, mailbox_contacts_suppressed = self.suppress_non_contacts()
         display_fields_canonicalized = self.canonicalize_display_fields()
         aliases_pruned = self.prune_unsubstantiated_contact_aliases()
         aliases_backfilled = self.backfill_contact_aliases()
@@ -61,6 +66,8 @@ class RoutedHygieneService:
             *self.todo_duplicate_suggestions(),
         ]
         report = RoutedHygieneReport(
+            self_contacts_suppressed=self_contacts_suppressed,
+            mailbox_contacts_suppressed=mailbox_contacts_suppressed,
             aliases_backfilled=aliases_backfilled,
             organization_identifiers_backfilled=organization_identifiers_backfilled,
             aliases_pruned=aliases_pruned,
@@ -71,6 +78,8 @@ class RoutedHygieneService:
         if persist_report:
             setting = self.session.get(RuntimeSetting, self.SETTING_KEY)
             payload = {
+                "self_contacts_suppressed": self_contacts_suppressed,
+                "mailbox_contacts_suppressed": mailbox_contacts_suppressed,
                 "aliases_backfilled": aliases_backfilled,
                 "organization_identifiers_backfilled": organization_identifiers_backfilled,
                 "aliases_pruned": aliases_pruned,
@@ -85,6 +94,127 @@ class RoutedHygieneService:
                 setting.value = payload
             self.session.commit()
         return report
+
+    def suppress_non_contacts(self) -> tuple[int, int]:
+        """Archive owner and attendee-created mailbox records while preserving event evidence."""
+
+        self_count = 0
+        mailbox_count = 0
+        contacts = list(self.session.scalars(select(Contact).where(Contact.status != "archived")))
+        for contact in contacts:
+            email = (contact.email or "").strip().lower()
+            if is_maestro_user_reference(name=contact.name, email=email):
+                self._archive_non_contact(contact, reason="maestro_user")
+                self_count += 1
+                continue
+            if (contact.metadata_ or {}).get("created_from_attendee") and is_non_person_mailbox(
+                contact.name,
+                email,
+            ):
+                self._archive_non_contact(contact, reason="group_mailbox")
+                mailbox_count += 1
+        if self_count or mailbox_count:
+            self.session.commit()
+        return self_count, mailbox_count
+
+    def _archive_non_contact(self, contact: Contact, *, reason: str) -> None:
+        from app.memory.routed_service import _merge_source_refs
+
+        is_user = reason == "maestro_user"
+        identity = maestro_user_identity()
+        for event in self.session.scalars(select(CalendarEvent)).all():
+            changed = False
+            updated: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for attendee in event.attendees or []:
+                if not isinstance(attendee, dict):
+                    continue
+                next_attendee = dict(attendee)
+                if str(next_attendee.get("contact_id") or "") == str(contact.id):
+                    next_attendee.pop("contact_id", None)
+                    if is_user:
+                        next_attendee.update(
+                            {
+                                "name": identity.full_name,
+                                "is_user": True,
+                                "identity": "maestro_user",
+                            }
+                        )
+                    else:
+                        next_attendee["contact_relevance"] = "group_mailbox"
+                    changed = True
+                attendee_key = (
+                    "maestro_user"
+                    if next_attendee.get("is_user")
+                    else str(next_attendee.get("email") or next_attendee.get("name") or "").lower()
+                )
+                if attendee_key and attendee_key in seen:
+                    changed = True
+                    continue
+                if attendee_key:
+                    seen.add(attendee_key)
+                updated.append(next_attendee)
+            if changed:
+                event.attendees = updated
+
+        attendee_rows = list(
+            self.session.scalars(
+                select(CalendarEventAttendee).where(CalendarEventAttendee.contact_id == contact.id)
+            )
+        )
+        for attendee in attendee_rows:
+            desired_identity = (
+                "maestro_user"
+                if is_user
+                else (
+                    f"email:{attendee.email.strip().lower()}"
+                    if attendee.email
+                    else f"name:{_normalize(attendee.name)}"
+                )
+            )
+            existing = self.session.scalar(
+                select(CalendarEventAttendee).where(
+                    CalendarEventAttendee.event_id == attendee.event_id,
+                    CalendarEventAttendee.normalized_identity == desired_identity,
+                    CalendarEventAttendee.id != attendee.id,
+                )
+            )
+            if existing is not None:
+                existing.source_refs = _merge_source_refs(
+                    existing.source_refs, attendee.source_refs
+                )
+                existing.metadata_ = _merge_metadata(existing.metadata_, attendee.metadata_)
+                existing.is_organizer = existing.is_organizer or attendee.is_organizer
+                existing.is_user = existing.is_user or is_user
+                self.session.delete(attendee)
+                continue
+            attendee.contact_id = None
+            attendee.normalized_identity = desired_identity
+            attendee.metadata_ = {
+                **(attendee.metadata_ or {}),
+                "contact_suppression": reason,
+            }
+            if is_user:
+                attendee.name = identity.full_name
+                attendee.is_user = True
+
+        contact.status = "archived"
+        contact.metadata_ = {
+            **(contact.metadata_ or {}),
+            "suppressed_by_hygiene": True,
+            "suppression_reason": reason,
+            "suppressed_at": datetime.now(UTC).isoformat(),
+        }
+        self.session.add(
+            RoutedObjectChangeLog(
+                object_type="contact",
+                object_id=contact.id,
+                action="suppressed_non_contact",
+                changes={"reason": reason},
+                source_refs=contact.source_refs,
+                metadata_={"hygiene": True},
+            )
+        )
 
     def merge_high_confidence_duplicates(self) -> int:
         merged = 0
@@ -118,7 +248,9 @@ class RoutedHygieneService:
         survivor.summary = _append_note(survivor.summary, duplicate.summary or "")
         survivor.website = survivor.website or duplicate.website
         survivor.source_refs = _merge_source_refs(survivor.source_refs, duplicate.source_refs)
-        survivor.metadata_ = _merge_metadata(survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id)
+        survivor.metadata_ = _merge_metadata(
+            survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id
+        )
         for contact in self.session.scalars(
             select(Contact).where(Contact.organization_entity_id == duplicate.id)
         ):
@@ -139,7 +271,9 @@ class RoutedHygieneService:
             if existing is None:
                 affiliation.entity_id = survivor.id
             else:
-                existing.source_refs = _merge_source_refs(existing.source_refs, affiliation.source_refs)
+                existing.source_refs = _merge_source_refs(
+                    existing.source_refs, affiliation.source_refs
+                )
                 existing.metadata_ = _merge_metadata(existing.metadata_, affiliation.metadata_)
                 self.session.delete(affiliation)
         for note in self.session.scalars(
@@ -155,7 +289,10 @@ class RoutedHygieneService:
                 note.entity_id = survivor.id
             else:
                 existing.notes = _append_note(existing.notes, note.notes or "")
-                existing.interaction_log = [*(existing.interaction_log or []), *(note.interaction_log or [])]
+                existing.interaction_log = [
+                    *(existing.interaction_log or []),
+                    *(note.interaction_log or []),
+                ]
                 existing.source_refs = _merge_source_refs(existing.source_refs, note.source_refs)
                 existing.metadata_ = _merge_metadata(existing.metadata_, note.metadata_)
                 self.session.delete(note)
@@ -185,7 +322,9 @@ class RoutedHygieneService:
             else:
                 self.session.delete(identifier)
         for link in self.session.scalars(
-            select(CalendarEventOrganization).where(CalendarEventOrganization.entity_id == duplicate.id)
+            select(CalendarEventOrganization).where(
+                CalendarEventOrganization.entity_id == duplicate.id
+            )
         ):
             existing = self.session.scalar(
                 select(CalendarEventOrganization).where(
@@ -207,7 +346,9 @@ class RoutedHygieneService:
             )
         )
         for relationship in relationships:
-            next_entity_id = survivor.id if relationship.entity_id == duplicate.id else relationship.entity_id
+            next_entity_id = (
+                survivor.id if relationship.entity_id == duplicate.id else relationship.entity_id
+            )
             next_related_id = (
                 survivor.id
                 if relationship.related_entity_id == duplicate.id
@@ -227,7 +368,9 @@ class RoutedHygieneService:
             )
             if existing is not None:
                 existing.description = existing.description or relationship.description
-                existing.source_refs = _merge_source_refs(existing.source_refs, relationship.source_refs)
+                existing.source_refs = _merge_source_refs(
+                    existing.source_refs, relationship.source_refs
+                )
                 existing.metadata_ = _merge_metadata(existing.metadata_, relationship.metadata_)
                 self.session.delete(relationship)
                 continue
@@ -326,10 +469,7 @@ class RoutedHygieneService:
 
     def prune_unsubstantiated_contact_aliases(self) -> int:
         count = 0
-        contacts = {
-            contact.id: contact
-            for contact in self.session.scalars(select(Contact)).all()
-        }
+        contacts = {contact.id: contact for contact in self.session.scalars(select(Contact)).all()}
         for alias in self.session.scalars(select(ContactAlias)).all():
             contact = contacts.get(alias.contact_id)
             if contact is None:
@@ -473,8 +613,7 @@ class RoutedHygieneService:
             contacts,
             key=lambda item: (
                 0
-                if item.email
-                and item.email.strip().lower() == _contact_email_identity(item)
+                if item.email and item.email.strip().lower() == _contact_email_identity(item)
                 else 1,
                 0 if "@" not in item.name else 1,
                 item.created_at or datetime.now(UTC),
@@ -498,7 +637,11 @@ class RoutedHygieneService:
             if matched_key.startswith("name:"):
                 survivor_emails = set(_contact_email_identities(survivor))
                 contact_emails = set(email_identities)
-                if survivor_emails and contact_emails and survivor_emails.isdisjoint(contact_emails):
+                if (
+                    survivor_emails
+                    and contact_emails
+                    and survivor_emails.isdisjoint(contact_emails)
+                ):
                     for key in keys:
                         if key.startswith("email:"):
                             by_key.setdefault(key, contact)
@@ -511,7 +654,9 @@ class RoutedHygieneService:
         return merged
 
     def _merge_duplicate_events(self) -> int:
-        events = list(self.session.scalars(select(CalendarEvent).where(CalendarEvent.status != "archived")))
+        events = list(
+            self.session.scalars(select(CalendarEvent).where(CalendarEvent.status != "archived"))
+        )
         merged = 0
         by_key: dict[str, CalendarEvent] = {}
         for event in sorted(events, key=lambda item: item.created_at or datetime.now(UTC)):
@@ -527,7 +672,9 @@ class RoutedHygieneService:
         return merged
 
     def _merge_duplicate_todos(self) -> int:
-        todos = list(self.session.scalars(select(Todo).where(Todo.status.notin_(["done", "archived"]))))
+        todos = list(
+            self.session.scalars(select(Todo).where(Todo.status.notin_(["done", "archived"])))
+        )
         merged = 0
         by_key: dict[str, Todo] = {}
         for todo in sorted(todos, key=lambda item: item.created_at or datetime.now(UTC)):
@@ -550,7 +697,9 @@ class RoutedHygieneService:
         self._preserve_contact_merge_alias(survivor, duplicate)
         survivor.summary = _append_note(survivor.summary, duplicate.summary or "")
         survivor.source_refs = _merge_source_refs(survivor.source_refs, duplicate.source_refs)
-        survivor.metadata_ = _merge_metadata(survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id)
+        survivor.metadata_ = _merge_metadata(
+            survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id
+        )
         alternate_emails = {
             *(survivor.metadata_ or {}).get("alternate_emails", []),
             *_contact_email_identities(survivor),
@@ -559,13 +708,17 @@ class RoutedHygieneService:
         survivor.metadata_ = {
             **(survivor.metadata_ or {}),
             "alternate_emails": sorted(
-                value for value in alternate_emails if value and value != (survivor.email or "").lower()
+                value
+                for value in alternate_emails
+                if value and value != (survivor.email or "").lower()
             ),
         }
         survivor.phone = survivor.phone or duplicate.phone
         survivor.email = survivor.email or duplicate.email
         survivor.linkedin = survivor.linkedin or duplicate.linkedin
-        survivor.organization_entity_id = survivor.organization_entity_id or duplicate.organization_entity_id
+        survivor.organization_entity_id = (
+            survivor.organization_entity_id or duplicate.organization_entity_id
+        )
         survivor.origination = survivor.origination or duplicate.origination
         survivor.last_contact_at = max(
             [value for value in (survivor.last_contact_at, duplicate.last_contact_at) if value],
@@ -631,13 +784,18 @@ class RoutedHygieneService:
                 keeper.email = keeper.email or attendee.email
                 keeper.is_organizer = keeper.is_organizer or attendee.is_organizer
                 keeper.is_user = keeper.is_user or attendee.is_user
-                if keeper.response_status == "needs_action" and attendee.response_status != "needs_action":
+                if (
+                    keeper.response_status == "needs_action"
+                    and attendee.response_status != "needs_action"
+                ):
                     keeper.response_status = attendee.response_status
                 self.session.delete(attendee)
             keeper.contact_id = survivor.id
             keeper.name = survivor.name
             keeper.normalized_identity = survivor_identity
-        for alias in self.session.scalars(select(ContactAlias).where(ContactAlias.contact_id == duplicate.id)):
+        for alias in self.session.scalars(
+            select(ContactAlias).where(ContactAlias.contact_id == duplicate.id)
+        ):
             existing = self.session.scalar(
                 select(ContactAlias).where(ContactAlias.normalized_alias == alias.normalized_alias)
             )
@@ -647,7 +805,9 @@ class RoutedHygieneService:
                 alias.source_refs = _merge_source_refs(existing.source_refs, alias.source_refs)
                 alias.metadata_ = _merge_metadata(existing.metadata_, alias.metadata_)
                 self.session.delete(alias)
-        for note in self.session.scalars(select(ContactDomainNote).where(ContactDomainNote.contact_id == duplicate.id)):
+        for note in self.session.scalars(
+            select(ContactDomainNote).where(ContactDomainNote.contact_id == duplicate.id)
+        ):
             existing = self.session.scalar(
                 select(ContactDomainNote).where(
                     ContactDomainNote.contact_id == survivor.id,
@@ -658,7 +818,10 @@ class RoutedHygieneService:
                 note.contact_id = survivor.id
             else:
                 existing.notes = _append_note(existing.notes, note.notes or "")
-                existing.interaction_log = [*(existing.interaction_log or []), *(note.interaction_log or [])]
+                existing.interaction_log = [
+                    *(existing.interaction_log or []),
+                    *(note.interaction_log or []),
+                ]
                 existing.source_refs = _merge_source_refs(existing.source_refs, note.source_refs)
                 existing.metadata_ = _merge_metadata(existing.metadata_, note.metadata_)
                 self.session.delete(note)
@@ -685,7 +848,9 @@ class RoutedHygieneService:
                 )
             if existing is not None:
                 existing.summary = _append_note(existing.summary, interaction.summary)
-                existing.source_refs = _merge_source_refs(existing.source_refs, interaction.source_refs)
+                existing.source_refs = _merge_source_refs(
+                    existing.source_refs, interaction.source_refs
+                )
                 self.session.delete(interaction)
             else:
                 interaction.contact_id = survivor.id
@@ -705,7 +870,9 @@ class RoutedHygieneService:
             if existing is None:
                 affiliation.contact_id = survivor.id
             else:
-                existing.source_refs = _merge_source_refs(existing.source_refs, affiliation.source_refs)
+                existing.source_refs = _merge_source_refs(
+                    existing.source_refs, affiliation.source_refs
+                )
                 existing.metadata_ = _merge_metadata(existing.metadata_, affiliation.metadata_)
                 self.session.delete(affiliation)
         for embedding in self.session.scalars(
@@ -790,9 +957,13 @@ class RoutedHygieneService:
         survivor.end_at = survivor.end_at or duplicate.end_at
         survivor.location = survivor.location or duplicate.location
         survivor.attendees = _merge_attendees(survivor.attendees, duplicate.attendees)
-        survivor.supporting_refs = _merge_source_refs(survivor.supporting_refs, duplicate.supporting_refs)
+        survivor.supporting_refs = _merge_source_refs(
+            survivor.supporting_refs, duplicate.supporting_refs
+        )
         survivor.source_refs = _merge_source_refs(survivor.source_refs, duplicate.source_refs)
-        survivor.metadata_ = _merge_metadata(survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id)
+        survivor.metadata_ = _merge_metadata(
+            survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id
+        )
         for attendee in self.session.scalars(
             select(CalendarEventAttendee).where(CalendarEventAttendee.event_id == duplicate.id)
         ):
@@ -807,7 +978,9 @@ class RoutedHygieneService:
             else:
                 self.session.delete(attendee)
         for organization in self.session.scalars(
-            select(CalendarEventOrganization).where(CalendarEventOrganization.event_id == duplicate.id)
+            select(CalendarEventOrganization).where(
+                CalendarEventOrganization.event_id == duplicate.id
+            )
         ):
             existing = self.session.scalar(
                 select(CalendarEventOrganization).where(
@@ -833,7 +1006,9 @@ class RoutedHygieneService:
                 interaction.calendar_event_id = survivor.id
             else:
                 existing.summary = _append_note(existing.summary, interaction.summary)
-                existing.source_refs = _merge_source_refs(existing.source_refs, interaction.source_refs)
+                existing.source_refs = _merge_source_refs(
+                    existing.source_refs, interaction.source_refs
+                )
                 self.session.delete(interaction)
         self._finalize_merge("event", survivor.id, duplicate)
 
@@ -844,7 +1019,9 @@ class RoutedHygieneService:
         survivor.due_at = survivor.due_at or duplicate.due_at
         survivor.owner_ref = survivor.owner_ref or duplicate.owner_ref
         survivor.source_refs = _merge_source_refs(survivor.source_refs, duplicate.source_refs)
-        survivor.metadata_ = _merge_metadata(survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id)
+        survivor.metadata_ = _merge_metadata(
+            survivor.metadata_, duplicate.metadata_, duplicate_id=duplicate.id
+        )
         if _priority_rank(duplicate.priority) > _priority_rank(survivor.priority):
             survivor.priority = duplicate.priority
         self._finalize_merge("todo", survivor.id, duplicate)
@@ -889,38 +1066,54 @@ class RoutedHygieneService:
         contacts = list(self.session.scalars(select(Contact).where(Contact.status != "archived")))
         suggestions: list[dict[str, Any]] = []
         for index, left in enumerate(contacts):
-            for right in contacts[index + 1:]:
+            for right in contacts[index + 1 :]:
                 if left.email and right.email and left.email == right.email:
-                    suggestions.append(_suggestion("contact", left.id, right.id, 0.99, "same_email"))
+                    suggestions.append(
+                        _suggestion("contact", left.id, right.id, 0.99, "same_email")
+                    )
                 elif _normalize(left.name) == _normalize(right.name):
                     suggestions.append(_suggestion("contact", left.id, right.id, 0.92, "same_name"))
         return suggestions
 
     def event_duplicate_suggestions(self) -> list[dict[str, Any]]:
-        events = list(self.session.scalars(select(CalendarEvent).where(CalendarEvent.status != "archived")))
+        events = list(
+            self.session.scalars(select(CalendarEvent).where(CalendarEvent.status != "archived"))
+        )
         suggestions: list[dict[str, Any]] = []
         for index, left in enumerate(events):
-            for right in events[index + 1:]:
-                if left.domain_id == right.domain_id and _normalize(left.title) == _normalize(right.title):
+            for right in events[index + 1 :]:
+                if left.domain_id == right.domain_id and _normalize(left.title) == _normalize(
+                    right.title
+                ):
                     if left.start_at and right.start_at and left.start_at == right.start_at:
-                        suggestions.append(_suggestion("event", left.id, right.id, 0.95, "same_title_time"))
+                        suggestions.append(
+                            _suggestion("event", left.id, right.id, 0.95, "same_title_time")
+                        )
                     elif (left.summary or "") == (right.summary or ""):
-                        suggestions.append(_suggestion("event", left.id, right.id, 0.86, "same_title_summary"))
+                        suggestions.append(
+                            _suggestion("event", left.id, right.id, 0.86, "same_title_summary")
+                        )
         return suggestions
 
     def todo_duplicate_suggestions(self) -> list[dict[str, Any]]:
-        todos = list(self.session.scalars(select(Todo).where(Todo.status.notin_(["done", "archived"]))))
+        todos = list(
+            self.session.scalars(select(Todo).where(Todo.status.notin_(["done", "archived"])))
+        )
         suggestions: list[dict[str, Any]] = []
         for index, left in enumerate(todos):
-            for right in todos[index + 1:]:
+            for right in todos[index + 1 :]:
                 if left.recurring_series_id or right.recurring_series_id:
                     continue
-                if left.domain_id == right.domain_id and _normalize(left.title) == _normalize(right.title):
+                if left.domain_id == right.domain_id and _normalize(left.title) == _normalize(
+                    right.title
+                ):
                     suggestions.append(_suggestion("todo", left.id, right.id, 0.88, "same_title"))
         return suggestions
 
 
-def _suggestion(object_type: str, left_id: uuid.UUID, right_id: uuid.UUID, score: float, reason: str) -> dict[str, Any]:
+def _suggestion(
+    object_type: str, left_id: uuid.UUID, right_id: uuid.UUID, score: float, reason: str
+) -> dict[str, Any]:
     return {
         "object_type": object_type,
         "left_id": str(left_id),
@@ -976,8 +1169,18 @@ def _normalize(value: str | None) -> str:
 def _organization_merge_name(value: str | None) -> str:
     parts = _normalize(value).split()
     suffixes = {
-        "co", "company", "corp", "corporation", "inc", "incorporated", "llc", "llp",
-        "limited", "ltd", "pllc", "the",
+        "co",
+        "company",
+        "corp",
+        "corporation",
+        "inc",
+        "incorporated",
+        "llc",
+        "llp",
+        "limited",
+        "ltd",
+        "pllc",
+        "the",
     }
     while parts and parts[-1] in suffixes:
         parts.pop()
