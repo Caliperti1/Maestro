@@ -594,22 +594,48 @@ class RoutedHygieneService:
                 updated_attendees.append(next_attendee)
             if changed:
                 event.attendees = updated_attendees
-        for attendee in self.session.scalars(
-            select(CalendarEventAttendee).where(CalendarEventAttendee.contact_id == duplicate.id)
-        ):
-            survivor_identity = f"contact:{survivor.id}"
-            existing = self.session.scalar(
+        survivor_identity = f"contact:{survivor.id}"
+        attendee_rows = list(
+            self.session.scalars(
                 select(CalendarEventAttendee).where(
-                    CalendarEventAttendee.event_id == attendee.event_id,
-                    CalendarEventAttendee.normalized_identity == survivor_identity,
+                    (CalendarEventAttendee.contact_id == duplicate.id)
+                    | (CalendarEventAttendee.contact_id == survivor.id)
+                    | (CalendarEventAttendee.normalized_identity == survivor_identity)
                 )
             )
-            if existing is not None:
+        )
+        attendees_by_event: dict[uuid.UUID, list[CalendarEventAttendee]] = {}
+        for attendee in attendee_rows:
+            attendees_by_event.setdefault(attendee.event_id, []).append(attendee)
+        for attendees in attendees_by_event.values():
+            duplicate_attendees = [
+                attendee for attendee in attendees if attendee.contact_id == duplicate.id
+            ]
+            if not duplicate_attendees:
+                continue
+            keeper = next(
+                (
+                    attendee
+                    for attendee in attendees
+                    if attendee.normalized_identity == survivor_identity
+                    or attendee.contact_id == survivor.id
+                ),
+                duplicate_attendees[0],
+            )
+            for attendee in attendees:
+                if attendee.id == keeper.id:
+                    continue
+                keeper.source_refs = _merge_source_refs(keeper.source_refs, attendee.source_refs)
+                keeper.metadata_ = _merge_metadata(keeper.metadata_, attendee.metadata_)
+                keeper.email = keeper.email or attendee.email
+                keeper.is_organizer = keeper.is_organizer or attendee.is_organizer
+                keeper.is_user = keeper.is_user or attendee.is_user
+                if keeper.response_status == "needs_action" and attendee.response_status != "needs_action":
+                    keeper.response_status = attendee.response_status
                 self.session.delete(attendee)
-            else:
-                attendee.contact_id = survivor.id
-                attendee.name = survivor.name
-                attendee.normalized_identity = survivor_identity
+            keeper.contact_id = survivor.id
+            keeper.name = survivor.name
+            keeper.normalized_identity = survivor_identity
         for alias in self.session.scalars(select(ContactAlias).where(ContactAlias.contact_id == duplicate.id)):
             existing = self.session.scalar(
                 select(ContactAlias).where(ContactAlias.normalized_alias == alias.normalized_alias)
