@@ -14,7 +14,10 @@ class Settings(BaseSettings):
     user_display_name: str = "Chris"
     user_full_name: str = "Chris Aliperti"
     user_email: str = "chris.aliperti@praxis-defense.com"
-    user_email_aliases: str = "chris@perti.io"
+    user_name_aliases: str = "Christopher Aliperti"
+    user_email_aliases: str = (
+        "chris@perti.io,christopher.aliperti@gmail.com,christopher.aliperti@westpoint.edu"
+    )
     app_host: str = "0.0.0.0"
     app_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     frontend_origin: str = "http://localhost:5174"
@@ -128,7 +131,9 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        origins = [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+        origins = [
+            origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()
+        ]
         if self.tailscale_frontend_origin and self.tailscale_frontend_origin not in origins:
             origins.append(self.tailscale_frontend_origin)
         return origins
@@ -139,6 +144,14 @@ class Settings(BaseSettings):
             address.strip().lower()
             for address in (self.user_email, *self.user_email_aliases.split(","))
             if address.strip()
+        }
+
+    @property
+    def user_names(self) -> set[str]:
+        return {
+            name.strip()
+            for name in (self.user_full_name, *self.user_name_aliases.split(","))
+            if name.strip()
         }
 
 

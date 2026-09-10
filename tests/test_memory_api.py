@@ -1013,6 +1013,30 @@ def test_event_group_address_is_not_promoted_to_contact(session: Session) -> Non
     ]
 
 
+def test_west_point_all_mailbox_is_not_promoted_to_contact(session: Session) -> None:
+    seed_default_domains(session)
+    usma = DomainRepository(session).get_by_key("usma")
+    assert usma is not None
+    routed_item = RoutedItem(
+        domain_id=usma.id,
+        route_type="event",
+        title="Military Academy Executive update",
+        content="Recurring USMA update.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "usma_outlook", "id": "mae-all"}],
+        metadata_={"attendees": [{"name": "MAE All", "email": "mae.all@westpoint.edu"}]},
+    )
+    session.add(routed_item)
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([routed_item])
+
+    event = session.query(CalendarEvent).one()
+    assert session.query(Contact).count() == 0
+    assert event.attendees == [{"name": "MAE All", "email": "mae.all@westpoint.edu"}]
+
+
 def test_contact_alias_edit_merges_empty_placeholder_and_relinks_events(
     session: Session,
     tmp_path: Path,
@@ -1890,9 +1914,10 @@ def test_routed_hygiene_merges_high_confidence_duplicates(
     events = session.query(CalendarEvent).all()
     todos = session.query(Todo).all()
     assert len([contact for contact in contacts if contact.status != "archived"]) == 1
-    assert "Second note" in next(
-        contact for contact in contacts if contact.status != "archived"
-    ).summary
+    assert (
+        "Second note"
+        in next(contact for contact in contacts if contact.status != "archived").summary
+    )
     assert len([event for event in events if event.status != "archived"]) == 1
     assert len([todo for todo in todos if todo.status != "archived"]) == 1
     assert (
@@ -1990,6 +2015,109 @@ def test_routed_hygiene_consolidates_duplicate_contact_attendees(
         "attendee-two",
         "attendee-three",
     }
+
+
+def test_routed_hygiene_suppresses_owner_and_group_contacts_but_keeps_event_evidence(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    usma = DomainRepository(session).get_by_key("usma")
+    assert usma is not None
+    owner = Contact(
+        name="Christopher Aliperti",
+        normalized_name="christopher aliperti",
+        email="christopher.aliperti@westpoint.edu",
+        scheduled_event_ids=[],
+        source_refs=[{"id": "owner-source"}],
+        provenance={},
+        metadata_={"created_from_attendee": True},
+    )
+    mailbox = Contact(
+        name="MAE All",
+        normalized_name="mae all",
+        email="mae.all@westpoint.edu",
+        scheduled_event_ids=[],
+        source_refs=[{"id": "mailbox-source"}],
+        provenance={},
+        metadata_={"created_from_attendee": True},
+    )
+    event = CalendarEvent(
+        domain_id=usma.id,
+        title="USMA update",
+        attendees=[],
+        source_refs=[],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([owner, mailbox, event])
+    session.flush()
+    event.attendees = [
+        {
+            "name": owner.name,
+            "email": owner.email,
+            "contact_id": str(owner.id),
+        },
+        {
+            "name": mailbox.name,
+            "email": mailbox.email,
+            "contact_id": str(mailbox.id),
+        },
+    ]
+    session.add_all(
+        [
+            CalendarEventAttendee(
+                event_id=event.id,
+                contact_id=owner.id,
+                name=owner.name,
+                email=owner.email,
+                normalized_identity=f"contact:{owner.id}",
+                source_refs=[{"id": "owner-attendee"}],
+                metadata_={},
+            ),
+            CalendarEventAttendee(
+                event_id=event.id,
+                contact_id=mailbox.id,
+                name=mailbox.name,
+                email=mailbox.email,
+                normalized_identity=f"contact:{mailbox.id}",
+                source_refs=[{"id": "mailbox-attendee"}],
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+
+    assert report.self_contacts_suppressed == 1
+    assert report.mailbox_contacts_suppressed == 1
+    assert owner.status == "archived"
+    assert mailbox.status == "archived"
+    session.refresh(event)
+    assert event.attendees == [
+        {
+            "name": "Chris Aliperti",
+            "email": "christopher.aliperti@westpoint.edu",
+            "is_user": True,
+            "identity": "maestro_user",
+        },
+        {
+            "name": "MAE All",
+            "email": "mae.all@westpoint.edu",
+            "contact_relevance": "group_mailbox",
+        },
+    ]
+    attendee_rows = list(
+        session.scalars(
+            select(CalendarEventAttendee).where(CalendarEventAttendee.event_id == event.id)
+        )
+    )
+    assert {row.normalized_identity for row in attendee_rows} == {
+        "maestro_user",
+        "email:mae.all@westpoint.edu",
+    }
+    assert all(row.contact_id is None for row in attendee_rows)
+    assert next(row for row in attendee_rows if row.is_user).name == "Chris Aliperti"
 
 
 def test_archive_memory_item_endpoint_hides_from_default_list(
@@ -2448,9 +2576,7 @@ def test_event_work_links_are_bidirectional_and_updatable(
     assert updated.status_code == 200
     assert updated.json()["link"]["relationship_type"] == "during"
 
-    removed = client.delete(
-        f"/memory/routed-objects/events/{event.id}/work-links/{link_id}"
-    )
+    removed = client.delete(f"/memory/routed-objects/events/{event.id}/work-links/{link_id}")
     assert removed.status_code == 200
     assert session.query(CalendarEventWorkLink).count() == 1
 

@@ -13,13 +13,17 @@ relationships such as `assistant_to`, `owns`, `founded`, `professional_context`,
 The initial seed records:
 
 - Chris Aliperti is Maestro's user and principal.
+- Chris's configured names and email addresses are aliases of that one principal, never separate
+  CRM contacts.
 - Maestro is Chris's system-level assistant.
 - Praxis Defense is Chris's company.
 - Chris started Perti Laboratories.
 - USMA is a professional and academic context connected to Chris, without inventing a job title.
 
 Seeding is additive. It creates missing records and canonical organization links but does not
-overwrite later user edits.
+overwrite later user edits. Verified owner aliases come from `USER_NAME_ALIASES` and
+`USER_EMAIL_ALIASES`; startup adds newly configured aliases to the authoritative node without
+discarding aliases already stored there.
 
 ## Prompt Use
 
@@ -40,3 +44,6 @@ GET /maestro/identity-graph?domain_key=praxis
 
 This graph is authoritative grounding, not a replacement for durable memory. Detailed project and
 relationship knowledge still belongs in memory, routed objects, reports, and source evidence.
+Contact ingestion, event attendee linking, and routed hygiene all use the same owner identity.
+Hygiene archives any legacy owner contact and preserves the underlying attendee/source evidence as
+an explicit Maestro-user identity instead.
