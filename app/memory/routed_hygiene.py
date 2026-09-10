@@ -504,6 +504,7 @@ class RoutedHygieneService:
                             by_key.setdefault(key, contact)
                     continue
             self._merge_contact(survivor, contact)
+            self.session.flush()
             merged += 1
             for key in keys:
                 by_key[key] = survivor

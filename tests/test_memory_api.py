@@ -1924,6 +1924,13 @@ def test_routed_hygiene_consolidates_duplicate_contact_attendees(
         provenance={},
         metadata_={},
     )
+    second_duplicate = Contact(
+        name="Will Sitze",
+        normalized_name="will sitze",
+        source_refs=[{"id": "contact-three"}],
+        provenance={},
+        metadata_={},
+    )
     event = CalendarEvent(
         domain_id=praxis.id,
         title="Partner sync",
@@ -1932,7 +1939,7 @@ def test_routed_hygiene_consolidates_duplicate_contact_attendees(
         provenance={},
         metadata_={},
     )
-    session.add_all([survivor, duplicate, event])
+    session.add_all([survivor, duplicate, second_duplicate, event])
     session.flush()
     session.add_all(
         [
@@ -1954,13 +1961,21 @@ def test_routed_hygiene_consolidates_duplicate_contact_attendees(
                 source_refs=[{"id": "attendee-two"}],
                 metadata_={},
             ),
+            CalendarEventAttendee(
+                event_id=event.id,
+                contact_id=second_duplicate.id,
+                name="W. Sitze",
+                normalized_identity="name:w sitze",
+                source_refs=[{"id": "attendee-three"}],
+                metadata_={},
+            ),
         ]
     )
     session.commit()
 
     report = RoutedHygieneService(session).run_once()
 
-    assert report.duplicates_merged == 1
+    assert report.duplicates_merged == 2
     attendees = list(
         session.scalars(
             select(CalendarEventAttendee).where(CalendarEventAttendee.event_id == event.id)
@@ -1973,6 +1988,7 @@ def test_routed_hygiene_consolidates_duplicate_contact_attendees(
     assert {item["id"] for item in attendees[0].source_refs} == {
         "attendee-one",
         "attendee-two",
+        "attendee-three",
     }
 
 
