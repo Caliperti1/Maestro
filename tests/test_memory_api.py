@@ -984,6 +984,35 @@ def test_event_attendees_keep_user_identity_out_of_contacts(session: Session) ->
     }
 
 
+def test_event_group_address_is_not_promoted_to_contact(session: Session) -> None:
+    seed_default_domains(session)
+    usma = DomainRepository(session).get_by_key("usma")
+    assert usma is not None
+    routed_item = RoutedItem(
+        domain_id=usma.id,
+        route_type="event",
+        title="Army Innovation Network monthly meeting",
+        content="Army Innovation Network monthly meeting.",
+        priority="normal",
+        status="open",
+        source_refs=[{"type": "usma_outlook", "id": "group-attendee"}],
+        metadata_={"attendees": [{"value": "ArmyInnovationNetwork@army.mil"}]},
+    )
+    session.add(routed_item)
+    session.commit()
+
+    RoutedMemoryService(session).promote_items([routed_item])
+
+    event = session.query(CalendarEvent).one()
+    assert session.query(Contact).count() == 0
+    assert event.attendees == [
+        {
+            "name": "ArmyInnovationNetwork@army.mil",
+            "email": "armyinnovationnetwork@army.mil",
+        }
+    ]
+
+
 def test_contact_alias_edit_merges_empty_placeholder_and_relinks_events(
     session: Session,
     tmp_path: Path,
@@ -1872,6 +1901,79 @@ def test_routed_hygiene_merges_high_confidence_duplicates(
     assert (
         "Second todo note" in next(todo for todo in todos if todo.status != "archived").description
     )
+
+
+def test_routed_hygiene_consolidates_duplicate_contact_attendees(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    survivor = Contact(
+        name="Will Sitze",
+        normalized_name="will sitze",
+        email="will.sitze@example.com",
+        source_refs=[{"id": "contact-one"}],
+        provenance={},
+        metadata_={},
+    )
+    duplicate = Contact(
+        name="Will Sitze",
+        normalized_name="will sitze",
+        source_refs=[{"id": "contact-two"}],
+        provenance={},
+        metadata_={},
+    )
+    event = CalendarEvent(
+        domain_id=praxis.id,
+        title="Partner sync",
+        start_at=datetime(2026, 7, 10, 16, 0, tzinfo=UTC),
+        source_refs=[{"id": "event-one"}],
+        provenance={},
+        metadata_={},
+    )
+    session.add_all([survivor, duplicate, event])
+    session.flush()
+    session.add_all(
+        [
+            CalendarEventAttendee(
+                event_id=event.id,
+                contact_id=duplicate.id,
+                name="Will Sitze",
+                email="will.sitze@example.com",
+                normalized_identity="email:will.sitze@example.com",
+                response_status="accepted",
+                source_refs=[{"id": "attendee-one"}],
+                metadata_={},
+            ),
+            CalendarEventAttendee(
+                event_id=event.id,
+                contact_id=duplicate.id,
+                name="William Sitze",
+                normalized_identity="name:william sitze",
+                source_refs=[{"id": "attendee-two"}],
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+
+    assert report.duplicates_merged == 1
+    attendees = list(
+        session.scalars(
+            select(CalendarEventAttendee).where(CalendarEventAttendee.event_id == event.id)
+        )
+    )
+    assert len(attendees) == 1
+    assert attendees[0].contact_id == survivor.id
+    assert attendees[0].normalized_identity == f"contact:{survivor.id}"
+    assert attendees[0].response_status == "accepted"
+    assert {item["id"] for item in attendees[0].source_refs} == {
+        "attendee-one",
+        "attendee-two",
+    }
 
 
 def test_archive_memory_item_endpoint_hides_from_default_list(
