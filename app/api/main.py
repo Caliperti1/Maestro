@@ -186,13 +186,12 @@ def _process_memory_hygiene_once() -> None:
 async def _routed_hygiene_worker_loop() -> None:
     while True:
         settings = get_settings()
+        if settings.routed_hygiene_autorun:
+            try:
+                await asyncio.to_thread(_process_routed_hygiene_once)
+            except Exception:
+                logger.exception("Routed-object hygiene heartbeat failed.")
         await asyncio.sleep(max(300, settings.routed_hygiene_interval_seconds))
-        if not settings.routed_hygiene_autorun:
-            continue
-        try:
-            await asyncio.to_thread(_process_routed_hygiene_once)
-        except Exception:
-            logger.exception("Routed-object hygiene heartbeat failed.")
 
 
 def _process_routed_hygiene_once() -> None:

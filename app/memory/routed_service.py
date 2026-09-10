@@ -1023,6 +1023,8 @@ class RoutedMemoryService:
             if not name:
                 continue
             attendee_email = str(attendee.get("email") or "").strip()
+            if not attendee_email and _email_from_text(name) == name.lower():
+                attendee_email = name.lower()
             if is_maestro_user_reference(name=name, email=attendee_email):
                 if "maestro_user" in seen:
                     continue
@@ -1092,6 +1094,8 @@ class RoutedMemoryService:
             if len(candidates) == 1:
                 contact = candidates[0]
         if contact is None and not create_if_missing:
+            return None
+        if contact is None and _is_role_or_group_attendee(name, email):
             return None
         if contact is None:
             contact = Contact(
@@ -1842,6 +1846,43 @@ def _contact_name_from_email(name: str, email: str | None) -> str:
         if part and part not in ignored:
             parts.append(part.upper() if len(part) == 1 else part.capitalize())
     return " ".join(parts).strip() or name
+
+
+def _is_role_or_group_attendee(name: str, email: str) -> bool:
+    if not email or "@" not in email:
+        return False
+    local = email.split("@", 1)[0].lower()
+    normalized_name = _normalize_key(name)
+    identity_like_name = "@" in name or normalized_name == _normalize_key(local)
+    if not identity_like_name:
+        return False
+    exact_role_names = {
+        "admin",
+        "alerts",
+        "billing",
+        "calendar",
+        "contact",
+        "events",
+        "hello",
+        "info",
+        "marketing",
+        "newsletter",
+        "notifications",
+        "office",
+        "sales",
+        "support",
+        "team",
+    }
+    if local in exact_role_names:
+        return True
+    compact_local = re.sub(r"[^a-z0-9]+", "", local)
+    return any(
+        token in compact_local
+        for token in ("donotreply", "mailerdaemon", "newsletter", "notification", "noreply")
+    ) or any(
+        compact_local.endswith(token)
+        for token in ("group", "network", "office", "team")
+    )
 
 
 def _organization_name_from_identifier(name: str) -> str:
