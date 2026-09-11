@@ -1928,6 +1928,51 @@ def test_routed_hygiene_merges_high_confidence_duplicates(
     )
 
 
+def test_routed_hygiene_merges_curator_copy_into_source_backed_event(
+    session: Session,
+) -> None:
+    seed_default_domains(session)
+    usma = DomainRepository(session).get_by_key("usma")
+    assert usma is not None
+    source_id = "outlook-event-123"
+    canonical = CalendarEvent(
+        domain_id=usma.id,
+        title="Von Neumann Bench",
+        start_at=datetime(2026, 9, 10, 14, 30, tzinfo=UTC),
+        end_at=datetime(2026, 9, 10, 15, 0, tzinfo=UTC),
+        external_provider="usma_outlook",
+        external_event_id=source_id,
+        source_refs=[{"source_system": "usma_outlook", "source_id": source_id}],
+        provenance={},
+        metadata_={"source_adapter": "context_mailbox"},
+    )
+    duplicate = CalendarEvent(
+        domain_id=usma.id,
+        title="Von Neumann Bench",
+        start_at=datetime(2026, 9, 10, 18, 30, tzinfo=UTC),
+        end_at=datetime(2026, 9, 10, 19, 0, tzinfo=UTC),
+        source_refs=[{"source_system": "usma_outlook", "external_id": source_id}],
+        provenance={},
+        metadata_={
+            "curator": "llm",
+            "source_system": "usma_outlook",
+            "source_id": "stale-series-occurrence-id",
+        },
+    )
+    session.add_all([canonical, duplicate])
+    session.commit()
+
+    report = RoutedHygieneService(session).run_once()
+
+    session.refresh(canonical)
+    session.refresh(duplicate)
+    assert report.duplicates_merged == 1
+    assert duplicate.status == "archived"
+    assert duplicate.metadata_["merged_into"] == str(canonical.id)
+    assert canonical.start_at.replace(tzinfo=UTC) == datetime(2026, 9, 10, 14, 30, tzinfo=UTC)
+    assert canonical.metadata_["structured_route_duplicate_merged"] is True
+
+
 def test_routed_hygiene_consolidates_duplicate_contact_attendees(
     session: Session,
 ) -> None:

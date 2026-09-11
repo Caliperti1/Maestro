@@ -1,6 +1,6 @@
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -657,9 +657,11 @@ class RoutedHygieneService:
         events = list(
             self.session.scalars(select(CalendarEvent).where(CalendarEvent.status != "archived"))
         )
-        merged = 0
+        merged = self._merge_structured_route_event_duplicates(events)
         by_key: dict[str, CalendarEvent] = {}
         for event in sorted(events, key=lambda item: item.created_at or datetime.now(UTC)):
+            if event.status == "archived":
+                continue
             key = _event_merge_key(event)
             if not key:
                 continue
@@ -668,6 +670,48 @@ class RoutedHygieneService:
                 by_key[key] = event
                 continue
             self._merge_event(survivor, event)
+            merged += 1
+        return merged
+
+    def _merge_structured_route_event_duplicates(
+        self,
+        events: list[CalendarEvent],
+    ) -> int:
+        """Merge curator copies when a source-backed event was already promoted."""
+
+        canonical_by_source: dict[tuple[str, str], list[CalendarEvent]] = {}
+        for event in events:
+            if event.external_provider and event.external_event_id:
+                canonical_by_source.setdefault(
+                    (event.external_provider, event.external_event_id), []
+                ).append(event)
+        merged = 0
+        for duplicate in events:
+            if duplicate.external_provider or duplicate.status == "archived":
+                continue
+            metadata = duplicate.metadata_ or {}
+            if metadata.get("curator") != "llm":
+                continue
+            candidates_by_id: dict[uuid.UUID, CalendarEvent] = {}
+            for source_key in _event_source_keys(duplicate):
+                for candidate in canonical_by_source.get(source_key, []):
+                    candidates_by_id[candidate.id] = candidate
+            survivor = _nearest_source_event(
+                duplicate,
+                list(candidates_by_id.values()),
+            )
+            if survivor is None or survivor.id == duplicate.id:
+                continue
+
+            canonical_metadata = dict(survivor.metadata_ or {})
+            self._merge_event(survivor, duplicate)
+            survivor.metadata_ = {
+                **(survivor.metadata_ or {}),
+                **canonical_metadata,
+                "start_at": survivor.start_at.isoformat() if survivor.start_at else None,
+                "end_at": survivor.end_at.isoformat() if survivor.end_at else None,
+                "structured_route_duplicate_merged": True,
+            }
             merged += 1
         return merged
 
@@ -1133,6 +1177,47 @@ def _event_merge_key(event: CalendarEvent) -> str | None:
     if event.summary:
         return f"{event.domain_id}:{title}:summary:{_normalize(event.summary)}"
     return None
+
+
+def _event_source_keys(event: CalendarEvent) -> set[tuple[str, str]]:
+    metadata = event.metadata_ or {}
+    default_system = str(metadata.get("source_system") or "").strip()
+    keys: set[tuple[str, str]] = set()
+    metadata_id = str(metadata.get("source_id") or "").strip()
+    if default_system and metadata_id:
+        keys.add((default_system, metadata_id))
+    for source_ref in event.source_refs or []:
+        if not isinstance(source_ref, dict):
+            continue
+        source_system = str(source_ref.get("source_system") or default_system).strip()
+        external_id = str(
+            source_ref.get("external_id") or source_ref.get("source_id") or ""
+        ).strip()
+        if source_system and external_id:
+            keys.add((source_system, external_id))
+    return keys
+
+
+def _nearest_source_event(
+    duplicate: CalendarEvent,
+    candidates: list[CalendarEvent],
+) -> CalendarEvent | None:
+    if not candidates:
+        return None
+    if duplicate.start_at is None:
+        return candidates[0] if len(candidates) == 1 else None
+    candidates_with_start = [
+        candidate for candidate in candidates if candidate.start_at is not None
+    ]
+    if not candidates_with_start:
+        return candidates[0] if len(candidates) == 1 else None
+    nearest = min(
+        candidates_with_start,
+        key=lambda candidate: abs(candidate.start_at - duplicate.start_at),
+    )
+    if abs(nearest.start_at - duplicate.start_at) > timedelta(hours=8):
+        return None
+    return nearest
 
 
 def _merge_metadata(
