@@ -181,6 +181,11 @@ class MemoryDropboxProcessor:
                     "ingestion_record_id": str(ingestion_record.id),
                     "original_path": str(original_path),
                     "source_policy": envelope.policy.as_dict(),
+                    "source_metadata": dict(envelope.metadata),
+                    "structured_route_promoted": bool(
+                        envelope.metadata.get("structured_route_promoted")
+                    ),
+                    "structured_route": envelope.metadata.get("structured_route"),
                     **envelope.provenance(),
                     **extraction_metadata,
                 },
@@ -312,6 +317,11 @@ class MemoryDropboxProcessor:
                 "suffix": path.suffix.lower(),
                 "ingestion_record_id": str(ingestion_record.id),
                 "source_policy": envelope.policy.as_dict(),
+                "source_metadata": dict(envelope.metadata),
+                "structured_route_promoted": bool(
+                    envelope.metadata.get("structured_route_promoted")
+                ),
+                "structured_route": envelope.metadata.get("structured_route"),
                 **envelope.provenance(),
                 **metadata,
             },
@@ -331,6 +341,11 @@ class MemoryDropboxProcessor:
                 "processing_path": str(path),
                 "ingestion_record_id": str(ingestion_record.id),
                 "source_policy": envelope.policy.as_dict(),
+                "source_metadata": dict(envelope.metadata),
+                "structured_route_promoted": bool(
+                    envelope.metadata.get("structured_route_promoted")
+                ),
+                "structured_route": envelope.metadata.get("structured_route"),
                 **envelope.provenance(),
                 **metadata,
             },
@@ -555,8 +570,10 @@ class MemoryDropboxProcessor:
         error_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
     def _is_supported_file(self, path: Path) -> bool:
-        return path.is_file() and not path.name.startswith(".") and path.suffix.lower() in (
-            SUPPORTED_DROPBOX_SUFFIXES
+        return (
+            path.is_file()
+            and not path.name.startswith(".")
+            and path.suffix.lower() in (SUPPORTED_DROPBOX_SUFFIXES)
         )
 
     def _mime_type(self, path: Path) -> str:
