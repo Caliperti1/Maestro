@@ -3,11 +3,12 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.db.models import IngestionRecord, MemoryItem, SeedPackage, SourceRegistration
+from app.db.models import IngestionRecord, MemoryItem, RoutedItem, SeedPackage, SourceRegistration
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.llm import LLMMemoryExtractor
 from app.memory import LLMMemoryCurator
+from app.memory.context_gateway import ContextGatewayService, GatewayItem
 from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.ingestion import IngestionLedgerService, envelope_for_file, policy_for_domain
 
@@ -122,6 +123,63 @@ def test_changed_file_version_is_reprocessed(session: Session, tmp_path: Path) -
     assert result[0].status == "processed"
     assert session.query(IngestionRecord).count() == 2
     assert session.query(SeedPackage).count() == 2
+
+
+def test_structured_route_metadata_prevents_curator_from_routing_duplicate(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    domain = DomainRepository(session).get_by_key("usma")
+    assert domain is not None
+    gateway = ContextGatewayService(session, root=tmp_path)
+    gateway.ingest(
+        GatewayItem(
+            source_registration_key="context-mailbox:usma_outlook:usma",
+            source_system="usma_outlook",
+            external_id="outlook-event-123",
+            source_version="version-1",
+            content_type="context_mailbox_handoff",
+            domain_key="usma",
+            title="Weekly project sync",
+            content="Weekly project sync at 14:35 UTC.",
+            source_timestamp=datetime(2026, 9, 9, 14, 35, tzinfo=UTC),
+            policy=policy_for_domain("usma"),
+            metadata={
+                "adapter_type": "context_mailbox",
+                "structured_route_promoted": True,
+                "structured_route": {"route_type": "event", "object_id": "canonical-id"},
+            },
+        ),
+        domain=domain,
+    )
+    payload = {
+        "candidates": [],
+        "routed_items": [
+            {
+                "route_type": "event",
+                "title": "Weekly project sync",
+                "content": "Weekly project sync at 14:35 UTC.",
+                "rationale": "Calendar event in the source.",
+                "priority": "normal",
+                "confidence": 0.99,
+                "status": "open",
+                "structured_data": [
+                    {"key": "start_at", "value": "2026-09-09T14:35:00"},
+                ],
+            }
+        ],
+    }
+    processor = MemoryDropboxProcessor(session, root=tmp_path, curator=_curator(session, payload))
+
+    result = processor.process_once()
+
+    assert result[0].status == "processed"
+    assert result[0].routed_count == 0
+    assert session.query(RoutedItem).count() == 0
+    seed = session.query(SeedPackage).one()
+    assert seed.metadata_["structured_route_promoted"] is True
+    assert seed.metadata_["source_metadata"]["structured_route_promoted"] is True
 
 
 def test_ingestion_ledger_recovers_stale_processing_record(
