@@ -3005,20 +3005,38 @@ export function App() {
   }, []);
 
   const applyConversation = useCallback((conversation: MaestroSessionSummary) => {
+    const receivedAt = new Date().toISOString();
+    const newlySeen = document.visibilityState === "visible" && activeSurface === "dashboard"
+      ? (conversation.messages ?? []).filter(
+          (message) =>
+            message.sender === "maestro" &&
+            message.metadata?.mobile_update === true &&
+            !message.seen_at,
+        )
+      : [];
+    const messages = (conversation.messages ?? []).map((message) =>
+      newlySeen.some((candidate) => candidate.id === message.id)
+        ? { ...message, seen_at: receivedAt, seen_via: "web" }
+        : message,
+    );
     setActiveConversationId(conversation.id);
-    setChatMessages(conversation.messages ?? []);
+    setChatMessages(messages);
     setMaestroPlan(shouldShowPlanPreview(conversation.active_plan ?? null) ? conversation.active_plan ?? null : null);
-  }, []);
+    for (const message of newlySeen) {
+      apiJson(`/maestro/mobile/updates/${message.id}/seen`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ via: "web", detail: "Visible in Maestro chat" }),
+      }).catch(() => undefined);
+    }
+  }, [activeSurface]);
 
   const pollActiveChannel = useCallback(async () => {
     const response = await apiJson<{ conversation: MaestroSessionSummary }>(
       "/maestro/sessions/active",
     );
-    setActiveConversationId(response.conversation.id);
-    setChatMessages(response.conversation.messages ?? []);
-    const responsePlan = response.conversation.active_plan ?? null;
-    setMaestroPlan(shouldShowPlanPreview(responsePlan) ? responsePlan : null);
-  }, []);
+    applyConversation(response.conversation);
+  }, [applyConversation]);
 
   const loadActiveSession = useCallback(async () => {
     const response = await apiJson<{ conversation: MaestroSessionSummary }>(
@@ -3512,6 +3530,22 @@ export function App() {
       socket?.close();
     };
   }, [applyConversation]);
+
+  useEffect(() => {
+    const acknowledgeVisibleUpdates = () => {
+      if (document.visibilityState === "visible") {
+        loadActiveSession().catch(() => undefined);
+      }
+    };
+    document.addEventListener("visibilitychange", acknowledgeVisibleUpdates);
+    return () => document.removeEventListener("visibilitychange", acknowledgeVisibleUpdates);
+  }, [loadActiveSession]);
+
+  useEffect(() => {
+    if (activeSurface === "dashboard" && document.visibilityState === "visible") {
+      loadActiveSession().catch(() => undefined);
+    }
+  }, [activeSurface, loadActiveSession]);
 
   const applyToolCallUpdate = (toolCall: MaestroToolCallResponse["tool_call"]) => {
     setMaestroRun((run) => {
@@ -4333,7 +4367,18 @@ export function App() {
                       }`}
                       key={message.id}
                     >
-                      <span>{message.sender === "user" ? "You" : "Maestro"}</span>
+                      <span className="message-author">
+                        {message.sender === "user" ? "You" : "Maestro"}
+                        {message.sender === "maestro" &&
+                          message.metadata?.mobile_update === true &&
+                          message.seen_at ? (
+                            <CheckCircle2
+                              className="message-seen"
+                              size={13}
+                              aria-label={`Seen via ${message.seen_via ?? "Maestro"}`}
+                            />
+                          ) : null}
+                      </span>
                       {message.sender === "maestro" ? (
                         <MarkdownMessage content={message.content} />
                       ) : (
