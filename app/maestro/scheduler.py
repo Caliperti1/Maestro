@@ -121,6 +121,23 @@ def _gmail_event_matches_scope(event_payload: dict[str, Any], scope: str) -> boo
     return False
 
 
+def _gmail_event_matches_excluded_terms(
+    event_payload: dict[str, Any],
+    excluded_terms: Any,
+) -> bool:
+    if not isinstance(excluded_terms, list):
+        return True
+    searchable = " ".join(
+        str(event_payload.get(field) or "")
+        for field in ("from", "subject", "to")
+    ).casefold()
+    return not any(
+        str(term).strip().casefold() in searchable
+        for term in excluded_terms
+        if str(term).strip()
+    )
+
+
 class SchedulerService:
     def __init__(self, session: Session):
         self.session = session
@@ -1110,6 +1127,10 @@ class SchedulerService:
         for key, expected in filters.items():
             if key == "gmail_scope":
                 if not _gmail_event_matches_scope(event_payload, str(expected)):
+                    return False
+                continue
+            if key == "gmail_excluded_terms":
+                if not _gmail_event_matches_excluded_terms(event_payload, expected):
                     return False
                 continue
             actual: Any = event_payload

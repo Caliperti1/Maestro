@@ -72,7 +72,14 @@ def _email_template(
     domain_name: str,
     agent_key: str,
     gmail_scope: str = "all_inbox",
+    gmail_excluded_terms: list[str] | None = None,
 ) -> dict[str, Any]:
+    filters: dict[str, Any] = {
+        "domain_key": domain_key,
+        "gmail_scope": gmail_scope,
+    }
+    if gmail_excluded_terms:
+        filters["gmail_excluded_terms"] = gmail_excluded_terms
     return {
         "key": key,
         "name": name,
@@ -85,10 +92,7 @@ def _email_template(
         "trigger_type": "event",
         "trigger_config": {
             "event_type": "gmail.message.received",
-            "filters": {
-                "domain_key": domain_key,
-                "gmail_scope": gmail_scope,
-            },
+            "filters": filters,
             "gmail_watch_enabled": False,
         },
         "workflow_spec": {
@@ -318,6 +322,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         domain_name="Personal",
         agent_key=PERSONAL_OPERATIONS_AGENT_KEY,
         gmail_scope="focused",
+        gmail_excluded_terms=["fanatics"],
     ),
     PRAXIS_CALENDAR_MONITOR_KEY: _calendar_template(
         key=PRAXIS_CALENDAR_MONITOR_KEY,

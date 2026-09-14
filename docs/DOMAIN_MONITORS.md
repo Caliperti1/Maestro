@@ -37,7 +37,9 @@ Each email workflow also owns its inbox scope:
 
 Personal Email Triage defaults to Focused because personal inbox volume is noisy. Praxis and Perti
 default to All inbox. The scope is editable directly on each durable Gmail workflow card. Calendar
-monitoring is independent and is never constrained by the email scope.
+monitoring is independent and is never constrained by the email scope. Personal monitoring also
+excludes Fanatics mail by sender or subject before creating a workflow, so it incurs no LLM cost or
+Maestro-side routing.
 
 ## Calendar Flow
 
