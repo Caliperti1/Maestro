@@ -20,6 +20,7 @@ from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
 from app.api.mobile_updates import router as mobile_updates_router
 from app.api.scheduler import router as scheduler_router
+from app.api.voice_live import router as voice_live_router
 from app.api.workflow_outputs import router as workflow_outputs_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -102,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(agents_router)
     app.include_router(maestro_router)
     app.include_router(mobile_updates_router)
+    app.include_router(voice_live_router)
     app.include_router(scheduler_router)
     app.include_router(workflow_outputs_router)
 

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://maestro:maestro@localhost:55432/maestro"
     llm_provider: str = "openrouter"
     openai_api_key: str | None = None
+    openai_live_enabled: bool = False
+    openai_live_model: str = "gpt-live-1"
+    openai_live_timeout_seconds: Annotated[float, Field(ge=5, le=60)] = 20.0
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_http_referer: str = "http://localhost:5173"
