@@ -129,7 +129,7 @@ def _gmail_event_matches_excluded_terms(
         return True
     searchable = " ".join(
         str(event_payload.get(field) or "")
-        for field in ("from", "subject", "to")
+        for field in ("from", "subject", "to", "snippet")
     ).casefold()
     return not any(
         str(term).strip().casefold() in searchable
