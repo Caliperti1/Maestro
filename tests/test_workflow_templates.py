@@ -360,9 +360,10 @@ def test_personal_email_scope_filters_noise_and_is_editable(
                 "domain_key": "personal",
                 "message_id": "fanatics-order",
                 "label_ids": ["INBOX", "CATEGORY_PERSONAL", "IMPORTANT"],
-                "from": "Fanatics <updates@fanatics.com>",
-                "subject": "Your Fanatics order update",
+                "from": "Order Updates <updates@example.com>",
+                "subject": "Your order update",
                 "to": "Christopher Aliperti <christopher.aliperti@gmail.com>",
+                "snippet": "Your recent Fanatics order is on the way.",
             },
         },
     )
