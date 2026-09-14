@@ -774,6 +774,7 @@ def _gmail_event_payload(
         "subject": metadata.get("subject"),
         "from": metadata.get("from"),
         "to": metadata.get("to"),
+        "snippet": metadata.get("snippet"),
         "date": metadata.get("date"),
         "internal_date": metadata.get("internal_date"),
         "detected_at": datetime.now(UTC).isoformat(),
