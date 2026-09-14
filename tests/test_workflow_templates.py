@@ -297,6 +297,7 @@ def test_personal_monitors_use_focused_email_scope_and_shared_operations_agent(
     assert email.trigger_config["filters"] == {
         "domain_key": "personal",
         "gmail_scope": "focused",
+        "gmail_excluded_terms": ["fanatics"],
     }
     assert email.workflow_spec["queue_items"][0]["agent_key"] == "personal-operations-agent"
     assert calendar.workflow_spec["queue_items"][0]["agent_key"] == "personal-operations-agent"
@@ -349,6 +350,24 @@ def test_personal_email_scope_filters_noise_and_is_editable(
     assert emit("routine-update", ["INBOX", "CATEGORY_UPDATES"]) == []
     assert len(emit("primary", ["INBOX", "CATEGORY_PERSONAL"])) == 1
     assert len(emit("important-update", ["INBOX", "CATEGORY_UPDATES", "IMPORTANT"])) == 1
+
+    response = client.post(
+        "/scheduler/triggers/event",
+        json={
+            "event_type": "gmail.message.received",
+            "event_id": "personal:fanatics-order",
+            "event_payload": {
+                "domain_key": "personal",
+                "message_id": "fanatics-order",
+                "label_ids": ["INBOX", "CATEGORY_PERSONAL", "IMPORTANT"],
+                "from": "Fanatics <updates@fanatics.com>",
+                "subject": "Your Fanatics order update",
+                "to": "Christopher Aliperti <christopher.aliperti@gmail.com>",
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["runs"] == []
 
     updated = client.patch(
         f"/scheduler/definitions/{definition_id}/gmail-filter",
