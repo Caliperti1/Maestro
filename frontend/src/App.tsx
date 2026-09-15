@@ -2680,6 +2680,30 @@ function IssuesWorkspace() {
     }
   };
 
+  const initializeCodexThreads = async () => {
+    if (!selected?.repository_id) return;
+    setBusy(true);
+    setStatusMessage("Creating the project Steward and Worker in Codex...");
+    try {
+      const response = await apiJson<{ repository: NonNullable<ProductIssue["repository"]> }>(
+        `/issues/repositories/${selected.repository_id}/codex-threads/initialize`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ roles: ["steward", "worker"], model: "gpt-5.6-luna" }),
+        },
+      );
+      setIssues((current) => current.map((item) => item.id === selected.id
+        ? { ...item, repository: response.repository }
+        : item));
+      setStatusMessage(`${response.repository.display_name} Codex threads are ready and visible in the Codex app.`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Codex thread initialization failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const renderIssueDetail = (mobile = false) => selected ? (
     <div className={mobile ? "mobile-routed-detail issue-mobile-detail" : "routed-object-detail"}>
       <div className={mobile ? "mobile-routed-detail-heading" : "section-heading"}>
@@ -2711,6 +2735,19 @@ function IssuesWorkspace() {
         {selected.event_links.map((link) => <div className="contact-evidence-row" key={link.id}>
           <strong>{link.event_title}</strong>
           <span>{link.relationship_type.replace("_", " ")} / {formatDateTime(link.start_at)}</span>
+        </div>)}
+      </section>}
+      {selected.repository && <section className="contact-intelligence-section codex-thread-section">
+        <div className="codex-thread-heading">
+          <div><h4>Codex project threads</h4><small>Persistent, auditable tasks in the Codex app</small></div>
+          {selected.repository.codex_threads.some((thread) => !thread.session_id) && (
+            <button type="button" onClick={initializeCodexThreads} disabled={busy}>Initialize</button>
+          )}
+        </div>
+        {selected.repository.codex_threads.map((thread) => <div className="contact-evidence-row" key={thread.role}>
+          <strong>{thread.name}</strong>
+          <span>{thread.session_id ? `${thread.status} / ${thread.session_id.slice(0, 8)}` : "Not initialized"}</span>
+          {thread.last_used_at && <small>Last used {formatDateTime(thread.last_used_at)}</small>}
         </div>)}
       </section>}
       <div className="routed-detail-actions"><button className="planner-action" type="button" onClick={save} disabled={busy}>Save issue</button>{selected.repository_id && <button type="button" onClick={syncRepository} disabled={busy}><RefreshCw size={15} /> Sync GitHub</button>}</div>
