@@ -687,6 +687,16 @@ export type ProductRepository = {
   last_synced_at: string | null;
   status: string;
   sync_config: Record<string, unknown>;
+  codex_threads: CodexProjectThread[];
+};
+
+export type CodexProjectThread = {
+  role: "steward" | "worker";
+  name: string;
+  session_id: string | null;
+  status: string;
+  last_used_at: string | null;
+  cwd: string | null;
 };
 
 export type ProductProject = {

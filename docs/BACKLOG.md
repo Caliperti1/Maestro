@@ -39,6 +39,13 @@ Maestro is the cross-domain chief-of-staff layer. C Suite workflows are Maestro-
   keeping unchanged polling quiet.
 - [x] Allow local Codex executions to resume a persistent session.
 - [x] Bridge agent-marked product issues into background coding workflows with run/PR/thread links.
+- [x] Give every registered repository persistent `{Project} Maestro Steward` and
+  `{Project} Maestro Worker` threads that are visible and auditable in the Codex app.
+- [x] Automatically reuse the repository Worker for coding turns while preserving isolated git
+  worktrees, issue execution records, branches, and PR approval boundaries.
+- [ ] Add an explicit coding-agent assignment control to each repository profile; until then the
+  orchestrator-selected domain agent uses the repository's shared Worker.
+- [ ] Add Worker rotation and archival when a project thread becomes stale or overly compacted.
 - [ ] Add repository registration and project-vision editing directly to the Product Issues UI.
 - [ ] Add explicit sync-conflict resolution controls and side-by-side local/GitHub field comparison.
 - [ ] Add webhook-based GitHub issue and merged-PR triggers; retain polling as recovery.

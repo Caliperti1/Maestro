@@ -71,15 +71,25 @@ The former Think Tank routed store has been removed.
 ## Repository Intelligence
 
 `RepositoryProfile` connects a product project to a GitHub repository, optional local checkout,
-source registration, commit checkpoint, durable workflows, sync policy, and a persistent repository
-steward Codex session. The current repository observer performs a full baseline, then commit-aware
-incremental observations and stages evidence reports through the Context Gateway.
+source registration, commit checkpoint, durable workflows, sync policy, and two persistent Codex
+threads. The current repository observer performs a full baseline, then commit-aware incremental
+observations and stages evidence reports through the Context Gateway.
 
-Codex execution accepts a prior `session_id` through `codex exec resume`. The intended thread policy is:
+Maestro creates the threads through Codex's local app-server so they appear as normal, named tasks in
+the Codex desktop app:
 
-- one repository-steward thread per repository for architecture and product-state continuity;
-- one issue-execution thread per issue for implementation and PR revision continuity;
-- separate issue threads preserve parallel execution and prevent unrelated coding context pollution.
+- `{Project Name} Maestro Steward` carries architecture, product-state, and repository continuity;
+- `{Project Name} Maestro Worker` performs scoped coding turns for that repository.
+
+The Worker is persistent, but code isolation remains git-owned. Every implementation runs in a fresh
+Maestro-managed worktree and records its issue, branch, commit, PR, workflow run, and Worker thread ID.
+Work on the same repository is serialized through the shared Worker; repositories may use their own
+Workers independently. A missing Codex thread is recreated under the same stable name and the replaced
+session ID remains in repository metadata for audit.
+
+The repository, its current git state, project instructions, curated memory, and observer reports
+remain authoritative. A Codex thread is useful working continuity, not a replacement for durable
+Maestro memory.
 
 ## Agent Tasks
 
@@ -87,6 +97,11 @@ Marking a canonical issue as an agent task lets the product-issue worker create 
 workflow. The issue records its parent task, workflow run, execution, branch, PR, and Codex session.
 Missing critical scope creates one chat RFI; the reply resumes the same issue. Completion returns a
 normal report/run log and conversational notification.
+
+The Product Issues UI exposes each repository's Steward and Worker names, session state, and most
+recent use. An uninitialized repository can create both threads from the UI; the first coding run also
+creates and reuses the Worker automatically. The Codex app remains the detailed audit surface for the
+complete coding conversation and activity.
 
 ## Safety Boundaries
 
@@ -97,4 +112,5 @@ normal report/run log and conversational notification.
 - Repository interpretation produces reports first; the Memory Curator remains the only authority
   that turns repository evidence into canonical durable memory.
 
-See [Behavior 013](../tests/behavior/013_product_issue_intelligence.md) for the human test matrix.
+See [Behavior 013](../tests/behavior/013_product_issue_intelligence.md) and
+[Behavior 015](../tests/behavior/015_persistent_project_codex_threads.md) for the human test matrix.

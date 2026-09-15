@@ -30,13 +30,17 @@ from urllib.request import Request, urlopen
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.codex.app_server import CodexAppServerClient, CodexAppServerError
+from app.codex.threads import CodexProjectThreadService
 from app.core.config import get_settings
 from app.db.models import (
     Agent,
     Contact,
     Domain,
     Entity,
+    ProductIssue,
     Report,
+    RepositoryProfile,
     RoutedItem,
     Task,
     ToolCall,
@@ -2461,6 +2465,16 @@ class CodexCliToolAdapter:
         if codex_bin is None:
             raise ToolExecutionError("Codex CLI is not installed or not on PATH.")
         target_path = self._target_path(context.connection, payload)
+        repository = self._repository_profile(context, payload, target_path)
+        if repository is not None and repository.local_path and not any(
+            payload.get(key) for key in ("target_path", "target_directory", "cwd")
+        ):
+            registered_path = Path(repository.local_path).expanduser().resolve()
+            if not registered_path.is_dir():
+                raise ToolExecutionError(
+                    f"Registered repository checkout does not exist: {registered_path}"
+                )
+            target_path = registered_path
         prompt = _required_any_text(payload, ("prompt", "task", "instructions"))
         sandbox = str(payload.get("sandbox") or payload.get("sandbox_mode") or "workspace-write").strip()
         if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
@@ -2497,6 +2511,69 @@ class CodexCliToolAdapter:
                 if git_context is not None
                 else target_path
             )
+            managed_thread_role = str(payload.get("codex_thread_role") or "worker").strip().lower()
+            use_project_thread = (
+                repository is not None
+                and managed_thread_role in {"steward", "worker"}
+                and not bool(payload.get("ephemeral", False))
+            )
+            if use_project_thread:
+                thread_service = CodexProjectThreadService(
+                    context.session,
+                    client=CodexAppServerClient(codex_bin=codex_bin),
+                )
+                previous_session_id = thread_service.session_id(
+                    repository,
+                    managed_thread_role,  # type: ignore[arg-type]
+                )
+                try:
+                    managed_result = thread_service.run_turn(
+                        repository,
+                        role=managed_thread_role,  # type: ignore[arg-type]
+                        cwd=execution_path,
+                        prompt=full_prompt,
+                        model=model or None,
+                        effort=str(payload.get("reasoning_effort") or payload.get("effort") or "").strip() or None,
+                        sandbox=sandbox,
+                        timeout_seconds=timeout_seconds,
+                    )
+                except CodexAppServerError as exc:
+                    raise ToolExecutionError(str(exc)) from exc
+                final_message = managed_result.final_message
+                result = {
+                    "target_path": str(execution_path),
+                    "source_repo_path": str(target_path),
+                    "sandbox": sandbox,
+                    "model": model or None,
+                    "profile": profile or None,
+                    "returncode": 0,
+                    "session_id": managed_result.thread_id,
+                    "resumed_session_id": previous_session_id,
+                    "replaced_session_id": managed_result.replaced_thread_id,
+                    "codex_thread_role": managed_thread_role,
+                    "codex_thread_name": thread_service.thread_name(
+                        repository,
+                        managed_thread_role,  # type: ignore[arg-type]
+                    ),
+                    "codex_thread_visible": True,
+                    "repository_id": str(repository.id),
+                    "final_message": final_message,
+                    "changed_files": _git_changed_paths(execution_path),
+                    "event_counts": managed_result.event_counts,
+                    "stderr_tail": "",
+                }
+                if git_context is not None:
+                    result.update(
+                        self._complete_branch_workflow(
+                            context,
+                            payload,
+                            execution_path,
+                            git_context,
+                            final_message=final_message,
+                            changed_files=result["changed_files"],
+                        )
+                    )
+                return result
             if resume_session_id:
                 args = [
                     codex_bin, "exec", "--cd", str(execution_path), "--sandbox", sandbox,
@@ -2574,6 +2651,69 @@ class CodexCliToolAdapter:
                 Path(output_path).unlink()
             except FileNotFoundError:
                 pass
+
+    def _repository_profile(
+        self,
+        context: ToolExecutionContext,
+        payload: dict[str, Any],
+        target_path: Path,
+    ) -> RepositoryProfile | None:
+        parent_ids = [context.task.id]
+        if context.task.parent_task_id:
+            parent_ids.append(context.task.parent_task_id)
+        issue = context.session.scalar(
+            select(ProductIssue).where(ProductIssue.workflow_task_id.in_(parent_ids))
+        )
+        if issue is not None and issue.repository_id is not None:
+            repository = context.session.get(RepositoryProfile, issue.repository_id)
+            if repository is not None:
+                return repository
+
+        raw_id = str(payload.get("repository_id") or "").strip()
+        if raw_id:
+            try:
+                repository = context.session.get(RepositoryProfile, uuid.UUID(raw_id))
+            except ValueError:
+                repository = None
+            if repository is not None:
+                return repository
+
+        external_repo = str(
+            payload.get("repo")
+            or payload.get("repository")
+            or _connection_config(context.connection).get("repo")
+            or ""
+        ).strip()
+        if not external_repo and (target_path / ".git").exists():
+            try:
+                remote = _run_local_text(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=target_path,
+                )
+                external_repo = _github_repo_name(remote)
+            except ToolExecutionError:
+                external_repo = ""
+        if external_repo:
+            repository = context.session.scalar(
+                select(RepositoryProfile).where(
+                    RepositoryProfile.external_repo == external_repo,
+                    RepositoryProfile.status == "active",
+                )
+            )
+            if repository is not None:
+                return repository
+
+        for repository in context.session.scalars(
+            select(RepositoryProfile).where(RepositoryProfile.status == "active")
+        ).all():
+            if not repository.local_path:
+                continue
+            try:
+                if Path(repository.local_path).expanduser().resolve() == target_path:
+                    return repository
+            except OSError:
+                continue
+        return None
 
     def _codex_bin(self, connection: ToolConnection | None) -> str | None:
         configured = ""
@@ -3564,6 +3704,15 @@ def _optional_repo_from(connection: ToolConnection | None, payload: dict[str, An
         return _repo_from(connection, payload)
     except ToolExecutionError:
         return None
+
+
+def _github_repo_name(remote: str) -> str:
+    value = remote.strip().removesuffix(".git")
+    match = re.search(r"github\.com[/:]([^/]+/[^/]+)$", value)
+    if match:
+        return match.group(1)
+    ssh_alias = re.search(r"^[^:]+:([^/]+/[^/]+)$", value)
+    return ssh_alias.group(1) if ssh_alias else ""
 
 
 def _connection_config(connection: ToolConnection | None) -> dict[str, Any]:
