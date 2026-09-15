@@ -7,8 +7,10 @@ app reads. Keeping this boundary isolated makes the coding adapter independent o
 from __future__ import annotations
 
 import json
+import os
 import selectors
 import shutil
+import signal
 import subprocess
 import tempfile
 from collections import Counter
@@ -68,6 +70,7 @@ class CodexAppServerClient:
                 stderr=stderr_file,
                 text=True,
                 bufsize=1,
+                start_new_session=True,
             )
             deadline = monotonic() + timeout_seconds
             next_id = 1
@@ -216,6 +219,9 @@ class CodexAppServerClient:
                             text = str(item.get("text") or item.get("message") or "").strip()
                             if text:
                                 messages.append(text)
+                            if item.get("phase") in {"finalAnswer", "final_answer"}:
+                                status = "completed"
+                                break
                     elif method == "turn/completed":
                         turn_payload = (message.get("params") or {}).get("turn") or {}
                         status_value = turn_payload.get("status")
@@ -259,12 +265,17 @@ class CodexAppServerClient:
                 )
             finally:
                 selector.close()
+                if process.stdin is not None and not process.stdin.closed:
+                    process.stdin.close()
                 if process.poll() is None:
                     process.terminate()
                     try:
-                        process.wait(timeout=5)
+                        process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
-                        process.kill()
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                         process.wait(timeout=5)
 
     @staticmethod
