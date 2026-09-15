@@ -18,6 +18,7 @@ from app.api.agents import router as agents_router
 from app.api.issues import router as issues_router
 from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
+from app.api.mobile_updates import router as mobile_updates_router
 from app.api.scheduler import router as scheduler_router
 from app.api.workflow_outputs import router as workflow_outputs_router
 from app.core.config import get_settings
@@ -29,6 +30,7 @@ from app.issues.worker import RepositoryIntelligenceWorker
 from app.maestro.calendar_trigger import CalendarTriggerService, calendar_trigger_worker_settings
 from app.maestro.gmail_trigger import GmailTriggerService, gmail_trigger_worker_settings
 from app.maestro.identity_grounding import IdentityGroundingService
+from app.maestro.mobile_notifications import MobileNotificationWorker
 from app.maestro.product_issue_agent_tasks import ProductIssueAgentTaskService
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
 from app.maestro.todo_agent_tasks import TodoAgentTaskService
@@ -70,6 +72,7 @@ def create_app() -> FastAPI:
                 asyncio.create_task(_product_issue_agent_task_worker_loop()),
                 asyncio.create_task(_routed_hygiene_worker_loop()),
                 asyncio.create_task(_repository_intelligence_worker_loop()),
+                asyncio.create_task(_mobile_notification_worker_loop()),
             ]
         )
         try:
@@ -98,10 +101,26 @@ def create_app() -> FastAPI:
     app.include_router(issues_router)
     app.include_router(agents_router)
     app.include_router(maestro_router)
+    app.include_router(mobile_updates_router)
     app.include_router(scheduler_router)
     app.include_router(workflow_outputs_router)
 
     return app
+
+
+async def _mobile_notification_worker_loop() -> None:
+    while True:
+        settings = get_settings()
+        try:
+            await asyncio.to_thread(_process_mobile_notifications_once)
+        except Exception:
+            logger.exception("Mobile notification worker heartbeat failed.")
+        await asyncio.sleep(max(5, settings.mobile_notification_worker_interval_seconds))
+
+
+def _process_mobile_notifications_once() -> None:
+    with SessionLocal() as session:
+        MobileNotificationWorker(session).run_once()
 
 
 async def _scheduler_worker_loop() -> None:

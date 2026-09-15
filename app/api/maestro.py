@@ -25,6 +25,7 @@ from app.db.models import (
     Conversation,
     Domain,
     Message,
+    MessageReceipt,
     ProductIssue,
     RoutedItem,
     RuntimeSetting,
@@ -1576,6 +1577,14 @@ def _conversation_payload(
         conversation.id,
         topic_id=str(active_topic.get("id")) if active_topic and active_topic.get("id") else None,
     )
+    receipts = {
+        receipt.message_id: receipt
+        for receipt in db.scalars(
+            select(MessageReceipt).where(
+                MessageReceipt.message_id.in_([message.id for message in messages])
+            )
+        ).all()
+    } if messages else {}
     return {
         "id": str(conversation.id),
         "title": conversation.title or "Maestro session",
@@ -1592,6 +1601,12 @@ def _conversation_payload(
                 "content": message.content,
                 "created_at": message.created_at.isoformat() if message.created_at else None,
                 "metadata": message.metadata_ or {},
+                "seen_at": (
+                    receipts[message.id].seen_at.isoformat()
+                    if message.id in receipts
+                    else None
+                ),
+                "seen_via": receipts[message.id].seen_via if message.id in receipts else None,
             }
             for message in messages
         ],

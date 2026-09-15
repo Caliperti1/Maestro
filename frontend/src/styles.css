@@ -354,6 +354,16 @@ h4 {
   font-weight: 800;
 }
 
+.message-author {
+  display: flex !important;
+  align-items: center;
+  gap: 5px;
+}
+
+.message-seen {
+  color: var(--color-primary);
+}
+
 .message p,
 .report-card p,
 .tool-shell span,

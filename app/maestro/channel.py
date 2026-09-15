@@ -6,6 +6,7 @@ WebSocket broadcaster a stable conversation to watch, and lets background worker
 updates into the same place the user already watches.
 """
 
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -14,6 +15,9 @@ from sqlalchemy.orm import Session
 from app.db.models import Conversation, Message, RuntimeSetting
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
+from app.maestro.mobile_notifications import mobile_update_metadata, queue_message_deliveries
+
+logger = logging.getLogger(__name__)
 
 MAESTRO_CHANNEL_KEY = "maestro_primary_channel"
 
@@ -60,13 +64,18 @@ def record_channel_message(
         conversation_id=conversation.id,
         sender_type="user" if sender == "user" else "maestro",
         content=content,
-        metadata_=metadata or {},
+        metadata_=mobile_update_metadata(sender, metadata),
     )
     session.add(message)
     conversation.updated_at = datetime.now(UTC)
     session.commit()
     session.refresh(message)
     session.refresh(conversation)
+    try:
+        queue_message_deliveries(session, message)
+    except Exception:
+        logger.exception("Could not queue mobile delivery for Maestro channel message %s", message.id)
+        session.rollback()
     return message
 
 
