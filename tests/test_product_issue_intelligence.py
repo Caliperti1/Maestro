@@ -3,6 +3,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api.main import create_app
+from app.codex.app_server import CodexTurnResult
+from app.codex.threads import CodexProjectThreadService
 from app.db.models import (
     Domain,
     ProductIssue,
@@ -269,6 +271,73 @@ def test_issue_api_registers_visible_repository_workflows(session, tmp_path):
     definitions = session.scalars(select(WorkflowDefinition)).all()
     assert {item.key for item in definitions} == {"repository-intelligence:maestro", "issue-hygiene:maestro"}
     assert all(item.trigger_config["managed_by"] == "repository_intelligence_worker" for item in definitions)
+
+
+def test_project_codex_threads_are_named_initialized_and_reused(session, tmp_path):
+    domain = _domain(session)
+    project = _project(session, domain)
+    repository = _repository(session, domain, project)
+    repository.display_name = "Maestro"
+    repository.local_path = str(tmp_path)
+    session.commit()
+
+    class FakeCodexClient:
+        def __init__(self):
+            self.calls = []
+
+        def run_turn(self, **kwargs):
+            self.calls.append(kwargs)
+            role = "steward" if "Steward" in kwargs["thread_name"] else "worker"
+            return CodexTurnResult(
+                thread_id=kwargs["thread_id"] or f"{role}-session",
+                final_message="Ready.",
+                status="completed",
+                event_counts={"turn/completed": 1},
+            )
+
+    client = FakeCodexClient()
+    service = CodexProjectThreadService(session, client=client)
+
+    initialized = service.initialize(repository)
+    service.initialize(repository)
+
+    assert [item["name"] for item in initialized] == [
+        "Maestro Maestro Steward",
+        "Maestro Maestro Worker",
+    ]
+    assert repository.codex_steward_session_id == "steward-session"
+    assert repository.codex_worker_session_id == "worker-session"
+    assert len(client.calls) == 2
+    assert all(call["sandbox"] == "read-only" for call in client.calls)
+
+
+def test_project_api_exposes_codex_thread_audit_state(session):
+    domain = _domain(session)
+    project = _project(session, domain)
+    repository = _repository(session, domain, project)
+    repository.codex_steward_session_id = "steward-session"
+    repository.metadata_ = {
+        "codex_threads": {
+            "steward": {
+                "status": "ready",
+                "last_used_at": "2026-09-15T12:00:00+00:00",
+            }
+        }
+    }
+    session.commit()
+    app = create_app()
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    response = TestClient(app).get("/issues/projects")
+
+    assert response.status_code == 200
+    payload = response.json()["projects"][0]["repositories"][0]
+    assert payload["codex_threads"][0]["name"] == "Maestro Maestro Steward"
+    assert payload["codex_threads"][0]["session_id"] == "steward-session"
+    assert payload["codex_threads"][1]["name"] == "Maestro Maestro Worker"
 
 
 def test_default_portfolio_registers_each_product_repository(session, monkeypatch):

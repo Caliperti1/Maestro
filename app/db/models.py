@@ -995,6 +995,7 @@ class RepositoryProfile(TimestampMixin, Base):
     last_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     codex_steward_session_id: Mapped[str | None] = mapped_column(String(240), index=True)
+    codex_worker_session_id: Mapped[str | None] = mapped_column(String(240), index=True)
     status: Mapped[str] = mapped_column(String(40), default="active", nullable=False, index=True)
     sync_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
