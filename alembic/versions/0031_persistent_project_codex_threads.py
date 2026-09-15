@@ -1,6 +1,6 @@
 """Add the persistent repository worker Codex thread.
 
-Revision ID: 0031_persistent_project_codex_threads
+Revision ID: 0031_project_codex_threads
 Revises: 0030_retire_l3_domain
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0031_persistent_project_codex_threads"
+revision: str = "0031_project_codex_threads"
 down_revision: str | None = "0030_retire_l3_domain"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
