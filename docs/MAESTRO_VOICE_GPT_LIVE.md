@@ -9,6 +9,10 @@ turn-taking, and lightweight conversational mechanics. Substantive requests are 
 iOS client, which sends the accumulated transcript through the existing `/maestro/respond` API.
 This preserves Maestro's routing, memory, workflow, permissions, and durable conversation ID.
 
+The iOS client may select any supported built-in GPT-Live voice when creating a session. The
+gateway validates that selection and applies it under `session.audio.output.voice`. Voice changes
+take effect on the next session because GPT-Live voices cannot change after startup.
+
 ## Configuration
 
 Set these values in the local `.env` and restart the backend:

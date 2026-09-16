@@ -38,6 +38,7 @@ def test_service_creates_client_delegation_session_without_exposing_key() -> Non
             return await GPTLiveSessionService(_settings(), client=client).create_session(
                 sdp="offer-sdp-long-enough",
                 client_identifier="installation-123",
+                voice="willow",
             )
 
     result = asyncio.run(create())
@@ -47,6 +48,7 @@ def test_service_creates_client_delegation_session_without_exposing_key() -> Non
     assert captured is not None
     payload = json.loads(captured.content)
     assert payload["session"]["model"] == "gpt-live-1"
+    assert payload["session"]["audio"] == {"output": {"voice": "willow"}}
     assert payload["session"]["delegation"] == {"type": "client"}
     assert payload["transport"] == {"type": "webrtc", "sdp": "offer-sdp-long-enough"}
     assert captured.headers["authorization"] == "Bearer test-key"
@@ -118,3 +120,21 @@ def test_endpoint_returns_webrtc_answer() -> None:
         "sdp": "answer-sdp",
         "model": "gpt-live-1",
     }
+
+
+def test_endpoint_rejects_unsupported_voice_before_contacting_openai() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_live_session_service] = lambda: GPTLiveSessionService(_settings())
+
+    response = TestClient(app).post(
+        "/maestro/voice/live/session",
+        json={
+            "sdp": "offer-sdp-long-enough",
+            "client_identifier": "installation-123",
+            "voice": "not-a-live-voice",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported GPT-Live voice" in response.json()["detail"]

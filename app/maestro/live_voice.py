@@ -15,6 +15,32 @@ from app.core.config import Settings
 logger = logging.getLogger(__name__)
 
 LIVE_SESSIONS_URL = "https://api.openai.com/v1/live/sessions"
+SUPPORTED_LIVE_VOICES = frozenset(
+    {
+        "alloy",
+        "ash",
+        "ballad",
+        "beacon",
+        "bossa",
+        "cedar",
+        "cinder",
+        "coral",
+        "delta",
+        "echo",
+        "gleam",
+        "marin",
+        "meridian",
+        "quartz",
+        "ripple",
+        "sage",
+        "shimmer",
+        "stone",
+        "tempo",
+        "verse",
+        "vesper",
+        "willow",
+    }
+)
 
 
 class LiveVoiceNotConfiguredError(RuntimeError):
@@ -32,6 +58,10 @@ class LiveVoiceUpstreamError(RuntimeError):
 
 class LiveVoiceInvalidResponseError(RuntimeError):
     """Raised when OpenAI returns an incomplete WebRTC answer."""
+
+
+class LiveVoiceUnsupportedVoiceError(ValueError):
+    """Raised when a client requests a voice GPT-Live does not support."""
 
 
 @dataclass(frozen=True)
@@ -53,6 +83,7 @@ class GPTLiveSessionService:
         *,
         sdp: str,
         client_identifier: str,
+        voice: str = "marin",
     ) -> LiveVoiceSession:
         api_key = (self.settings.openai_api_key or "").strip()
         if not self.settings.openai_live_enabled or not api_key:
@@ -60,10 +91,15 @@ class GPTLiveSessionService:
                 "GPT-Live is disabled or OPENAI_API_KEY is not configured."
             )
 
+        selected_voice = voice.strip().lower()
+        if selected_voice not in SUPPORTED_LIVE_VOICES:
+            raise LiveVoiceUnsupportedVoiceError(f"Unsupported GPT-Live voice: {voice}")
+
         model = self.settings.openai_live_model.strip() or "gpt-live-1"
         payload: dict[str, Any] = {
             "session": {
                 "model": model,
+                "audio": {"output": {"voice": selected_voice}},
                 "instructions": _live_instructions(),
                 "delegation": {"type": "client"},
             },
@@ -124,7 +160,12 @@ class GPTLiveSessionService:
 
         logger.info(
             "GPT-Live session created",
-            extra={"model": model, "session_id": session_id, "latency_ms": elapsed_ms},
+            extra={
+                "model": model,
+                "voice": selected_voice,
+                "session_id": session_id,
+                "latency_ms": elapsed_ms,
+            },
         )
         return LiveVoiceSession(session_id=session_id, sdp=answer_sdp, model=model)
 
