@@ -795,12 +795,20 @@ async def maestro_channel_ws(
 ) -> None:
     await websocket.accept()
     requested_conversation_id = websocket.query_params.get("conversation_id")
+    requested_client_turn_id = websocket.query_params.get("client_turn_id")
     conversation_id: uuid.UUID | None = None
+    client_turn_id: uuid.UUID | None = None
     if requested_conversation_id:
         try:
             conversation_id = uuid.UUID(requested_conversation_id)
         except ValueError:
             await websocket.close(code=1008, reason="Invalid conversation_id.")
+            return
+    if requested_client_turn_id:
+        try:
+            client_turn_id = uuid.UUID(requested_client_turn_id)
+        except ValueError:
+            await websocket.close(code=1008, reason="Invalid client_turn_id.")
             return
     last_signature: tuple[str, str | None, int] | None = None
     try:
@@ -815,6 +823,19 @@ async def maestro_channel_ws(
                 await websocket.close(code=1008, reason="Unknown Maestro conversation.")
                 return
             payload = _conversation_payload(db, conversation)
+            if client_turn_id is not None:
+                turn_id = str(client_turn_id)
+                payload["messages"] = [
+                    message
+                    for message in payload["messages"]
+                    if str((message.get("metadata") or {}).get("client_turn_id") or "")
+                    == turn_id
+                    or str(
+                        (message.get("metadata") or {}).get("in_reply_to_client_turn_id")
+                        or ""
+                    )
+                    == turn_id
+                ]
             signature = (
                 payload["id"],
                 payload["updated_at"],
