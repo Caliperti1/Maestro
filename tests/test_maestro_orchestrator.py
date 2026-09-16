@@ -2657,6 +2657,30 @@ def test_maestro_channel_websocket_sends_active_conversation(
     assert payload["conversation"]["messages"][0]["content"] == "Prepare a Praxis partner call workflow."
 
 
+def test_maestro_channel_websocket_can_follow_a_specific_conversation(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    first = client.post(
+        "/maestro/respond",
+        json={"message": "Keep this voice conversation selected."},
+    )
+    first_conversation_id = first.json()["conversation"]["id"]
+    client.post("/maestro/sessions/new")
+
+    with client.websocket_connect(
+        f"/maestro/channel/ws?conversation_id={first_conversation_id}"
+    ) as websocket:
+        payload = websocket.receive_json()
+
+    assert payload["type"] == "conversation"
+    assert payload["conversation"]["id"] == first_conversation_id
+    assert payload["conversation"]["messages"][0]["content"] == (
+        "Keep this voice conversation selected."
+    )
+
+
 def test_active_topic_includes_global_notifications_but_not_routine_progress(
     session: Session,
     tmp_path: Path,

@@ -174,8 +174,31 @@ def respond_to_maestro(
     if cached is not None:
         return _decorate_maestro_response(body, cached)
     if x_maestro_async == "true":
-        background_tasks.add_task(_respond_to_maestro_in_background, body)
-        return _decorate_maestro_response(body, {
+        client_turn_id = body.client_turn_id or uuid.uuid4()
+        conversation = _get_or_create_maestro_conversation(db, body.conversation_id)
+        queued_body = body.model_copy(
+            update={
+                "conversation_id": conversation.id,
+                "client_turn_id": client_turn_id,
+            }
+        )
+        user_message = _record_session_message(
+            db,
+            conversation,
+            "user",
+            body.message,
+            metadata={
+                **_client_turn_metadata(queued_body),
+                "turn_status": "pending",
+            },
+            client_turn_id=client_turn_id,
+        )
+        background_tasks.add_task(
+            _respond_to_maestro_in_background,
+            queued_body,
+            user_message.id,
+        )
+        return _decorate_maestro_response(queued_body, {
             "kind": "pending",
             "classification": "pending",
             "message": "I received that and am working through it now.",
@@ -183,7 +206,8 @@ def respond_to_maestro(
             "chat_plan": None,
             "active_plan": None,
             "channel_context": None,
-            "conversation": None,
+            "conversation": _conversation_payload(db, conversation, include_messages=False),
+            "continue_listening": False,
         })
     try:
         response = _respond_to_maestro_sync(body, db)
@@ -208,6 +232,12 @@ def _cached_client_turn_response(
     )
     if user_message is None:
         return None
+    conversation = db.get(Conversation, user_message.conversation_id)
+    if conversation is None:
+        raise HTTPException(
+            status_code=409,
+            detail="The original Maestro conversation is unavailable.",
+        )
     response_message = next(
         (
             message
@@ -226,16 +256,16 @@ def _cached_client_turn_response(
         None,
     )
     if response_message is None:
-        raise HTTPException(
-            status_code=409,
-            detail="This Maestro client turn is still processing. Retry shortly.",
-        )
-    conversation = db.get(Conversation, user_message.conversation_id)
-    if conversation is None:
-        raise HTTPException(
-            status_code=409,
-            detail="The original Maestro conversation is unavailable.",
-        )
+        metadata = user_message.metadata_ or {}
+        failed = metadata.get("turn_status") == "failed"
+        return {
+            "kind": "failed" if failed else "pending",
+            "classification": "failed" if failed else "pending",
+            "interaction_mode": metadata.get("interaction_mode", body.interaction_mode),
+            "message": metadata.get("turn_error") if failed else "Maestro is still working.",
+            "conversation": _conversation_payload(db, conversation, include_messages=False),
+            "continue_listening": False,
+        }
     return {
         "kind": "chat_only",
         "classification": "idempotent_replay",
@@ -292,18 +322,48 @@ def _client_turn_metadata(body: MaestroRespondBody) -> dict[str, Any]:
     return metadata
 
 
-def _respond_to_maestro_in_background(body: MaestroRespondBody) -> None:
+def _respond_to_maestro_in_background(
+    body: MaestroRespondBody,
+    user_message_id: uuid.UUID,
+) -> None:
     """Keep the shared channel responsive while local/model reasoning completes."""
     with SessionLocal() as session:
         try:
-            _respond_to_maestro_sync(body, session)
-        except Exception:
+            _respond_to_maestro_sync(
+                body,
+                session,
+                existing_user_message_id=user_message_id,
+            )
+            user_message = session.get(Message, user_message_id)
+            if user_message is not None:
+                user_message.metadata_ = {
+                    **(user_message.metadata_ or {}),
+                    "turn_status": "completed",
+                }
+                conversation = session.get(Conversation, user_message.conversation_id)
+                if conversation is not None:
+                    conversation.updated_at = datetime.now(UTC)
+                session.commit()
+        except Exception as exc:
+            user_message = session.get(Message, user_message_id)
+            if user_message is not None:
+                user_message.metadata_ = {
+                    **(user_message.metadata_ or {}),
+                    "turn_status": "failed",
+                    "turn_error": str(exc)[:500],
+                }
+                conversation = session.get(Conversation, user_message.conversation_id)
+                if conversation is not None:
+                    conversation.updated_at = datetime.now(UTC)
+                session.commit()
             logger.exception("Maestro background response failed.")
 
 
 def _respond_to_maestro_sync(
     body: MaestroRespondBody,
     db: Session,
+    *,
+    existing_user_message_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     conversation = _get_or_create_maestro_conversation(db, body.conversation_id)
     normalized_message = _normalized_message_for_routing(body.message)
@@ -316,14 +376,27 @@ def _respond_to_maestro_sync(
     message_metadata = _client_turn_metadata(body)
     if topic_context.get("topic_id"):
         message_metadata["topic_id"] = topic_context.get("topic_id")
-    user_message = _record_session_message(
-        db,
-        conversation,
-        "user",
-        body.message,
-        metadata=message_metadata,
-        client_turn_id=body.client_turn_id,
-    )
+    if existing_user_message_id is not None:
+        user_message = db.get(Message, existing_user_message_id)
+        if user_message is None or user_message.conversation_id != conversation.id:
+            raise MaestroOrchestratorError("Queued Maestro voice turn is missing its user message.")
+        user_message.metadata_ = {
+            **(user_message.metadata_ or {}),
+            **message_metadata,
+            "turn_status": "processing",
+        }
+        conversation.updated_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(user_message)
+    else:
+        user_message = _record_session_message(
+            db,
+            conversation,
+            "user",
+            body.message,
+            metadata=message_metadata,
+            client_turn_id=body.client_turn_id,
+        )
     resumed_agent_task = _resume_waiting_agent_task_from_reply(
         db,
         conversation=conversation,
@@ -721,11 +794,26 @@ async def maestro_channel_ws(
     db: Session = Depends(get_db),
 ) -> None:
     await websocket.accept()
+    requested_conversation_id = websocket.query_params.get("conversation_id")
+    conversation_id: uuid.UUID | None = None
+    if requested_conversation_id:
+        try:
+            conversation_id = uuid.UUID(requested_conversation_id)
+        except ValueError:
+            await websocket.close(code=1008, reason="Invalid conversation_id.")
+            return
     last_signature: tuple[str, str | None, int] | None = None
     try:
         while True:
             db.expire_all()
-            conversation = get_or_create_maestro_channel(db)
+            conversation = (
+                db.get(Conversation, conversation_id)
+                if conversation_id is not None
+                else get_or_create_maestro_channel(db)
+            )
+            if conversation is None:
+                await websocket.close(code=1008, reason="Unknown Maestro conversation.")
+                return
             payload = _conversation_payload(db, conversation)
             signature = (
                 payload["id"],
@@ -1569,6 +1657,11 @@ def _conversation_payload(
             for message in all_messages
             if (message.metadata_ or {}).get("topic_id") == active_topic_id
             or is_global_channel_message(message)
+            or (
+                (message.metadata_ or {}).get("client_turn_id")
+                and (message.metadata_ or {}).get("turn_status")
+                in {"pending", "processing", "failed"}
+            )
         ]
     message_count = len(messages) if include_messages else len(all_messages)
     active_topic = _active_topic(conversation)

@@ -50,6 +50,8 @@ def test_service_creates_client_delegation_session_without_exposing_key() -> Non
     assert payload["session"]["model"] == "gpt-live-1"
     assert payload["session"]["audio"] == {"output": {"voice": "willow"}}
     assert payload["session"]["delegation"] == {"type": "client"}
+    assert "Create exactly one delegation" in payload["session"]["instructions"]
+    assert "ask them to\nhold on" in payload["session"]["instructions"]
     assert payload["transport"] == {"type": "webrtc", "sdp": "offer-sdp-long-enough"}
     assert captured.headers["authorization"] == "Bearer test-key"
     assert captured.headers["openai-safety-identifier"] != "installation-123"

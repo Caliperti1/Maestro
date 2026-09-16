@@ -8,6 +8,10 @@ The Live session uses `gpt-live-1` with client delegation. GPT-Live owns natural
 turn-taking, and lightweight conversational mechanics. Substantive requests are delegated to the
 iOS client, which sends the accumulated transcript through the existing `/maestro/respond` API.
 This preserves Maestro's routing, memory, workflow, permissions, and durable conversation ID.
+The request is persisted before background reasoning starts. The phone then waits on the existing
+`/maestro/channel/ws` conversation feed and correlates Maestro's published response by
+`client_turn_id`; GPT-Live does not poll a separate turn-status API. The same message therefore
+appears in the Maestro web chat before it is appended to the Live session for speech.
 
 The iOS client may select any supported built-in GPT-Live voice when creating a session. The
 gateway validates that selection and applies it under `session.audio.output.voice`. Voice changes
