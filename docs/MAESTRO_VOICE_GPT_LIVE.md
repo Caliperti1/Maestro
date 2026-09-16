@@ -17,10 +17,6 @@ The iOS client may select any supported built-in GPT-Live voice when creating a 
 gateway validates that selection and applies it under `session.audio.output.voice`. Voice changes
 take effect on the next session because GPT-Live voices cannot change after startup.
 
-The iOS client may select any supported built-in GPT-Live voice when creating a session. The
-gateway validates that selection and applies it under `session.audio.output.voice`. Voice changes
-take effect on the next session because GPT-Live voices cannot change after startup.
-
 ## Configuration
 
 Set these values in the local `.env` and restart the backend:
