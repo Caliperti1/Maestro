@@ -2044,6 +2044,29 @@ h4 {
   font-size: 0.86rem;
 }
 
+.codex-thread-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.codex-thread-heading h4 {
+  margin-bottom: 2px;
+}
+
+.codex-thread-heading small,
+.codex-thread-section .contact-evidence-row small {
+  color: var(--muted);
+}
+
+.codex-thread-section .contact-evidence-row {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
 .contact-evidence-row {
   display: grid;
   gap: 3px;

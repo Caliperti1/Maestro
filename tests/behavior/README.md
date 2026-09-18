@@ -16,6 +16,7 @@
 - [012 Routed Tasks And Identity Hygiene](012_routed_tasks_and_identity_hygiene.md)
 - [013 Product Issue Intelligence](013_product_issue_intelligence.md)
 - [014 On-Demand Workflows](014_on_demand_workflows.md)
+- [015 Persistent Project Codex Threads](015_persistent_project_codex_threads.md)
 
 This directory tracks end-to-end behavioral tests that are not fully automated yet. Use these
 matrices while manually testing Maestro through the UI and backend logs.
