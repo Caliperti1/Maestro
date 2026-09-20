@@ -109,6 +109,21 @@ class CalendarTriggerWorkerSettingsBody(BaseModel):
     page_size: int | None = Field(default=None, ge=1, le=2500)
 
 
+class CalendarSecondarySourcePolicy(BaseModel):
+    calendar_id: str
+    enabled: bool = True
+    target_domain_key: str | None = None
+    inclusion_policy: Literal["all", "with_attendees", "ignore"] = "with_attendees"
+    item_kind: Literal["event", "context_window"] = "event"
+    context_type: str | None = None
+    scheduling_effect: str | None = None
+    blocks_time: bool | None = None
+
+
+class CalendarSecondarySourcesBody(BaseModel):
+    sources: list[CalendarSecondarySourcePolicy] = Field(default_factory=list)
+
+
 class WorkflowTemplateInstallBody(BaseModel):
     is_active: bool = False
 
@@ -475,6 +490,33 @@ def reset_calendar_trigger_domain(
 ) -> dict[str, Any]:
     try:
         return {"domain": CalendarTriggerService(db).reset_domain(domain_key)}
+    except CalendarTriggerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/triggers/calendar/domains/{domain_key}/reconcile")
+def reconcile_calendar_trigger_domain(
+    domain_key: str,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return {"reconciliation": CalendarTriggerService(db).reconcile_domain(domain_key)}
+    except CalendarTriggerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/triggers/calendar/domains/{domain_key}/secondary-sources")
+def update_calendar_secondary_sources(
+    domain_key: str,
+    body: CalendarSecondarySourcesBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        sources = CalendarTriggerService(db).update_secondary_source_policies(
+            domain_key,
+            [source.model_dump() for source in body.sources],
+        )
+        return {"domain_key": domain_key, "sources": sources}
     except CalendarTriggerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -2089,6 +2089,28 @@ h4 {
   border-radius: 8px;
 }
 
+.calendar-health-alert {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #f1b8b8;
+  border-radius: 6px;
+  background: #fff7f7;
+  color: #8c1d18;
+}
+
+.calendar-health-alert div {
+  display: grid;
+  gap: 3px;
+}
+
+.calendar-health-alert span {
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
 .calendar-legend {
   display: flex;
   flex-wrap: wrap;
