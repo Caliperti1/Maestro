@@ -72,6 +72,11 @@ def google_calendar_route_payload(event_payload: dict[str, Any]) -> dict[str, An
         )
 
     calendar_id = str(event_payload.get("calendar_id") or "primary")
+    source_policy = (
+        event_payload.get("source_policy")
+        if isinstance(event_payload.get("source_policy"), dict)
+        else {}
+    )
     source_ref = {
         "type": "google_calendar_event",
         "provider": "google_calendar",
@@ -114,6 +119,12 @@ def google_calendar_route_payload(event_payload: dict[str, Any]) -> dict[str, An
             "recurrence_original_start_at": (
                 original_start.get("dateTime") or original_start.get("date")
             ),
+            "item_kind": source_policy.get("item_kind") or "event",
+            "context_type": source_policy.get("context_type"),
+            "scheduling_effect": source_policy.get("scheduling_effect") or "hard",
+            "blocks_time": source_policy.get("blocks_time", True),
+            "source_calendar_summary": source_policy.get("calendar_summary"),
+            "source_inclusion_policy": source_policy.get("inclusion_policy"),
             # Provider payloads are already structured; skip the generic LLM enricher.
             "enriched_at": datetime.now(UTC).isoformat(),
             "enrichment_source": "google_calendar_adapter",
@@ -138,7 +149,26 @@ def stage_google_calendar_event(
             CalendarEvent.external_event_id == metadata["external_event_id"],
         )
     )
+    if existing is None:
+        source_matches = session.scalars(
+            select(CalendarEvent).where(
+                CalendarEvent.external_provider == "google_calendar",
+                CalendarEvent.external_calendar_id == metadata["external_calendar_id"],
+                CalendarEvent.external_event_id == metadata["external_event_id"],
+            )
+        ).all()
+        if len(source_matches) == 1:
+            existing = source_matches[0]
+            existing.domain_id = domain.id
     if existing is not None and existing.external_etag == metadata.get("external_etag"):
+        existing.item_kind = str(metadata.get("item_kind") or existing.item_kind)
+        existing.context_type = metadata.get("context_type")
+        existing.scheduling_effect = str(
+            metadata.get("scheduling_effect") or existing.scheduling_effect
+        )
+        existing.blocks_time = bool(metadata.get("blocks_time", existing.blocks_time))
+        existing.metadata_ = {**(existing.metadata_ or {}), **metadata}
+        session.commit()
         return {"status": "unchanged", "event_id": str(existing.id)}
     if route["status"] == "cancelled":
         series_instances = _future_series_instances(

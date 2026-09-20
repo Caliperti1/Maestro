@@ -202,6 +202,11 @@ export type GmailTriggerDomainStatus = {
   sync_token_present?: boolean;
   calendar_id?: string | null;
   last_event_id?: string | null;
+  last_success_at?: string | null;
+  last_reconciled_at?: string | null;
+  next_retry_at?: string | null;
+  auth_required?: boolean;
+  error_count?: number;
 };
 
 export type GmailTriggerStatus = {

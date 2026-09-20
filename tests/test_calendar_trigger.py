@@ -9,6 +9,7 @@ from app.db.seed import seed_default_domains
 from app.maestro.calendar_trigger import (
     CALENDAR_TRIGGER_CURSOR_PREFIX,
     CalendarSyncTokenExpired,
+    CalendarTriggerError,
     CalendarTriggerService,
 )
 from app.maestro.scheduler import SchedulerService
@@ -87,6 +88,14 @@ class ExpiredCalendarChangeSource(FakeCalendarChangeSource):
             page_token=page_token,
             page_size=page_size,
             bootstrap_at=bootstrap_at,
+        )
+
+
+class FailingCalendarChangeSource(FakeCalendarChangeSource):
+    def changes_page(self, connection, *, sync_token, page_token, page_size, bootstrap_at=None):
+        self.calls.append({"sync_token": sync_token})
+        raise CalendarTriggerError(
+            'Google OAuth refresh failed: 400 {"error":"invalid_grant","error_description":"Token has been expired or revoked."}'
         )
 
 
@@ -370,3 +379,85 @@ def test_calendar_trigger_imports_self_organized_secondary_event_with_external_a
     status = service.status()["domains"][0]
     assert status["secondary_sync_token_count"] == 1
     assert "secondary_sync_tokens" not in status
+
+
+def test_calendar_trigger_backs_off_and_marks_reauthorization_required(session: Session) -> None:
+    _seed_calendar_trigger(session)
+    source = FailingCalendarChangeSource()
+    service = CalendarTriggerService(session, source=source)
+
+    failed = service.poll_once()
+    deferred = service.poll_once()
+
+    assert failed["domains"][0]["status"] == "error"
+    assert failed["domains"][0]["auth_required"] is True
+    assert deferred["domains"][0]["status"] == "backoff"
+    assert len(source.calls) == 1
+    status = service.status()["domains"][0]
+    assert status["auth_required"] is True
+    assert status["next_retry_at"]
+
+
+def test_secondary_source_policy_routes_all_events_as_context_to_target_domain(
+    session: Session,
+) -> None:
+    domain = _seed_calendar_trigger(session)
+    personal = session.scalar(select(Domain).where(Domain.key == "personal"))
+    connection = session.scalar(
+        select(ToolConnection).where(ToolConnection.domain_id == domain.id)
+    )
+    assert personal is not None
+    assert connection is not None
+    connection.config = {
+        **connection.config,
+        "calendar_secondary_sources": [{
+            "calendar_id": "team-calendar",
+            "target_domain_key": "personal",
+            "inclusion_policy": "all",
+            "item_kind": "context_window",
+            "context_type": "availability",
+        }],
+    }
+    session.commit()
+
+    service = CalendarTriggerService(session, source=SecondaryCalendarSource())
+    service.poll_once()
+    service.poll_once()
+
+    events = session.scalars(
+        select(CalendarEvent).where(
+            CalendarEvent.external_calendar_id == "team-calendar"
+        )
+    ).all()
+    assert {event.external_event_id for event in events} == {"team-meeting", "solo-block"}
+    assert all(event.domain_id == personal.id for event in events)
+    assert all(event.item_kind == "context_window" for event in events)
+    assert all(event.blocks_time is False for event in events)
+
+
+def test_manual_reconciliation_cancels_provider_events_missing_from_window(
+    session: Session,
+) -> None:
+    _seed_calendar_trigger(session)
+    source = FakeCalendarChangeSource()
+    start = datetime.now(UTC) + timedelta(days=2)
+    source.upcoming_events = [{
+        "id": "removed-event",
+        "etag": "v1",
+        "status": "confirmed",
+        "summary": "Soon removed",
+        "start": {"dateTime": start.isoformat()},
+        "end": {"dateTime": (start + timedelta(hours=1)).isoformat()},
+    }]
+    service = CalendarTriggerService(session, source=source)
+    service.poll_once()
+    source.upcoming_events = []
+
+    result = service.reconcile_domain("praxis")
+
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "removed-event")
+    )
+    assert event is not None
+    assert event.status == "cancelled"
+    assert result["missing_cancelled_count"] == 1

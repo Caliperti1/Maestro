@@ -1433,6 +1433,52 @@ def test_calendar_listing_backfills_conferencing_url_from_summary(
     )
 
 
+def test_calendar_view_returns_lightweight_window_and_detail_on_demand(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    personal = DomainRepository(session).get_by_key("personal")
+    assert personal is not None
+    event = CalendarEvent(
+        domain_id=personal.id,
+        title="Family planning",
+        summary="Detailed planning notes.",
+        start_at=datetime(2030, 8, 12, 14, 0, tzinfo=UTC),
+        end_at=datetime(2030, 8, 12, 15, 0, tzinfo=UTC),
+        attendees=[{"name": f"Attendee {index}", "email": f"a{index}@example.com"} for index in range(50)],
+        source_refs=[{"raw": "x" * 10_000}],
+        supporting_refs=[{"raw": "x" * 10_000}],
+        provenance={"raw": "x" * 10_000},
+        metadata_={"recurrence_exdates": ["2030-08-19T14:00:00Z"], "raw": "x" * 10_000},
+    )
+    session.add(event)
+    session.commit()
+    client = _client(session, tmp_path)
+
+    response = client.get(
+        "/memory/routed-objects/events",
+        params={
+            "view": "calendar",
+            "start_at": "2030-08-01T00:00:00Z",
+            "end_at": "2030-09-01T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    summary = response.json()["events"][0]
+    assert summary["title"] == "Family planning"
+    assert summary["attendees"] == []
+    assert summary["source_refs"] == []
+    assert summary["metadata"] == {"recurrence_exdates": ["2030-08-19T14:00:00Z"]}
+    assert len(response.content) < 10_000
+
+    detail = client.get(f"/memory/routed-objects/events/{event.id}")
+    assert detail.status_code == 200
+    assert len(detail.json()["event"]["attendees"]) == 50
+    assert detail.json()["event"]["summary"] == "Detailed planning notes."
+
+
 def test_routed_memory_service_prefers_explicit_event_and_todo_dates(
     session: Session,
 ) -> None:

@@ -45,14 +45,18 @@ so it incurs no LLM cost or Maestro-side routing.
 
 The shared Calendar producer keeps an incremental Google cursor for the primary calendar and each
 eligible secondary calendar. First enablement records the current cursors without importing past
-events, then deterministically seeds a bounded window of upcoming event instances. The primary
-calendar is imported normally. Selected secondary calendars with owner or writer access contribute
-only events that include at least one attendee other than Chris; this includes meetings Chris
-organized himself. Personal blocks from secondary calendars therefore stay out of Maestro while
-real meetings are not missed. Expanding future instances is important for recurring series whose
-master record may not have changed recently. This seed bypasses agent reasoning and therefore adds
-no LLM cost. Later changes emit the exact calendar ID, event ID, provider version, and Google event
-payload; changes to a recurring master refresh its upcoming instances.
+events, then deterministically seeds a bounded window of upcoming event instances. Incremental
+polling is the low-latency path. Once per day, an authoritative rolling-window reconciliation
+upserts changed or previously missed occurrences and cancels provider events that are no longer in
+the source calendar. Expanding future instances is important for recurring series whose master
+record may not have changed recently. Neither path uses an LLM.
+
+Secondary calendars support explicit source policies on the domain Google connection. Each policy
+selects a target Maestro domain, an inclusion mode (`all`, `with_attendees`, or `ignore`), and
+whether imported entries are normal events or nonblocking context windows. Calendars without an
+explicit policy retain the conservative `with_attendees` behavior. This keeps family availability,
+West Point, Praxis, Perti, and retired calendars from being treated as one undifferentiated Personal
+source.
 
 The calendar workflow performs a deterministic routed write before its reasoning pass. Canonical
 events are keyed by domain plus external provider/calendar/event IDs. A retry of one provider
@@ -66,6 +70,11 @@ original slot; choosing `Edit full series` edits the parent recurrence instead.
 
 Shadow mode records the proposed run without the routed write. Switch a monitor to live only after
 one controlled shadow test looks correct.
+
+Credential failures use exponential backoff rather than retrying every worker cycle. The Calendar
+screen surfaces domains that require OAuth renewal. After replacing a revoked refresh token,
+restart the backend and reset that domain's calendar cursor; reset performs a bounded future seed,
+and the following incremental polls resume normal updates.
 
 ## Perti Credentials
 

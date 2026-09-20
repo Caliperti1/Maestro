@@ -1,9 +1,9 @@
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -607,10 +607,12 @@ def list_calendar_events(
     status: str | None = None,
     start_at: datetime | None = None,
     end_at: datetime | None = None,
+    view: Literal["full", "calendar"] = "full",
     limit: int = Query(default=500, ge=1, le=2000),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
+    if view == "full":
+        RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(CalendarEvent)
     if domain_id is not None:
@@ -632,11 +634,24 @@ def list_calendar_events(
     events = db.scalars(
         query.order_by(CalendarEvent.start_at, CalendarEvent.created_at.desc()).limit(limit)
     ).all()
+    if view == "calendar":
+        return {"events": _calendar_event_summaries(db, events)}
     calendar = CalendarIntelligenceService(db)
     for event in events:
         calendar.ensure_links(event)
     db.commit()
     return {"events": [_calendar_event_payload(db, event) for event in events]}
+
+
+@router.get("/routed-objects/events/{event_id}")
+def get_calendar_event(
+    event_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    event = db.get(CalendarEvent, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    return {"event": _calendar_event_payload(db, event)}
 
 
 @router.post("/routed-objects/events")
@@ -1731,6 +1746,92 @@ def _routed_item_payload(db: Session, item: RoutedItem) -> dict[str, Any]:
 
 def _calendar_event_payload(db: Session, event: CalendarEvent) -> dict[str, Any]:
     return CalendarIntelligenceService(db).event_payload(event)
+
+
+def _calendar_event_summaries(
+    db: Session,
+    events: list[CalendarEvent],
+) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    domain_keys = {
+        domain.id: domain.key
+        for domain in db.scalars(select(Domain)).all()
+    }
+    for event in events:
+        todo = db.get(Todo, event.todo_id) if event.todo_id else None
+        metadata = event.metadata_ or {}
+        summaries.append({
+            "id": str(event.id),
+            "domain_key": domain_keys.get(event.domain_id),
+            "title": event.title,
+            "summary": None,
+            "start_at": home_isoformat(event.start_at),
+            "end_at": home_isoformat(event.end_at),
+            "timezone": event.timezone,
+            "all_day": event.all_day,
+            "recurrence_rule": event.recurrence_rule,
+            "item_kind": event.item_kind,
+            "todo_id": str(event.todo_id) if event.todo_id else None,
+            "todo_status": todo.status if todo else None,
+            "estimated_minutes": todo.estimated_minutes if todo else None,
+            "context_type": event.context_type,
+            "scheduling_effect": event.scheduling_effect,
+            "blocks_time": event.blocks_time,
+            "location": event.location,
+            "conferencing_url": event.conferencing_url,
+            "organizer_name": None,
+            "organizer_email": None,
+            "attendees": [],
+            "organizations": [],
+            "work_links": [],
+            "conflicts": [],
+            "supporting_refs": [],
+            "source_refs": [],
+            "provenance": {},
+            "status": event.status,
+            "external_provider": event.external_provider,
+            "external_calendar_id": event.external_calendar_id,
+            "external_event_id": event.external_event_id,
+            "sync_status": event.sync_status,
+            "last_synced_at": event.last_synced_at.isoformat() if event.last_synced_at else None,
+            "metadata": {
+                key: metadata[key]
+                for key in ("recurrence_exdates", "source_calendar_summary")
+                if key in metadata
+            },
+            "created_at": event.created_at.isoformat() if event.created_at else None,
+        })
+
+    for index, event in enumerate(events):
+        if event.start_at is None or not event.blocks_time or event.status in {"archived", "cancelled"}:
+            continue
+        start = ensure_aware_utc(event.start_at)
+        end = ensure_aware_utc(event.end_at) if event.end_at else start + timedelta(hours=1)
+        conflicts: list[dict[str, Any]] = []
+        for other in events:
+            if (
+                other.id == event.id
+                or other.start_at is None
+                or not other.blocks_time
+                or other.status in {"archived", "cancelled"}
+            ):
+                continue
+            other_start = ensure_aware_utc(other.start_at)
+            other_end = (
+                ensure_aware_utc(other.end_at)
+                if other.end_at
+                else other_start + timedelta(hours=1)
+            )
+            if other_start < end and other_end > start:
+                conflicts.append({
+                    "id": str(other.id),
+                    "title": other.title,
+                    "domain_key": domain_keys.get(other.domain_id),
+                    "start_at": home_isoformat(other.start_at),
+                    "end_at": home_isoformat(other.end_at),
+                })
+        summaries[index]["conflicts"] = conflicts
+    return summaries
 
 
 def _ensure_aware(value: datetime | None) -> datetime | None:
