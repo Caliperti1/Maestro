@@ -36,6 +36,7 @@ class GatewayItem:
     policy: SourcePolicy
     extension: str = ".md"
     metadata: dict[str, Any] = field(default_factory=dict)
+    stage_for_memory: bool = True
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,12 @@ class ContextGatewayService:
         claim = ledger.claim(envelope, domain=domain)
         if not claim.should_process:
             return GatewayIngestResult("duplicate", None, str(claim.record.id), claim.duplicate_status)
+        if not item.stage_for_memory:
+            processed_path = Path(
+                str(item.metadata.get("raw_archive_path") or item.metadata.get("artifact_uri") or destination)
+            )
+            ledger.mark_processed(claim.record, processed_path=processed_path)
+            return GatewayIngestResult("processed", None, str(claim.record.id))
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(embed_context_envelope(envelope, item.content), encoding="utf-8")
         ledger.mark_staged(claim.record, staged_path=destination)
