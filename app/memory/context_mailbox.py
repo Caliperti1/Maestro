@@ -27,6 +27,11 @@ from app.db.models import (
     SourceRegistration,
 )
 from app.db.repositories import DomainRepository
+from app.memory.calendar_snapshot import (
+    CalendarSnapshotError,
+    CalendarSnapshotService,
+    load_calendar_snapshot,
+)
 from app.memory.context_gateway import ContextGatewayService, GatewayItem
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES, extract_dropbox_text
 from app.memory.ingestion import SourcePolicy, policy_for_domain
@@ -281,6 +286,7 @@ class ContextMailboxService:
             counts = {
                 "seen": len(message_ids),
                 "staged": 0,
+                "routed": 0,
                 "duplicate": 0,
                 "quarantined": 0,
                 "failed": 0,
@@ -372,6 +378,7 @@ class ContextMailboxService:
                 domain=domain,
                 message=message,
                 content_hash=content_hash,
+                attachments=attachments,
             )
             result = self.gateway.ingest(
                 self._gateway_item(
@@ -392,7 +399,13 @@ class ContextMailboxService:
             return {
                 "message_id": message_id,
                 "status": result.status,
-                "count_key": "duplicate" if result.status == "duplicate" else "staged",
+                "count_key": (
+                    "duplicate"
+                    if result.status == "duplicate"
+                    else "routed"
+                    if structured_route is not None
+                    else "staged"
+                ),
                 "domain_key": domain.key,
                 "source_id": handoff.source_id,
                 "ingestion_record_id": result.ingestion_record_id,
@@ -486,6 +499,8 @@ class ContextMailboxService:
                 "structured_route": structured_route,
                 "source_config": {"mailbox": self.settings.maestro_intake_email},
             },
+            stage_for_memory=handoff.record_type
+            not in {"calendar_event", "calendar_snapshot"},
         )
 
     def _route_structured_handoff(
@@ -495,7 +510,22 @@ class ContextMailboxService:
         domain: Domain,
         message: dict[str, Any],
         content_hash: str,
+        attachments: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
+        if handoff.record_type == "calendar_snapshot":
+            try:
+                snapshot = load_calendar_snapshot(
+                    attachments,
+                    expected_source_system=handoff.source_system,
+                    expected_snapshot_id=handoff.source_id,
+                )
+                return CalendarSnapshotService(self.session).apply(
+                    snapshot,
+                    domain=domain,
+                    gmail_message_id=str(message.get("message_id") or ""),
+                )
+            except CalendarSnapshotError as exc:
+                raise ContextHandoffError(str(exc)) from exc
         if handoff.record_type != "calendar_event":
             return None
         metadata = handoff.metadata
