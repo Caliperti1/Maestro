@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.db.models import CalendarEvent, IngestionRecord, RuntimeSetting
+from app.db.models import CalendarEvent, IngestionRecord, RoutedItem, RuntimeSetting
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.memory.context_gateway import ContextGatewayService
@@ -220,11 +220,84 @@ def test_structured_calendar_ingest_promotes_exact_event_without_llm(session, tm
     duplicate = _service(session, tmp_path, source).poll_once()
 
     assert duplicate["counts"]["duplicate"] == 1
+    assert session.query(RoutedItem).count() == 1
     assert len(
         session.scalars(
             select(CalendarEvent).where(CalendarEvent.external_event_id == "outlook-event-123")
         ).all()
     ) == 1
+
+
+def test_structured_calendar_ingest_collapses_transport_only_changes(
+    session, tmp_path
+) -> None:
+    first = _message(
+        sender="Chris Aliperti <approved@example.com>",
+        subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+        body=_calendar_body(),
+    )
+    source = FakeMailboxSource([first])
+    service = _service(session, tmp_path, source)
+
+    assert service.poll_once()["counts"]["staged"] == 1
+
+    reordered = _calendar_body().replace("action: updated", "action: added").replace(
+        "required_attendees: approved@example.com;partner@example.com;",
+        "required_attendees: partner@example.com; approved@example.com;",
+    )
+    source.messages = {
+        "gmail-2": _message(
+            "gmail-2",
+            sender="Chris Aliperti <approved@example.com>",
+            subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+            body=reordered,
+        )
+    }
+
+    result = service.poll_once()
+
+    assert result["counts"]["duplicate"] == 1
+    assert session.query(RoutedItem).count() == 1
+    assert session.query(IngestionRecord).count() == 1
+
+
+def test_structured_calendar_ingest_keeps_attendee_membership_changes(
+    session, tmp_path
+) -> None:
+    first = _message(
+        sender="Chris Aliperti <approved@example.com>",
+        subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+        body=_calendar_body(),
+    )
+    source = FakeMailboxSource([first])
+    service = _service(session, tmp_path, source)
+    service.poll_once()
+    changed = _calendar_body().replace(
+        "required_attendees: approved@example.com;partner@example.com;",
+        "required_attendees: approved@example.com;partner@example.com;new@example.com;",
+    )
+    source.messages = {
+        "gmail-2": _message(
+            "gmail-2",
+            sender="Chris Aliperti <approved@example.com>",
+            subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+            body=changed,
+        )
+    }
+
+    result = service.poll_once()
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "outlook-event-123")
+    )
+
+    assert result["counts"]["staged"] == 1
+    assert session.query(IngestionRecord).count() == 2
+    assert event is not None
+    assert {attendee["email"] for attendee in event.attendees} == {
+        "approved@example.com",
+        "partner@example.com",
+        "new@example.com",
+    }
 
 
 def test_structured_calendar_ingest_honors_explicit_outlook_timezone(

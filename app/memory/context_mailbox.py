@@ -14,11 +14,18 @@ from typing import Any, Protocol
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.identity import is_maestro_user_reference
-from app.db.models import Domain, RoutedItem, RuntimeSetting
+from app.db.models import (
+    Domain,
+    IngestionRecord,
+    RoutedItem,
+    RuntimeSetting,
+    SourceRegistration,
+)
 from app.db.repositories import DomainRepository
 from app.memory.context_gateway import ContextGatewayService, GatewayItem
 from app.memory.document_extract import SUPPORTED_DROPBOX_SUFFIXES, extract_dropbox_text
@@ -325,7 +332,41 @@ class ContextMailboxService:
                 raise ContextHandoffError(f"Unknown Maestro domain: {handoff.domain_key}")
             content, attachments, raw_path = self._context_content(message, handoff)
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            source_version = _handoff_source_version(handoff, fallback=content_hash)
             source_policy = _mailbox_policy(handoff)
+            registration_key = (
+                f"context-mailbox:{handoff.source_system}:{domain.key}"
+            )
+            if self._known_version(
+                registration_key=registration_key,
+                external_id=handoff.source_id,
+                source_version=source_version,
+            ):
+                result = self.gateway.ingest(
+                    self._gateway_item(
+                        handoff,
+                        domain=domain,
+                        message=message,
+                        content=content,
+                        content_hash=content_hash,
+                        source_version=source_version,
+                        source_policy=source_policy,
+                        raw_path=raw_path,
+                        attachments=attachments,
+                        structured_route=None,
+                    ),
+                    domain=domain,
+                )
+                self._finish_message(message_id, labels, state="processed")
+                return {
+                    "message_id": message_id,
+                    "status": result.status,
+                    "count_key": "duplicate",
+                    "domain_key": domain.key,
+                    "source_id": handoff.source_id,
+                    "ingestion_record_id": result.ingestion_record_id,
+                    "structured_route": None,
+                }
             structured_route = self._route_structured_handoff(
                 handoff,
                 domain=domain,
@@ -333,31 +374,17 @@ class ContextMailboxService:
                 content_hash=content_hash,
             )
             result = self.gateway.ingest(
-                GatewayItem(
-                    source_registration_key=f"context-mailbox:{handoff.source_system}:{domain.key}",
-                    source_system=handoff.source_system,
-                    external_id=handoff.source_id,
-                    source_version=content_hash,
-                    content_type="context_mailbox_handoff",
-                    domain_key=domain.key,
-                    title=handoff.title,
+                self._gateway_item(
+                    handoff,
+                    domain=domain,
+                    message=message,
                     content=content,
-                    source_timestamp=handoff.source_timestamp,
-                    policy=source_policy,
-                    metadata={
-                        "adapter_type": "context_mailbox",
-                        "gmail_message_id": message_id,
-                        "gmail_thread_id": message.get("thread_id"),
-                        "gmail_sender": sender,
-                        "gmail_subject": message.get("subject"),
-                        "gmail_date": message.get("date"),
-                        "raw_archive_path": str(raw_path),
-                        "attachments": attachments,
-                        "manifest": handoff.metadata,
-                        "structured_route_promoted": structured_route is not None,
-                        "structured_route": structured_route,
-                        "source_config": {"mailbox": self.settings.maestro_intake_email},
-                    },
+                    content_hash=content_hash,
+                    source_version=source_version,
+                    source_policy=source_policy,
+                    raw_path=raw_path,
+                    attachments=attachments,
+                    structured_route=structured_route,
                 ),
                 domain=domain,
             )
@@ -389,6 +416,77 @@ class ContextMailboxService:
                 "count_key": "failed",
                 "reason": str(exc),
             }
+
+    def _known_version(
+        self,
+        *,
+        registration_key: str,
+        external_id: str,
+        source_version: str,
+    ) -> bool:
+        registration = self.session.scalar(
+            select(SourceRegistration).where(SourceRegistration.key == registration_key)
+        )
+        if registration is None:
+            return False
+        record = self.session.scalar(
+            select(IngestionRecord).where(
+                IngestionRecord.source_registration_id == registration.id,
+                IngestionRecord.external_id == external_id,
+                IngestionRecord.source_version == source_version,
+            )
+        )
+        return record is not None and record.status in {
+            "processed",
+            "duplicate",
+            "processing",
+            "staged",
+        }
+
+    def _gateway_item(
+        self,
+        handoff: ParsedContextHandoff,
+        *,
+        domain: Domain,
+        message: dict[str, Any],
+        content: str,
+        content_hash: str,
+        source_version: str,
+        source_policy: SourcePolicy,
+        raw_path: Path,
+        attachments: list[dict[str, Any]],
+        structured_route: dict[str, Any] | None,
+    ) -> GatewayItem:
+        sender = parseaddr(str(message.get("from") or ""))[1].lower()
+        return GatewayItem(
+            source_registration_key=(
+                f"context-mailbox:{handoff.source_system}:{domain.key}"
+            ),
+            source_system=handoff.source_system,
+            external_id=handoff.source_id,
+            source_version=source_version,
+            content_type="context_mailbox_handoff",
+            domain_key=domain.key,
+            title=handoff.title,
+            content=content,
+            source_timestamp=handoff.source_timestamp,
+            policy=source_policy,
+            metadata={
+                "adapter_type": "context_mailbox",
+                "gmail_message_id": message.get("message_id"),
+                "gmail_thread_id": message.get("thread_id"),
+                "gmail_sender": sender,
+                "gmail_subject": message.get("subject"),
+                "gmail_date": message.get("date"),
+                "raw_archive_path": str(raw_path),
+                "attachments": attachments,
+                "content_hash": content_hash,
+                "manifest": handoff.metadata,
+                "structured_route_promoted": structured_route is not None,
+                "structured_route": structured_route,
+                "source_config": {"mailbox": self.settings.maestro_intake_email},
+            },
+        )
 
     def _route_structured_handoff(
         self,
@@ -640,6 +738,42 @@ def _manifest_fields(body: str) -> dict[str, str]:
         elif cleaned.startswith("#") or (fields and cleaned.startswith("- ")):
             break
     return fields
+
+
+def _handoff_source_version(handoff: ParsedContextHandoff, *, fallback: str) -> str:
+    if handoff.record_type != "calendar_event":
+        return fallback
+    metadata: dict[str, Any] = {}
+    for key, raw_value in handoff.metadata.items():
+        if key == "source_timestamp":
+            continue
+        value = " ".join(str(raw_value or "").split())
+        if key == "action":
+            token = _slug_token(value)
+            value = (
+                "cancelled"
+                if token in {"cancelled", "canceled", "deleted", "removed"}
+                else "active"
+            )
+        elif key in {"required_attendees", "optional_attendees"}:
+            value = sorted(
+                {
+                    email.strip().lower()
+                    for email in re.split(r"[;,]", value)
+                    if email.strip()
+                }
+            )
+        elif key in {"organizer", "source_system", "domain", "record_type"}:
+            value = value.lower()
+        metadata[key] = value
+    payload = {
+        "source_system": handoff.source_system,
+        "source_id": handoff.source_id,
+        "record_type": handoff.record_type,
+        "metadata": metadata,
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _domain_key(value: str | None, *, allow_placeholder: bool = False) -> str:

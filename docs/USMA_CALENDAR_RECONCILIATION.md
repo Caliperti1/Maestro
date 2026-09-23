@@ -10,10 +10,20 @@ reconciliation flow so Maestro receives a rolling window of concrete occurrences
 2. Use Office 365 Outlook **Get calendar view of events (V3)** for the USMA calendar.
 3. Set the UTC start to the current time and the UTC end to 60 days later.
 4. Iterate over the returned events. Calendar view expands recurring series into occurrences.
-5. Send one email per occurrence to `maestro@perti.io` using the contract below.
+5. For the current MVP, send one email per occurrence to `maestro@perti.io` using the contract
+   below. Maestro normalizes active-state labels and attendee ordering before deduplication, so
+   repeated no-op deliveries do not touch the routed calendar.
+
+This per-occurrence transport is intentionally simple but noisy. The preferred follow-on is one
+daily `calendar_snapshot` email with a JSON attachment containing the complete occurrence array.
+Keep the event-change flow for low-latency updates; use the batch snapshot only for reconciliation.
+Until the batch adapter is implemented, run the occurrence reconciliation once daily, not on a
+short polling interval and not once per source-calendar event update.
 
 Repeated snapshots are expected. Maestro uses `source_id` plus a content hash to make unchanged
-deliveries idempotent and updates the existing event when an occurrence changes.
+deliveries idempotent and updates the existing event when an occurrence changes. `added`, `updated`,
+and `upsert` are treated as the same active state, and attendee order does not create a new version.
+An actual attendee membership, time, title, location, recurrence, or cancellation change still does.
 
 ## Email Contract
 
