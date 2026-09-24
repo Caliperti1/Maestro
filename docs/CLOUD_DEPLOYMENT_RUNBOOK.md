@@ -99,12 +99,36 @@ The API must list the exact deployed Vercel origin in both `FRONTEND_ORIGIN` and
 `CORS_ALLOW_ORIGINS`. Do not put API keys, session secrets, or node credentials in a `VITE_*`
 variable; Vite embeds those values in the public browser bundle.
 
+## Cognito Managed Login Setup
+
+When the Cognito user-pool domain uses managed login version 2, create a branding style for the
+Maestro app client after creating the domain and OAuth client. Without this association Cognito
+accepts the authorization request but displays `Login pages unavailable` instead of the sign-in
+form.
+
+```bash
+aws cognito-idp create-managed-login-branding \
+  --user-pool-id "$MAESTRO_COGNITO_USER_POOL_ID" \
+  --client-id "$MAESTRO_COGNITO_CLIENT_ID" \
+  --use-cognito-provided-values \
+  --region "$MAESTRO_AWS_REGION"
+```
+
+Verify the association before smoke testing the frontend:
+
+```bash
+aws cognito-idp describe-managed-login-branding-by-client \
+  --user-pool-id "$MAESTRO_COGNITO_USER_POOL_ID" \
+  --client-id "$MAESTRO_COGNITO_CLIENT_ID" \
+  --region "$MAESTRO_AWS_REGION"
+```
+
 ## Single-Owner Authentication Release Gate
 
 One human account reduces account-management work, but it does not make an internet-facing API
 safe by itself. All of the following are required before public deployment:
 
-- [ ] Provision an OIDC provider and record the one permitted immutable `(issuer, subject)` identity.
+- [x] Provision an OIDC provider and record the one permitted immutable `(issuer, subject)` identity.
 - [x] Implement authorization-code flow with PKCE on the FastAPI backend; do not trust a browser-provided
       email address or identity claim without issuer, audience, nonce, and signature validation.
 - [x] Issue a short-lived, revocable `Secure`, `HttpOnly` owner session cookie.
