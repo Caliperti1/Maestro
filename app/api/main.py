@@ -9,9 +9,11 @@ import asyncio
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.agents.runtime import AgentRegistryService
 from app.api.agents import router as agents_router
@@ -19,6 +21,7 @@ from app.api.issues import router as issues_router
 from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
 from app.api.mobile_updates import router as mobile_updates_router
+from app.api.nodes import router as nodes_router
 from app.api.scheduler import router as scheduler_router
 from app.api.voice_live import router as voice_live_router
 from app.api.workflow_outputs import router as workflow_outputs_router
@@ -41,6 +44,7 @@ from app.memory.dropbox import MemoryDropboxProcessor
 from app.memory.hygiene import DurableMemoryHygieneService
 from app.memory.recurring_todos import RecurringTodoService
 from app.memory.routed_hygiene import RoutedHygieneService
+from app.operations.readiness import check_readiness
 
 logger = logging.getLogger(__name__)
 
@@ -60,22 +64,23 @@ def create_app() -> FastAPI:
             ensure_runtime_repository(session)
             ensure_default_repository_portfolio(session)
             RecurringTodoService(session).materialize_all()
-        worker_tasks.extend(
-            [
-                asyncio.create_task(_scheduler_worker_loop()),
-                asyncio.create_task(_gmail_trigger_worker_loop()),
-                asyncio.create_task(_calendar_trigger_worker_loop()),
-                asyncio.create_task(_memory_dropbox_worker_loop()),
-                asyncio.create_task(_context_mailbox_worker_loop()),
-                asyncio.create_task(_contact_hydration_worker_loop()),
-                asyncio.create_task(_memory_hygiene_worker_loop()),
-                asyncio.create_task(_todo_agent_task_worker_loop()),
-                asyncio.create_task(_product_issue_agent_task_worker_loop()),
-                asyncio.create_task(_routed_hygiene_worker_loop()),
-                asyncio.create_task(_repository_intelligence_worker_loop()),
-                asyncio.create_task(_mobile_notification_worker_loop()),
-            ]
-        )
+        if settings.maestro_process_role == "combined":
+            worker_tasks.extend(
+                [
+                    asyncio.create_task(_scheduler_worker_loop()),
+                    asyncio.create_task(_gmail_trigger_worker_loop()),
+                    asyncio.create_task(_calendar_trigger_worker_loop()),
+                    asyncio.create_task(_memory_dropbox_worker_loop()),
+                    asyncio.create_task(_context_mailbox_worker_loop()),
+                    asyncio.create_task(_contact_hydration_worker_loop()),
+                    asyncio.create_task(_memory_hygiene_worker_loop()),
+                    asyncio.create_task(_todo_agent_task_worker_loop()),
+                    asyncio.create_task(_product_issue_agent_task_worker_loop()),
+                    asyncio.create_task(_routed_hygiene_worker_loop()),
+                    asyncio.create_task(_repository_intelligence_worker_loop()),
+                    asyncio.create_task(_mobile_notification_worker_loop()),
+                ]
+            )
         try:
             yield
         finally:
@@ -98,11 +103,24 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok", "service": settings.app_name}
 
+    @app.get("/health/live", tags=["system"])
+    async def liveness() -> dict[str, str]:
+        return {"status": "ok", "service": settings.app_name}
+
+    @app.get("/health/ready", tags=["system"])
+    async def readiness():
+        result = check_readiness()
+        payload = asdict(result)
+        if not result.ready:
+            return JSONResponse(status_code=503, content=payload)
+        return payload
+
     app.include_router(memory_router)
     app.include_router(issues_router)
     app.include_router(agents_router)
     app.include_router(maestro_router)
     app.include_router(mobile_updates_router)
+    app.include_router(nodes_router)
     app.include_router(voice_live_router)
     app.include_router(scheduler_router)
     app.include_router(workflow_outputs_router)

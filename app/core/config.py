@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     user_email_aliases: str = (
         "chris@perti.io,christopher.aliperti@gmail.com,christopher.aliperti@westpoint.edu"
     )
+    maestro_process_role: str = "combined"
     app_host: str = "0.0.0.0"
     app_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     frontend_origin: str = "http://localhost:5174"
@@ -117,6 +118,26 @@ class Settings(BaseSettings):
     maestro_intake_google_client_secret: str | None = None
     maestro_intake_google_refresh_token: str | None = None
     maestro_intake_allowed_senders: str = ""
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_postgres_driver(cls, value: object) -> object:
+        """Use the installed psycopg 3 driver for provider-issued Postgres URLs."""
+        if not isinstance(value, str):
+            return value
+        if value.startswith("postgres://"):
+            return f"postgresql+psycopg://{value.removeprefix('postgres://')}"
+        if value.startswith("postgresql://"):
+            return f"postgresql+psycopg://{value.removeprefix('postgresql://')}"
+        return value
+
+    @field_validator("maestro_process_role")
+    @classmethod
+    def validate_process_role(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"combined", "web", "worker"}:
+            raise ValueError("MAESTRO_PROCESS_ROLE must be combined, web, or worker.")
+        return normalized
 
     @property
     def context_mailbox_configured(self) -> bool:
