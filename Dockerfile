@@ -7,7 +7,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /srv/maestro
 
-RUN addgroup --system maestro \
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes git \
+    && rm -rf /var/lib/apt/lists/* \
+    && addgroup --system maestro \
     && adduser --system --ingroup maestro --home /var/lib/maestro maestro \
     && mkdir -p /var/lib/maestro/dropbox \
     && chown -R maestro:maestro /var/lib/maestro
