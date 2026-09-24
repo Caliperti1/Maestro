@@ -1,7 +1,6 @@
 """Fail-fast checks for production deployment configuration.
 
-This command validates only settings that the current application consumes. Authentication is
-intentionally reported as a separate release gate until owner-session middleware is integrated.
+This command validates settings that the cloud API and worker consume before migrations run.
 """
 
 import json
@@ -80,13 +79,72 @@ def deployment_findings(settings: Settings) -> list[DeploymentFinding]:
                 "Local Ollama is unavailable in Render; configure hosted embeddings before cutover.",
             ),
         )
-    findings.append(
-        DeploymentFinding(
-            "gate",
-            "OWNER_AUTH",
-            "Do not expose this service until single-owner HTTP and WebSocket authentication is integrated.",
-        ),
-    )
+    if settings.owner_auth_mode != "oidc":
+        findings.append(
+            DeploymentFinding(
+                "gate",
+                "OWNER_AUTH_MODE",
+                "Production requires OWNER_AUTH_MODE=oidc.",
+            )
+        )
+    elif not settings.owner_oidc_configured:
+        findings.append(
+            DeploymentFinding(
+                "gate",
+                "OWNER_OIDC",
+                "OIDC issuer, client, subject, redirect URI, and session secret are required.",
+            )
+        )
+    else:
+        for key, value in (
+            ("OWNER_OIDC_ISSUER", settings.owner_oidc_issuer),
+            ("OWNER_OIDC_REDIRECT_URI", settings.owner_oidc_redirect_uri),
+        ):
+            parsed = urlparse(value or "")
+            if parsed.scheme != "https" or not parsed.netloc:
+                findings.append(
+                    DeploymentFinding(
+                        "error",
+                        key,
+                        f"{key} must be an HTTPS URL.",
+                    )
+                )
+    if settings.owner_session_secret and len(settings.owner_session_secret) < 32:
+        findings.append(
+            DeploymentFinding(
+                "error",
+                "OWNER_SESSION_SECRET",
+                "OWNER_SESSION_SECRET must contain at least 32 characters.",
+            )
+        )
+    if not settings.owner_cookie_secure:
+        findings.append(
+            DeploymentFinding(
+                "error",
+                "OWNER_COOKIE_SECURE",
+                "Production owner cookies must be Secure.",
+            )
+        )
+    if settings.owner_auth_mode == "oidc" and settings.owner_cookie_samesite != "none":
+        findings.append(
+            DeploymentFinding(
+                "error",
+                "OWNER_COOKIE_SAMESITE",
+                "The separate Vercel and Render origins require SameSite=None.",
+            )
+        )
+    if (
+        settings.artifact_store_backend != "s3"
+        or not settings.artifact_store_s3_bucket
+        or not settings.artifact_store_s3_region
+    ):
+        findings.append(
+            DeploymentFinding(
+                "gate",
+                "ARTIFACT_STORE",
+                "Production requires a private S3 artifact bucket.",
+            )
+        )
     return findings
 
 

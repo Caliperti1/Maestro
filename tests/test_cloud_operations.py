@@ -93,7 +93,7 @@ def test_readiness_checks_database_connection() -> None:
     assert result.database == "available"
 
 
-def test_deployment_check_accepts_cloud_endpoints_and_reports_auth_gate() -> None:
+def test_deployment_check_accepts_cloud_endpoints_and_reports_release_gates() -> None:
     settings = Settings(
         _env_file=None,
         database_url="postgresql://maestro:secret@internal/maestro",
@@ -107,7 +107,34 @@ def test_deployment_check_accepts_cloud_endpoints_and_reports_auth_gate() -> Non
     findings = deployment_findings(settings)
 
     assert not [finding for finding in findings if finding.level == "error"]
-    assert any(finding.key == "OWNER_AUTH" and finding.level == "gate" for finding in findings)
+    assert any(finding.key == "OWNER_AUTH_MODE" and finding.level == "gate" for finding in findings)
+    assert any(finding.key == "ARTIFACT_STORE" and finding.level == "gate" for finding in findings)
+
+
+def test_deployment_check_accepts_complete_production_security_configuration() -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql://maestro:secret@internal/maestro",
+        frontend_origin="https://maestro.example.com",
+        cors_allow_origins="https://maestro.example.com",
+        openrouter_api_key="configured",
+        embedding_provider="openai",
+        openai_api_key="configured",
+        owner_auth_mode="oidc",
+        owner_oidc_issuer="https://issuer.example.com",
+        owner_oidc_client_id="client-id",
+        owner_oidc_client_secret="client-secret",
+        owner_oidc_subject="owner-subject",
+        owner_oidc_redirect_uri="https://api.maestro.example.com/auth/callback",
+        owner_session_secret="x" * 32,
+        owner_cookie_secure=True,
+        owner_cookie_samesite="none",
+        artifact_store_backend="s3",
+        artifact_store_s3_bucket="maestro-private",
+        artifact_store_s3_region="us-west-2",
+    )
+
+    assert deployment_findings(settings) == []
 
 
 def test_deployment_check_refuses_promotion_while_auth_gate_exists(

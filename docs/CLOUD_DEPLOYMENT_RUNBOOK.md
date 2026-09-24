@@ -1,7 +1,8 @@
 # Maestro Cloud Deployment Runbook
 
-Status: deployment scaffold only. Do not expose the current API publicly until every release gate
-below is complete.
+Status: staging-ready foundation. Owner authentication and private object writes are implemented;
+do not import the production database or treat the cloud service as authoritative until the
+remaining gates and smoke tests below are complete.
 
 ## Intended Topology
 
@@ -24,7 +25,8 @@ The repository contains:
 - `render.yaml`: one API instance, one worker instance, and private Render Postgres.
 - `frontend/vercel.json`: Vite build and single-page-app routing.
 - `deploy/render.env.example`: variable inventory without credentials.
-- `app.operations.deployment_check`: fail-fast checks for cloud database, origin, and model settings.
+- `app.operations.deployment_check`: fail-fast checks for database, origin, owner auth, object
+  storage, and model settings.
 - `app.operations.readiness`: the Postgres connectivity check used by `/health/ready`.
 
 The Render Postgres connection string is normalized to SQLAlchemy's `psycopg` driver automatically.
@@ -63,9 +65,8 @@ python -m app.operations.readiness
 alembic upgrade head
 ```
 
-The deployment check treats owner authentication as a fatal release gate. The Render pre-deploy
-command will refuse to promote the service until that gate is replaced by the implemented auth
-check.
+The deployment check refuses promotion unless OIDC, secure owner cookies, exact origins, and a
+private S3 artifact store are configured.
 
 ## Render Staging Setup
 
@@ -79,9 +80,10 @@ check.
 7. Use only synthetic or sanitized staging data until artifact storage, auth, and retention are
    verified.
 
-The Blueprint deliberately disables the filesystem memory dropbox. Render instance files are
-ephemeral and are not shared between the API and worker. Do not re-enable it until ingestion uses a
-private object store.
+The Blueprint deliberately disables the filesystem memory-dropbox processor. Uploads and workflow
+artifacts are durable in S3, but the current curator still scans a local filesystem. Keep automatic
+dropbox processing disabled until the S3 inbox adapter lands; cloud memory already present in
+Postgres remains available.
 
 ## Vercel Staging Setup
 
@@ -101,28 +103,26 @@ variable; Vite embeds those values in the public browser bundle.
 One human account reduces account-management work, but it does not make an internet-facing API
 safe by itself. All of the following are required before public deployment:
 
-- [ ] Choose an OIDC provider and record the one permitted immutable `(issuer, subject)` identity.
-- [ ] Implement authorization-code flow on the FastAPI backend; do not trust a browser-provided
+- [ ] Provision an OIDC provider and record the one permitted immutable `(issuer, subject)` identity.
+- [x] Implement authorization-code flow on the FastAPI backend; do not trust a browser-provided
       email address or identity claim without issuer, audience, nonce, and signature validation.
-- [ ] Issue a short-lived, revocable `Secure`, `HttpOnly` owner session cookie.
-- [ ] Add server-side session storage or a revocation strategy and an explicit logout path.
-- [ ] Require authentication on every REST route except liveness, readiness, and OIDC callbacks.
-- [ ] Require CSRF protection on every cookie-authenticated state-changing request.
-- [ ] Authenticate the Maestro WebSocket before `accept()`; preferably exchange the owner session
-      for a short-lived, single-use WebSocket ticket.
-- [ ] Use an exact frontend-origin allowlist for HTTP and WebSocket origin validation.
-- [ ] Make the frontend send the intended credentials and handle login/session expiration.
-- [ ] Keep node credentials completely separate from owner sessions. A node token must never log in
+- [x] Issue a short-lived, revocable `Secure`, `HttpOnly` owner session cookie.
+- [x] Add server-side session storage, revocation, expiry, and an explicit logout path.
+- [x] Require authentication on every REST route except health, OIDC, and node protocol endpoints.
+- [x] Require CSRF protection on every cookie-authenticated state-changing request.
+- [x] Authenticate Maestro WebSockets before `accept()` and validate their exact origin.
+- [x] Use an exact frontend-origin allowlist for HTTP and WebSocket origin validation.
+- [x] Make the frontend send credentials, attach CSRF tokens, and handle session expiration.
+- [x] Keep node credentials completely separate from owner sessions. A node token must never log in
       to the human API and an owner cookie must never lease node jobs.
 - [ ] Rate-limit login, callback, enrollment, token refresh, and WebSocket-ticket endpoints.
-- [ ] Encrypt provider refresh tokens and session secrets at rest using a key not stored in the
-      database.
-- [ ] Add tests proving unauthenticated REST and WebSocket requests are denied.
+- [x] Keep provider client secrets and session secrets out of Postgres and source control; Render
+      stores them as encrypted environment values. Maestro does not store an OIDC refresh token.
+- [x] Add tests proving unauthenticated REST and WebSocket requests are denied.
 - [ ] Protect Vercel preview deployments as defense in depth; do not treat Vercel protection as
       protection for the separately hosted Render API.
 
-The placeholder auth variable names in `deploy/render.env.example` are an inventory for this work,
-not an implemented interface.
+The auth and artifact variables in `deploy/render.env.example` are the implemented interface.
 
 ## Other Release Gates
 
@@ -131,14 +131,15 @@ not an implemented interface.
 - [x] Ensure runtime database settings cannot turn a worker loop back on inside the API process.
 - [ ] Replace FastAPI `BackgroundTasks` used for durable orchestration with persisted queue work.
 - [x] Integrate `check_readiness()` as `/health/ready`; keep `/health` as process liveness.
-- [ ] Move uploads, workflow artifacts, and memory ingestion to private object storage.
+- [~] Uploads and workflow artifacts write to private object storage; S3-backed curator ingestion
+      remains to be implemented before enabling `MEMORY_DROPBOX_AUTORUN` in Render.
 - [ ] Make scheduler claims atomic and add expired-lease recovery before using more than one worker.
 - [ ] Add database pool sizing, `pool_pre_ping`, timeouts, and production observability.
 - [ ] Decide whether the classifiers disabled in `render.yaml` should use deterministic fallback,
       hosted providers, or node execution.
 - [ ] Confirm hosted embedding dimensions against the existing database before importing memory.
-- [ ] Add secure-cookie and trusted-proxy configuration as part of auth integration.
-- [ ] Rehearse backup restoration and deployment rollback with synthetic staging data.
+- [x] Add secure-cookie configuration and exact cross-origin checks as part of auth integration.
+- [x] Rehearse backup restoration and forward migration against a disposable local Postgres clone.
 
 ## Staging Smoke Test
 

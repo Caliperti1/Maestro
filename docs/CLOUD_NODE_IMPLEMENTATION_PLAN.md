@@ -1,6 +1,7 @@
 # Cloud Control Plane and Node Implementation Plan
 
-Status: approved direction; Slices 1-2 and the Slice 4 deployment scaffold are implemented
+Status: approved direction; node foundation, deployment scaffold, owner auth, and durable artifact
+writes are implemented
 
 ## Implementation Status — September 23, 2026
 
@@ -11,9 +12,13 @@ Status: approved direction; Slices 1-2 and the Slice 4 deployment scaffold are i
   idempotency journal, heartbeats, long polling, reconnect backoff, and `diagnostic.echo`.
 - Complete: Render API/worker/Postgres Blueprint, Vercel build configuration, process-role
   separation, readiness checks, deployment validation, and deployment runbook.
+- Complete: single-owner OIDC sessions, immutable subject allowlisting, HTTP/WebSocket protection,
+  CSRF, logout/revocation, and frontend reauthentication handling.
+- Complete: private local/S3 artifact-store abstraction with hashes and storage provenance for
+  uploads and workflow/session packages.
 - Verified: a real HTTP/Postgres round trip from enrollment through signed diagnostic result.
-- Next: owner authentication, cloud artifact storage, durable replacement for API background tasks,
-  and the first real node capability (`coding.codex.run`).
+- Next: S3-backed curator ingestion, durable replacement for API background tasks, and the first
+  real node capability (`coding.codex.run`).
 - Deferred by design: USMA implementation remains synthetic-only until institutional policy and
   Microsoft tenant authorization are settled.
 

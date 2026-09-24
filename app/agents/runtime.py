@@ -46,6 +46,7 @@ from app.memory.retrieval import (
     MemoryRetrievalService,
 )
 from app.prompts import load_prompt
+from app.storage import get_artifact_store
 from app.tools.runtime import (
     ToolExecutionRequest,
     ToolExecutionService,
@@ -2113,17 +2114,18 @@ class InteractionArtifactPackager:
         )
 
     def stage_package(self, package: InteractionArtifactPackage) -> StagedInteractionArtifact:
-        root = Path(get_settings().memory_dropbox_root)
-        inbox = root / package.domain_key / "inbox"
-        inbox.mkdir(parents=True, exist_ok=True)
         filename = f"{_slug(package.agent_key or 'maestro-session')}-{package.package_id}.json"
-        path = inbox / filename
-        path.write_text(json.dumps(asdict(package), indent=2, sort_keys=True), encoding="utf-8")
+        data = json.dumps(asdict(package), indent=2, sort_keys=True).encode("utf-8")
+        stored = get_artifact_store().put_bytes(
+            f"{package.domain_key}/inbox/{filename}",
+            data,
+            content_type="application/json",
+        )
 
         artifact = Artifact(
             artifact_type="interaction_package",
             name=filename,
-            uri=str(path),
+            uri=stored.uri,
             mime_type="application/json",
             metadata_={
                 "schema_version": package.schema_version,
@@ -2131,6 +2133,9 @@ class InteractionArtifactPackager:
                 "domain_key": package.domain_key,
                 "agent_key": package.agent_key,
                 "staged_for_curation": True,
+                "storage_key": stored.key,
+                "sha256": stored.sha256,
+                "size": stored.size,
             },
         )
         self.session.add(artifact)
@@ -2138,7 +2143,7 @@ class InteractionArtifactPackager:
         self.session.refresh(artifact)
         return StagedInteractionArtifact(
             package=package,
-            path=str(path),
+            path=stored.uri,
             artifact_id=str(artifact.id),
         )
 

@@ -24,6 +24,24 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: OWNER_OIDC_ISSUER
+        sync: false
+      - key: OWNER_OIDC_CLIENT_ID
+        sync: false
+      - key: OWNER_OIDC_CLIENT_SECRET
+        sync: false
+      - key: OWNER_OIDC_SUBJECT
+        sync: false
+      - key: OWNER_OIDC_REDIRECT_URI
+        sync: false
+      - key: OWNER_SESSION_SECRET
+        generateValue: true
+      - key: ARTIFACT_STORE_S3_BUCKET
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
       - key: MAESTRO_PROCESS_ROLE
         value: web
       - key: SCHEDULER_WORKER_AUTORUN
@@ -56,6 +74,21 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: ARTIFACT_STORE_S3_BUCKET
+        fromService:
+          type: web
+          name: maestro-api
+          envVarKey: ARTIFACT_STORE_S3_BUCKET
+      - key: AWS_ACCESS_KEY_ID
+        fromService:
+          type: web
+          name: maestro-api
+          envVarKey: AWS_ACCESS_KEY_ID
+      - key: AWS_SECRET_ACCESS_KEY
+        fromService:
+          type: web
+          name: maestro-api
+          envVarKey: AWS_SECRET_ACCESS_KEY
       - key: MAESTRO_PROCESS_ROLE
         value: worker
       - key: SCHEDULER_WORKER_AUTORUN
@@ -109,3 +142,15 @@ envVarGroups:
         value: none
       - key: MAESTRO_TOPIC_RESOLVER_PROVIDER
         value: none
+      - key: OWNER_AUTH_MODE
+        value: oidc
+      - key: OWNER_COOKIE_SECURE
+        value: "true"
+      - key: OWNER_COOKIE_SAMESITE
+        value: none
+      - key: ARTIFACT_STORE_BACKEND
+        value: s3
+      - key: ARTIFACT_STORE_S3_REGION
+        value: us-west-2
+      - key: ARTIFACT_STORE_S3_PREFIX
+        value: maestro

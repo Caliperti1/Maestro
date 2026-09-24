@@ -14,9 +14,11 @@ from dataclasses import asdict
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.agents.runtime import AgentRegistryService
 from app.api.agents import router as agents_router
+from app.api.auth import router as auth_router
 from app.api.issues import router as issues_router
 from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
@@ -27,6 +29,7 @@ from app.api.voice_live import router as voice_live_router
 from app.api.workflow_outputs import router as workflow_outputs_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.auth.middleware import OwnerAuthMiddleware
 from app.db.seed import seed_default_domains
 from app.db.session import SessionLocal
 from app.issues.repositories import ensure_default_repository_portfolio, ensure_runtime_repository
@@ -91,6 +94,16 @@ def create_app() -> FastAPI:
                     await worker_task
 
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    if settings.owner_session_secret:
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key=settings.owner_session_secret,
+            session_cookie="maestro_oidc_flow",
+            max_age=600,
+            same_site=settings.owner_cookie_samesite,
+            https_only=settings.owner_cookie_secure,
+        )
+    app.add_middleware(OwnerAuthMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -116,6 +129,7 @@ def create_app() -> FastAPI:
         return payload
 
     app.include_router(memory_router)
+    app.include_router(auth_router)
     app.include_router(issues_router)
     app.include_router(agents_router)
     app.include_router(maestro_router)
