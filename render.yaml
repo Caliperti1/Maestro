@@ -3,7 +3,7 @@ services:
     name: maestro-api
     runtime: docker
     region: virginia
-    dockerfilePath: ./Dockerfile.backend
+    dockerfilePath: ./Dockerfile
     dockerContext: .
     dockerCommand: python -m app.operations.api
     preDeployCommand: python -m app.operations.deployment_check && alembic upgrade head
@@ -27,8 +27,6 @@ services:
       - key: OWNER_OIDC_ISSUER
         sync: false
       - key: OWNER_OIDC_CLIENT_ID
-        sync: false
-      - key: OWNER_OIDC_CLIENT_SECRET
         sync: false
       - key: OWNER_OIDC_SUBJECT
         sync: false
@@ -55,7 +53,7 @@ services:
     name: maestro-worker
     runtime: docker
     region: virginia
-    dockerfilePath: ./Dockerfile.backend
+    dockerfilePath: ./Dockerfile
     dockerContext: .
     dockerCommand: python -m app.operations.worker
     maxShutdownDelaySeconds: 120

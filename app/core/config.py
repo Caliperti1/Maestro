@@ -186,7 +186,6 @@ class Settings(BaseSettings):
             (
                 self.owner_oidc_issuer,
                 self.owner_oidc_client_id,
-                self.owner_oidc_client_secret,
                 self.owner_oidc_subject,
                 self.owner_oidc_redirect_uri,
                 self.owner_session_secret,

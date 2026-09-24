@@ -19,7 +19,8 @@ Render FastAPI service ---- Render Postgres + pgvector
 
 The repository contains:
 
-- `Dockerfile.backend`: one non-root image for the API and worker.
+- `Dockerfile`: one non-root image for the API and worker (`Dockerfile.backend` remains as the
+  original compatibility entry point).
 - `app.operations.api`: production Uvicorn entry point.
 - `app.operations.worker`: signal-aware scheduler, Gmail trigger, and local-dropbox loops.
 - `render.yaml`: one API instance, one worker instance, and private Render Postgres.
@@ -104,7 +105,7 @@ One human account reduces account-management work, but it does not make an inter
 safe by itself. All of the following are required before public deployment:
 
 - [ ] Provision an OIDC provider and record the one permitted immutable `(issuer, subject)` identity.
-- [x] Implement authorization-code flow on the FastAPI backend; do not trust a browser-provided
+- [x] Implement authorization-code flow with PKCE on the FastAPI backend; do not trust a browser-provided
       email address or identity claim without issuer, audience, nonce, and signature validation.
 - [x] Issue a short-lived, revocable `Secure`, `HttpOnly` owner session cookie.
 - [x] Add server-side session storage, revocation, expiry, and an explicit logout path.

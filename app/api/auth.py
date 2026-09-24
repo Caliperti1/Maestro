@@ -39,19 +39,22 @@ def _safe_return_to(value: str | None, settings: Settings) -> str:
 def _oauth_client(
     issuer: str,
     client_id: str,
-    client_secret: str,
+    client_secret: str | None,
 ) -> OAuth:
     oauth = OAuth()
-    oauth.register(
+    registration = dict(
         name="owner",
         client_id=client_id,
-        client_secret=client_secret,
         server_metadata_url=issuer.rstrip("/") + "/.well-known/openid-configuration",
         client_kwargs={
             "scope": "openid email profile",
             "code_challenge_method": "S256",
+            "token_endpoint_auth_method": "client_secret_basic" if client_secret else "none",
         },
     )
+    if client_secret:
+        registration["client_secret"] = client_secret
+    oauth.register(**registration)
     return oauth
 
 
@@ -61,7 +64,7 @@ def _configured_oauth(settings: Settings):
     oauth = _oauth_client(
         settings.owner_oidc_issuer or "",
         settings.owner_oidc_client_id or "",
-        settings.owner_oidc_client_secret or "",
+        settings.owner_oidc_client_secret,
     )
     return oauth.create_client("owner")
 
