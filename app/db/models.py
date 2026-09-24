@@ -168,6 +168,69 @@ class Message(Base):
     )
 
 
+class MessageReceipt(TimestampMixin, Base):
+    """Shared seen state for a Maestro message across web and companion clients."""
+
+    __tablename__ = "message_receipts"
+    __table_args__ = (UniqueConstraint("message_id", name="uq_message_receipts_message_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    seen_via: Mapped[str] = mapped_column(String(40), nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class MobileDeviceEndpoint(TimestampMixin, Base):
+    """An APNs destination registered by one Maestro Voice installation."""
+
+    __tablename__ = "mobile_device_endpoints"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    installation_id: Mapped[uuid.UUID] = mapped_column(Uuid, unique=True, nullable=False, index=True)
+    device_token: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    platform: Mapped[str] = mapped_column(String(40), default="ios", nullable=False)
+    environment: Mapped[str] = mapped_column(String(20), default="sandbox", nullable=False)
+    bundle_id: Mapped[str] = mapped_column(String(240), nullable=False)
+    notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    last_registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class MobileNotificationDelivery(TimestampMixin, Base):
+    """One retryable APNs attempt stream for a message and a device endpoint."""
+
+    __tablename__ = "mobile_notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint(
+            "message_id",
+            "device_endpoint_id",
+            name="uq_mobile_notification_delivery_message_device",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    device_endpoint_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("mobile_device_endpoints.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(40), default="queued", nullable=False, index=True)
+    priority: Mapped[str] = mapped_column(String(40), default="important", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    apns_id: Mapped[str | None] = mapped_column(String(120))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
 class Task(TimestampMixin, Base):
     __tablename__ = "tasks"
 

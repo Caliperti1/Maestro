@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     routed_hygiene_interval_seconds: Annotated[int, Field(ge=300, le=86400)] = 3600
     repository_intelligence_autorun: bool = True
     repository_intelligence_interval_seconds: Annotated[int, Field(ge=60, le=86400)] = 300
+    mobile_notification_worker_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 15
+    apns_team_id: str | None = None
+    apns_key_id: str | None = None
+    apns_private_key_path: str | None = None
+    apns_topic: str = "com.pertilaboratories.maestrovoice"
     context_mailbox_autorun: bool = True
     context_mailbox_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     context_mailbox_page_size: Annotated[int, Field(ge=1, le=100)] = 25
@@ -120,6 +125,10 @@ class Settings(BaseSettings):
                 self.maestro_intake_google_refresh_token,
             )
         )
+
+    @property
+    def apns_configured(self) -> bool:
+        return all((self.apns_team_id, self.apns_key_id, self.apns_private_key_path))
 
     @property
     def context_mailbox_allowed_senders(self) -> set[str]:
