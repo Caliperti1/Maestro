@@ -43,6 +43,21 @@ class User(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
+class OwnerSession(TimestampMixin, Base):
+    """Revocable opaque browser session for the single Maestro owner."""
+
+    __tablename__ = "owner_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    issuer: Mapped[str] = mapped_column(String(500), nullable=False)
+    subject: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
 class Domain(TimestampMixin, Base):
     __tablename__ = "domains"
 
@@ -1241,6 +1256,107 @@ class ToolCall(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionNode(TimestampMixin, Base):
+    """A separately authenticated host that can execute local Maestro capabilities."""
+
+    __tablename__ = "execution_nodes"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    platform: Mapped[str] = mapped_column(String(80), nullable=False)
+    public_key: Mapped[str | None] = mapped_column(Text)
+    credential_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="offline", nullable=False, index=True)
+    client_version: Mapped[str | None] = mapped_column(String(80))
+    enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    credential_issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class NodeCapability(TimestampMixin, Base):
+    __tablename__ = "node_capabilities"
+    __table_args__ = (
+        UniqueConstraint("node_id", "capability_key", name="uq_node_capabilities_node_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    capability_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    version: Mapped[str | None] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(40), default="ready", nullable=False, index=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NodeEnrollmentToken(TimestampMixin, Base):
+    __tablename__ = "node_enrollment_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    token_hint: Mapped[str] = mapped_column(String(16), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    allowed_capabilities: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class NodeJob(TimestampMixin, Base):
+    __tablename__ = "node_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("tasks.id", ondelete="SET NULL"), index=True
+    )
+    capability_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    job_type: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(40), default="waiting_for_node", nullable=False, index=True
+    )
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False, index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(240), unique=True)
+    input_envelope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    output_envelope: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    lease_token_hash: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class NodeJobEvent(Base):
+    __tablename__ = "node_job_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("node_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    from_status: Mapped[str | None] = mapped_column(String(40))
+    to_status: Mapped[str | None] = mapped_column(String(40))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
 
 

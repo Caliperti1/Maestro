@@ -28,6 +28,7 @@ chat responses toward persistent execution.
 - Approved on-demand playbooks callable directly from Knowledge chat or the Workflows UI, including
   a parallel cross-domain Daily Standup with dependent Maestro synthesis.
 - Background scheduler worker that can be toggled from the UI.
+- Durable execution-node enrollment, health, and job leasing with a standalone Mac client.
 - Tool runtime with approval gates, domain credential resolution, and agent permissions.
 - GitHub, Gmail, Codex, and app reload tool foundations.
 - Domain-isolated Google Workspace (including Calendar) and GitHub connections for Personal and
@@ -214,7 +215,8 @@ Relevant code:
 
 The scheduler records recurring or trigger-shaped workflow definitions, creates workflow runs,
 manages queue items, tracks resource locks and fairness groups, and lets the worker claim ready
-items. The current background worker runs inside the FastAPI process and can be toggled from the UI.
+items. Local development can use the combined API/worker process; cloud deployments use the
+standalone worker entry point.
 
 Relevant code:
 
@@ -275,6 +277,30 @@ http://localhost:5173
 ```
 
 For phone access, see [docs/PHONE_ACCESS.md](docs/PHONE_ACCESS.md).
+
+### Personal Mac node
+
+The first node client is a foreground development service with the safe `diagnostic.echo`
+capability. It does not expose a shell or general filesystem access.
+
+```bash
+cd node_client
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+```
+
+In Maestro, open **Nodes** and create a one-time enrollment code. Then run:
+
+```bash
+.venv/bin/maestro-node enroll \
+  --url http://localhost:8000 \
+  --name "Personal Mac"
+.venv/bin/maestro-node run
+```
+
+See [node_client/README.md](node_client/README.md) for local state and status commands. Cloud
+packaging and its release gates are documented in
+[docs/CLOUD_DEPLOYMENT_RUNBOOK.md](docs/CLOUD_DEPLOYMENT_RUNBOOK.md).
 
 ## Configuration
 
@@ -386,6 +412,8 @@ pytest tests/test_scheduler_api.py -q
 - [Product issue and repository intelligence](docs/PRODUCT_ISSUE_INTELLIGENCE.md)
 - [Postgres setup](docs/POSTGRES.md)
 - [Phone access](docs/PHONE_ACCESS.md)
+- [Cloud and node implementation plan](docs/CLOUD_NODE_IMPLEMENTATION_PLAN.md)
+- [Cloud deployment runbook](docs/CLOUD_DEPLOYMENT_RUNBOOK.md)
 - [Codebase cleanup register](docs/CODEBASE_CLEANUP.md)
 - [MVP backlog](docs/BACKLOG.md)
 

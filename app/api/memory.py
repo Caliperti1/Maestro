@@ -82,6 +82,7 @@ from app.memory.routed_retrieval import (
 )
 from app.memory.routed_service import RoutedMemoryService
 from app.memory.service import MemoryAccessError, MemoryService
+from app.storage import get_artifact_store
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 CALENDAR_EVENT_STATUSES = {"scheduled", "tentative", "cancelled", "archived"}
@@ -417,14 +418,17 @@ async def upload_dropbox_file(
         supported = ", ".join(sorted(SUPPORTED_DROPBOX_SUFFIXES))
         raise HTTPException(status_code=400, detail=f"Supported file types: {supported}.")
 
-    inbox = _dropbox_root() / domain_key / "inbox"
-    inbox.mkdir(parents=True, exist_ok=True)
-    destination = _available_destination(inbox / filename)
-    destination.write_bytes(await file.read())
+    data = await file.read()
+    store = get_artifact_store()
+    storage_key = f"{domain_key}/inbox/{filename}"
+    stored = store.put_bytes(storage_key, data, content_type=file.content_type)
     return {
         "domain_key": domain_key,
-        "filename": destination.name,
-        "path": str(destination),
+        "filename": filename,
+        "path": stored.uri,
+        "storage_key": stored.key,
+        "sha256": stored.sha256,
+        "size": stored.size,
         "status": "uploaded",
     }
 
@@ -553,7 +557,6 @@ def list_routed_objects(
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     return RoutedMemoryService(db).build_context_bundle(
         domain_id=domain_id,
@@ -570,7 +573,6 @@ def routed_context_bundle(
     max_chars: int = 3000,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     bundle = RoutedRetrievalService(db).build_context_bundle(
         domain_id=domain_id,
@@ -611,8 +613,6 @@ def list_calendar_events(
     limit: int = Query(default=500, ge=1, le=2000),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    if view == "full":
-        RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(CalendarEvent)
     if domain_id is not None:
@@ -820,8 +820,6 @@ def list_todos(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RecurringTodoService(db).materialize_all()
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(Todo)
     if domain_id is not None:
@@ -950,7 +948,6 @@ def list_contacts(
     use_semantic: bool = True,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = None
     if domain_key:
         domain = DomainRepository(db).get_by_key(domain_key)
@@ -1190,7 +1187,6 @@ def list_entities(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     service = OrganizationIntelligenceService(db)
     results = service.search(

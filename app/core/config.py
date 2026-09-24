@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +18,24 @@ class Settings(BaseSettings):
     user_email_aliases: str = (
         "chris@perti.io,christopher.aliperti@gmail.com,christopher.aliperti@westpoint.edu"
     )
+    maestro_process_role: str = "combined"
+    owner_auth_mode: str = "disabled"
+    owner_oidc_issuer: str | None = None
+    owner_oidc_client_id: str | None = None
+    owner_oidc_client_secret: str | None = None
+    owner_oidc_subject: str | None = None
+    owner_oidc_redirect_uri: str | None = None
+    owner_session_secret: str | None = None
+    owner_session_cookie_name: str = "maestro_owner_session"
+    owner_session_ttl_seconds: Annotated[int, Field(ge=300, le=2592000)] = 43200
+    owner_cookie_secure: bool = True
+    owner_cookie_samesite: str = "lax"
+    artifact_store_backend: str = "local"
+    artifact_store_local_root: str | None = None
+    artifact_store_s3_bucket: str | None = None
+    artifact_store_s3_region: str | None = None
+    artifact_store_s3_prefix: str = "maestro"
+    artifact_store_s3_kms_key_id: str | None = None
     app_host: str = "0.0.0.0"
     app_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     frontend_origin: str = "http://localhost:5174"
@@ -117,6 +135,62 @@ class Settings(BaseSettings):
     maestro_intake_google_client_secret: str | None = None
     maestro_intake_google_refresh_token: str | None = None
     maestro_intake_allowed_senders: str = ""
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_postgres_driver(cls, value: object) -> object:
+        """Use the installed psycopg 3 driver for provider-issued Postgres URLs."""
+        if not isinstance(value, str):
+            return value
+        if value.startswith("postgres://"):
+            return f"postgresql+psycopg://{value.removeprefix('postgres://')}"
+        if value.startswith("postgresql://"):
+            return f"postgresql+psycopg://{value.removeprefix('postgresql://')}"
+        return value
+
+    @field_validator("maestro_process_role")
+    @classmethod
+    def validate_process_role(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"combined", "web", "worker"}:
+            raise ValueError("MAESTRO_PROCESS_ROLE must be combined, web, or worker.")
+        return normalized
+
+    @field_validator("owner_auth_mode")
+    @classmethod
+    def validate_owner_auth_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"disabled", "oidc"}:
+            raise ValueError("OWNER_AUTH_MODE must be disabled or oidc.")
+        return normalized
+
+    @field_validator("owner_cookie_samesite")
+    @classmethod
+    def validate_owner_cookie_samesite(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"lax", "strict", "none"}:
+            raise ValueError("OWNER_COOKIE_SAMESITE must be lax, strict, or none.")
+        return normalized
+
+    @field_validator("artifact_store_backend")
+    @classmethod
+    def validate_artifact_store_backend(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"local", "s3"}:
+            raise ValueError("ARTIFACT_STORE_BACKEND must be local or s3.")
+        return normalized
+
+    @property
+    def owner_oidc_configured(self) -> bool:
+        return all(
+            (
+                self.owner_oidc_issuer,
+                self.owner_oidc_client_id,
+                self.owner_oidc_subject,
+                self.owner_oidc_redirect_uri,
+                self.owner_session_secret,
+            )
+        )
 
     @property
     def context_mailbox_configured(self) -> bool:

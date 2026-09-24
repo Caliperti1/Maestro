@@ -8,6 +8,7 @@ import {
   ChevronRight,
   CircleAlert,
   Clock3,
+  Copy,
   Database,
   ExternalLink,
   FileText,
@@ -62,6 +63,7 @@ import type {
   ContactHydrationJob,
   DomainContext,
   DropboxDomain,
+  ExecutionNode,
   GmailTriggerStatus,
   IngestionHealth,
   MaestroPlan,
@@ -75,6 +77,7 @@ import type {
   MemoryItem,
   MemoryPreview,
   MemorySource,
+  NodeEnrollmentToken,
   PendingProposal,
   ProductIssue,
   ProductProject,
@@ -3602,7 +3605,7 @@ export function App() {
       loadGmailTriggerStatus().catch(() => undefined);
       loadCalendarTriggerStatus().catch(() => undefined);
       loadWorkflowOutputs().catch(() => undefined);
-    }, 3000);
+    }, 15_000);
     return () => window.clearInterval(interval);
   }, [loadCalendarTriggerStatus, loadGmailTriggerStatus, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
 
@@ -4251,6 +4254,13 @@ export function App() {
             )}
           </div>
           <button
+            className={activeSurface === "nodes" ? "domain-button active" : "domain-button"}
+            onClick={() => setActiveSurface("nodes")}
+          >
+            <Database size={17} />
+            <span>Nodes</span>
+          </button>
+          <button
             className={activeSurface === "tools" ? "domain-button active" : "domain-button"}
             onClick={() => setActiveSurface("tools")}
           >
@@ -4322,6 +4332,8 @@ export function App() {
                   ? "Workflows"
                 : activeSurface === "reports"
                   ? "Reports"
+                : activeSurface === "nodes"
+                  ? "Nodes"
                 : activeSurface === "tools"
                   ? "Tools"
                 : activeSurface === "skills"
@@ -4356,6 +4368,11 @@ export function App() {
               <span>
                 <Wrench size={16} />
                 Shared tool suite
+              </span>
+            ) : activeSurface === "nodes" ? (
+              <span>
+                <Database size={16} />
+                Execution fabric
               </span>
             ) : activeSurface === "skills" ? (
               <span>
@@ -4436,6 +4453,8 @@ export function App() {
           <RoutedObjectsWorkspace surface={activeSurface as RoutedObjectSurface} />
         ) : activeSurface === "tools" ? (
           <ToolsWorkspace />
+        ) : activeSurface === "nodes" ? (
+          <NodesWorkspace />
         ) : activeSurface === "skills" ? (
           <SkillsWorkspace />
         ) : activeSurface === "domain" ? (
@@ -6627,6 +6646,170 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
         )}
       </section>
     </div>
+  );
+}
+
+function NodesWorkspace() {
+  const [nodes, setNodes] = useState<ExecutionNode[]>([]);
+  const [enrollment, setEnrollment] = useState<NodeEnrollmentToken | null>(null);
+  const [statusMessage, setStatusMessage] = useState("Loading node health…");
+  const [busy, setBusy] = useState(false);
+
+  const refreshNodes = useCallback(async () => {
+    try {
+      const payload = await apiJson<{ nodes: ExecutionNode[] }>("/nodes");
+      setNodes(payload.nodes);
+      setStatusMessage(
+        payload.nodes.length
+          ? `${payload.nodes.filter((node) => node.effective_status === "online").length} of ${payload.nodes.length} nodes online.`
+          : "No nodes enrolled yet.",
+      );
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not load nodes.");
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshNodes();
+    const interval = window.setInterval(refreshNodes, 15_000);
+    return () => window.clearInterval(interval);
+  }, [refreshNodes]);
+
+  const createEnrollment = async () => {
+    setBusy(true);
+    try {
+      const payload = await apiJson<NodeEnrollmentToken>("/nodes/enrollment-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expires_in_seconds: 600,
+          allowed_capabilities: ["diagnostic.echo"],
+          metadata: { trust_zone: "personal" },
+        }),
+      });
+      setEnrollment(payload);
+      setStatusMessage("Enrollment code created. It expires in 10 minutes.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not create enrollment code.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyEnrollment = async () => {
+    if (!enrollment) return;
+    await navigator.clipboard.writeText(enrollment.enrollment_code);
+    setStatusMessage("Enrollment code copied.");
+  };
+
+  const sendDiagnostic = async (node: ExecutionNode) => {
+    setBusy(true);
+    try {
+      await apiJson(`/nodes/${node.id}/diagnostic-jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: `Hello ${node.display_name} from Maestro.` }),
+      });
+      setStatusMessage(`Diagnostic job queued for ${node.display_name}.`);
+      await refreshNodes();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not queue diagnostic job.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="admin-grid" aria-labelledby="nodes-heading">
+      <article className="domain-panel admin-panel">
+        <div className="section-heading-row">
+          <div>
+            <p className="eyebrow">Capability providers</p>
+            <h3 id="nodes-heading">Nodes</h3>
+          </div>
+          <button className="icon-button" onClick={refreshNodes} title="Refresh nodes" type="button">
+            <RefreshCw size={17} />
+          </button>
+        </div>
+        <p className="muted-copy">
+          Nodes connect outbound to Maestro and execute only the capabilities approved for that device.
+        </p>
+        <div className="node-list">
+          {nodes.map((node) => (
+            <article className="node-card" key={node.id}>
+              <div className="node-card-heading">
+                <div>
+                  <h4>{node.display_name}</h4>
+                  <p>{node.platform} · client {node.client_version || "unknown"}</p>
+                </div>
+                <span className={`node-health node-health-${node.effective_status}`}>
+                  {node.effective_status}
+                </span>
+              </div>
+              <dl className="node-facts">
+                <div>
+                  <dt>Last seen</dt>
+                  <dd>{node.last_seen_at ? formatDateTime(node.last_seen_at) : "Never"}</dd>
+                </div>
+                <div>
+                  <dt>Work</dt>
+                  <dd>{node.active_job_count} active · {node.pending_job_count} waiting</dd>
+                </div>
+              </dl>
+              <div className="node-capabilities">
+                {node.capabilities.map((capability) => (
+                  <span key={`${node.id}-${capability.key}`}>
+                    {capability.key} · {capability.status}
+                  </span>
+                ))}
+                {node.capabilities.length === 0 && <span>No capabilities advertised</span>}
+              </div>
+              <button
+                className="planner-action"
+                disabled={busy || !node.capabilities.some((capability) => capability.key === "diagnostic.echo")}
+                onClick={() => sendDiagnostic(node)}
+                type="button"
+              >
+                Send diagnostic
+              </button>
+            </article>
+          ))}
+          {nodes.length === 0 && <p className="empty-state">Create an enrollment code to connect the first Mac node.</p>}
+        </div>
+      </article>
+
+      <article className="domain-panel admin-panel">
+        <div>
+          <p className="eyebrow">Personal Mac</p>
+          <h3>Enroll a node</h3>
+        </div>
+        <p className="muted-copy">
+          This one-time code authorizes only the diagnostic capability. Device credentials are created during enrollment.
+        </p>
+        <button className="planner-action" disabled={busy} onClick={createEnrollment} type="button">
+          <Plus size={16} />
+          Create 10-minute code
+        </button>
+        {enrollment && (
+          <div className="enrollment-code" role="status">
+            <div>
+              <span>Enrollment code</span>
+              <strong>{enrollment.enrollment_code}</strong>
+              <small>Expires {formatDateTime(enrollment.expires_at)}</small>
+            </div>
+            <button className="icon-button" onClick={copyEnrollment} title="Copy enrollment code" type="button">
+              <Copy size={17} />
+            </button>
+          </div>
+        )}
+        <div className="node-run-hint">
+          <strong>Development flow</strong>
+          <code>maestro-node enroll --url {API_BASE_URL} --code &lt;code&gt;</code>
+          <code>maestro-node run</code>
+        </div>
+        <p className="memory-status">{statusMessage}</p>
+      </article>
+    </section>
   );
 }
 
