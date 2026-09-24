@@ -1,7 +1,7 @@
-from pathlib import Path
 import base64
 import json
 import uuid
+from pathlib import Path
 from subprocess import CompletedProcess
 
 import pytest
@@ -20,6 +20,7 @@ from app.agents.runtime import (
     _should_finalize_email_triage,
     _tool_request_is_auto_executable,
 )
+from app.codex.app_server import CodexTurnResult
 from app.core.config import get_settings
 from app.db.models import (
     Artifact,
@@ -27,7 +28,9 @@ from app.db.models import (
     LLMCallLog,
     MemoryItem,
     Message,
+    ProductProject,
     Report,
+    RepositoryProfile,
     RoutedItem,
     Task,
     ToolCall,
@@ -3375,6 +3378,103 @@ def test_codex_adapter_runs_branch_workflow_and_returns_pr_metadata(
     assert any(call[:3] == ["gh", "pr", "create"] for call in calls)
     assert any(call[:4] == ["git", "worktree", "remove", "--force"] for call in calls)
     assert "Closes #50" in pr_create_body
+
+
+def test_codex_adapter_uses_persistent_repository_worker_thread(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    registry = AgentRegistryService(session)
+    registry.get_spec("maestro-introspection-agent")
+    registry.upsert_tool_connection(
+        domain_key="maestro-development",
+        tool_key="codex",
+        display_name="Local Codex",
+        auth_type="local_cli",
+        config={
+            "default_cwd": str(tmp_path),
+            "allowed_roots": [str(tmp_path)],
+        },
+    )
+    agent = AgentRepository(session).get_by_key("maestro-introspection-agent")
+    domain = DomainRepository(session).get_by_key("maestro-development")
+    connection = session.query(ToolConnection).filter_by(tool_key="codex").one()
+    assert agent is not None
+    assert domain is not None
+    project = ProductProject(
+        domain_id=domain.id,
+        key="maestro",
+        name="Maestro",
+        summary="",
+        vision="",
+        source_refs=[],
+        provenance={},
+    )
+    session.add(project)
+    session.flush()
+    repository = RepositoryProfile(
+        domain_id=domain.id,
+        project_id=project.id,
+        key="maestro",
+        display_name="Maestro",
+        external_repo="Caliperti1/Maestro",
+        local_path=str(tmp_path),
+        default_branch="main",
+        sync_config={},
+        provenance={},
+    )
+    task = Task(
+        domain_id=domain.id,
+        assigned_agent_id=agent.id,
+        status="running",
+        priority="normal",
+        source_type="test",
+        workflow_key="test.codex",
+        objective="Run a persistent Codex task.",
+        input_payload={},
+    )
+    session.add_all([repository, task])
+    session.commit()
+    monkeypatch.setattr("app.tools.runtime.shutil.which", lambda _name: "/usr/bin/codex")
+
+    def fake_turn(_self, **kwargs):
+        assert kwargs["thread_id"] is None
+        assert kwargs["thread_name"] == "Maestro Maestro Worker"
+        return CodexTurnResult(
+            thread_id="worker-session-1",
+            final_message="Inspected the requested code.",
+            status="completed",
+            event_counts={"turn/completed": 1},
+        )
+
+    monkeypatch.setattr("app.codex.app_server.CodexAppServerClient.run_turn", fake_turn)
+    monkeypatch.setattr(
+        "app.tools.runtime.subprocess.run",
+        lambda args, **_kwargs: CompletedProcess(args=args, returncode=0, stdout="", stderr=""),
+    )
+
+    output = CodexCliToolAdapter("codex.task.run").execute(
+        ToolExecutionContext(
+            session=session,
+            agent=agent,
+            domain=domain,
+            task=task,
+            connection=connection,
+        ),
+        {
+            "task": "Inspect this repository.",
+            "target_directory": ".",
+            "branch_workflow": False,
+        },
+    )
+
+    session.refresh(repository)
+    assert output["session_id"] == "worker-session-1"
+    assert output["codex_thread_name"] == "Maestro Maestro Worker"
+    assert output["codex_thread_visible"] is True
+    assert repository.codex_worker_session_id == "worker-session-1"
 
 
 def test_codex_adapter_rejects_target_outside_allowed_roots(

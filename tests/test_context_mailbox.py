@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -8,7 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.db.models import CalendarEvent, IngestionRecord, RuntimeSetting
+from app.db.models import CalendarEvent, IngestionRecord, RoutedItem, RuntimeSetting
 from app.db.repositories import DomainRepository
 from app.db.seed import seed_default_domains
 from app.memory.context_gateway import ContextGatewayService
@@ -70,6 +71,68 @@ required_attendees: approved@example.com;partner@example.com;
 optional_attendees:
 all_day: false
 """
+
+
+def _snapshot_body(snapshot_id: str) -> str:
+    return f"""source_system: usma_outlook
+domain: USMA
+record_type: calendar_snapshot
+source_id: {snapshot_id}
+source_timestamp: 2026-09-23T07:00:00-04:00
+window_start: 2026-09-23T11:00:00Z
+window_end: 2026-11-22T11:00:00Z
+title: USMA calendar snapshot
+"""
+
+
+def _snapshot_payload(snapshot_id: str, *, event_ids: tuple[str, ...]) -> bytes:
+    events = [
+        {
+            "source_id": event_id,
+            "ical_uid": f"ical-{event_id}",
+            "series_master_id": "series-1",
+            "action": "upsert",
+            "title": f"USMA event {event_id}",
+            "start": f"2026-10-{index + 1:02d}T14:00:00Z",
+            "end": f"2026-10-{index + 1:02d}T15:00:00Z",
+            "timezone": "UTC",
+            "location": "Washington Hall",
+            "organizer": "organizer@westpoint.edu",
+            "required_attendees": ["christopher.aliperti@westpoint.edu"],
+            "optional_attendees": [],
+            "all_day": False,
+        }
+        for index, event_id in enumerate(event_ids)
+    ]
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "snapshot_id": snapshot_id,
+            "source_system": "usma_outlook",
+            "domain": "usma",
+            "generated_at": "2026-09-23T11:00:00Z",
+            "window_start": "2026-09-23T11:00:00Z",
+            "window_end": "2026-11-22T11:00:00Z",
+            "events": events,
+        }
+    ).encode()
+
+
+def _snapshot_message(snapshot_id: str, *, message_id: str) -> dict:
+    message = _message(
+        message_id,
+        sender="Chris Aliperti <approved@example.com>",
+        subject=f"[MAESTRO-INGEST][USMA][CALENDAR_SNAPSHOT] {snapshot_id}",
+        body=_snapshot_body(snapshot_id),
+    )
+    message["attachments"] = [
+        {
+            "attachment_id": f"attachment-{message_id}",
+            "filename": f"{snapshot_id}.json",
+            "mime_type": "application/json",
+        }
+    ]
+    return message
 
 
 class FakeMailboxSource:
@@ -196,7 +259,7 @@ def test_structured_calendar_ingest_promotes_exact_event_without_llm(session, tm
     event = session.scalar(
         select(CalendarEvent).where(CalendarEvent.external_event_id == "outlook-event-123")
     )
-    assert result["counts"]["staged"] == 1
+    assert result["counts"]["routed"] == 1
     assert result["messages"][0]["structured_route"]["route_type"] == "event"
     assert event is not None
     assert event.title == "Weekly project sync"
@@ -220,11 +283,155 @@ def test_structured_calendar_ingest_promotes_exact_event_without_llm(session, tm
     duplicate = _service(session, tmp_path, source).poll_once()
 
     assert duplicate["counts"]["duplicate"] == 1
+    assert session.query(RoutedItem).count() == 1
     assert len(
         session.scalars(
             select(CalendarEvent).where(CalendarEvent.external_event_id == "outlook-event-123")
         ).all()
     ) == 1
+
+
+def test_structured_calendar_ingest_collapses_transport_only_changes(
+    session, tmp_path
+) -> None:
+    first = _message(
+        sender="Chris Aliperti <approved@example.com>",
+        subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+        body=_calendar_body(),
+    )
+    source = FakeMailboxSource([first])
+    service = _service(session, tmp_path, source)
+
+    assert service.poll_once()["counts"]["routed"] == 1
+
+    reordered = _calendar_body().replace("action: updated", "action: added").replace(
+        "required_attendees: approved@example.com;partner@example.com;",
+        "required_attendees: partner@example.com; approved@example.com;",
+    )
+    source.messages = {
+        "gmail-2": _message(
+            "gmail-2",
+            sender="Chris Aliperti <approved@example.com>",
+            subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+            body=reordered,
+        )
+    }
+
+    result = service.poll_once()
+
+    assert result["counts"]["duplicate"] == 1
+    assert session.query(RoutedItem).count() == 1
+    assert session.query(IngestionRecord).count() == 1
+
+
+def test_structured_calendar_ingest_keeps_attendee_membership_changes(
+    session, tmp_path
+) -> None:
+    first = _message(
+        sender="Chris Aliperti <approved@example.com>",
+        subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+        body=_calendar_body(),
+    )
+    source = FakeMailboxSource([first])
+    service = _service(session, tmp_path, source)
+    service.poll_once()
+    changed = _calendar_body().replace(
+        "required_attendees: approved@example.com;partner@example.com;",
+        "required_attendees: approved@example.com;partner@example.com;new@example.com;",
+    )
+    source.messages = {
+        "gmail-2": _message(
+            "gmail-2",
+            sender="Chris Aliperti <approved@example.com>",
+            subject="[MAESTRO-INGEST][USMA][CALENDAR] Weekly project sync",
+            body=changed,
+        )
+    }
+
+    result = service.poll_once()
+    event = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "outlook-event-123")
+    )
+
+    assert result["counts"]["routed"] == 1
+    assert session.query(IngestionRecord).count() == 2
+    assert event is not None
+    assert {attendee["email"] for attendee in event.attendees} == {
+        "approved@example.com",
+        "partner@example.com",
+        "new@example.com",
+    }
+
+
+def test_calendar_snapshot_routes_all_events_without_memory_staging(
+    session, tmp_path
+) -> None:
+    snapshot_id = "usma-calendar-2026-09-23"
+    message = _snapshot_message(snapshot_id, message_id="gmail-snapshot-1")
+    source = FakeMailboxSource([message])
+    source.attachment_data[("gmail-snapshot-1", "attachment-gmail-snapshot-1")] = (
+        _snapshot_payload(snapshot_id, event_ids=("occurrence-1", "occurrence-2"))
+    )
+
+    result = _service(session, tmp_path, source).poll_once()
+
+    assert result["counts"]["routed"] == 1
+    assert result["messages"][0]["structured_route"]["event_count"] == 2
+    assert result["messages"][0]["structured_route"]["promoted_count"] == 2
+    assert session.query(CalendarEvent).count() == 2
+    record = session.scalar(select(IngestionRecord))
+    assert record is not None and record.status == "processed"
+    assert list((tmp_path / "usma" / "inbox").glob("*.md")) == []
+
+    source.messages = {
+        "gmail-snapshot-2": _snapshot_message(
+            snapshot_id,
+            message_id="gmail-snapshot-2",
+        )
+    }
+    source.attachment_data[("gmail-snapshot-2", "attachment-gmail-snapshot-2")] = (
+        _snapshot_payload(snapshot_id, event_ids=("occurrence-1", "occurrence-2"))
+    )
+    duplicate = _service(session, tmp_path, source).poll_once()
+
+    assert duplicate["counts"]["duplicate"] == 1
+    assert session.query(CalendarEvent).count() == 2
+    assert session.query(RoutedItem).count() == 2
+
+
+def test_calendar_snapshot_requires_two_absences_before_cancelling(
+    session, tmp_path
+) -> None:
+    service = None
+    for index, event_ids in enumerate(
+        (
+            ("occurrence-1", "occurrence-2"),
+            ("occurrence-1",),
+            ("occurrence-1",),
+        ),
+        start=1,
+    ):
+        snapshot_id = f"usma-calendar-2026-09-{22 + index:02d}"
+        message_id = f"gmail-snapshot-{index}"
+        message = _snapshot_message(snapshot_id, message_id=message_id)
+        source = FakeMailboxSource([message])
+        source.attachment_data[(message_id, f"attachment-{message_id}")] = (
+            _snapshot_payload(snapshot_id, event_ids=event_ids)
+        )
+        service = _service(session, tmp_path, source)
+        result = service.poll_once()
+        assert result["counts"]["routed"] == 1
+        missing = result["messages"][0]["structured_route"]
+        if index == 2:
+            assert missing["missing_count"] == 1
+            assert missing["cancelled_after_confirmation_count"] == 0
+
+    occurrence = session.scalar(
+        select(CalendarEvent).where(CalendarEvent.external_event_id == "occurrence-2")
+    )
+    assert occurrence is not None
+    assert occurrence.status == "cancelled"
+    assert occurrence.metadata_["snapshot_missing_count"] == 2
 
 
 def test_structured_calendar_ingest_honors_explicit_outlook_timezone(

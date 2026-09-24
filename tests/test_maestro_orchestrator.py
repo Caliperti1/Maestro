@@ -2657,6 +2657,36 @@ def test_maestro_channel_websocket_sends_active_conversation(
     assert payload["conversation"]["messages"][0]["content"] == "Prepare a Praxis partner call workflow."
 
 
+def test_maestro_channel_websocket_can_follow_a_specific_conversation(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    client = _client(session, tmp_path)
+    client_turn_id = uuid.uuid4()
+    first = client.post(
+        "/maestro/respond",
+        json={
+            "message": "Keep this voice conversation selected.",
+            "client_turn_id": str(client_turn_id),
+        },
+    )
+    first_conversation_id = first.json()["conversation"]["id"]
+    client.post("/maestro/sessions/new")
+
+    with client.websocket_connect(
+        f"/maestro/channel/ws?conversation_id={first_conversation_id}"
+        f"&client_turn_id={client_turn_id}"
+    ) as websocket:
+        payload = websocket.receive_json()
+
+    assert payload["type"] == "conversation"
+    assert payload["conversation"]["id"] == first_conversation_id
+    messages = payload["conversation"]["messages"]
+    assert messages[0]["content"] == "Keep this voice conversation selected."
+    assert messages[0]["metadata"]["client_turn_id"] == str(client_turn_id)
+    assert messages[1]["metadata"]["in_reply_to_client_turn_id"] == str(client_turn_id)
+
+
 def test_active_topic_includes_global_notifications_but_not_routine_progress(
     session: Session,
     tmp_path: Path,

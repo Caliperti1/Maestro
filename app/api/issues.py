@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.codex.threads import CodexProjectThreadService
 from app.db.models import (
     Domain,
     ProductIssue,
@@ -76,6 +77,11 @@ class IssueRelationRequest(BaseModel):
     relation_type: str
     rationale: str = ""
     confidence: float = Field(default=1.0, ge=0, le=1)
+
+
+class InitializeCodexThreadsRequest(BaseModel):
+    roles: list[str] = Field(default_factory=lambda: ["steward", "worker"])
+    model: str = "gpt-5.6-luna"
 
 
 @router.get("")
@@ -171,6 +177,43 @@ def register_repository(body: RepositoryRequest, db: Session = Depends(get_db)) 
     return {"repository": _repository_payload(profile), "workflows": workflows}
 
 
+@router.get("/repositories/{repository_id}/codex-threads")
+def get_repository_codex_threads(
+    repository_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    profile = db.get(RepositoryProfile, repository_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Repository not found.")
+    return {
+        "repository": _repository_payload(profile),
+        "threads": CodexProjectThreadService(db).payload(profile),
+    }
+
+
+@router.post("/repositories/{repository_id}/codex-threads/initialize")
+def initialize_repository_codex_threads(
+    repository_id: uuid.UUID,
+    body: InitializeCodexThreadsRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    profile = db.get(RepositoryProfile, repository_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Repository not found.")
+    roles = tuple(dict.fromkeys(role.strip().lower() for role in body.roles))
+    if not roles or any(role not in {"steward", "worker"} for role in roles):
+        raise HTTPException(status_code=400, detail="Roles must contain steward and/or worker.")
+    try:
+        threads = CodexProjectThreadService(db).initialize(
+            profile,
+            roles=roles,  # type: ignore[arg-type]
+            model=body.model,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"repository": _repository_payload(profile), "threads": threads}
+
+
 @router.post("/repositories/{repository_id}/sync")
 def sync_repository_issues(repository_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     profile = db.get(RepositoryProfile, repository_id)
@@ -243,6 +286,23 @@ def _issue_detail(db: Session, issue: ProductIssue) -> dict[str, Any]:
 
 
 def _repository_payload(profile: RepositoryProfile) -> dict[str, Any]:
+    thread_metadata = (profile.metadata_ or {}).get("codex_threads")
+    thread_metadata = thread_metadata if isinstance(thread_metadata, dict) else {}
+    codex_threads = [
+        {
+            "role": role,
+            "name": f"{profile.display_name} Maestro {role.title()}",
+            "session_id": (
+                profile.codex_steward_session_id
+                if role == "steward"
+                else profile.codex_worker_session_id
+            ),
+            "status": str((thread_metadata.get(role) or {}).get("status") or "not_initialized"),
+            "last_used_at": (thread_metadata.get(role) or {}).get("last_used_at"),
+            "cwd": (thread_metadata.get(role) or {}).get("cwd") or profile.local_path,
+        }
+        for role in ("steward", "worker")
+    ]
     return {
         "id": str(profile.id), "domain_id": str(profile.domain_id), "project_id": str(profile.project_id),
         "key": profile.key, "display_name": profile.display_name, "provider": profile.provider,
@@ -251,6 +311,7 @@ def _repository_payload(profile: RepositoryProfile) -> dict[str, Any]:
         "last_observed_at": profile.last_observed_at.isoformat() if profile.last_observed_at else None,
         "last_synced_at": profile.last_synced_at.isoformat() if profile.last_synced_at else None,
         "status": profile.status, "sync_config": profile.sync_config,
+        "codex_threads": codex_threads,
     }
 
 

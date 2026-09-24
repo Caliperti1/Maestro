@@ -39,7 +39,7 @@ import interactionPlugin, {
   type EventResizeDoneArg,
 } from "@fullcalendar/interaction";
 import rrulePlugin from "@fullcalendar/rrule";
-import type { DateSelectArg, EventDropArg, EventInput } from "@fullcalendar/core";
+import type { DatesSetArg, DateSelectArg, EventDropArg, EventInput } from "@fullcalendar/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { API_BASE_URL, apiJson, websocketUrl } from "./api";
@@ -964,6 +964,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const Icon = config.icon;
   const [items, setItems] = useState<RoutedObjectRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [calendarDetail, setCalendarDetail] = useState<RoutedEvent | null>(null);
+  const [calendarRange, setCalendarRange] = useState<{ start: string; end: string } | null>(null);
+  const [calendarHealth, setCalendarHealth] = useState<CalendarTriggerStatus | null>(null);
   const [domainFilter, setDomainFilter] = useState("all");
   const [showArchived, setShowArchived] = useState(false);
   const [showDone, setShowDone] = useState(false);
@@ -997,6 +1000,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const supportsDomainFilter = surface === "calendar" || surface === "contacts" || surface === "todos" || surface === "organizations";
   const supportsLifecycleFilters = surface === "calendar" || surface === "todos";
   const supportsDoneFilter = surface === "todos";
+  const calendarProblems = calendarHealth?.domains.filter(
+    (domain) => domain.status === "error" || domain.status === "backoff" || domain.auth_required,
+  ) ?? [];
   const visibleItems = useMemo(() => {
       const filtered = items.filter((item) => {
         if (!showArchived && item.status === "archived") return false;
@@ -1017,9 +1023,13 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     },
     [items, showArchived, showCalendarContext, showDone, supportsDoneFilter, surface],
   );
-  const selectedItem = creatingEvent || creatingTodo
+  const listedSelectedItem = creatingEvent || creatingTodo
     ? null
     : visibleItems.find((item) => item.id === selectedId) ?? null;
+  const selectedItem = (
+    surface === "calendar"
+    && calendarDetail?.id === selectedId
+  ) ? calendarDetail : listedSelectedItem;
   const calendarItems = useMemo(
     () =>
       visibleItems
@@ -1064,6 +1074,13 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
 
   const refreshItems = useCallback(async () => {
     const params = new URLSearchParams({ limit: surface === "calendar" ? "500" : "100" });
+    if (surface === "calendar") {
+      params.set("view", "calendar");
+      if (calendarRange) {
+        params.set("start_at", calendarRange.start);
+        params.set("end_at", calendarRange.end);
+      }
+    }
     if (supportsDomainFilter && domainFilter !== "all") {
       params.set("domain_key", domainFilter);
     }
@@ -1077,13 +1094,41 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     setItems(nextItems);
     setSelectedId((current) => current && nextItems.some((item) => item.id === current) ? current : null);
     setStatusMessage("Ready");
-  }, [config.endpoint, config.responseKey, contactQuery, domainFilter, supportsDomainFilter, surface]);
+  }, [calendarRange, config.endpoint, config.responseKey, contactQuery, domainFilter, supportsDomainFilter, surface]);
 
   useEffect(() => {
     refreshItems().catch((error) =>
       setStatusMessage(error instanceof Error ? error.message : `Unable to load ${config.title}.`),
     );
   }, [refreshItems, config.title]);
+
+  useEffect(() => {
+    if (surface !== "calendar") return;
+    apiJson<CalendarTriggerStatus>("/scheduler/triggers/calendar/status")
+      .then(setCalendarHealth)
+      .catch(() => setCalendarHealth(null));
+  }, [surface]);
+
+  useEffect(() => {
+    if (surface !== "calendar" || !selectedId || creatingEvent) {
+      setCalendarDetail(null);
+      return;
+    }
+    let active = true;
+    setCalendarDetail(null);
+    apiJson<{ event: RoutedEvent }>(`/memory/routed-objects/events/${selectedId}`)
+      .then((response) => {
+        if (active) setCalendarDetail(response.event);
+      })
+      .catch((error) => {
+        if (active) {
+          setStatusMessage(error instanceof Error ? error.message : "Unable to load event details.");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [creatingEvent, selectedId, surface]);
 
   useEffect(() => {
     if (creatingEvent || creatingTodo) return;
@@ -1185,7 +1230,10 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
               : { ...todoUpdates, domain_key: todoDomainKey }),
         }),
       });
-      if (response.event) setSelectedId(response.event.id);
+      if (response.event) {
+        setSelectedId(response.event.id);
+        if (surface === "calendar") setCalendarDetail(response.event);
+      }
       setSelectedOccurrence(null);
       setCreatingEvent(false);
       setCreatingTodo(false);
@@ -1243,7 +1291,10 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
           },
         }),
       });
-      if (response.event) setSelectedId(response.event.id);
+      if (response.event) {
+        setSelectedId(response.event.id);
+        setCalendarDetail(response.event);
+      }
       setSelectedOccurrence(null);
       setStatusMessage(editingOccurrence ? "This occurrence was updated." : "Event time updated.");
       await refreshItems();
@@ -1734,6 +1785,22 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         )}
 
         {surface === "calendar" && (
+          <>
+          {calendarProblems.length > 0 && (
+            <div className="calendar-health-alert" role="status">
+              <CircleAlert size={18} />
+              <div>
+                <strong>Calendar synchronization needs attention</strong>
+                {calendarProblems.map((domain) => (
+                  <span key={domain.domain_key}>
+                    {domainLabels[domain.domain_key] ?? domain.domain_key}: {domain.auth_required
+                      ? "Google authorization must be renewed."
+                      : domain.last_error ?? "Synchronization is temporarily unavailable."}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="calendar-shell">
             <CalendarErrorBoundary
               resetKey={calendarItems.map((item) => `${item.id}:${String(item.start)}:${String(item.rrule ?? "")}`).join("|")}
@@ -1777,6 +1844,14 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 eventTimeFormat={{ hour: "numeric", minute: "2-digit", meridiem: "short" }}
                 slotLabelFormat={{ hour: "numeric", minute: "2-digit", meridiem: "short" }}
                 height="auto"
+                datesSet={(range: DatesSetArg) => {
+                  const nextRange = { start: range.start.toISOString(), end: range.end.toISOString() };
+                  setCalendarRange((current) => (
+                    current?.start === nextRange.start && current.end === nextRange.end
+                      ? current
+                      : nextRange
+                  ));
+                }}
                 select={selectCalendarRange}
                 eventClick={(info) => {
                   setCreatingEvent(false);
@@ -1816,6 +1891,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
             </CalendarErrorBoundary>
             {selectedItem && "attendees" in selectedItem && mobileInlineDetail(selectedItem)}
           </div>
+          </>
         )}
 
         {surface === "calendar" && unscheduledCalendarItems.length > 0 && (
@@ -2680,6 +2756,30 @@ function IssuesWorkspace() {
     }
   };
 
+  const initializeCodexThreads = async () => {
+    if (!selected?.repository_id) return;
+    setBusy(true);
+    setStatusMessage("Creating the project Steward and Worker in Codex...");
+    try {
+      const response = await apiJson<{ repository: NonNullable<ProductIssue["repository"]> }>(
+        `/issues/repositories/${selected.repository_id}/codex-threads/initialize`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ roles: ["steward", "worker"], model: "gpt-5.6-luna" }),
+        },
+      );
+      setIssues((current) => current.map((item) => item.id === selected.id
+        ? { ...item, repository: response.repository }
+        : item));
+      setStatusMessage(`${response.repository.display_name} Codex threads are ready and visible in the Codex app.`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Codex thread initialization failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const renderIssueDetail = (mobile = false) => selected ? (
     <div className={mobile ? "mobile-routed-detail issue-mobile-detail" : "routed-object-detail"}>
       <div className={mobile ? "mobile-routed-detail-heading" : "section-heading"}>
@@ -2711,6 +2811,19 @@ function IssuesWorkspace() {
         {selected.event_links.map((link) => <div className="contact-evidence-row" key={link.id}>
           <strong>{link.event_title}</strong>
           <span>{link.relationship_type.replace("_", " ")} / {formatDateTime(link.start_at)}</span>
+        </div>)}
+      </section>}
+      {selected.repository && <section className="contact-intelligence-section codex-thread-section">
+        <div className="codex-thread-heading">
+          <div><h4>Codex project threads</h4><small>Persistent, auditable tasks in the Codex app</small></div>
+          {selected.repository.codex_threads.some((thread) => !thread.session_id) && (
+            <button type="button" onClick={initializeCodexThreads} disabled={busy}>Initialize</button>
+          )}
+        </div>
+        {selected.repository.codex_threads.map((thread) => <div className="contact-evidence-row" key={thread.role}>
+          <strong>{thread.name}</strong>
+          <span>{thread.session_id ? `${thread.status} / ${thread.session_id.slice(0, 8)}` : "Not initialized"}</span>
+          {thread.last_used_at && <small>Last used {formatDateTime(thread.last_used_at)}</small>}
         </div>)}
       </section>}
       <div className="routed-detail-actions"><button className="planner-action" type="button" onClick={save} disabled={busy}>Save issue</button>{selected.repository_id && <button type="button" onClick={syncRepository} disabled={busy}><RefreshCw size={15} /> Sync GitHub</button>}</div>

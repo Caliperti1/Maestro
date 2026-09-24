@@ -1,4 +1,5 @@
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -33,6 +34,11 @@ from app.maestro.knowledge import (
     LLMKnowledgePlanner,
     MaestroKnowledgeService,
 )
+
+
+@contextmanager
+def _background_session(session: Session):
+    yield session
 
 
 class FlakyKnowledgeClient:
@@ -219,6 +225,91 @@ def test_voice_mode_returns_compact_spoken_contract_and_replays_client_turn_once
         if (message.metadata_ or {}).get("in_reply_to_client_turn_id") == str(client_turn_id)
     ]
     assert len(responses) == 1
+
+
+def test_async_voice_turn_publishes_result_to_shared_conversation_channel(
+    session: Session,
+    monkeypatch,
+) -> None:
+    class FakeKnowledgeService:
+        def __init__(self, _session):
+            pass
+
+        def respond(self, _message, **_kwargs):
+            return KnowledgeResponse(
+                message="The shared-channel response is ready.",
+                action_results=[],
+            )
+
+    monkeypatch.setattr(maestro_api, "MaestroKnowledgeService", FakeKnowledgeService)
+    monkeypatch.setattr(maestro_api, "SessionLocal", lambda: _background_session(session))
+    client_turn_id = uuid.uuid4()
+
+    accepted = _client(session).post(
+        "/maestro/respond",
+        json={
+            "message": "Check my calendar through Maestro.",
+            "interaction_mode": "knowledge",
+            "interface": "voice",
+            "response_mode": "voice",
+            "client_turn_id": str(client_turn_id),
+        },
+        headers={"X-Maestro-Async": "true"},
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.json()["kind"] == "pending"
+    conversation_id = accepted.json()["conversation"]["id"]
+    stored_messages = session.scalars(
+        select(Message)
+        .where(Message.conversation_id == uuid.UUID(conversation_id))
+        .order_by(Message.created_at, Message.id)
+    ).all()
+    assert [message.content for message in stored_messages] == [
+        "Check my calendar through Maestro.",
+        "The shared-channel response is ready.",
+    ]
+    assert stored_messages[0].client_turn_id == client_turn_id
+    assert (stored_messages[0].metadata_ or {})["turn_status"] == "completed"
+    assert (stored_messages[1].metadata_ or {})["in_reply_to_client_turn_id"] == str(
+        client_turn_id
+    )
+
+
+def test_async_voice_turn_failure_is_published_on_queued_message(
+    session: Session,
+    monkeypatch,
+) -> None:
+    class FailingKnowledgeService:
+        def __init__(self, _session):
+            pass
+
+        def respond(self, _message, **_kwargs):
+            raise RuntimeError("voice turn failed safely")
+
+    monkeypatch.setattr(maestro_api, "MaestroKnowledgeService", FailingKnowledgeService)
+    monkeypatch.setattr(maestro_api, "SessionLocal", lambda: _background_session(session))
+    client_turn_id = uuid.uuid4()
+
+    accepted = _client(session).post(
+        "/maestro/respond",
+        json={
+            "message": "Exercise the failed background path.",
+            "interaction_mode": "knowledge",
+            "interface": "voice",
+            "response_mode": "voice",
+            "client_turn_id": str(client_turn_id),
+        },
+        headers={"X-Maestro-Async": "true"},
+    )
+
+    assert accepted.status_code == 200
+    user_message = session.scalar(
+        select(Message).where(Message.client_turn_id == client_turn_id)
+    )
+    assert user_message is not None
+    assert (user_message.metadata_ or {})["turn_status"] == "failed"
+    assert "voice turn failed safely" in (user_message.metadata_ or {})["turn_error"]
 
 
 def test_voice_mode_adds_spoken_response_guidance_to_knowledge_context(session: Session) -> None:
