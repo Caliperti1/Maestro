@@ -557,7 +557,6 @@ def list_routed_objects(
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     return RoutedMemoryService(db).build_context_bundle(
         domain_id=domain_id,
@@ -574,7 +573,6 @@ def routed_context_bundle(
     max_chars: int = 3000,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     bundle = RoutedRetrievalService(db).build_context_bundle(
         domain_id=domain_id,
@@ -615,8 +613,6 @@ def list_calendar_events(
     limit: int = Query(default=500, ge=1, le=2000),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    if view == "full":
-        RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(CalendarEvent)
     if domain_id is not None:
@@ -824,8 +820,6 @@ def list_todos(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RecurringTodoService(db).materialize_all()
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(Todo)
     if domain_id is not None:
@@ -954,7 +948,6 @@ def list_contacts(
     use_semantic: bool = True,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = None
     if domain_key:
         domain = DomainRepository(db).get_by_key(domain_key)
@@ -1194,7 +1187,6 @@ def list_entities(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     service = OrganizationIntelligenceService(db)
     results = service.search(

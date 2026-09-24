@@ -3605,7 +3605,7 @@ export function App() {
       loadGmailTriggerStatus().catch(() => undefined);
       loadCalendarTriggerStatus().catch(() => undefined);
       loadWorkflowOutputs().catch(() => undefined);
-    }, 3000);
+    }, 15_000);
     return () => window.clearInterval(interval);
   }, [loadCalendarTriggerStatus, loadGmailTriggerStatus, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
 

@@ -576,7 +576,7 @@ def test_routed_items_endpoint_can_return_all_statuses(
     }
 
 
-def test_routed_objects_api_promotes_pending_items_before_returning_stores(
+def test_routed_objects_api_requires_explicit_promotion_before_returning_stores(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -598,8 +598,14 @@ def test_routed_objects_api_promotes_pending_items_before_returning_stores(
     session.commit()
     client = _client(session, tmp_path)
 
+    before = client.get("/memory/routed-objects/contacts")
+    promoted = client.post("/memory/routed-items/promote", json={"limit": 100})
     response = client.get("/memory/routed-objects/contacts")
 
+    assert before.status_code == 200
+    assert before.json()["contacts"] == []
+    assert promoted.status_code == 200
+    assert len(promoted.json()["promoted"]) == 1
     assert response.status_code == 200
     assert response.json()["contacts"][0]["name"] == "Alice Park"
     assert session.query(Contact).filter_by(name="Alice Park").count() == 1
