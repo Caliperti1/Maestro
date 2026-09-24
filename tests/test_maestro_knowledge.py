@@ -1,4 +1,5 @@
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -33,6 +34,11 @@ from app.maestro.knowledge import (
     LLMKnowledgePlanner,
     MaestroKnowledgeService,
 )
+
+
+@contextmanager
+def _background_session(session: Session):
+    yield session
 
 
 class FlakyKnowledgeClient:
@@ -219,6 +225,93 @@ def test_voice_mode_returns_compact_spoken_contract_and_replays_client_turn_once
         if (message.metadata_ or {}).get("in_reply_to_client_turn_id") == str(client_turn_id)
     ]
     assert len(responses) == 1
+
+
+def test_async_voice_turn_returns_immediately_and_can_be_retrieved_by_client_turn(
+    session: Session,
+    monkeypatch,
+) -> None:
+    class FakeKnowledgeService:
+        def __init__(self, _session):
+            pass
+
+        def respond(self, _message, **_kwargs):
+            return KnowledgeResponse(
+                message="The durable background response is ready.",
+                action_results=[],
+            )
+
+    monkeypatch.setattr(maestro_api, "MaestroKnowledgeService", FakeKnowledgeService)
+    monkeypatch.setattr(maestro_api, "SessionLocal", lambda: _background_session(session))
+    client_turn_id = uuid.uuid4()
+    request = {
+        "message": "Finish this even if my phone is suspended.",
+        "interaction_mode": "knowledge",
+        "interface": "voice",
+        "response_mode": "voice",
+        "client_turn_id": str(client_turn_id),
+    }
+
+    accepted = _client(session).post(
+        "/maestro/respond",
+        json=request,
+        headers={"X-Maestro-Async": "true"},
+    )
+    status = _client(session).get(f"/maestro/turns/{client_turn_id}")
+    replay = _client(session).post(
+        "/maestro/respond",
+        json=request,
+        headers={"X-Maestro-Async": "true"},
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.json()["kind"] == "pending"
+    assert accepted.json()["client_turn_id"] == str(client_turn_id)
+    assert accepted.json()["conversation"]["id"]
+    assert status.status_code == 200
+    assert status.json()["status"] == "completed"
+    assert status.json()["message"] == "The durable background response is ready."
+    assert replay.status_code == 200
+    assert replay.json()["classification"] == "idempotent_replay"
+    assert len(
+        session.scalars(
+            select(Message).where(Message.client_turn_id == client_turn_id)
+        ).all()
+    ) == 1
+
+
+def test_async_voice_turn_exposes_background_failure_status(
+    session: Session,
+    monkeypatch,
+) -> None:
+    class FailingKnowledgeService:
+        def __init__(self, _session):
+            pass
+
+        def respond(self, _message, **_kwargs):
+            raise RuntimeError("voice turn failed safely")
+
+    monkeypatch.setattr(maestro_api, "MaestroKnowledgeService", FailingKnowledgeService)
+    monkeypatch.setattr(maestro_api, "SessionLocal", lambda: _background_session(session))
+    client_turn_id = uuid.uuid4()
+
+    accepted = _client(session).post(
+        "/maestro/respond",
+        json={
+            "message": "Exercise the failed background path.",
+            "interaction_mode": "knowledge",
+            "interface": "voice",
+            "response_mode": "voice",
+            "client_turn_id": str(client_turn_id),
+        },
+        headers={"X-Maestro-Async": "true"},
+    )
+    status = _client(session).get(f"/maestro/turns/{client_turn_id}")
+
+    assert accepted.status_code == 200
+    assert status.status_code == 200
+    assert status.json()["status"] == "failed"
+    assert "voice turn failed safely" in status.json()["message"]
 
 
 def test_voice_mode_adds_spoken_response_guidance_to_knowledge_context(session: Session) -> None:
