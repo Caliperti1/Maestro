@@ -20,6 +20,7 @@ from app.db.models import (
     Domain,
     MemoryItem,
     Message,
+    MessageReceipt,
     Report,
     RoutedItem,
     Task,
@@ -2685,6 +2686,74 @@ def test_maestro_channel_websocket_can_follow_a_specific_conversation(
     assert messages[0]["content"] == "Keep this voice conversation selected."
     assert messages[0]["metadata"]["client_turn_id"] == str(client_turn_id)
     assert messages[1]["metadata"]["in_reply_to_client_turn_id"] == str(client_turn_id)
+
+
+def test_acknowledging_messages_clears_queue_without_deleting_history(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    first = record_channel_message(
+        session,
+        sender="maestro",
+        content="First queued update.",
+        metadata={"channel_visibility": "global"},
+    )
+    second = record_channel_message(
+        session,
+        sender="maestro",
+        content="Second queued update.",
+        metadata={"channel_visibility": "global"},
+    )
+    client = _client(session, tmp_path)
+
+    active = client.get("/maestro/sessions/active")
+    assert active.status_code == 200
+    assert {message["id"] for message in active.json()["conversation"]["messages"]} >= {
+        str(first.id),
+        str(second.id),
+    }
+
+    acknowledged = client.post(
+        "/maestro/messages/acknowledge",
+        json={
+            "conversation_id": str(first.conversation_id),
+            "message_ids": [str(first.id), str(second.id)],
+            "via": "web",
+        },
+    )
+    assert acknowledged.status_code == 200
+    remaining_ids = {
+        message["id"] for message in acknowledged.json()["conversation"]["messages"]
+    }
+    assert str(first.id) not in remaining_ids
+    assert str(second.id) not in remaining_ids
+    assert session.get(Message, first.id) is not None
+    assert session.get(Message, second.id) is not None
+    assert session.scalar(
+        select(MessageReceipt).where(MessageReceipt.message_id == first.id)
+    ) is not None
+
+
+def test_active_message_queue_is_bounded(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    for index in range(75):
+        record_channel_message(
+            session,
+            sender="maestro",
+            content=f"Queued update {index}.",
+            metadata={"channel_visibility": "global"},
+        )
+    client = _client(session, tmp_path)
+
+    response = client.get("/maestro/sessions/active")
+
+    assert response.status_code == 200
+    messages = response.json()["conversation"]["messages"]
+    assert len(messages) == 60
+    assert messages[0]["content"] == "Queued update 15."
+    assert messages[-1]["content"] == "Queued update 74."
 
 
 def test_active_topic_includes_global_notifications_but_not_routine_progress(

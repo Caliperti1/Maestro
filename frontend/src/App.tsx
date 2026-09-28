@@ -43,7 +43,7 @@ import rrulePlugin from "@fullcalendar/rrule";
 import type { DatesSetArg, DateSelectArg, EventDropArg, EventInput } from "@fullcalendar/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { API_BASE_URL, apiJson, websocketUrl } from "./api";
+import { API_BASE_URL, apiJson } from "./api";
 import { CalendarErrorBoundary } from "./CalendarErrorBoundary";
 import {
   domainKeysByLabel,
@@ -3151,31 +3151,43 @@ export function App() {
   }, []);
 
   const applyConversation = useCallback((conversation: MaestroSessionSummary) => {
-    const receivedAt = new Date().toISOString();
-    const newlySeen = document.visibilityState === "visible" && activeSurface === "dashboard"
-      ? (conversation.messages ?? []).filter(
-          (message) =>
-            message.sender === "maestro" &&
-            message.metadata?.mobile_update === true &&
-            !message.seen_at,
-        )
-      : [];
-    const messages = (conversation.messages ?? []).map((message) =>
-      newlySeen.some((candidate) => candidate.id === message.id)
-        ? { ...message, seen_at: receivedAt, seen_via: "web" }
-        : message,
-    );
     setActiveConversationId(conversation.id);
-    setChatMessages(messages);
+    setChatMessages(conversation.messages ?? []);
     setMaestroPlan(shouldShowPlanPreview(conversation.active_plan ?? null) ? conversation.active_plan ?? null : null);
-    for (const message of newlySeen) {
-      apiJson(`/maestro/mobile/updates/${message.id}/seen`, {
+  }, []);
+
+  const acknowledgeMessage = useCallback(async (messageId: string) => {
+    const response = await apiJson<{ conversation: MaestroSessionSummary | null }>(
+      `/maestro/messages/${messageId}/acknowledge`,
+      {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ via: "web", detail: "Visible in Maestro chat" }),
-      }).catch(() => undefined);
-    }
-  }, [activeSurface]);
+        body: JSON.stringify({ via: "web", detail: "Acknowledged in Maestro chat" }),
+      },
+    );
+    if (response.conversation) applyConversation(response.conversation);
+  }, [applyConversation]);
+
+  const acknowledgeAllMessages = useCallback(async () => {
+    const messageIds = chatMessages
+      .filter((message) => message.sender === "maestro")
+      .map((message) => message.id);
+    if (!activeConversationId || messageIds.length === 0) return;
+    const response = await apiJson<{ conversation: MaestroSessionSummary | null }>(
+      "/maestro/messages/acknowledge",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: activeConversationId,
+          message_ids: messageIds,
+          via: "web",
+          detail: "Acknowledged together in Maestro chat",
+        }),
+      },
+    );
+    if (response.conversation) applyConversation(response.conversation);
+  }, [activeConversationId, applyConversation, chatMessages]);
 
   const pollActiveChannel = useCallback(async () => {
     const response = await apiJson<{ conversation: MaestroSessionSummary }>(
@@ -3640,42 +3652,13 @@ export function App() {
   }, [loadCalendarTriggerStatus, loadGmailTriggerStatus, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
 
   useEffect(() => {
-    let closed = false;
-    let socket: WebSocket | null = null;
-    let reconnectTimer: number | undefined;
-
-    const connect = () => {
-      socket = new WebSocket(websocketUrl("/maestro/channel/ws"));
-      socket.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data) as {
-            type?: string;
-            conversation?: MaestroSessionSummary;
-          };
-          if (payload.type === "conversation" && payload.conversation) {
-            applyConversation(payload.conversation);
-          }
-        } catch {
-          setMaestroStatus("Could not parse Maestro channel update.");
-        }
-      };
-      socket.onclose = () => {
-        if (!closed) {
-          reconnectTimer = window.setTimeout(connect, 2000);
-        }
-      };
-      socket.onerror = () => {
-        socket?.close();
-      };
-    };
-
-    connect();
-    return () => {
-      closed = true;
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      socket?.close();
-    };
-  }, [applyConversation]);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        pollActiveChannel().catch(() => undefined);
+      }
+    }, 10_000);
+    return () => window.clearInterval(interval);
+  }, [pollActiveChannel]);
 
   useEffect(() => {
     const acknowledgeVisibleUpdates = () => {
@@ -4498,6 +4481,17 @@ export function App() {
                   <h3 id="chat-heading">Command thread</h3>
                 </div>
                 <div className="chat-actions">
+                  {chatMessages.some((message) => message.sender === "maestro") ? (
+                    <button
+                      className="acknowledge-all-button"
+                      type="button"
+                      onClick={() => acknowledgeAllMessages().catch(() => {
+                        setMaestroStatus("Could not acknowledge these messages.");
+                      })}
+                    >
+                      Acknowledge all
+                    </button>
+                  ) : null}
                   <button
                     className="icon-button"
                     aria-label="Previous sessions"
@@ -4542,7 +4536,18 @@ export function App() {
                           ) : null}
                       </span>
                       {message.sender === "maestro" ? (
-                        <MarkdownMessage content={message.content} />
+                        <>
+                          <MarkdownMessage content={message.content} />
+                          <button
+                            className="message-acknowledge-button"
+                            type="button"
+                            onClick={() => acknowledgeMessage(message.id).catch(() => {
+                              setMaestroStatus("Could not acknowledge this message.");
+                            })}
+                          >
+                            Acknowledge
+                          </button>
+                        </>
                       ) : (
                         <p className="plain-message">{message.content}</p>
                       )}
@@ -4550,7 +4555,7 @@ export function App() {
                   ))
                 ) : (
                   <p className="empty-state">
-                    No active Maestro session yet. Send a request to start a plan or conversation.
+                    You’re caught up. Send a request to start a plan or conversation.
                   </p>
                 )}
                 {maestroBusy && (

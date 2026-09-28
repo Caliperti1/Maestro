@@ -88,16 +88,20 @@ Postgres remains available.
 
 ## Vercel Staging Setup
 
-Create the Vercel project with `frontend/` as its project root. Configure this non-secret build
+Create the Vercel project with `frontend/` as its project root. Keep browser API traffic on the
+Vercel origin through the `/api` rewrite in `frontend/vercel.json`. Configure this non-secret build
 variable separately for Preview and Production:
 
 ```text
-VITE_API_BASE_URL=https://the-corresponding-render-api.example.com
+VITE_API_BASE_URL=/api
 ```
 
 The API must list the exact deployed Vercel origin in both `FRONTEND_ORIGIN` and
-`CORS_ALLOW_ORIGINS`. Do not put API keys, session secrets, or node credentials in a `VITE_*`
-variable; Vite embeds those values in the public browser bundle.
+`CORS_ALLOW_ORIGINS`, and the OIDC callback must use the public Vercel proxy path
+(`https://the-vercel-origin.example.com/api/auth/callback`). Keeping login and API calls on one
+browser origin is required for reliable owner sessions in Mobile Safari. Do not put API keys,
+session secrets, or node credentials in a `VITE_*` variable; Vite embeds those values in the public
+browser bundle.
 
 ## Cognito Managed Login Setup
 

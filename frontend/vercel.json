@@ -6,6 +6,10 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/api/:path*",
+      "destination": "https://maestro-api-staging.onrender.com/:path*"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

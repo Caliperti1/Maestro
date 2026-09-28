@@ -524,6 +524,22 @@ h4 {
   gap: 8px;
 }
 
+.acknowledge-all-button,
+.message-acknowledge-button {
+  padding: 6px 9px;
+  color: var(--color-primary-strong);
+  font-size: 0.74rem;
+  font-weight: 800;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.message-acknowledge-button {
+  justify-self: start;
+  margin-top: 8px;
+}
+
 .session-history span {
   color: var(--color-muted);
   font-size: 0.74rem;
