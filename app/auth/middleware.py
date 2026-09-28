@@ -18,6 +18,7 @@ _PUBLIC_EXACT = {
     "/auth/status",
     "/auth/login",
     "/auth/callback",
+    "/auth/bridge",
     "/nodes/enroll",
 }
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}

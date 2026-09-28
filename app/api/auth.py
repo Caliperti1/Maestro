@@ -1,20 +1,31 @@
 from __future__ import annotations
 
+import hashlib
 import secrets
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from http.cookies import SimpleCookie
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.service import OwnerSessionService, csrf_token
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
+from app.db.models import RuntimeSetting
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+_BRIDGE_PREFIX = "owner_session_bridge:"
+_BRIDGE_TTL_SECONDS = 120
+
+
+class SessionBridgeBody(BaseModel):
+    code: str = Field(min_length=32, max_length=256)
 
 
 def _cookie(request: Request, name: str) -> str | None:
@@ -33,6 +44,19 @@ def _safe_return_to(value: str | None, settings: Settings) -> str:
     if candidate.scheme == allowed.scheme and candidate.netloc == allowed.netloc:
         return value
     return fallback
+
+
+def _bridge_key(code: str) -> str:
+    return _BRIDGE_PREFIX + hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def _bridge_destination(destination: str, code: str) -> str:
+    parsed = urlparse(destination)
+    return urlunparse(parsed._replace(fragment=urlencode({"maestro_bridge": code})))
+
+
+def _cookie_expires(settings: Settings) -> datetime:
+    return datetime.now(UTC) + timedelta(seconds=settings.owner_session_ttl_seconds)
 
 
 @lru_cache
@@ -111,22 +135,97 @@ async def callback(request: Request, db: Session = Depends(get_db)):
     subject = str(userinfo.get("sub") or "")
     if not subject or subject != settings.owner_oidc_subject:
         raise HTTPException(status_code=403, detail="This identity is not the Maestro owner.")
+    metadata = {
+        "email": str(userinfo.get("email") or ""),
+        "email_verified": bool(userinfo.get("email_verified")),
+    }
+    destination = str(request.session.pop("owner_return_to", settings.frontend_origin))
+    request.session.clear()
+
+    destination_origin = urlparse(destination)
+    callback_origin = urlparse(settings.owner_oidc_redirect_uri or "")
+    if (destination_origin.scheme, destination_origin.netloc) != (
+        callback_origin.scheme,
+        callback_origin.netloc,
+    ):
+        bridge_code = secrets.token_urlsafe(48)
+        now = datetime.now(UTC)
+        db.add(
+            RuntimeSetting(
+                key=_bridge_key(bridge_code),
+                value={
+                    "issuer": settings.owner_oidc_issuer or "",
+                    "subject": subject,
+                    "metadata": metadata,
+                    "expires_at": (now + timedelta(seconds=_BRIDGE_TTL_SECONDS)).isoformat(),
+                },
+            )
+        )
+        db.commit()
+        return RedirectResponse(_bridge_destination(destination, bridge_code), status_code=303)
+
     record, raw_token = OwnerSessionService(db, settings).create(
         issuer=settings.owner_oidc_issuer or "",
         subject=subject,
-        metadata={
-            "email": str(userinfo.get("email") or ""),
-            "email_verified": bool(userinfo.get("email_verified")),
-        },
+        metadata=metadata,
     )
-    destination = str(request.session.pop("owner_return_to", settings.frontend_origin))
-    request.session.clear()
     response = RedirectResponse(destination, status_code=303)
     response.set_cookie(
         settings.owner_session_cookie_name,
         raw_token,
         max_age=settings.owner_session_ttl_seconds,
-        expires=record.expires_at,
+        expires=_cookie_expires(settings),
+        path="/",
+        secure=settings.owner_cookie_secure,
+        httponly=True,
+        samesite=settings.owner_cookie_samesite,
+    )
+    return response
+
+
+@router.post("/bridge")
+def bridge_owner_session(
+    body: SessionBridgeBody,
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    settings = get_settings()
+    setting = db.scalar(
+        select(RuntimeSetting)
+        .where(RuntimeSetting.key == _bridge_key(body.code))
+        .with_for_update()
+    )
+    if setting is None:
+        raise HTTPException(status_code=401, detail="Session bridge is invalid or expired.")
+    payload = setting.value or {}
+    try:
+        expires_at = datetime.fromisoformat(str(payload.get("expires_at") or ""))
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Session bridge is invalid or expired.") from exc
+    subject = str(payload.get("subject") or "")
+    if expires_at <= datetime.now(UTC) or subject != settings.owner_oidc_subject:
+        db.delete(setting)
+        db.commit()
+        raise HTTPException(status_code=401, detail="Session bridge is invalid or expired.")
+    db.delete(setting)
+    record, raw_token = OwnerSessionService(db, settings).create(
+        issuer=str(payload.get("issuer") or settings.owner_oidc_issuer or ""),
+        subject=subject,
+        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+    )
+    response = JSONResponse(
+        {
+            "authenticated": True,
+            "expires_at": record.expires_at.isoformat(),
+            "csrf_token": csrf_token(settings, raw_token),
+        }
+    )
+    response.set_cookie(
+        settings.owner_session_cookie_name,
+        raw_token,
+        max_age=settings.owner_session_ttl_seconds,
+        expires=_cookie_expires(settings),
         path="/",
         secure=settings.owner_cookie_secure,
         httponly=True,

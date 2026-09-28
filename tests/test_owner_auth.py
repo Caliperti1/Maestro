@@ -10,8 +10,10 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.auth.middleware import OwnerAuthMiddleware
 from app.auth.service import OwnerSessionService, csrf_token
+from app.api import auth as auth_api
 from app.core.config import Settings, get_settings
-from app.db.models import Base, OwnerSession
+from app.db.models import Base, OwnerSession, RuntimeSetting
+from app.db.session import get_db
 
 
 def _session_factory():
@@ -156,3 +158,56 @@ def test_revoke_expired_marks_sessions() -> None:
 
         assert service.revoke_expired() == 1
         assert db.get(OwnerSession, record.id).revoked_at is not None
+
+
+def test_session_bridge_is_single_use_and_sets_first_party_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _session_factory()
+    settings = _settings()
+    monkeypatch.setattr("app.auth.middleware.SessionLocal", factory)
+    monkeypatch.setattr("app.auth.middleware.get_settings", lambda: settings)
+    monkeypatch.setattr("app.api.auth.get_settings", lambda: settings)
+    code = "bridge-code-" + "a" * 40
+    with factory() as db:
+        db.add(
+            RuntimeSetting(
+                key=auth_api._bridge_key(code),
+                value={
+                    "issuer": settings.owner_oidc_issuer,
+                    "subject": settings.owner_oidc_subject,
+                    "metadata": {"email": "owner@example.com"},
+                    "expires_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+                },
+            )
+        )
+        db.commit()
+
+    app = _protected_app()
+    app.include_router(auth_api.router)
+
+    def override_db():
+        with factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_db
+    client = TestClient(app)
+
+    bridged = client.post("/auth/bridge", json={"code": code})
+
+    assert bridged.status_code == 200
+    assert bridged.json()["authenticated"] is True
+    assert bridged.json()["csrf_token"]
+    assert client.get("/protected").status_code == 200
+    assert TestClient(app).post("/auth/bridge", json={"code": code}).status_code == 401
+
+
+def test_bridge_destination_keeps_code_out_of_request_url() -> None:
+    destination = auth_api._bridge_destination(
+        "https://maestro.example.com/calendar?view=week",
+        "one-time-code",
+    )
+
+    assert destination == (
+        "https://maestro.example.com/calendar?view=week#maestro_bridge=one-time-code"
+    )
