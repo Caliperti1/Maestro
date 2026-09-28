@@ -968,6 +968,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const [items, setItems] = useState<RoutedObjectRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [calendarDetail, setCalendarDetail] = useState<RoutedEvent | null>(null);
+  const [objectDetail, setObjectDetail] = useState<RoutedContact | RoutedEntity | null>(null);
   const [calendarRange, setCalendarRange] = useState<{ start: string; end: string } | null>(null);
   const [calendarHealth, setCalendarHealth] = useState<CalendarTriggerStatus | null>(null);
   const [domainFilter, setDomainFilter] = useState("all");
@@ -1029,10 +1030,11 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const listedSelectedItem = creatingEvent || creatingTodo
     ? null
     : visibleItems.find((item) => item.id === selectedId) ?? null;
-  const selectedItem = (
-    surface === "calendar"
-    && calendarDetail?.id === selectedId
-  ) ? calendarDetail : listedSelectedItem;
+  const selectedItem = surface === "calendar" && calendarDetail?.id === selectedId
+    ? calendarDetail
+    : (surface === "contacts" || surface === "organizations") && objectDetail?.id === selectedId
+      ? objectDetail
+      : listedSelectedItem;
   const calendarItems = useMemo(
     () =>
       visibleItems
@@ -1074,9 +1076,12 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const unscheduledCalendarItems = visibleItems.filter(
     (item): item is RoutedEvent => "start_at" in item && !item.start_at,
   );
+  const shouldLoadCalendarOptions = surface === "calendar" && (Boolean(selectedId) || creatingEvent);
 
   const refreshItems = useCallback(async () => {
-    const params = new URLSearchParams({ limit: surface === "calendar" ? "500" : "100" });
+    const params = new URLSearchParams({
+      limit: surface === "calendar" || surface === "contacts" || surface === "organizations" ? "500" : "100",
+    });
     if (surface === "calendar") {
       params.set("view", "calendar");
       if (calendarRange) {
@@ -1089,6 +1094,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     }
     if ((surface === "contacts" || surface === "organizations") && contactQuery.trim()) {
       params.set("query_text", contactQuery.trim());
+    }
+    if (surface === "contacts" || surface === "organizations") {
+      params.set("view", "summary");
     }
     const response = await apiJson<Record<string, RoutedObjectRecord[]>>(
       `${config.endpoint}?${params.toString()}`,
@@ -1134,6 +1142,28 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   }, [creatingEvent, selectedId, surface]);
 
   useEffect(() => {
+    if ((surface !== "contacts" && surface !== "organizations") || !selectedId) {
+      setObjectDetail(null);
+      return;
+    }
+    let active = true;
+    setObjectDetail(null);
+    const responseKey = surface === "contacts" ? "contact" : "entity";
+    apiJson<Record<string, RoutedContact | RoutedEntity>>(`${config.endpoint}/${selectedId}`)
+      .then((response) => {
+        if (active) setObjectDetail(response[responseKey] ?? null);
+      })
+      .catch((error) => {
+        if (active) {
+          setStatusMessage(error instanceof Error ? error.message : `Unable to load ${surface} details.`);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [config.endpoint, selectedId, surface]);
+
+  useEffect(() => {
     if (creatingEvent || creatingTodo) return;
     const nextDraft = routedDraftFor(selectedItem);
     if (
@@ -1156,11 +1186,11 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   }, [creatingEvent, creatingTodo, selectedItem, selectedOccurrence]);
 
   useEffect(() => {
-    if (surface !== "calendar") return;
+    if (!shouldLoadCalendarOptions) return;
     Promise.all([
-      apiJson<{ contacts: RoutedContact[] }>("/memory/routed-objects/contacts?limit=500"),
-      apiJson<{ entities: RoutedEntity[] }>("/memory/routed-objects/entities?limit=500"),
-      apiJson<{ todos: RoutedTodo[] }>("/memory/routed-objects/todos?limit=500"),
+      apiJson<{ contacts: RoutedContact[] }>("/memory/routed-objects/contacts?view=summary&limit=500"),
+      apiJson<{ entities: RoutedEntity[] }>("/memory/routed-objects/entities?view=summary&limit=500"),
+      apiJson<{ todos: RoutedTodo[] }>("/memory/routed-objects/todos?view=summary&limit=500"),
       apiJson<{ issues: ProductIssue[] }>("/issues?status=open&limit=250"),
     ])
       .then(([contacts, organizations, todos, issues]) => {
@@ -1170,7 +1200,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         setIssueOptions(issues.issues);
       })
       .catch(() => undefined);
-  }, [surface]);
+  }, [shouldLoadCalendarOptions]);
 
   const updateDraft = (key: string, value: string) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -1943,7 +1973,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 </small>
               </span>
             </button>
-            {item.id === selectedItem?.id && mobileInlineDetail(item)}
+            {item.id === selectedItem?.id && mobileInlineDetail(selectedItem)}
             </div>
           ))}
           {visibleItems.length === 0 && <p className="empty-state">{config.empty}</p>}

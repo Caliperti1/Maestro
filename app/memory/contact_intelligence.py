@@ -107,18 +107,50 @@ class ContactIntelligenceService:
         domain_id: uuid.UUID | None = None,
         limit: int = 10,
         use_semantic: bool = True,
+        summary: bool = False,
     ) -> list[ContactSearchResult]:
         query = query_text.strip()
         contacts = self._visible_contacts(domain_id)
         semantic_scores = self._semantic_scores(contacts, query) if use_semantic and query else {}
         results = [
-            self._score_contact(contact, query, domain_id, semantic_scores.get(contact.id))
+            (
+                self._score_contact_summary(contact, query, semantic_scores.get(contact.id))
+                if summary
+                else self._score_contact(contact, query, domain_id, semantic_scores.get(contact.id))
+            )
             for contact in contacts
         ]
         if query:
             results = [result for result in results if result.score >= 0.12]
         results.sort(key=lambda result: (result.score, result.contact.updated_at), reverse=True)
         return results[:limit]
+
+    def contact_summary_payload(self, contact: Contact) -> dict[str, Any]:
+        """Return the stable list fields without loading the contact's graph."""
+        return {
+            "id": str(contact.id),
+            "name": contact.name,
+            "email": contact.email,
+            "phone": contact.phone,
+            "linkedin": contact.linkedin,
+            "organization_entity_id": str(contact.organization_entity_id) if contact.organization_entity_id else None,
+            "summary": contact.summary,
+            "origination": contact.origination,
+            "last_contact_at": contact.last_contact_at.isoformat() if contact.last_contact_at else None,
+            "scheduled_event_ids": [],
+            "source_refs": [],
+            "provenance": {},
+            "status": contact.status,
+            "metadata": {},
+            "aliases": [],
+            "alias_records": [],
+            "domain_notes": [],
+            "interactions": [],
+            "upcoming_events": [],
+            "affiliations": [],
+            "relationships": [],
+            "created_at": contact.created_at.isoformat() if contact.created_at else None,
+        }
 
     def get(self, contact_id: uuid.UUID, *, domain_id: uuid.UUID | None = None) -> dict[str, Any]:
         contact = self.session.get(Contact, contact_id)
@@ -338,6 +370,41 @@ class ContactIntelligenceService:
             if recent and recent >= datetime.now(UTC) - timedelta(days=14):
                 score += 0.22
                 reasons.append("recent interaction match")
+        if semantic_similarity is not None:
+            score += max(0.0, semantic_similarity) * 0.55
+            reasons.append(f"semantic similarity {semantic_similarity:.2f}")
+        return ContactSearchResult(
+            contact=contact,
+            score=round(score, 4),
+            match_reasons=reasons or ["weak profile match"],
+            semantic_similarity=None if semantic_similarity is None else round(semantic_similarity, 4),
+            payload=payload,
+        )
+
+    def _score_contact_summary(
+        self,
+        contact: Contact,
+        query: str,
+        semantic_similarity: float | None,
+    ) -> ContactSearchResult:
+        payload = self.contact_summary_payload(contact)
+        if not query:
+            return ContactSearchResult(contact, 0.5, ["recent contact"], semantic_similarity, payload)
+        normalized_query = _normalize(query)
+        identities = [contact.name, contact.email or "", contact.phone or "", contact.linkedin or ""]
+        normalized_identities = {_normalize(value) for value in identities if value}
+        reasons: list[str] = []
+        score = 0.0
+        if normalized_query in normalized_identities:
+            score += 1.0
+            reasons.append("exact identity match")
+        elif any(normalized_query and normalized_query in value for value in normalized_identities):
+            score += 0.65
+            reasons.append("partial identity match")
+        lexical = _token_overlap(_tokens(query), _tokens(" ".join([contact.name, contact.summary or ""])))
+        if lexical:
+            score += lexical * 0.6
+            reasons.append(f"profile overlap {lexical:.2f}")
         if semantic_similarity is not None:
             score += max(0.0, semantic_similarity) * 0.55
             reasons.append(f"semantic similarity {semantic_similarity:.2f}")
