@@ -94,13 +94,27 @@ services:
       - key: MAESTRO_TURN_WORKER_AUTORUN
         value: "true"
       - key: CONTACT_HYDRATION_AUTORUN
-        value: "false"
+        value: "true"
       - key: MEMORY_HYGIENE_AUTORUN
-        value: "false"
+        value: "true"
+      - key: FEDERATED_INDEX_AUTORUN
+        value: "true"
       - key: GMAIL_TRIGGER_AUTORUN
-        value: "false"
+        value: "true"
+      - key: CALENDAR_TRIGGER_AUTORUN
+        value: "true"
       - key: MEMORY_DROPBOX_AUTORUN
-        value: "false"
+        value: "true"
+      - key: CONTEXT_MAILBOX_AUTORUN
+        value: "true"
+      - key: TODO_AGENT_WORKER_AUTORUN
+        value: "true"
+      - key: PRODUCT_ISSUE_AGENT_WORKER_AUTORUN
+        value: "true"
+      - key: ROUTED_HYGIENE_AUTORUN
+        value: "true"
+      - key: REPOSITORY_INTELLIGENCE_AUTORUN
+        value: "true"
 
 databases:
   - name: maestro-postgres

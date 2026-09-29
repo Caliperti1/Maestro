@@ -7,7 +7,7 @@ from app.memory.hygiene import DurableMemoryHygieneService
 
 
 class _NoopEmbeddingService:
-    def backfill(self):
+    def backfill(self, **_kwargs):
         return []
 
 
@@ -40,6 +40,25 @@ def test_durable_hygiene_merges_exact_duplicates_and_proposes_semantic_review(se
     assert run.duplicate_merged_count == 1
     assert run.proposal_count >= 1
     assert session.query(MemoryProposal).filter_by(status="proposed").count() >= 1
+
+
+def test_durable_hygiene_bounds_each_maintenance_pass(session):
+    domains = {domain.key: domain for domain in seed_default_domains(session)}
+    praxis = domains["praxis"]
+    session.add_all(
+        [_memory(praxis.id, f"Memory {index}", f"Bounded content {index}") for index in range(25)]
+    )
+    session.commit()
+
+    run = DurableMemoryHygieneService(
+        session,
+        embedding_service=_NoopEmbeddingService(),
+    ).run(batch_size=10, embedding_batch_size=5, index_batch_size=5)
+
+    assert run.status == "completed"
+    assert run.scanned_count == 10
+    assert run.details["bounded"] is True
+    assert run.details["batch_size"] == 10
 
 
 def test_chatgpt_export_import_is_incremental_and_stages_changed_conversations(session, tmp_path):

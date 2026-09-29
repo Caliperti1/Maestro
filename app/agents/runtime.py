@@ -1041,6 +1041,7 @@ class PromptAggregationService:
                 max_items=request.max_memory_items,
                 max_chars=request.max_memory_chars,
                 use_semantic=request.use_semantic,
+                sync_index=False,
             )
         )
         global_context = self.registry.get_global_context().context

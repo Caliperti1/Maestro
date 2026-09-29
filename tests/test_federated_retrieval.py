@@ -85,6 +85,40 @@ def test_index_archives_removed_and_retrieval_filters_expired_or_local_only(sess
     assert bundle.policy_filtered_count == 1
 
 
+def test_bounded_index_sync_advances_cyclic_source_cursor(session):
+    praxis = _domain(session, "praxis")
+    session.add_all(
+        [
+            MemoryItem(
+                domain_id=praxis.id,
+                scope="domain",
+                memory_type="fact",
+                title=f"Bounded memory {index}",
+                content=f"Content {index}",
+                metadata_={},
+                importance=0.5,
+                impact_level="low",
+            )
+            for index in range(3)
+        ]
+    )
+    session.commit()
+
+    first = FederatedIndexService(session).sync(
+        embed_missing=False,
+        source_limit_per_store=2,
+    )
+    session.commit()
+    second = FederatedIndexService(session).sync(
+        embed_missing=False,
+        source_limit_per_store=2,
+    )
+
+    assert first.projected == 2
+    assert second.projected == 1
+    assert session.query(MemoryItem).count() == 3
+
+
 def test_explicit_store_selection_overrides_query_router_hints(session):
     praxis = _domain(session, "praxis")
     session.add(

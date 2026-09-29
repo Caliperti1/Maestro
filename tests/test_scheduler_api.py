@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +19,7 @@ from app.db.models import (
     LLMCallLog,
     Message,
     Report,
+    SchedulerResourceLock,
     Task,
     WorkflowDefinition,
     WorkflowNotification,
@@ -776,6 +777,112 @@ def test_scheduler_api_tick_claims_due_recurring_work(
     assert len(payload["enqueued"]) == 1
     assert len(payload["claimed"]) == 1
     assert payload["claimed"][0]["lease_owner"] == "api-test"
+
+
+def test_scheduler_recovers_expired_lease_before_claiming(session: Session) -> None:
+    domains = {domain.key: domain for domain in seed_default_domains(session)}
+    now = datetime.now(UTC)
+    run = WorkflowRun(
+        domain_id=domains["personal"].id,
+        source_type="scheduled",
+        status="running",
+        priority="normal",
+        input_payload={},
+    )
+    session.add(run)
+    session.flush()
+    item = WorkflowQueueItem(
+        workflow_run_id=run.id,
+        domain_id=domains["personal"].id,
+        external_key="expired-item",
+        status="running",
+        priority="normal",
+        stage_index=1,
+        position=1,
+        objective="Recover me after a worker restart.",
+        dependency_keys=[],
+        resource_locks=[{"resource_key": "agent:personal", "lock_scope": "exclusive"}],
+        attempt_count=1,
+        max_attempts=3,
+        lease_owner="dead-worker",
+        lease_expires_at=now - timedelta(minutes=1),
+        input_payload={},
+    )
+    session.add(item)
+    session.flush()
+    session.add(
+        SchedulerResourceLock(
+            resource_key="agent:personal",
+            lock_scope="exclusive",
+            status="held",
+            workflow_run_id=run.id,
+            queue_item_id=item.id,
+            owner="dead-worker",
+            lease_expires_at=now - timedelta(minutes=1),
+            metadata_={},
+        )
+    )
+    session.commit()
+
+    claimed = SchedulerService(session).claim_ready_items(
+        owner="replacement-worker",
+        limit=1,
+        now=now,
+    )
+
+    assert [claimed_item.id for claimed_item in claimed] == [item.id]
+    session.refresh(item)
+    assert item.status == "running"
+    assert item.attempt_count == 2
+    assert item.lease_owner == "replacement-worker"
+    lock = session.query(SchedulerResourceLock).filter_by(queue_item_id=item.id).one()
+    assert lock.status == "held"
+    assert lock.owner == "replacement-worker"
+
+
+def test_scheduler_fails_expired_item_after_attempt_budget(session: Session) -> None:
+    domains = {domain.key: domain for domain in seed_default_domains(session)}
+    now = datetime.now(UTC)
+    run = WorkflowRun(
+        domain_id=domains["personal"].id,
+        source_type="scheduled",
+        status="running",
+        priority="normal",
+        input_payload={},
+    )
+    session.add(run)
+    session.flush()
+    item = WorkflowQueueItem(
+        workflow_run_id=run.id,
+        domain_id=domains["personal"].id,
+        external_key="exhausted-item",
+        status="running",
+        priority="normal",
+        stage_index=1,
+        position=1,
+        objective="Do not retry forever.",
+        dependency_keys=[],
+        resource_locks=[],
+        attempt_count=2,
+        max_attempts=2,
+        lease_owner="dead-worker",
+        lease_expires_at=now - timedelta(minutes=1),
+        input_payload={},
+    )
+    session.add(item)
+    session.commit()
+
+    claimed = SchedulerService(session).claim_ready_items(
+        owner="replacement-worker",
+        limit=1,
+        now=now,
+    )
+
+    assert claimed == []
+    session.refresh(item)
+    session.refresh(run)
+    assert item.status == "failed"
+    assert run.status == "failed"
 
 
 def test_scheduler_tick_deconflicts_duplicate_agent_locks(

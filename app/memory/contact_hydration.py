@@ -987,8 +987,12 @@ class ContactHydrationService:
                     task.status = "completed"
                     task.output_payload = {"hydration_job_id": str(job.id), "promoted_count": job.promoted_count}
             RoutedHygieneService(self.session).run_once(persist_report=True)
-            ContactEmbeddingService(self.session).backfill(limit=job.max_contacts)
-            OrganizationEmbeddingService(self.session).backfill(limit=job.max_contacts)
+            embedding_limit = min(
+                job.max_contacts,
+                get_settings().memory_embedding_batch_size,
+            )
+            ContactEmbeddingService(self.session).backfill(limit=embedding_limit)
+            OrganizationEmbeddingService(self.session).backfill(limit=embedding_limit)
             return
         for candidate in candidates:
             try:

@@ -3333,6 +3333,7 @@ class MemoryContextBundleToolAdapter:
                 max_items=_bounded_int(payload.get("max_items"), default=12, minimum=1, maximum=40),
                 max_chars=_bounded_int(payload.get("max_chars"), default=4000, minimum=200, maximum=12000),
                 use_semantic=_optional_bool(payload.get("use_semantic"), default=True),
+                sync_index=False,
             )
         )
         result = federated_bundle_payload(bundle)

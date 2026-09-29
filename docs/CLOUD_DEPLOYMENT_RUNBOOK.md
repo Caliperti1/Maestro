@@ -161,12 +161,14 @@ The auth and artifact variables in `deploy/render.env.example` are the implement
 - [x] Cloud chat turns are persisted on the user message and claimed by the standalone worker;
       the web API no longer performs durable Maestro responses in `BackgroundTasks`.
 - [x] Integrate `check_readiness()` as `/health/ready`; keep `/health` as process liveness.
-- [~] Uploads and workflow artifacts write to private object storage; S3-backed curator ingestion
-      remains to be implemented before enabling `MEMORY_DROPBOX_AUTORUN` in Render.
-- [ ] Make scheduler claims atomic and add expired-lease recovery before using more than one worker.
-- [ ] Move full-memory embedding/index maintenance into explicit bounded batches before enabling
-      `MEMORY_HYGIENE_AUTORUN` or contact hydration on the 512 MB cloud worker.
-- [ ] Add database pool sizing, `pool_pre_ping`, timeouts, and production observability.
+- [x] Uploads and workflow artifacts write to private object storage, and the bounded S3 inbox
+      adapter feeds uploaded context through the canonical curator before archiving each object.
+- [~] Scheduler queue rows are claimed with database row locks and expired leases are reconciled.
+      Keep one worker until the live restart test confirms unknown side effects are not repeated.
+- [x] Memory hygiene, embedding maintenance, and federated-index projection run in bounded cyclic
+      batches; ordinary agent retrieval no longer rebuilds the full index in request memory.
+- [~] Database pool sizing, `pool_pre_ping`, connection timeouts, and recycling are configured;
+      production metric alerting remains to be added.
 - [ ] Decide whether the classifiers disabled in `render.yaml` should use deterministic fallback,
       hosted providers, or node execution.
 - [ ] Confirm hosted embedding dimensions against the existing database before importing memory.
@@ -186,6 +188,11 @@ After the gates are complete:
 7. Restart the worker and confirm leases are recovered without duplicated side effects.
 8. Disconnect and reconnect the Mac node and confirm node-dependent work waits and resumes.
 9. Verify logs contain no credentials, sensitive tool payloads, or unreleased airlock content.
+
+Cloud/local parity additionally requires fresh successful cursors for every enabled Gmail and
+calendar domain. An enabled worker with `last_error` is not considered operational. Provider OAuth
+credentials must be present in the worker environment; imported rows alone do not demonstrate live
+source synchronization.
 
 ## Rollback
 

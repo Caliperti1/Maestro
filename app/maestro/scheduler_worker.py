@@ -387,6 +387,7 @@ class SchedulerWorkerService:
             owner=owner,
             limit=claim_limit,
             lease_seconds=lease_seconds,
+            now=now,
         )
         executed = [
             self.execute_queue_item(

@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     )
     tailscale_frontend_origin: str | None = None
     database_url: str = "postgresql+psycopg://maestro:maestro@localhost:55432/maestro"
+    database_pool_size: Annotated[int, Field(ge=1, le=50)] = 5
+    database_max_overflow: Annotated[int, Field(ge=0, le=50)] = 5
+    database_pool_timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 30
+    database_pool_recycle_seconds: Annotated[int, Field(ge=30, le=3600)] = 300
+    database_connect_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 10
     llm_provider: str = "openrouter"
     openai_api_key: str | None = None
     openai_live_enabled: bool = False
@@ -66,6 +71,7 @@ class Settings(BaseSettings):
     memory_dropbox_root: str = "maestro_dropbox"
     memory_dropbox_autorun: bool = True
     memory_dropbox_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 30
+    memory_dropbox_batch_size: Annotated[int, Field(ge=1, le=50)] = 5
     memory_extraction_chunk_chars: Annotated[int, Field(ge=5000, le=150000)] = 60000
     memory_extraction_max_source_chars: Annotated[int, Field(ge=10000, le=5000000)] = 500000
     contact_hydration_autorun: bool = True
@@ -79,6 +85,11 @@ class Settings(BaseSettings):
     memory_embedding_best_effort: bool = True
     memory_hygiene_autorun: bool = True
     memory_hygiene_interval_seconds: Annotated[int, Field(ge=300, le=604800)] = 21600
+    memory_hygiene_batch_size: Annotated[int, Field(ge=10, le=500)] = 100
+    memory_embedding_batch_size: Annotated[int, Field(ge=1, le=250)] = 25
+    federated_index_batch_size: Annotated[int, Field(ge=5, le=500)] = 50
+    federated_index_autorun: bool = True
+    federated_index_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     routed_resolver_llm_provider: str = "ollama"
     routed_resolver_llm_model: str = "llama3.1:8b"
     routed_resolver_llm_base_url: str = "http://localhost:11434"

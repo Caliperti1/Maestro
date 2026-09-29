@@ -481,6 +481,7 @@ class SchedulerService:
             owner=owner,
             limit=claim_limit,
             lease_seconds=lease_seconds,
+            now=now,
         )
         return {
             "enqueued": [self.workflow_run_payload(run) for run in enqueued],
@@ -595,15 +596,29 @@ class SchedulerService:
         owner: str,
         limit: int = 4,
         lease_seconds: int = 900,
+        now: datetime | None = None,
     ) -> list[WorkflowQueueItem]:
+        now = now or datetime.now(UTC)
+        self.reconcile_expired_leases(now=now, commit=True)
         claimed: list[WorkflowQueueItem] = []
         for batch in self.runnable_batches():
             for item_payload in batch["parallel_ready"]:
                 if len(claimed) >= limit:
                     self.session.commit()
                     return claimed
-                item = self.session.get(WorkflowQueueItem, uuid.UUID(item_payload["id"]))
-                if item is None or item.status not in {"queued", "pending", "ready", "retrying"}:
+                # Claim the queue row while holding a database lock. Two worker processes may
+                # discover the same runnable candidate, but only one can transition it to running.
+                # PostgreSQL skips a row already locked by another worker; SQLite ignores this
+                # clause, which preserves the lightweight local/test behavior.
+                item = self.session.scalar(
+                    select(WorkflowQueueItem)
+                    .where(
+                        WorkflowQueueItem.id == uuid.UUID(item_payload["id"]),
+                        WorkflowQueueItem.status.in_({"queued", "pending", "ready", "retrying"}),
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+                if item is None:
                     continue
                 try:
                     self.acquire_locks(item, owner=owner, lease_seconds=lease_seconds, commit=False)
@@ -612,12 +627,12 @@ class SchedulerService:
                 item.status = "running"
                 item.attempt_count += 1
                 item.lease_owner = owner
-                item.lease_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
-                item.started_at = datetime.now(UTC)
+                item.lease_expires_at = now + timedelta(seconds=lease_seconds)
+                item.started_at = now
                 run = self.session.get(WorkflowRun, item.workflow_run_id)
                 if run is not None:
                     run.status = "running"
-                    run.started_at = run.started_at or datetime.now(UTC)
+                    run.started_at = run.started_at or now
                 self.record_event(
                     run,
                     queue_item=item,
@@ -629,6 +644,62 @@ class SchedulerService:
                 claimed.append(item)
         self.session.commit()
         return claimed
+
+    def reconcile_expired_leases(
+        self,
+        *,
+        now: datetime | None = None,
+        commit: bool = True,
+    ) -> list[WorkflowQueueItem]:
+        """Release expired scheduler leases and make interrupted work runnable again.
+
+        The durable queue is the source of truth. A worker restart must not leave rows in
+        ``running`` forever, but an item that exhausted its attempt budget must not loop.
+        Side-effecting tool adapters retain their own approval/idempotency rules when the item is
+        executed again.
+        """
+        now = now or datetime.now(UTC)
+        expired = list(
+            self.session.scalars(
+                select(WorkflowQueueItem)
+                .where(
+                    WorkflowQueueItem.status == "running",
+                    WorkflowQueueItem.lease_expires_at.is_not(None),
+                    WorkflowQueueItem.lease_expires_at <= now,
+                )
+                .order_by(WorkflowQueueItem.lease_expires_at, WorkflowQueueItem.created_at)
+                .with_for_update(skip_locked=True)
+            ).all()
+        )
+        touched_runs: set[uuid.UUID] = set()
+        for item in expired:
+            run = self.session.get(WorkflowRun, item.workflow_run_id)
+            exhausted = item.attempt_count >= item.max_attempts
+            item.status = "failed" if exhausted else "retrying"
+            item.error_message = (
+                "Worker lease expired after the maximum number of attempts."
+                if exhausted
+                else "Worker lease expired; the durable scheduler will retry this item."
+            )
+            self.release_locks(item, commit=False)
+            self.record_event(
+                run,
+                queue_item=item,
+                event_type="queue_item_lease_expired",
+                message=(
+                    f"Queue item `{item.external_key}` exhausted its retry budget after a worker lease expired."
+                    if exhausted
+                    else f"Queue item `{item.external_key}` returned to the durable queue after a worker lease expired."
+                ),
+                payload={"attempt_count": item.attempt_count, "max_attempts": item.max_attempts},
+                commit=False,
+            )
+            touched_runs.add(item.workflow_run_id)
+        for run_id in touched_runs:
+            self._refresh_run_status(self.session.get(WorkflowRun, run_id))
+        if commit:
+            self.session.commit()
+        return expired
 
     def complete_queue_item(
         self,

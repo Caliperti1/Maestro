@@ -1493,6 +1493,7 @@ def retrieve_federated_context(
                 use_semantic=use_semantic,
                 max_items=max_items,
                 max_chars=max_chars,
+                sync_index=False,
             )
         )
     except (ValueError, TypeError) as exc:

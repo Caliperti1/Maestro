@@ -29,8 +29,10 @@ from app.maestro.product_issue_agent_tasks import ProductIssueAgentTaskService
 from app.maestro.scheduler_worker import SchedulerWorkerService, scheduler_worker_settings
 from app.maestro.todo_agent_tasks import TodoAgentTaskService
 from app.memory.contact_hydration import ContactHydrationService
+from app.memory.cloud_dropbox import CloudMemoryDropboxProcessor
 from app.memory.context_mailbox import ContextMailboxService
 from app.memory.dropbox import MemoryDropboxProcessor
+from app.memory.federated_retrieval import FederatedIndexService
 from app.memory.hygiene import DurableMemoryHygieneService
 from app.memory.recurring_todos import RecurringTodoService
 from app.memory.routed_hygiene import RoutedHygieneService
@@ -69,11 +71,15 @@ def process_gmail_triggers_once() -> int:
 
 
 def process_memory_dropbox_once() -> int:
-    """Run one local dropbox scan when configured and return its polling interval."""
+    """Run one bounded local or object-store dropbox scan."""
     settings = get_settings()
     if settings.memory_dropbox_autorun:
         with SessionLocal() as session:
-            results = MemoryDropboxProcessor(session).process_once()
+            results = (
+                CloudMemoryDropboxProcessor(session).process_once()
+                if settings.artifact_store_backend == "s3"
+                else MemoryDropboxProcessor(session).process_once()
+            )
             if results:
                 logger.info(
                     "Memory dropbox worker processed %s artifact(s): %s",
@@ -144,6 +150,20 @@ def process_memory_hygiene_once() -> int:
         with SessionLocal() as session:
             DurableMemoryHygieneService(session).run()
     return settings.memory_hygiene_interval_seconds
+
+
+def process_federated_index_once() -> int:
+    settings = get_settings()
+    if settings.federated_index_autorun:
+        with SessionLocal() as session:
+            result = FederatedIndexService(session).sync(
+                embed_missing=False,
+                source_limit_per_store=settings.federated_index_batch_size,
+            )
+            session.commit()
+            if result.created or result.updated or result.archived:
+                logger.info("Federated index batch completed: %s", result)
+    return settings.federated_index_interval_seconds
 
 
 def process_todo_agent_tasks_once() -> int:
@@ -318,6 +338,16 @@ async def run_worker() -> None:
                 initial_interval_seconds=settings.memory_hygiene_interval_seconds,
             ),
             name="maestro-memory-hygiene-worker",
+        ),
+        asyncio.create_task(
+            run_cycle_loop(
+                name="federated-index",
+                cycle=process_federated_index_once,
+                stop_event=stop_event,
+                minimum_interval_seconds=10,
+                initial_interval_seconds=settings.federated_index_interval_seconds,
+            ),
+            name="maestro-federated-index-worker",
         ),
         asyncio.create_task(
             run_cycle_loop(

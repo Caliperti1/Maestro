@@ -399,7 +399,7 @@ class IngestionLedgerService:
         record.artifact_id = artifact.id
         self.session.commit()
 
-    def mark_processed(self, record: IngestionRecord, *, processed_path: Path) -> None:
+    def mark_processed(self, record: IngestionRecord, *, processed_path: Path | str) -> None:
         record.status = "processed"
         record.processed_at = datetime.now(UTC)
         record.last_error = None
@@ -413,7 +413,7 @@ class IngestionLedgerService:
         record.metadata_ = {**(record.metadata_ or {}), "staged_path": str(staged_path)}
         self.session.commit()
 
-    def mark_failed(self, record: IngestionRecord, *, error: str, failed_path: Path) -> None:
+    def mark_failed(self, record: IngestionRecord, *, error: str, failed_path: Path | str) -> None:
         record.status = "failed"
         record.processed_at = datetime.now(UTC)
         record.last_error = error

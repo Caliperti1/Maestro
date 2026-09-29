@@ -17,8 +17,10 @@ writes are implemented
 - Complete: private local/S3 artifact-store abstraction with hashes and storage provenance for
   uploads and workflow/session packages.
 - Verified: a real HTTP/Postgres round trip from enrollment through signed diagnostic result.
-- Next: S3-backed curator ingestion, durable replacement for API background tasks, and the first
-  real node capability (`coding.codex.run`).
+- Complete: durable cloud chat turns, bounded memory/index maintenance, S3-backed curator inbox
+  ingestion, atomic scheduler row claims, and expired scheduler-lease reconciliation.
+- Next: verify every restored background integration through live source cursors, then add the
+  first real node capability (`coding.codex.run`).
 - Deferred by design: USMA implementation remains synthetic-only until institutional policy and
   Microsoft tenant authorization are settled.
 
