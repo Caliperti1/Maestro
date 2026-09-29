@@ -135,6 +135,7 @@ class MaestroContextAssembler:
                     egress_target="external",
                     max_items=14,
                     max_chars=max_chars,
+                    use_semantic=False,
                     sync_index=False,
                 )
             )

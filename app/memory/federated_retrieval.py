@@ -14,7 +14,7 @@ from urllib import error, request
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.core.config import get_settings
 from app.db.models import (
@@ -48,6 +48,7 @@ STORE_NAMES = {
     "memory", "contacts", "organizations", "events", "todos", "decisions",
     "reports", "run_log", "artifacts", "identity", "issues",
 }
+RETRIEVAL_CANDIDATE_LIMIT = 500
 
 
 class RetrievalQueryPlan(BaseModel):
@@ -458,6 +459,15 @@ class FederatedRetrievalService:
             query = query.where(or_(RetrievalDocument.domain_id.in_(domain_ids), RetrievalDocument.domain_id.is_(None)))
         if stores:
             query = query.where(RetrievalDocument.store.in_(stores))
+        query = (
+            query.order_by(
+                RetrievalDocument.source_timestamp.desc().nullslast(),
+                RetrievalDocument.created_at.desc(),
+            )
+            .limit(RETRIEVAL_CANDIDATE_LIMIT)
+        )
+        if not request_data.use_semantic:
+            query = query.options(defer(RetrievalDocument.embedding))
         documents = self.session.scalars(query).all()
         now = datetime.now(UTC)
         policy_filtered = 0

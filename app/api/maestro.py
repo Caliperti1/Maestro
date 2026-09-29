@@ -399,18 +399,24 @@ def process_pending_maestro_turn_once(
         .limit(100)
     ).all()
     now = datetime.now(UTC)
-    candidate = next(
-        (
-            message
-            for message in candidates
-            if _maestro_turn_is_claimable(
-                message.metadata_ or {},
-                now=now,
-                stale_after_seconds=stale_after_seconds,
-            )
-        ),
-        None,
-    )
+    candidate = None
+    for queued_message in candidates:
+        if not _maestro_turn_is_claimable(
+            queued_message.metadata_ or {},
+            now=now,
+            stale_after_seconds=stale_after_seconds,
+        ):
+            continue
+        if _maestro_turn_has_response(db, queued_message):
+            queued_message.metadata_ = {
+                **(queued_message.metadata_ or {}),
+                "turn_status": "completed",
+                "turn_completed_at": now.isoformat(),
+            }
+            db.commit()
+            continue
+        candidate = queued_message
+        break
     if candidate is None:
         return None
 
@@ -502,6 +508,23 @@ def _maestro_turn_is_claimable(
     if started.tzinfo is None:
         started = started.replace(tzinfo=UTC)
     return started <= now - timedelta(seconds=stale_after_seconds)
+
+
+def _maestro_turn_has_response(db: Session, message: Message) -> bool:
+    if message.client_turn_id is None:
+        return False
+    response_id = db.scalar(
+        select(Message.id)
+        .where(
+            Message.conversation_id == message.conversation_id,
+            Message.sender_type != "user",
+            Message.created_at >= message.created_at,
+            Message.metadata_["in_reply_to_client_turn_id"].as_string()
+            == str(message.client_turn_id),
+        )
+        .limit(1)
+    )
+    return response_id is not None
 
 
 def _respond_to_maestro_sync(

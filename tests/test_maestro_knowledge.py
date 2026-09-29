@@ -372,6 +372,55 @@ def test_cloud_async_turn_is_durably_processed_by_worker(
     assert response.content == "The durable cloud response is ready."
 
 
+def test_cloud_turn_worker_does_not_repeat_a_legacy_completed_turn(
+    session: Session,
+    monkeypatch,
+) -> None:
+    conversation = Conversation(title="Legacy cloud chat", metadata_={})
+    session.add(conversation)
+    session.flush()
+    client_turn_id = uuid.uuid4()
+    user_message = Message(
+        conversation_id=conversation.id,
+        sender_type="user",
+        client_turn_id=client_turn_id,
+        content="This already has a reply.",
+        metadata_={"turn_status": "pending", "interaction_mode": "knowledge"},
+    )
+    session.add(user_message)
+    session.flush()
+    session.add(
+        Message(
+            conversation_id=conversation.id,
+            sender_type="maestro",
+            content="The original reply.",
+            metadata_={"in_reply_to_client_turn_id": str(client_turn_id)},
+        )
+    )
+    session.commit()
+
+    def fail_if_repeated(*_args, **_kwargs):
+        raise AssertionError("a completed legacy turn must not execute again")
+
+    monkeypatch.setattr(maestro_api, "_respond_to_maestro_sync", fail_if_repeated)
+
+    result = maestro_api.process_pending_maestro_turn_once(
+        session,
+        owner="test-cloud-worker",
+        stale_after_seconds=30,
+    )
+
+    assert result is None
+    session.refresh(user_message)
+    assert (user_message.metadata_ or {})["turn_status"] == "completed"
+    assert session.scalar(
+        select(func.count(Message.id)).where(
+            Message.conversation_id == conversation.id,
+            Message.sender_type == "maestro",
+        )
+    ) == 1
+
+
 def test_voice_mode_adds_spoken_response_guidance_to_knowledge_context(session: Session) -> None:
     planner = CapturingKnowledgePlanner(
         KnowledgeTurn(
