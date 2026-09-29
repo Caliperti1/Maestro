@@ -42,6 +42,7 @@ from app.db.models import (
     WorkflowRunLogEntry,
 )
 from app.memory.embeddings import EmbeddingClient, build_embedding_client
+from app.llm.structured import hosted_structured_response
 from app.memory.ingestion import memory_allowed_for_target
 from app.prompts import load_prompt
 
@@ -148,6 +149,29 @@ class RetrievalQueryRouter:
     ) -> RetrievalQueryPlan:
         settings = get_settings()
         fallback = self._fallback(query_text, available_domains, forced_domain)
+        if settings.retrieval_router_provider in {"openai", "openrouter"}:
+            payload = hosted_structured_response(
+                provider=settings.retrieval_router_provider,
+                model=settings.retrieval_router_model,
+                instructions=load_prompt("retrieval_query_router.md"),
+                input_payload={
+                    "query": query_text,
+                    "available_domains": available_domains,
+                    "forced_domain": forced_domain,
+                },
+                schema_name="retrieval_query_plan",
+                schema=RetrievalQueryPlan.model_json_schema(),
+            )
+            try:
+                plan = RetrievalQueryPlan.model_validate(payload)
+            except (ValidationError, ValueError, TypeError):
+                return fallback
+            return self._sanitize_plan(
+                plan,
+                fallback=fallback,
+                available_domains=available_domains,
+                forced_domain=forced_domain,
+            )
         if settings.retrieval_router_provider != "ollama":
             return fallback
         payload = {
@@ -176,6 +200,21 @@ class RetrievalQueryRouter:
             plan = RetrievalQueryPlan.model_validate_json(content)
         except (OSError, error.URLError, TimeoutError, json.JSONDecodeError, ValidationError, ValueError, TypeError):
             return fallback
+        return self._sanitize_plan(
+            plan,
+            fallback=fallback,
+            available_domains=available_domains,
+            forced_domain=forced_domain,
+        )
+
+    def _sanitize_plan(
+        self,
+        plan: RetrievalQueryPlan,
+        *,
+        fallback: RetrievalQueryPlan,
+        available_domains: list[str],
+        forced_domain: str | None,
+    ) -> RetrievalQueryPlan:
         allowed_domains = set(available_domains)
         plan.domains = [value for value in plan.domains if value in allowed_domains]
         plan.stores = [value for value in plan.stores if value in STORE_NAMES]
