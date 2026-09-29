@@ -232,6 +232,7 @@ class FederatedIndexService:
         *,
         embed_missing: bool = True,
         source_limit_per_store: int | None = None,
+        embedding_limit: int | None = None,
     ) -> RetrievalIndexSyncResult:
         """Project source records into the retrieval index.
 
@@ -251,7 +252,7 @@ class FederatedIndexService:
             for document in self.session.scalars(existing_query).all()
         }
         seen: set[str] = set()
-        created = updated = unchanged = embedded = failures = 0
+        created = updated = unchanged = embedded = failures = embedding_attempts = 0
         client = self.embedding_client
         if embed_missing and client is None:
             try:
@@ -281,12 +282,28 @@ class FederatedIndexService:
                 ("metadata_", projection.metadata),
             ):
                 setattr(document, attr, value)
-            if projection.embedding is not None:
+            projection_matches_client = (
+                client is not None
+                and projection.embedding_provider == client.provider
+                and projection.embedding_model == client.model
+            )
+            document_matches_client = (
+                client is not None
+                and document.embedding is not None
+                and document.embedding_provider == client.provider
+                and document.embedding_model == client.model
+            )
+            if projection.embedding is not None and (
+                not embed_missing or client is None or projection_matches_client
+            ):
                 document.embedding = projection.embedding
                 document.embedding_provider = projection.embedding_provider
                 document.embedding_model = projection.embedding_model
                 document.embedding_dimensions = len(projection.embedding)
-            elif changed and client is not None and embed_missing:
+            elif client is not None and embed_missing and (changed or not document_matches_client):
+                if embedding_limit is not None and embedding_attempts >= embedding_limit:
+                    continue
+                embedding_attempts += 1
                 try:
                     vector = client.embed(f"{projection.title}\n{projection.content}"[:12000])
                     document.embedding = vector

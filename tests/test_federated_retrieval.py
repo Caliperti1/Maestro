@@ -1,6 +1,14 @@
 from datetime import UTC, datetime, timedelta
 
-from app.db.models import Contact, ContactDomainNote, Domain, MemoryItem, Report
+from app.db.models import (
+    Contact,
+    ContactDomainNote,
+    Domain,
+    MemoryEmbedding,
+    MemoryItem,
+    Report,
+    RetrievalDocument,
+)
 from app.memory.federated_retrieval import (
     FederatedIndexService,
     FederatedRetrievalRequest,
@@ -117,6 +125,103 @@ def test_bounded_index_sync_advances_cyclic_source_cursor(session):
     assert first.projected == 2
     assert second.projected == 1
     assert session.query(MemoryItem).count() == 3
+
+
+def test_index_reembeds_legacy_vectors_for_configured_cloud_provider(session):
+    praxis = _domain(session, "praxis")
+    memory = MemoryItem(
+        domain_id=praxis.id,
+        scope="domain",
+        memory_type="fact",
+        title="Legacy vector",
+        content="This memory was embedded by the local provider.",
+        metadata_={},
+        importance=0.5,
+        impact_level="low",
+    )
+    session.add(memory)
+    session.flush()
+    session.add(
+        MemoryEmbedding(
+            memory_item_id=memory.id,
+            provider="ollama",
+            model="nomic-embed-text",
+            dimensions=3,
+            source_text_hash="legacy",
+            embedding=[0.1, 0.2, 0.3],
+            metadata_={},
+        )
+    )
+    session.commit()
+
+    class CloudEmbeddingClient:
+        provider = "openai"
+        model = "text-embedding-3-small"
+
+        def __init__(self):
+            self.calls = 0
+
+        def embed(self, _text: str) -> list[float]:
+            self.calls += 1
+            return [0.4, 0.5, 0.6, 0.7]
+
+    client = CloudEmbeddingClient()
+    service = FederatedIndexService(session, embedding_client=client)
+
+    first = service.sync(embed_missing=True)
+    session.commit()
+    second = service.sync(embed_missing=True)
+    document = session.query(RetrievalDocument).one()
+
+    assert first.embedded == 1
+    assert second.embedded == 0
+    assert client.calls == 1
+    assert document.embedding_provider == "openai"
+    assert document.embedding_model == "text-embedding-3-small"
+    assert document.embedding_dimensions == 4
+    assert list(document.embedding) == [0.4, 0.5, 0.6, 0.7]
+
+
+def test_index_bounds_cloud_embedding_calls_per_cycle(session):
+    praxis = _domain(session, "praxis")
+    session.add_all(
+        [
+            MemoryItem(
+                domain_id=praxis.id,
+                scope="domain",
+                memory_type="fact",
+                title=f"Needs cloud vector {index}",
+                content=f"Content {index}",
+                metadata_={},
+                importance=0.5,
+                impact_level="low",
+            )
+            for index in range(2)
+        ]
+    )
+    session.commit()
+
+    class CountingEmbeddingClient:
+        provider = "openai"
+        model = "text-embedding-3-small"
+
+        def __init__(self):
+            self.calls = 0
+
+        def embed(self, _text: str) -> list[float]:
+            self.calls += 1
+            return [0.1, 0.2]
+
+    client = CountingEmbeddingClient()
+    result = FederatedIndexService(session, embedding_client=client).sync(
+        embed_missing=True,
+        embedding_limit=1,
+    )
+
+    assert result.projected == 2
+    assert result.embedded == 1
+    assert client.calls == 1
+    assert session.query(RetrievalDocument).count() == 2
 
 
 def test_explicit_store_selection_overrides_query_router_hints(session):

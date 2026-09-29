@@ -154,6 +154,8 @@ envVarGroups:
         value: openai
       - key: EMBEDDING_MODEL
         value: text-embedding-3-small
+      - key: FEDERATED_INDEX_EMBEDDING_BATCH_SIZE
+        value: "25"
       - key: ROUTED_RESOLVER_LLM_PROVIDER
         value: none
       - key: ROUTED_ENRICHER_LLM_PROVIDER

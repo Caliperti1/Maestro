@@ -157,8 +157,9 @@ def process_federated_index_once() -> int:
     if settings.federated_index_autorun:
         with SessionLocal() as session:
             result = FederatedIndexService(session).sync(
-                embed_missing=False,
+                embed_missing=True,
                 source_limit_per_store=settings.federated_index_batch_size,
+                embedding_limit=settings.federated_index_embedding_batch_size,
             )
             session.commit()
             if result.created or result.updated or result.archived:

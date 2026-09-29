@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     memory_hygiene_batch_size: Annotated[int, Field(ge=10, le=500)] = 100
     memory_embedding_batch_size: Annotated[int, Field(ge=1, le=250)] = 25
     federated_index_batch_size: Annotated[int, Field(ge=5, le=500)] = 50
+    federated_index_embedding_batch_size: Annotated[int, Field(ge=1, le=250)] = 25
     federated_index_autorun: bool = True
     federated_index_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     routed_resolver_llm_provider: str = "ollama"
