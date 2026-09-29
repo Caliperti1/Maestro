@@ -91,6 +91,12 @@ services:
         value: worker
       - key: SCHEDULER_WORKER_AUTORUN
         value: "true"
+      - key: MAESTRO_TURN_WORKER_AUTORUN
+        value: "true"
+      - key: CONTACT_HYDRATION_AUTORUN
+        value: "false"
+      - key: MEMORY_HYGIENE_AUTORUN
+        value: "false"
       - key: GMAIL_TRIGGER_AUTORUN
         value: "false"
       - key: MEMORY_DROPBOX_AUTORUN

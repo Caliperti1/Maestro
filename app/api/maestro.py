@@ -3,7 +3,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import (
@@ -204,11 +204,16 @@ def respond_to_maestro(
             },
             client_turn_id=client_turn_id,
         )
-        background_tasks.add_task(
-            _respond_to_maestro_in_background,
-            queued_body,
-            user_message.id,
-        )
+        # A cloud API process must return after durably recording the turn. The standalone
+        # worker claims it from Postgres; otherwise a Render restart can lose the reply after
+        # this request has already returned 200. Combined/local mode retains the lightweight
+        # in-process behavior for backwards compatibility.
+        if get_settings().maestro_process_role != "web":
+            background_tasks.add_task(
+                _respond_to_maestro_in_background,
+                queued_body,
+                user_message.id,
+            )
         return _decorate_maestro_response(queued_body, {
             "kind": "pending",
             "classification": "pending",
@@ -368,6 +373,135 @@ def _respond_to_maestro_in_background(
                     conversation.updated_at = datetime.now(UTC)
                 session.commit()
             logger.exception("Maestro background response failed.")
+
+
+def process_pending_maestro_turn_once(
+    db: Session,
+    *,
+    owner: str,
+    stale_after_seconds: int = 600,
+) -> dict[str, Any] | None:
+    """Claim and execute one durable asynchronous Maestro turn.
+
+    Message rows are already the idempotency boundary for browser retries, so the worker uses
+    their turn metadata as a small durable queue. A turn left in ``processing`` by a killed API
+    or worker is claimable again after its lease expires. Legacy cloud attempts that never wrote
+    a worker owner/timestamp are treated as immediately recoverable.
+    """
+    candidates = db.scalars(
+        select(Message)
+        .where(
+            Message.sender_type == "user",
+            Message.client_turn_id.is_not(None),
+            Message.metadata_["turn_status"].as_string().in_({"pending", "processing"}),
+        )
+        .order_by(Message.created_at)
+        .limit(100)
+    ).all()
+    now = datetime.now(UTC)
+    candidate = next(
+        (
+            message
+            for message in candidates
+            if _maestro_turn_is_claimable(
+                message.metadata_ or {},
+                now=now,
+                stale_after_seconds=stale_after_seconds,
+            )
+        ),
+        None,
+    )
+    if candidate is None:
+        return None
+
+    message = db.scalar(
+        select(Message)
+        .where(Message.id == candidate.id)
+        .with_for_update(skip_locked=True)
+    )
+    if message is None or not _maestro_turn_is_claimable(
+        message.metadata_ or {},
+        now=now,
+        stale_after_seconds=stale_after_seconds,
+    ):
+        db.rollback()
+        return None
+
+    metadata = dict(message.metadata_ or {})
+    metadata.update(
+        {
+            "turn_status": "processing",
+            "turn_worker_owner": owner,
+            "turn_started_at": now.isoformat(),
+        }
+    )
+    metadata.pop("turn_error", None)
+    message.metadata_ = metadata
+    db.commit()
+
+    body = MaestroRespondBody(
+        message=message.content,
+        conversation_id=message.conversation_id,
+        interaction_mode=metadata.get("interaction_mode", "knowledge"),
+        interface=metadata.get("interface"),
+        response_mode=metadata.get("response_mode", "text"),
+        client_turn_id=message.client_turn_id,
+    )
+    try:
+        _respond_to_maestro_sync(
+            body,
+            db,
+            existing_user_message_id=message.id,
+        )
+    except Exception as exc:
+        db.rollback()
+        failed = db.get(Message, message.id)
+        if failed is not None:
+            failed.metadata_ = {
+                **(failed.metadata_ or {}),
+                "turn_status": "failed",
+                "turn_error": str(exc)[:500],
+                "turn_worker_owner": owner,
+                "turn_completed_at": datetime.now(UTC).isoformat(),
+            }
+            db.commit()
+        logger.exception("Durable Maestro turn %s failed.", message.id)
+        return {"status": "failed", "message_id": str(message.id), "error": str(exc)[:500]}
+
+    completed = db.get(Message, message.id)
+    if completed is not None:
+        completed.metadata_ = {
+            **(completed.metadata_ or {}),
+            "turn_status": "completed",
+            "turn_worker_owner": owner,
+            "turn_completed_at": datetime.now(UTC).isoformat(),
+        }
+        db.commit()
+    return {"status": "completed", "message_id": str(message.id)}
+
+
+def _maestro_turn_is_claimable(
+    metadata: dict[str, Any],
+    *,
+    now: datetime,
+    stale_after_seconds: int,
+) -> bool:
+    status = str(metadata.get("turn_status") or "")
+    if status == "pending":
+        return True
+    if status != "processing":
+        return False
+    started_at = metadata.get("turn_started_at")
+    worker_owner = str(metadata.get("turn_worker_owner") or "").strip()
+    if not started_at or not worker_owner:
+        return True
+    try:
+        started = datetime.fromisoformat(str(started_at))
+    except ValueError:
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return started <= now - timedelta(seconds=stale_after_seconds)
 
 
 def _respond_to_maestro_sync(

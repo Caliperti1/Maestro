@@ -14,6 +14,7 @@ import socket
 from collections.abc import Callable
 
 from app.agents.runtime import AgentRegistryService
+from app.api.maestro import process_pending_maestro_turn_once
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.seed import seed_default_domains
@@ -109,11 +110,32 @@ def process_context_mailbox_once() -> int:
 
 def process_contact_hydration_once() -> int:
     settings = get_settings()
+    if not settings.contact_hydration_autorun:
+        return settings.contact_hydration_interval_seconds
     with SessionLocal() as session:
         job = ContactHydrationService(session).process_once()
         if job is not None:
             logger.info("Contact hydration job %s advanced to %s.", job.id, job.status)
     return settings.contact_hydration_interval_seconds
+
+
+def process_maestro_turns_once() -> int:
+    settings = get_settings()
+    if not settings.maestro_turn_worker_autorun:
+        return settings.maestro_turn_worker_interval_seconds
+    with SessionLocal() as session:
+        result = process_pending_maestro_turn_once(
+            session,
+            owner=_worker_owner(),
+            stale_after_seconds=settings.maestro_turn_worker_stale_seconds,
+        )
+        if result is not None:
+            logger.info(
+                "Maestro turn worker %s message %s.",
+                result["status"],
+                result["message_id"],
+            )
+    return settings.maestro_turn_worker_interval_seconds
 
 
 def process_memory_hygiene_once() -> int:
@@ -217,6 +239,16 @@ async def run_worker() -> None:
             loop.add_signal_handler(shutdown_signal, stop_event.set)
 
     tasks = [
+        asyncio.create_task(
+            run_cycle_loop(
+                name="maestro-turns",
+                cycle=process_maestro_turns_once,
+                stop_event=stop_event,
+                minimum_interval_seconds=1,
+                initial_interval_seconds=settings.maestro_turn_worker_interval_seconds,
+            ),
+            name="maestro-turn-worker",
+        ),
         asyncio.create_task(
             run_cycle_loop(
                 name="scheduler",

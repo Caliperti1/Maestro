@@ -181,6 +181,7 @@ class KnowledgeReadToolService:
                     max_items=limit,
                     max_chars=max_chars,
                     use_semantic=True,
+                    sync_index=False,
                 )
             )
             semantic_status = bundle.semantic_status

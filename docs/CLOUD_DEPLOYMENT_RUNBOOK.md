@@ -158,11 +158,14 @@ The auth and artifact variables in `deploy/render.env.example` are the implement
 - [x] Make `app.api.main` honor `MAESTRO_PROCESS_ROLE=web` and skip its in-process scheduler,
       Gmail, and dropbox loops.
 - [x] Ensure runtime database settings cannot turn a worker loop back on inside the API process.
-- [ ] Replace FastAPI `BackgroundTasks` used for durable orchestration with persisted queue work.
+- [x] Cloud chat turns are persisted on the user message and claimed by the standalone worker;
+      the web API no longer performs durable Maestro responses in `BackgroundTasks`.
 - [x] Integrate `check_readiness()` as `/health/ready`; keep `/health` as process liveness.
 - [~] Uploads and workflow artifacts write to private object storage; S3-backed curator ingestion
       remains to be implemented before enabling `MEMORY_DROPBOX_AUTORUN` in Render.
 - [ ] Make scheduler claims atomic and add expired-lease recovery before using more than one worker.
+- [ ] Move full-memory embedding/index maintenance into explicit bounded batches before enabling
+      `MEMORY_HYGIENE_AUTORUN` or contact hydration on the 512 MB cloud worker.
 - [ ] Add database pool sizing, `pool_pre_ping`, timeouts, and production observability.
 - [ ] Decide whether the classifiers disabled in `render.yaml` should use deterministic fallback,
       hosted providers, or node execution.

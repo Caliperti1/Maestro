@@ -74,6 +74,7 @@ class FederatedRetrievalRequest:
     max_items: int = 12
     max_chars: int = 5000
     use_semantic: bool = True
+    sync_index: bool = True
 
 
 @dataclass(frozen=True)
@@ -430,7 +431,11 @@ class FederatedRetrievalService:
         self.embedding_client = embedding_client
 
     def retrieve(self, request_data: FederatedRetrievalRequest) -> FederatedContextBundle:
-        FederatedIndexService(self.session, embedding_client=self.embedding_client).sync(embed_missing=request_data.use_semantic)
+        if request_data.sync_index:
+            FederatedIndexService(
+                self.session,
+                embedding_client=self.embedding_client,
+            ).sync(embed_missing=request_data.use_semantic)
         domains = self.session.scalars(select(Domain).where(Domain.is_active.is_(True))).all()
         by_key = {domain.key: domain for domain in domains}
         forced_domain = next((domain.key for domain in domains if domain.id == request_data.domain_id), None)

@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     memory_dropbox_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 30
     memory_extraction_chunk_chars: Annotated[int, Field(ge=5000, le=150000)] = 60000
     memory_extraction_max_source_chars: Annotated[int, Field(ge=10000, le=5000000)] = 500000
+    contact_hydration_autorun: bool = True
     contact_hydration_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 10
     home_timezone: str = "America/New_York"
     embedding_provider: str = "ollama"
@@ -104,6 +105,9 @@ class Settings(BaseSettings):
     scheduler_worker_claim_limit: int = 4
     scheduler_worker_execute_llm: bool = True
     scheduler_worker_auto_tool_loop: bool = True
+    maestro_turn_worker_autorun: bool = True
+    maestro_turn_worker_interval_seconds: Annotated[int, Field(ge=1, le=300)] = 5
+    maestro_turn_worker_stale_seconds: Annotated[int, Field(ge=30, le=3600)] = 600
     gmail_trigger_autorun: bool = False
     gmail_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     gmail_trigger_page_size: Annotated[int, Field(ge=1, le=500)] = 100
