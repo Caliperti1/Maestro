@@ -19,6 +19,8 @@ writes are implemented
 - Verified: a real HTTP/Postgres round trip from enrollment through signed diagnostic result.
 - Complete: durable cloud chat turns, bounded memory/index maintenance, S3-backed curator inbox
   ingestion, atomic scheduler row claims, and expired scheduler-lease reconciliation.
+- Complete: cloud worker startup staggering and separation of Mac-only repository intelligence
+  from cloud autorun.
 - Next: verify every restored background integration through live source cursors, then add the
   first real node capability (`coding.codex.run`).
 - Deferred by design: USMA implementation remains synthetic-only until institutional policy and

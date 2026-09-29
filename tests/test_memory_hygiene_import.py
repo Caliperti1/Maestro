@@ -1,6 +1,6 @@
 import json
 
-from app.db.models import MemoryItem, MemoryProposal
+from app.db.models import MemoryHygieneRun, MemoryItem, MemoryProposal
 from app.db.seed import seed_default_domains
 from app.memory.chatgpt_import import ChatGPTExportImporter
 from app.memory.hygiene import DurableMemoryHygieneService
@@ -59,6 +59,24 @@ def test_durable_hygiene_bounds_each_maintenance_pass(session):
     assert run.scanned_count == 10
     assert run.details["bounded"] is True
     assert run.details["batch_size"] == 10
+    assert run.details["retrieval_index"] == {"delegated": True}
+
+
+def test_durable_hygiene_closes_interrupted_prior_runs(session):
+    interrupted = MemoryHygieneRun(status="running", details={})
+    session.add(interrupted)
+    session.commit()
+
+    completed = DurableMemoryHygieneService(
+        session,
+        embedding_service=_NoopEmbeddingService(),
+    ).run(batch_size=10, embedding_batch_size=5, index_batch_size=5)
+
+    session.refresh(interrupted)
+    assert completed.status == "completed"
+    assert interrupted.status == "failed"
+    assert interrupted.completed_at is not None
+    assert "Interrupted" in interrupted.error_message
 
 
 def test_chatgpt_export_import_is_incremental_and_stages_changed_conversations(session, tmp_path):

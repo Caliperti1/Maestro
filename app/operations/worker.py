@@ -228,9 +228,15 @@ async def run_cycle_loop(
     stop_event: asyncio.Event,
     minimum_interval_seconds: int,
     initial_interval_seconds: int,
+    initial_delay_seconds: int = 0,
 ) -> None:
     """Run a blocking cycle off the event loop until shutdown is requested."""
     interval_seconds = initial_interval_seconds
+    if initial_delay_seconds > 0:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=initial_delay_seconds)
+        except TimeoutError:
+            pass
     while not stop_event.is_set():
         try:
             interval_seconds = await asyncio.to_thread(cycle)
@@ -276,6 +282,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=5,
                 initial_interval_seconds=settings.scheduler_worker_interval_seconds,
+                initial_delay_seconds=1,
             ),
             name="maestro-scheduler-worker",
         ),
@@ -286,6 +293,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=10,
                 initial_interval_seconds=settings.gmail_trigger_interval_seconds,
+                initial_delay_seconds=2,
             ),
             name="maestro-gmail-trigger-worker",
         ),
@@ -296,6 +304,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=5,
                 initial_interval_seconds=settings.memory_dropbox_interval_seconds,
+                initial_delay_seconds=6,
             ),
             name="maestro-memory-dropbox-worker",
         ),
@@ -306,6 +315,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=10,
                 initial_interval_seconds=settings.calendar_trigger_interval_seconds,
+                initial_delay_seconds=3,
             ),
             name="maestro-calendar-trigger-worker",
         ),
@@ -316,6 +326,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=10,
                 initial_interval_seconds=settings.context_mailbox_interval_seconds,
+                initial_delay_seconds=4,
             ),
             name="maestro-context-mailbox-worker",
         ),
@@ -326,6 +337,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=5,
                 initial_interval_seconds=settings.contact_hydration_interval_seconds,
+                initial_delay_seconds=5,
             ),
             name="maestro-contact-hydration-worker",
         ),
@@ -336,6 +348,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=300,
                 initial_interval_seconds=settings.memory_hygiene_interval_seconds,
+                initial_delay_seconds=30,
             ),
             name="maestro-memory-hygiene-worker",
         ),
@@ -346,6 +359,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=10,
                 initial_interval_seconds=settings.federated_index_interval_seconds,
+                initial_delay_seconds=10,
             ),
             name="maestro-federated-index-worker",
         ),
@@ -356,6 +370,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=10,
                 initial_interval_seconds=settings.todo_agent_worker_interval_seconds,
+                initial_delay_seconds=12,
             ),
             name="maestro-todo-agent-task-worker",
         ),
@@ -366,6 +381,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=10,
                 initial_interval_seconds=settings.product_issue_agent_worker_interval_seconds,
+                initial_delay_seconds=15,
             ),
             name="maestro-product-issue-agent-task-worker",
         ),
@@ -376,6 +392,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=300,
                 initial_interval_seconds=settings.routed_hygiene_interval_seconds,
+                initial_delay_seconds=45,
             ),
             name="maestro-routed-hygiene-worker",
         ),
@@ -386,6 +403,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=60,
                 initial_interval_seconds=settings.repository_intelligence_interval_seconds,
+                initial_delay_seconds=60,
             ),
             name="maestro-repository-intelligence-worker",
         ),
@@ -396,6 +414,7 @@ async def run_worker() -> None:
                 stop_event=stop_event,
                 minimum_interval_seconds=5,
                 initial_interval_seconds=settings.mobile_notification_worker_interval_seconds,
+                initial_delay_seconds=7,
             ),
             name="maestro-mobile-notification-worker",
         ),

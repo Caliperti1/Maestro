@@ -76,15 +76,15 @@ private S3 artifact store are configured.
 3. Supply the prompted values from `deploy/render.env.example`; never paste them into the Blueprint.
 4. Replace the placeholder `OPENROUTER_HTTP_REFERER` value in the Render environment group with the
    deployed frontend origin.
-5. Keep both services at one instance. Queue claims are not yet safe for horizontal workers.
+5. Keep both services at one instance while staging verifies side-effect reconciliation. Queue
+   claims are atomic, but external writes still need unknown-outcome reconciliation before scaling.
 6. Confirm the migration pre-deploy command succeeds before starting the worker.
 7. Use only synthetic or sanitized staging data until artifact storage, auth, and retention are
    verified.
 
-The Blueprint deliberately disables the filesystem memory-dropbox processor. Uploads and workflow
-artifacts are durable in S3, but the current curator still scans a local filesystem. Keep automatic
-dropbox processing disabled until the S3 inbox adapter lands; cloud memory already present in
-Postgres remains available.
+The Blueprint runs the bounded S3 memory-dropbox processor. Uploads and workflow artifacts remain
+durable in object storage, and inbox objects are archived only after the canonical curator records
+them.
 
 ## Vercel Staging Setup
 
@@ -163,14 +163,18 @@ The auth and artifact variables in `deploy/render.env.example` are the implement
 - [x] Integrate `check_readiness()` as `/health/ready`; keep `/health` as process liveness.
 - [x] Uploads and workflow artifacts write to private object storage, and the bounded S3 inbox
       adapter feeds uploaded context through the canonical curator before archiving each object.
-- [~] Scheduler queue rows are claimed with database row locks and expired leases are reconciled.
-      Keep one worker until the live restart test confirms unknown side effects are not repeated.
+- [x] Scheduler queue rows are claimed with database row locks, and a live restart confirmed that
+      expired leases are reconciled and returned to the durable queue.
 - [x] Memory hygiene, embedding maintenance, and federated-index projection run in bounded cyclic
       batches; ordinary agent retrieval no longer rebuilds the full index in request memory.
+- [x] Stagger worker-loop startup so deploys do not run every integration and maintenance pass at
+      once on a 512 MiB instance.
 - [~] Database pool sizing, `pool_pre_ping`, connection timeouts, and recycling are configured;
       production metric alerting remains to be added.
 - [ ] Decide whether the classifiers disabled in `render.yaml` should use deterministic fallback,
       hosted providers, or node execution.
+- [ ] Move repository intelligence and issue hygiene to the personal node. They require local
+      repository paths and an authenticated GitHub CLI, so cloud autorun is intentionally disabled.
 - [ ] Confirm hosted embedding dimensions against the existing database before importing memory.
 - [x] Add secure-cookie configuration and exact cross-origin checks as part of auth integration.
 - [x] Rehearse backup restoration and forward migration against a disposable local Postgres clone.

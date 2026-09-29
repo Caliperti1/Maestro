@@ -86,6 +86,35 @@ def test_cycle_loop_stops_without_waiting_for_next_interval() -> None:
     assert calls == ["ran"]
 
 
+def test_cycle_loop_honors_startup_stagger() -> None:
+    calls: list[str] = []
+
+    async def exercise() -> None:
+        stop_event = asyncio.Event()
+
+        def cycle() -> int:
+            calls.append("ran")
+            stop_event.set()
+            return 300
+
+        task = asyncio.create_task(
+            worker.run_cycle_loop(
+                name="test",
+                cycle=cycle,
+                stop_event=stop_event,
+                minimum_interval_seconds=5,
+                initial_interval_seconds=5,
+                initial_delay_seconds=60,
+            )
+        )
+        await asyncio.sleep(0)
+        stop_event.set()
+        await task
+
+    asyncio.run(exercise())
+    assert calls == []
+
+
 def test_readiness_checks_database_connection() -> None:
     result = check_readiness(create_engine("sqlite+pysqlite:///:memory:"))
 

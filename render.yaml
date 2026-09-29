@@ -114,7 +114,9 @@ services:
       - key: ROUTED_HYGIENE_AUTORUN
         value: "true"
       - key: REPOSITORY_INTELLIGENCE_AUTORUN
-        value: "true"
+        # Repository paths and the authenticated GitHub CLI belong on the personal
+        # node. The cloud worker must not repeatedly execute Mac-only paths.
+        value: "false"
 
 databases:
   - name: maestro-postgres

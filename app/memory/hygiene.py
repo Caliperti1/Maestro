@@ -6,13 +6,12 @@ import re
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import MemoryHygieneRun, MemoryItem, MemoryProposal, RuntimeSetting
 from app.memory.embeddings import MemoryEmbeddingService
-from app.memory.federated_retrieval import FederatedIndexService
 
 
 class DurableMemoryHygieneService:
@@ -37,6 +36,19 @@ class DurableMemoryHygieneService:
         embedding_batch_size = embedding_batch_size or settings.memory_embedding_batch_size
         index_batch_size = index_batch_size or settings.federated_index_batch_size
         run = MemoryHygieneRun(status="running", details={})
+        # A process can be terminated after creating a run but before recording its
+        # terminal state.  Close those stale records before starting a new bounded
+        # pass so the health view reflects the worker that is actually running.
+        now = datetime.now(UTC)
+        self.session.execute(
+            update(MemoryHygieneRun)
+            .where(MemoryHygieneRun.status == "running")
+            .values(
+                status="failed",
+                error_message="Interrupted before the next maintenance cycle started.",
+                completed_at=now,
+            )
+        )
         self.session.add(run)
         self.session.flush()
         try:
@@ -50,17 +62,16 @@ class DurableMemoryHygieneService:
                 cursor_key=self.EMBEDDING_CURSOR_KEY,
             )
             run.embedding_backfilled_count = sum(result.status == "written" for result in embedding_results)
-            index_result = FederatedIndexService(self.session).sync(
-                embed_missing=False,
-                source_limit_per_store=index_batch_size,
-            )
             run.details = {
                 "bounded": True,
                 "batch_size": batch_size,
                 "embedding_batch_size": embedding_batch_size,
                 "index_batch_size": index_batch_size,
                 "embedding_failures": [result.error for result in embedding_results if result.status == "failed"],
-                "retrieval_index": index_result.__dict__,
+                # Federated indexing owns a separate bounded worker loop.  Keeping
+                # it out of hygiene prevents both loops from racing to create or
+                # advance the same durable cursor during deploy overlap.
+                "retrieval_index": {"delegated": True},
             }
             run.status = "completed"
             run.completed_at = datetime.now(UTC)
