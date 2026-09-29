@@ -96,6 +96,7 @@ def test_readiness_checks_database_connection() -> None:
 def test_deployment_check_accepts_cloud_endpoints_and_reports_release_gates() -> None:
     settings = Settings(
         _env_file=None,
+        maestro_process_role="web",
         database_url="postgresql://maestro:secret@internal/maestro",
         frontend_origin="https://maestro.example.com",
         cors_allow_origins="https://maestro.example.com",
@@ -114,6 +115,7 @@ def test_deployment_check_accepts_cloud_endpoints_and_reports_release_gates() ->
 def test_deployment_check_accepts_complete_production_security_configuration() -> None:
     settings = Settings(
         _env_file=None,
+        maestro_process_role="web",
         database_url="postgresql://maestro:secret@internal/maestro",
         frontend_origin="https://maestro.example.com",
         cors_allow_origins="https://maestro.example.com",
@@ -142,6 +144,7 @@ def test_deployment_check_refuses_promotion_while_auth_gate_exists(
 ) -> None:
     settings = Settings(
         _env_file=None,
+        maestro_process_role="web",
         database_url="postgresql://maestro:secret@internal/maestro",
         frontend_origin="https://maestro.example.com",
         cors_allow_origins="https://maestro.example.com",
@@ -155,3 +158,23 @@ def test_deployment_check_refuses_promotion_while_auth_gate_exists(
         deployment_check.main()
 
     assert exc_info.value.code == 1
+
+
+def test_deployment_check_rejects_combined_cloud_process() -> None:
+    settings = Settings(
+        _env_file=None,
+        maestro_process_role="combined",
+        database_url="postgresql://maestro:secret@internal/maestro",
+        frontend_origin="https://maestro.example.com",
+        cors_allow_origins="https://maestro.example.com",
+        openrouter_api_key="configured",
+        embedding_provider="openai",
+        openai_api_key="configured",
+    )
+
+    findings = deployment_findings(settings)
+
+    assert any(
+        finding.key == "MAESTRO_PROCESS_ROLE" and finding.level == "error"
+        for finding in findings
+    )

@@ -1079,8 +1079,16 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const shouldLoadCalendarOptions = surface === "calendar" && (Boolean(selectedId) || creatingEvent);
 
   const refreshItems = useCallback(async () => {
+    if (surface === "calendar" && !calendarRange) {
+      setStatusMessage("Loading calendar range...");
+      return;
+    }
     const params = new URLSearchParams({
-      limit: surface === "calendar" || surface === "contacts" || surface === "organizations" ? "500" : "100",
+      limit: surface === "calendar"
+        ? "250"
+        : surface === "contacts" || surface === "organizations"
+          ? "500"
+          : "100",
     });
     if (surface === "calendar") {
       params.set("view", "calendar");
@@ -3625,31 +3633,35 @@ export function App() {
       setMaestroStatus("Could not restore active Maestro session.");
     });
     loadSessionHistory().catch(() => undefined);
-    loadSchedulerDashboard().catch(() => undefined);
-    loadSchedulerWorkerStatus().catch(() => undefined);
-    loadGmailTriggerStatus().catch(() => undefined);
-    loadCalendarTriggerStatus().catch(() => undefined);
-    loadWorkflowOutputs().catch(() => undefined);
   }, [
     loadActiveSession,
-    loadSchedulerDashboard,
-    loadSchedulerWorkerStatus,
-    loadGmailTriggerStatus,
-    loadCalendarTriggerStatus,
     loadSessionHistory,
-    loadWorkflowOutputs,
   ]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      loadSchedulerDashboard().catch(() => undefined);
-      loadSchedulerWorkerStatus().catch(() => undefined);
-      loadGmailTriggerStatus().catch(() => undefined);
-      loadCalendarTriggerStatus().catch(() => undefined);
+    if (!["workflows", "run-log", "reports"].includes(activeSurface)) return;
+    const refreshWorkflowSurface = () => {
+      if (activeSurface === "workflows") {
+        loadSchedulerDashboard().catch(() => undefined);
+        loadSchedulerWorkerStatus().catch(() => undefined);
+        loadGmailTriggerStatus().catch(() => undefined);
+        loadCalendarTriggerStatus().catch(() => undefined);
+      }
       loadWorkflowOutputs().catch(() => undefined);
-    }, 15_000);
+    };
+    refreshWorkflowSurface();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refreshWorkflowSurface();
+    }, 60_000);
     return () => window.clearInterval(interval);
-  }, [loadCalendarTriggerStatus, loadGmailTriggerStatus, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
+  }, [
+    activeSurface,
+    loadCalendarTriggerStatus,
+    loadGmailTriggerStatus,
+    loadSchedulerDashboard,
+    loadSchedulerWorkerStatus,
+    loadWorkflowOutputs,
+  ]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -3918,12 +3930,16 @@ export function App() {
     try {
       const response = await apiJson<MaestroRespond>("/maestro/respond", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Maestro-Async": "true",
+        },
         body: JSON.stringify({
           message: outgoingMessage.content,
           active_plan_id: activePlanId,
           conversation_id: activeConversationId,
           interaction_mode: maestroInteractionMode,
+          client_turn_id: outgoingMessage.id,
         }),
       });
       if (response.kind === "pending") {
@@ -3946,7 +3962,9 @@ export function App() {
           {
             id: createClientId(),
             sender: "maestro",
-            content: response.message,
+            content:
+              response.message?.trim()
+              || "Maestro could not complete that response. Please try again.",
           },
         ]);
       }
@@ -4516,7 +4534,9 @@ export function App() {
 
               <div className="thread" ref={chatThreadRef}>
                 {chatMessages.length > 0 ? (
-                  chatMessages.map((message) => (
+                  chatMessages
+                    .filter((message) => message.content?.trim())
+                    .map((message) => (
                     <div
                       className={`message ${
                         message.sender === "user" ? "user-message" : "maestro-message"
@@ -4552,7 +4572,7 @@ export function App() {
                         <p className="plain-message">{message.content}</p>
                       )}
                     </div>
-                  ))
+                    ))
                 ) : (
                   <p className="empty-state">
                     You’re caught up. Send a request to start a plan or conversation.

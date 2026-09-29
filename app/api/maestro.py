@@ -1612,6 +1612,12 @@ def _record_session_message(
     metadata: dict[str, Any] | None = None,
     client_turn_id: uuid.UUID | None = None,
 ) -> Message:
+    normalized_content = content.strip()
+    if sender != "user" and not normalized_content:
+        logger.error("Refused to persist an empty Maestro response.")
+        normalized_content = (
+            "I couldn't complete that response. Please try again; no action was taken."
+        )
     stored_metadata = dict(metadata or {})
     if sender != "user" and stored_metadata.get("client_turn_id"):
         stored_metadata["in_reply_to_client_turn_id"] = stored_metadata["client_turn_id"]
@@ -1619,7 +1625,7 @@ def _record_session_message(
         conversation_id=conversation.id,
         sender_type="user" if sender == "user" else "maestro",
         client_turn_id=client_turn_id if sender == "user" else None,
-        content=content,
+        content=normalized_content if sender != "user" else content,
         metadata_=stored_metadata,
     )
     db.add(message)

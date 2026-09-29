@@ -20,6 +20,14 @@ class DeploymentFinding:
 
 def deployment_findings(settings: Settings) -> list[DeploymentFinding]:
     findings: list[DeploymentFinding] = []
+    if settings.maestro_process_role == "combined":
+        findings.append(
+            DeploymentFinding(
+                "error",
+                "MAESTRO_PROCESS_ROLE",
+                "Cloud processes must declare web or worker; combined mode can exhaust the API memory limit.",
+            )
+        )
     database = urlparse(settings.database_url.replace("postgresql+psycopg", "postgresql", 1))
     if database.scheme != "postgresql":
         findings.append(
