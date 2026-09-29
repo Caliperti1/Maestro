@@ -395,6 +395,43 @@ def test_gmail_trigger_backs_off_missing_oauth_env_until_credential_appears(
     assert source.calls == 2
 
 
+def test_gmail_trigger_backs_off_rejected_oauth_refresh_token(session: Session) -> None:
+    domain = _seed_trigger(session)
+    session.add(
+        RuntimeSetting(
+            key=f"{GMAIL_TRIGGER_CURSOR_PREFIX}{domain.key}",
+            value={"domain_key": domain.key, "history_id": "100", "status": "healthy"},
+        )
+    )
+    session.commit()
+
+    class RejectedCredentialSource:
+        calls = 0
+
+        def history_page(self, *_args, **_kwargs):
+            self.calls += 1
+            raise RuntimeError(
+                'Google OAuth refresh failed: 401 {"error":"unauthorized_client"}'
+            )
+
+        def message_metadata(self, *_args, **_kwargs):
+            raise AssertionError("not reached")
+
+        def profile(self, *_args, **_kwargs):
+            raise AssertionError("not reached")
+
+    source = RejectedCredentialSource()
+    service = GmailTriggerService(session, source=source)
+
+    failed = service.poll_once()
+    backed_off = service.poll_once()
+
+    assert failed["domains"][0]["auth_required"] is True
+    assert failed["domains"][0]["retry_at"] is not None
+    assert backed_off["domains"][0]["status"] == "auth_backoff"
+    assert source.calls == 1
+
+
 def test_gmail_trigger_waits_for_sustained_network_outage_and_reports_recovery(
     session: Session,
 ) -> None:

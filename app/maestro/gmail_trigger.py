@@ -277,8 +277,8 @@ class GmailTriggerService:
         if (
             retry_at is not None
             and retry_at > datetime.now(UTC)
-            and missing_env_key
-            and not os.environ.get(missing_env_key)
+            and bool(cursor_payload.get("auth_required"))
+            and (not missing_env_key or not os.environ.get(missing_env_key))
         ):
             return {
                 "domain_key": domain.key,
@@ -463,8 +463,7 @@ class GmailTriggerService:
         now = now_datetime.isoformat()
         message = str(error)
         transient_network = _is_transient_network_failure(error)
-        missing_env_key = _missing_oauth_env_key(message)
-        auth_required = missing_env_key is not None
+        auth_required = _is_oauth_authorization_failure(message)
         error_count = int(payload.get("error_count") or 0) + 1
         prior_status = str(payload.get("status") or "")
         outage_started_at = (
@@ -733,6 +732,19 @@ def _missing_oauth_env_key(value: object) -> str | None:
         return None
     key = message.split(marker, 1)[1].strip().split()[0] if message.split(marker, 1)[1].strip() else ""
     return key if key.replace("_", "").isalnum() else None
+
+
+def _is_oauth_authorization_failure(value: object) -> bool:
+    message = str(value or "").lower()
+    return _missing_oauth_env_key(value) is not None or any(
+        marker in message
+        for marker in (
+            '"invalid_grant"',
+            '"unauthorized_client"',
+            "oauth refresh failed: 400",
+            "oauth refresh failed: 401",
+        )
+    )
 
 
 def _is_transient_network_failure(error: BaseException) -> bool:
