@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     gmail_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     gmail_trigger_page_size: Annotated[int, Field(ge=1, le=500)] = 100
     gmail_trigger_network_alert_seconds: Annotated[int, Field(ge=60, le=86400)] = 900
+    gmail_trigger_auth_retry_seconds: Annotated[int, Field(ge=300, le=86400)] = 900
     calendar_trigger_autorun: bool = False
     calendar_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     calendar_trigger_page_size: Annotated[int, Field(ge=1, le=2500)] = 250
