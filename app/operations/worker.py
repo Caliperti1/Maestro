@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import socket
+import time
 from collections.abc import Callable
 
 from app.agents.runtime import AgentRegistryService
@@ -239,12 +240,25 @@ async def run_cycle_loop(
         except TimeoutError:
             pass
     while not stop_event.is_set():
+        started_at = time.monotonic()
+        rss_before = _resident_memory_mib()
         try:
             interval_seconds = await asyncio.to_thread(cycle)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("%s worker cycle failed.", name)
+        finally:
+            rss_after = _resident_memory_mib()
+            elapsed = time.monotonic() - started_at
+            if elapsed >= 30 or rss_after - rss_before >= 8:
+                logger.info(
+                    "%s worker cycle completed in %.1fs; resident memory %.1f -> %.1f MiB.",
+                    name,
+                    elapsed,
+                    rss_before,
+                    rss_after,
+                )
 
         wait_seconds = max(minimum_interval_seconds, int(interval_seconds))
         try:
@@ -436,6 +450,16 @@ def _worker_owner() -> str:
     if explicit_owner:
         return explicit_owner
     return f"maestro-worker:{socket.gethostname()}:{os.getpid()}"
+
+
+def _resident_memory_mib() -> float:
+    """Read current Linux RSS without importing a monitoring dependency."""
+    try:
+        with open("/proc/self/statm", encoding="utf-8") as statm:
+            resident_pages = int(statm.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        return 0.0
 
 
 def main() -> None:
