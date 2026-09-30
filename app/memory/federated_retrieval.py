@@ -135,6 +135,8 @@ class _Projection:
     provenance: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     embedding: list[float] | None = None
+    embedding_record: MemoryEmbedding | ContactEmbedding | OrganizationEmbedding | None = None
+    embedding_dimensions: int | None = None
     embedding_provider: str | None = None
     embedding_model: str | None = None
 
@@ -341,21 +343,29 @@ class FederatedIndexService:
                 and document.embedding_model == client.model
                 and document.embedding_dimensions is not None
             )
-            projection_is_usable = projection.embedding is not None and (
+            projection_has_embedding = (
+                projection.embedding is not None or projection.embedding_record is not None
+            )
+            projection_is_usable = projection_has_embedding and (
                 not embed_missing or client is None or projection_matches_client
             )
             if projection_is_usable:
-                projection_dimensions = len(projection.embedding)
+                projection_dimensions = projection.embedding_dimensions
+                if projection_dimensions is None and projection.embedding is not None:
+                    projection_dimensions = len(projection.embedding)
                 projection_already_current = (
                     document.embedding_provider == projection.embedding_provider
                     and document.embedding_model == projection.embedding_model
                     and document.embedding_dimensions == projection_dimensions
                 )
                 if changed or not projection_already_current:
-                    document.embedding = projection.embedding
+                    vector = projection.embedding
+                    if vector is None and projection.embedding_record is not None:
+                        vector = list(projection.embedding_record.embedding)
+                    document.embedding = vector
                     document.embedding_provider = projection.embedding_provider
                     document.embedding_model = projection.embedding_model
-                    document.embedding_dimensions = projection_dimensions
+                    document.embedding_dimensions = projection_dimensions or len(vector or [])
             elif client is not None and embed_missing and (changed or not document_matches_client):
                 if embedding_limit is not None and embedding_attempts >= embedding_limit:
                     continue
@@ -404,6 +414,7 @@ class FederatedIndexService:
                 MemoryEmbedding.provider == embedding_provider,
                 MemoryEmbedding.model == embedding_model,
             )
+        memory_embedding_query = memory_embedding_query.options(defer(MemoryEmbedding.embedding))
         memory_embeddings = {
             item.memory_item_id: item
             for item in self.session.scalars(memory_embedding_query).all()
@@ -419,7 +430,8 @@ class FederatedIndexService:
                 importance=item.importance, relationship_weight=0.2 if item.scope == "global" else 0.0,
                 policy=_policy(metadata), provenance={"source_refs": metadata.get("source_refs", []), **metadata},
                 metadata={"scope": item.scope, "memory_type": item.memory_type, "impact_level": item.impact_level, "domain_key": domains.get(item.domain_id)},
-                embedding=list(embedding.embedding) if embedding else None,
+                embedding_record=embedding,
+                embedding_dimensions=embedding.dimensions if embedding else None,
                 embedding_provider=embedding.provider if embedding else None,
                 embedding_model=embedding.model if embedding else None,
             )
@@ -448,6 +460,7 @@ class FederatedIndexService:
                 ContactEmbedding.provider == embedding_provider,
                 ContactEmbedding.model == embedding_model,
             )
+        contact_embedding_query = contact_embedding_query.options(defer(ContactEmbedding.embedding))
         contact_embeddings = {
             item.contact_id: item
             for item in self.session.scalars(contact_embedding_query).all()
@@ -467,7 +480,7 @@ class FederatedIndexService:
                 aliases = ", ".join(contact_aliases.get(contact.id, []))
                 content = "\n".join(value for value in [contact.summary, note.notes if note else None, f"Email: {contact.email}" if contact.email else None, f"Phone: {contact.phone}" if contact.phone else None, f"Aliases: {aliases}" if aliases else None] if value)
                 embedding = contact_embeddings.get(contact.id)
-                yield _Projection(key=f"contact:{contact.id}{suffix}", store="contacts", source_id=str(contact.id), domain_id=domain_id, title=contact.name, content=content or contact.name, status=contact.status, source_timestamp=contact.last_contact_at or contact.updated_at, trust_score=_trust(contact.provenance), importance=0.65, relationship_weight=0.35, policy=_policy(contact.provenance), provenance={"source_refs": contact.source_refs, **contact.provenance}, metadata={"aliases": contact_aliases.get(contact.id, []), "email": contact.email, "domain_key": domains.get(domain_id)}, embedding=list(embedding.embedding) if embedding else None, embedding_provider=embedding.provider if embedding else None, embedding_model=embedding.model if embedding else None)
+                yield _Projection(key=f"contact:{contact.id}{suffix}", store="contacts", source_id=str(contact.id), domain_id=domain_id, title=contact.name, content=content or contact.name, status=contact.status, source_timestamp=contact.last_contact_at or contact.updated_at, trust_score=_trust(contact.provenance), importance=0.65, relationship_weight=0.35, policy=_policy(contact.provenance), provenance={"source_refs": contact.source_refs, **contact.provenance}, metadata={"aliases": contact_aliases.get(contact.id, []), "email": contact.email, "domain_key": domains.get(domain_id)}, embedding_record=embedding, embedding_dimensions=embedding.dimensions if embedding else None, embedding_provider=embedding.provider if embedding else None, embedding_model=embedding.model if embedding else None)
         organizations = self._source_rows(
             Entity,
             "organizations",
@@ -493,6 +506,9 @@ class FederatedIndexService:
                 OrganizationEmbedding.provider == embedding_provider,
                 OrganizationEmbedding.model == embedding_model,
             )
+        organization_embedding_query = organization_embedding_query.options(
+            defer(OrganizationEmbedding.embedding)
+        )
         org_embeddings = {
             item.entity_id: item
             for item in self.session.scalars(organization_embedding_query).all()
@@ -512,7 +528,7 @@ class FederatedIndexService:
                 aliases = ", ".join(org_aliases.get(entity.id, []))
                 content = "\n".join(value for value in [entity.summary, note.notes if note else None, f"Website: {entity.website}" if entity.website else None, f"Aliases: {aliases}" if aliases else None] if value)
                 embedding = org_embeddings.get(entity.id)
-                yield _Projection(key=f"organization:{entity.id}{suffix}", store="organizations", source_id=str(entity.id), domain_id=domain_id, title=entity.name, content=content or entity.name, status=entity.status, source_timestamp=entity.updated_at, trust_score=_trust(entity.provenance), importance=0.65, relationship_weight=0.3, policy=_policy(entity.provenance), provenance={"source_refs": entity.source_refs, **entity.provenance}, metadata={"aliases": org_aliases.get(entity.id, []), "domain_key": domains.get(domain_id)}, embedding=list(embedding.embedding) if embedding else None, embedding_provider=embedding.provider if embedding else None, embedding_model=embedding.model if embedding else None)
+                yield _Projection(key=f"organization:{entity.id}{suffix}", store="organizations", source_id=str(entity.id), domain_id=domain_id, title=entity.name, content=content or entity.name, status=entity.status, source_timestamp=entity.updated_at, trust_score=_trust(entity.provenance), importance=0.65, relationship_weight=0.3, policy=_policy(entity.provenance), provenance={"source_refs": entity.source_refs, **entity.provenance}, metadata={"aliases": org_aliases.get(entity.id, []), "domain_key": domains.get(domain_id)}, embedding_record=embedding, embedding_dimensions=embedding.dimensions if embedding else None, embedding_provider=embedding.provider if embedding else None, embedding_model=embedding.model if embedding else None)
         yield from self._simple_projections(
             CalendarEvent,
             "events",

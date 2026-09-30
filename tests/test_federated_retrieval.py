@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import event
+
 from app.db.models import (
     Contact,
     ContactDomainNote,
@@ -274,11 +276,27 @@ def test_index_reuses_only_the_configured_provider_source_vector(session):
             return [9.0]
 
     client = CloudEmbeddingClient()
-    result = FederatedIndexService(session, embedding_client=client).sync(embed_missing=True)
+    service = FederatedIndexService(session, embedding_client=client)
+    result = service.sync(embed_missing=True)
+    session.commit()
+    session.expunge_all()
+
+    statements: list[str] = []
+
+    def capture_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(session.bind, "before_cursor_execute", capture_statement)
+    try:
+        unchanged = service.sync(embed_missing=True)
+    finally:
+        event.remove(session.bind, "before_cursor_execute", capture_statement)
     document = session.query(RetrievalDocument).one()
 
     assert result.embedded == 0
+    assert unchanged.unchanged == 1
     assert client.calls == 0
+    assert not any("memory_embeddings.embedding" in statement for statement in statements)
     assert document.embedding_provider == "openai"
     assert document.embedding_model == "text-embedding-3-small"
     assert list(document.embedding) == [0.4, 0.5, 0.6, 0.7]
