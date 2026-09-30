@@ -224,6 +224,66 @@ def test_index_bounds_cloud_embedding_calls_per_cycle(session):
     assert session.query(RetrievalDocument).count() == 2
 
 
+def test_index_reuses_only_the_configured_provider_source_vector(session):
+    praxis = _domain(session, "praxis")
+    memory = MemoryItem(
+        domain_id=praxis.id,
+        scope="domain",
+        memory_type="fact",
+        title="Multiple source vectors",
+        content="The cloud projection should select the cloud vector.",
+        metadata_={},
+        importance=0.5,
+        impact_level="low",
+    )
+    session.add(memory)
+    session.flush()
+    session.add_all(
+        [
+            MemoryEmbedding(
+                memory_item_id=memory.id,
+                provider="ollama",
+                model="nomic-embed-text",
+                dimensions=3,
+                source_text_hash="local",
+                embedding=[0.1, 0.2, 0.3],
+                metadata_={},
+            ),
+            MemoryEmbedding(
+                memory_item_id=memory.id,
+                provider="openai",
+                model="text-embedding-3-small",
+                dimensions=4,
+                source_text_hash="cloud",
+                embedding=[0.4, 0.5, 0.6, 0.7],
+                metadata_={},
+            ),
+        ]
+    )
+    session.commit()
+
+    class CloudEmbeddingClient:
+        provider = "openai"
+        model = "text-embedding-3-small"
+
+        def __init__(self):
+            self.calls = 0
+
+        def embed(self, _text: str) -> list[float]:
+            self.calls += 1
+            return [9.0]
+
+    client = CloudEmbeddingClient()
+    result = FederatedIndexService(session, embedding_client=client).sync(embed_missing=True)
+    document = session.query(RetrievalDocument).one()
+
+    assert result.embedded == 0
+    assert client.calls == 0
+    assert document.embedding_provider == "openai"
+    assert document.embedding_model == "text-embedding-3-small"
+    assert list(document.embedding) == [0.4, 0.5, 0.6, 0.7]
+
+
 def test_explicit_store_selection_overrides_query_router_hints(session):
     praxis = _domain(session, "praxis")
     session.add(

@@ -281,9 +281,24 @@ class FederatedIndexService:
         Missing-document archival remains a full-sync-only operation because a bounded pass does
         not observe the complete source set.
         """
-        projections = list(self._projections(source_limit_per_store=source_limit_per_store))
+        client = self.embedding_client
+        if embed_missing and client is None:
+            try:
+                client = build_embedding_client()
+            except Exception:
+                client = None
+        projections = list(
+            self._projections(
+                source_limit_per_store=source_limit_per_store,
+                embedding_provider=client.provider if embed_missing and client is not None else None,
+                embedding_model=client.model if embed_missing and client is not None else None,
+            )
+        )
         projection_keys = [projection.key for projection in projections]
-        existing_query = select(RetrievalDocument)
+        # A vector is thousands of Python float objects after pgvector deserialization. The
+        # projection worker only needs provider/model/dimension metadata to decide whether an
+        # unchanged document is current, so do not materialize every existing vector each minute.
+        existing_query = select(RetrievalDocument).options(defer(RetrievalDocument.embedding))
         if source_limit_per_store is not None:
             existing_query = existing_query.where(RetrievalDocument.document_key.in_(projection_keys))
         existing = {
@@ -292,12 +307,6 @@ class FederatedIndexService:
         }
         seen: set[str] = set()
         created = updated = unchanged = embedded = failures = embedding_attempts = 0
-        client = self.embedding_client
-        if embed_missing and client is None:
-            try:
-                client = build_embedding_client()
-            except Exception:
-                client = None
         for projection in projections:
             seen.add(projection.key)
             content_hash = _hash(f"{projection.title}\n{projection.content}")
@@ -328,17 +337,25 @@ class FederatedIndexService:
             )
             document_matches_client = (
                 client is not None
-                and document.embedding is not None
                 and document.embedding_provider == client.provider
                 and document.embedding_model == client.model
+                and document.embedding_dimensions is not None
             )
-            if projection.embedding is not None and (
+            projection_is_usable = projection.embedding is not None and (
                 not embed_missing or client is None or projection_matches_client
-            ):
-                document.embedding = projection.embedding
-                document.embedding_provider = projection.embedding_provider
-                document.embedding_model = projection.embedding_model
-                document.embedding_dimensions = len(projection.embedding)
+            )
+            if projection_is_usable:
+                projection_dimensions = len(projection.embedding)
+                projection_already_current = (
+                    document.embedding_provider == projection.embedding_provider
+                    and document.embedding_model == projection.embedding_model
+                    and document.embedding_dimensions == projection_dimensions
+                )
+                if changed or not projection_already_current:
+                    document.embedding = projection.embedding
+                    document.embedding_provider = projection.embedding_provider
+                    document.embedding_model = projection.embedding_model
+                    document.embedding_dimensions = projection_dimensions
             elif client is not None and embed_missing and (changed or not document_matches_client):
                 if embedding_limit is not None and embedding_attempts >= embedding_limit:
                     continue
@@ -361,7 +378,13 @@ class FederatedIndexService:
         self.session.flush()
         return RetrievalIndexSyncResult(len(projections), created, updated, unchanged, archived, embedded, failures)
 
-    def _projections(self, *, source_limit_per_store: int | None = None):
+    def _projections(
+        self,
+        *,
+        source_limit_per_store: int | None = None,
+        embedding_provider: str | None = None,
+        embedding_model: str | None = None,
+    ):
         domains = {domain.id: domain.key for domain in self.session.scalars(select(Domain)).all()}
         memories = self._source_rows(
             MemoryItem,
@@ -371,13 +394,19 @@ class FederatedIndexService:
             MemoryItem.id,
         )
         memory_ids = [item.id for item in memories]
+        memory_embedding_query = (
+            select(MemoryEmbedding).where(MemoryEmbedding.memory_item_id.in_(memory_ids))
+            if memory_ids
+            else select(MemoryEmbedding).where(False)
+        )
+        if embedding_provider is not None:
+            memory_embedding_query = memory_embedding_query.where(
+                MemoryEmbedding.provider == embedding_provider,
+                MemoryEmbedding.model == embedding_model,
+            )
         memory_embeddings = {
             item.memory_item_id: item
-            for item in self.session.scalars(
-                select(MemoryEmbedding).where(MemoryEmbedding.memory_item_id.in_(memory_ids))
-                if memory_ids
-                else select(MemoryEmbedding).where(False)
-            ).all()
+            for item in self.session.scalars(memory_embedding_query).all()
         }
         for item in memories:
             metadata = item.metadata_ or {}
@@ -409,13 +438,19 @@ class FederatedIndexService:
             else select(ContactAlias).where(False)
         ).all():
             contact_aliases.setdefault(alias.contact_id, []).append(alias.alias)
+        contact_embedding_query = (
+            select(ContactEmbedding).where(ContactEmbedding.contact_id.in_(contact_ids))
+            if contact_ids
+            else select(ContactEmbedding).where(False)
+        )
+        if embedding_provider is not None:
+            contact_embedding_query = contact_embedding_query.where(
+                ContactEmbedding.provider == embedding_provider,
+                ContactEmbedding.model == embedding_model,
+            )
         contact_embeddings = {
             item.contact_id: item
-            for item in self.session.scalars(
-                select(ContactEmbedding).where(ContactEmbedding.contact_id.in_(contact_ids))
-                if contact_ids
-                else select(ContactEmbedding).where(False)
-            ).all()
+            for item in self.session.scalars(contact_embedding_query).all()
         }
         notes_by_contact: dict[uuid.UUID, list[ContactDomainNote]] = {}
         for note in self.session.scalars(
@@ -448,13 +483,19 @@ class FederatedIndexService:
             else select(OrganizationAlias).where(False)
         ).all():
             org_aliases.setdefault(alias.entity_id, []).append(alias.alias)
+        organization_embedding_query = (
+            select(OrganizationEmbedding).where(OrganizationEmbedding.entity_id.in_(organization_ids))
+            if organization_ids
+            else select(OrganizationEmbedding).where(False)
+        )
+        if embedding_provider is not None:
+            organization_embedding_query = organization_embedding_query.where(
+                OrganizationEmbedding.provider == embedding_provider,
+                OrganizationEmbedding.model == embedding_model,
+            )
         org_embeddings = {
             item.entity_id: item
-            for item in self.session.scalars(
-                select(OrganizationEmbedding).where(OrganizationEmbedding.entity_id.in_(organization_ids))
-                if organization_ids
-                else select(OrganizationEmbedding).where(False)
-            ).all()
+            for item in self.session.scalars(organization_embedding_query).all()
         }
         notes_by_org: dict[uuid.UUID, list[EntityDomainNote]] = {}
         for note in self.session.scalars(
