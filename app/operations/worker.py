@@ -7,10 +7,13 @@ failed integration cannot poison the other loops' transactions.
 
 import asyncio
 import contextlib
+import ctypes
+import gc
 import logging
 import os
 import signal
 import socket
+import threading
 import time
 from collections.abc import Callable
 
@@ -41,6 +44,7 @@ from app.memory.routed_hygiene import RoutedHygieneService
 logger = logging.getLogger(__name__)
 
 Cycle = Callable[[], int]
+_MEMORY_TRIM_LOCK = threading.Lock()
 
 
 def process_scheduler_once() -> int:
@@ -249,15 +253,22 @@ async def run_cycle_loop(
         except Exception:
             logger.exception("%s worker cycle failed.", name)
         finally:
-            rss_after = _resident_memory_mib()
+            rss_after_cycle = _resident_memory_mib()
             elapsed = time.monotonic() - started_at
-            if elapsed >= 30 or rss_after - rss_before >= 8:
+            material_growth = rss_after_cycle - rss_before >= 8
+            rss_after_trim = rss_after_cycle
+            if material_growth or rss_after_cycle >= 300:
+                _release_unused_memory()
+                rss_after_trim = _resident_memory_mib()
+            if elapsed >= 30 or material_growth:
                 logger.info(
-                    "%s worker cycle completed in %.1fs; resident memory %.1f -> %.1f MiB.",
+                    "%s worker cycle completed in %.1fs; resident memory "
+                    "%.1f -> %.1f -> %.1f MiB after trim.",
                     name,
                     elapsed,
                     rss_before,
-                    rss_after,
+                    rss_after_cycle,
+                    rss_after_trim,
                 )
 
         wait_seconds = max(minimum_interval_seconds, int(interval_seconds))
@@ -460,6 +471,20 @@ def _resident_memory_mib() -> float:
         return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
     except (OSError, ValueError, IndexError):
         return 0.0
+
+
+def _release_unused_memory() -> None:
+    """Return freed Python heap pages to the Linux service memory pool."""
+    with _MEMORY_TRIM_LOCK:
+        gc.collect()
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            malloc_trim = libc.malloc_trim
+            malloc_trim.argtypes = [ctypes.c_size_t]
+            malloc_trim.restype = ctypes.c_int
+            malloc_trim(0)
+        except (AttributeError, OSError):
+            pass
 
 
 def main() -> None:
