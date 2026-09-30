@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import MemoryEmbedding, MemoryItem
+from app.db.models import MemoryEmbedding, MemoryItem, RuntimeSetting
 
 
 class EmbeddingError(RuntimeError):
@@ -165,14 +165,37 @@ class MemoryEmbeddingService:
         self.session.flush()
         return EmbeddingWriteResult(memory_item_id=memory_item.id, status="written")
 
-    def backfill(self, *, limit: int | None = None) -> list[EmbeddingWriteResult]:
-        query = select(MemoryItem).order_by(MemoryItem.created_at.asc())
+    def backfill(
+        self,
+        *,
+        limit: int | None = None,
+        cursor_key: str | None = None,
+    ) -> list[EmbeddingWriteResult]:
+        query = select(MemoryItem).order_by(MemoryItem.id)
+        cursor = self.session.get(RuntimeSetting, cursor_key) if cursor_key else None
+        cursor_value = str((cursor.value or {}).get("last_id") or "") if cursor else ""
+        if cursor_value:
+            try:
+                query = query.where(MemoryItem.id > uuid.UUID(cursor_value))
+            except ValueError:
+                cursor_value = ""
         if limit is not None:
             query = query.limit(limit)
+        items = list(self.session.scalars(query).all())
+        if not items and cursor_value:
+            query = select(MemoryItem).order_by(MemoryItem.id)
+            if limit is not None:
+                query = query.limit(limit)
+            items = list(self.session.scalars(query).all())
         results = [
             self.upsert_memory_embedding(memory_item)
-            for memory_item in self.session.scalars(query).all()
+            for memory_item in items
         ]
+        if cursor_key:
+            if cursor is None:
+                cursor = RuntimeSetting(key=cursor_key, value={})
+                self.session.add(cursor)
+            cursor.value = {"last_id": str(items[-1].id) if items else None}
         self.session.commit()
         return results
 

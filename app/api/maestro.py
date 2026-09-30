@@ -3,7 +3,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import (
@@ -16,7 +16,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
@@ -52,6 +52,7 @@ from app.maestro.intent_classifier import (
     understand_message_with_local_llm,
 )
 from app.maestro.knowledge import MaestroKnowledgeService, knowledge_fallback
+from app.maestro.mobile_notifications import mark_message_seen
 from app.maestro.orchestrator import (
     MaestroOrchestratorError,
     MaestroOrchestratorService,
@@ -88,6 +89,16 @@ class MaestroRunBody(BaseModel):
     auto_tool_loop: bool = False
     max_tool_iterations: int = Field(default=2, ge=1, le=4)
     conversation_id: uuid.UUID | None = None
+
+
+class MaestroMessageAcknowledgeBody(BaseModel):
+    via: Literal["web", "ios", "ios_voice", "notification_action"] = "web"
+    detail: str | None = Field(default=None, max_length=240)
+
+
+class MaestroMessagesAcknowledgeBody(MaestroMessageAcknowledgeBody):
+    conversation_id: uuid.UUID
+    message_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
 
 
 class MaestroPlanArchiveBody(BaseModel):
@@ -193,11 +204,16 @@ def respond_to_maestro(
             },
             client_turn_id=client_turn_id,
         )
-        background_tasks.add_task(
-            _respond_to_maestro_in_background,
-            queued_body,
-            user_message.id,
-        )
+        # A cloud API process must return after durably recording the turn. The standalone
+        # worker claims it from Postgres; otherwise a Render restart can lose the reply after
+        # this request has already returned 200. Combined/local mode retains the lightweight
+        # in-process behavior for backwards compatibility.
+        if get_settings().maestro_process_role != "web":
+            background_tasks.add_task(
+                _respond_to_maestro_in_background,
+                queued_body,
+                user_message.id,
+            )
         return _decorate_maestro_response(queued_body, {
             "kind": "pending",
             "classification": "pending",
@@ -357,6 +373,158 @@ def _respond_to_maestro_in_background(
                     conversation.updated_at = datetime.now(UTC)
                 session.commit()
             logger.exception("Maestro background response failed.")
+
+
+def process_pending_maestro_turn_once(
+    db: Session,
+    *,
+    owner: str,
+    stale_after_seconds: int = 600,
+) -> dict[str, Any] | None:
+    """Claim and execute one durable asynchronous Maestro turn.
+
+    Message rows are already the idempotency boundary for browser retries, so the worker uses
+    their turn metadata as a small durable queue. A turn left in ``processing`` by a killed API
+    or worker is claimable again after its lease expires. Legacy cloud attempts that never wrote
+    a worker owner/timestamp are treated as immediately recoverable.
+    """
+    candidates = db.scalars(
+        select(Message)
+        .where(
+            Message.sender_type == "user",
+            Message.client_turn_id.is_not(None),
+            Message.metadata_["turn_status"].as_string().in_({"pending", "processing"}),
+        )
+        .order_by(Message.created_at)
+        .limit(100)
+    ).all()
+    now = datetime.now(UTC)
+    candidate = None
+    for queued_message in candidates:
+        if not _maestro_turn_is_claimable(
+            queued_message.metadata_ or {},
+            now=now,
+            stale_after_seconds=stale_after_seconds,
+        ):
+            continue
+        if _maestro_turn_has_response(db, queued_message):
+            queued_message.metadata_ = {
+                **(queued_message.metadata_ or {}),
+                "turn_status": "completed",
+                "turn_completed_at": now.isoformat(),
+            }
+            db.commit()
+            continue
+        candidate = queued_message
+        break
+    if candidate is None:
+        return None
+
+    message = db.scalar(
+        select(Message)
+        .where(Message.id == candidate.id)
+        .with_for_update(skip_locked=True)
+    )
+    if message is None or not _maestro_turn_is_claimable(
+        message.metadata_ or {},
+        now=now,
+        stale_after_seconds=stale_after_seconds,
+    ):
+        db.rollback()
+        return None
+
+    metadata = dict(message.metadata_ or {})
+    metadata.update(
+        {
+            "turn_status": "processing",
+            "turn_worker_owner": owner,
+            "turn_started_at": now.isoformat(),
+        }
+    )
+    metadata.pop("turn_error", None)
+    message.metadata_ = metadata
+    db.commit()
+
+    body = MaestroRespondBody(
+        message=message.content,
+        conversation_id=message.conversation_id,
+        interaction_mode=metadata.get("interaction_mode", "knowledge"),
+        interface=metadata.get("interface"),
+        response_mode=metadata.get("response_mode", "text"),
+        client_turn_id=message.client_turn_id,
+    )
+    try:
+        _respond_to_maestro_sync(
+            body,
+            db,
+            existing_user_message_id=message.id,
+        )
+    except Exception as exc:
+        db.rollback()
+        failed = db.get(Message, message.id)
+        if failed is not None:
+            failed.metadata_ = {
+                **(failed.metadata_ or {}),
+                "turn_status": "failed",
+                "turn_error": str(exc)[:500],
+                "turn_worker_owner": owner,
+                "turn_completed_at": datetime.now(UTC).isoformat(),
+            }
+            db.commit()
+        logger.exception("Durable Maestro turn %s failed.", message.id)
+        return {"status": "failed", "message_id": str(message.id), "error": str(exc)[:500]}
+
+    completed = db.get(Message, message.id)
+    if completed is not None:
+        completed.metadata_ = {
+            **(completed.metadata_ or {}),
+            "turn_status": "completed",
+            "turn_worker_owner": owner,
+            "turn_completed_at": datetime.now(UTC).isoformat(),
+        }
+        db.commit()
+    return {"status": "completed", "message_id": str(message.id)}
+
+
+def _maestro_turn_is_claimable(
+    metadata: dict[str, Any],
+    *,
+    now: datetime,
+    stale_after_seconds: int,
+) -> bool:
+    status = str(metadata.get("turn_status") or "")
+    if status == "pending":
+        return True
+    if status != "processing":
+        return False
+    started_at = metadata.get("turn_started_at")
+    worker_owner = str(metadata.get("turn_worker_owner") or "").strip()
+    if not started_at or not worker_owner:
+        return True
+    try:
+        started = datetime.fromisoformat(str(started_at))
+    except ValueError:
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return started <= now - timedelta(seconds=stale_after_seconds)
+
+
+def _maestro_turn_has_response(db: Session, message: Message) -> bool:
+    if message.client_turn_id is None:
+        return False
+    response_id = db.scalar(
+        select(Message.id)
+        .where(
+            Message.conversation_id == message.conversation_id,
+            Message.sender_type != "user",
+            Message.created_at >= message.created_at,
+            Message.metadata_["in_reply_to_client_turn_id"].as_string()
+            == str(message.client_turn_id),
+        )
+        .limit(1)
+    )
+    return response_id is not None
 
 
 def _respond_to_maestro_sync(
@@ -810,41 +978,47 @@ async def maestro_channel_ws(
         except ValueError:
             await websocket.close(code=1008, reason="Invalid client_turn_id.")
             return
-    last_signature: tuple[str, str | None, int] | None = None
+    conversation = (
+        db.get(Conversation, conversation_id)
+        if conversation_id is not None
+        else get_or_create_maestro_channel(db)
+    )
+    if conversation is None:
+        await websocket.close(code=1008, reason="Unknown Maestro conversation.")
+        return
+    conversation_id = conversation.id
+    last_updated_at: datetime | None = None
     try:
         while True:
-            db.expire_all()
-            conversation = (
-                db.get(Conversation, conversation_id)
-                if conversation_id is not None
-                else get_or_create_maestro_channel(db)
+            updated_at = db.scalar(
+                select(Conversation.updated_at).where(Conversation.id == conversation_id)
             )
-            if conversation is None:
+            if updated_at is None:
                 await websocket.close(code=1008, reason="Unknown Maestro conversation.")
                 return
-            payload = _conversation_payload(db, conversation)
-            if client_turn_id is not None:
-                turn_id = str(client_turn_id)
-                payload["messages"] = [
-                    message
-                    for message in payload["messages"]
-                    if str((message.get("metadata") or {}).get("client_turn_id") or "")
-                    == turn_id
-                    or str(
-                        (message.get("metadata") or {}).get("in_reply_to_client_turn_id")
-                        or ""
-                    )
-                    == turn_id
-                ]
-            signature = (
-                payload["id"],
-                payload["updated_at"],
-                int(payload["message_count"]),
-            )
-            if signature != last_signature:
+            if updated_at != last_updated_at:
+                db.expire_all()
+                conversation = db.get(Conversation, conversation_id)
+                if conversation is None:
+                    await websocket.close(code=1008, reason="Unknown Maestro conversation.")
+                    return
+                payload = _conversation_payload(db, conversation)
+                if client_turn_id is not None:
+                    turn_id = str(client_turn_id)
+                    payload["messages"] = [
+                        message
+                        for message in payload["messages"]
+                        if str((message.get("metadata") or {}).get("client_turn_id") or "")
+                        == turn_id
+                        or str(
+                            (message.get("metadata") or {}).get("in_reply_to_client_turn_id")
+                            or ""
+                        )
+                        == turn_id
+                    ]
                 await websocket.send_json({"type": "conversation", "conversation": payload})
-                last_signature = signature
-            await asyncio.sleep(1)
+                last_updated_at = updated_at
+            await asyncio.sleep(3)
     except WebSocketDisconnect:
         return
 
@@ -1026,6 +1200,75 @@ def get_maestro_session(conversation_id: uuid.UUID, db: Session = Depends(get_db
     if conversation is None:
         raise HTTPException(status_code=404, detail="Unknown Maestro session.")
     return {"conversation": _conversation_payload(db, conversation)}
+
+
+@router.post("/messages/{message_id}/acknowledge")
+def acknowledge_maestro_message(
+    message_id: uuid.UUID,
+    body: MaestroMessageAcknowledgeBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    message = db.get(Message, message_id)
+    if message is None or message.sender_type == "user":
+        raise HTTPException(status_code=404, detail="Unknown Maestro message.")
+    receipt = mark_message_seen(
+        db,
+        message,
+        via=body.via,
+        metadata={"detail": body.detail} if body.detail else {},
+    )
+    conversation = db.get(Conversation, message.conversation_id)
+    return {
+        "acknowledged": {
+            "message_id": str(message.id),
+            "seen_at": receipt.seen_at.isoformat(),
+            "seen_via": receipt.seen_via,
+        },
+        "conversation": _conversation_payload(db, conversation) if conversation else None,
+    }
+
+
+@router.post("/messages/acknowledge")
+def acknowledge_maestro_messages(
+    body: MaestroMessagesAcknowledgeBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    conversation = db.get(Conversation, body.conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Unknown Maestro session.")
+    requested_ids = set(body.message_ids)
+    messages = list(
+        db.scalars(
+            select(Message).where(
+                Message.conversation_id == conversation.id,
+                Message.id.in_(requested_ids),
+                Message.sender_type != "user",
+            )
+        ).all()
+    )
+    if len(messages) != len(requested_ids):
+        raise HTTPException(status_code=400, detail="One or more Maestro messages are unavailable.")
+    acknowledged = []
+    for message in messages:
+        receipt = mark_message_seen(
+            db,
+            message,
+            via=body.via,
+            metadata={"detail": body.detail} if body.detail else {},
+        )
+        acknowledged.append(
+            {
+                "message_id": str(message.id),
+                "seen_at": receipt.seen_at.isoformat(),
+                "seen_via": receipt.seen_via,
+            }
+        )
+    db.expire_all()
+    conversation = db.get(Conversation, body.conversation_id)
+    return {
+        "acknowledged": acknowledged,
+        "conversation": _conversation_payload(db, conversation) if conversation else None,
+    }
 
 
 @router.patch("/sessions/{conversation_id}/archive")
@@ -1526,6 +1769,12 @@ def _record_session_message(
     metadata: dict[str, Any] | None = None,
     client_turn_id: uuid.UUID | None = None,
 ) -> Message:
+    normalized_content = content.strip()
+    if sender != "user" and not normalized_content:
+        logger.error("Refused to persist an empty Maestro response.")
+        normalized_content = (
+            "I couldn't complete that response. Please try again; no action was taken."
+        )
     stored_metadata = dict(metadata or {})
     if sender != "user" and stored_metadata.get("client_turn_id"):
         stored_metadata["in_reply_to_client_turn_id"] = stored_metadata["client_turn_id"]
@@ -1533,7 +1782,7 @@ def _record_session_message(
         conversation_id=conversation.id,
         sender_type="user" if sender == "user" else "maestro",
         client_turn_id=client_turn_id if sender == "user" else None,
-        content=content,
+        content=normalized_content if sender != "user" else content,
         metadata_=stored_metadata,
     )
     db.add(message)
@@ -1607,6 +1856,61 @@ def _conversation_messages(db: Session, conversation_id: uuid.UUID) -> list[Mess
     )
 
 
+def _queued_conversation_messages(
+    db: Session,
+    conversation: Conversation,
+    *,
+    limit: int = 60,
+) -> list[Message]:
+    """Return a bounded acknowledgement queue without hydrating conversation history."""
+    candidates = list(
+        db.scalars(
+            select(Message)
+            .outerjoin(MessageReceipt, MessageReceipt.message_id == Message.id)
+            .where(
+                Message.conversation_id == conversation.id,
+                or_(Message.sender_type == "user", MessageReceipt.id.is_(None)),
+            )
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit * 2)
+        ).all()
+    )
+    candidates.reverse()
+    active_topic = _active_topic(conversation)
+    active_topic_id = active_topic.get("id") if isinstance(active_topic, dict) else None
+    if active_topic_id:
+        candidates = [
+            message
+            for message in candidates
+            if (message.metadata_ or {}).get("topic_id") == active_topic_id
+            or is_global_channel_message(message)
+            or (
+                (message.metadata_ or {}).get("client_turn_id")
+                and (message.metadata_ or {}).get("turn_status")
+                in {"pending", "processing", "failed"}
+            )
+        ]
+
+    queued_maestro = [message for message in candidates if message.sender_type != "user"]
+    referenced_turn_ids = {
+        str((message.metadata_ or {}).get("in_reply_to_client_turn_id"))
+        for message in queued_maestro
+        if (message.metadata_ or {}).get("in_reply_to_client_turn_id")
+    }
+    included_ids = {message.id for message in queued_maestro}
+    for index, message in enumerate(candidates):
+        if message.sender_type != "user":
+            continue
+        metadata = message.metadata_ or {}
+        turn_id = str(metadata.get("client_turn_id") or message.client_turn_id or "")
+        if metadata.get("turn_status") in {"pending", "processing", "failed"} or turn_id in referenced_turn_ids:
+            included_ids.add(message.id)
+            continue
+        if any(candidate.sender_type != "user" for candidate in candidates[index + 1 : index + 2]):
+            included_ids.add(message.id)
+    return [message for message in candidates if message.id in included_ids][-limit:]
+
+
 def _message_with_topic_context(
     db: Session,
     conversation: Conversation,
@@ -1620,17 +1924,24 @@ def _message_with_topic_context(
     topic_id = topic_context.get("topic_id")
     if not topic_id:
         return message
-    previous_messages = [
-        prior
-        for prior in _conversation_messages(db, conversation.id)
-        if prior.id != current_message_id and (prior.metadata_ or {}).get("topic_id") == topic_id
-    ]
+    previous_messages = list(
+        db.scalars(
+            select(Message)
+            .where(
+                Message.conversation_id == conversation.id,
+                Message.id != current_message_id,
+                Message.metadata_["topic_id"].as_string() == str(topic_id),
+            )
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(8)
+        ).all()
+    )
+    previous_messages.reverse()
     if not previous_messages:
         return message
-    turns = previous_messages[-8:]
     rendered_turns = "\n".join(
         f"{'Chris' if turn.sender_type == 'user' else 'Maestro'}: {turn.content}"
-        for turn in turns
+        for turn in previous_messages
     )
     return (
         "<latest_chris_message>\n"
@@ -1668,23 +1979,13 @@ def _conversation_payload(
     *,
     include_messages: bool = True,
 ) -> dict[str, Any]:
-    all_messages = _conversation_messages(db, conversation.id)
-    active_topic = _active_topic(conversation)
-    active_topic_id = active_topic.get("id") if isinstance(active_topic, dict) else None
-    messages = all_messages if include_messages else []
-    if include_messages and active_topic_id:
-        messages = [
-            message
-            for message in all_messages
-            if (message.metadata_ or {}).get("topic_id") == active_topic_id
-            or is_global_channel_message(message)
-            or (
-                (message.metadata_ or {}).get("client_turn_id")
-                and (message.metadata_ or {}).get("turn_status")
-                in {"pending", "processing", "failed"}
-            )
-        ]
-    message_count = len(messages) if include_messages else len(all_messages)
+    messages = _queued_conversation_messages(db, conversation) if include_messages else []
+    message_count = int(
+        db.scalar(
+            select(func.count(Message.id)).where(Message.conversation_id == conversation.id)
+        )
+        or 0
+    )
     active_topic = _active_topic(conversation)
     plan = _latest_conversation_plan(
         db,

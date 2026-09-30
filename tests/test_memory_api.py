@@ -576,7 +576,7 @@ def test_routed_items_endpoint_can_return_all_statuses(
     }
 
 
-def test_routed_objects_api_promotes_pending_items_before_returning_stores(
+def test_routed_objects_api_requires_explicit_promotion_before_returning_stores(
     session: Session,
     tmp_path: Path,
 ) -> None:
@@ -598,8 +598,14 @@ def test_routed_objects_api_promotes_pending_items_before_returning_stores(
     session.commit()
     client = _client(session, tmp_path)
 
+    before = client.get("/memory/routed-objects/contacts")
+    promoted = client.post("/memory/routed-items/promote", json={"limit": 100})
     response = client.get("/memory/routed-objects/contacts")
 
+    assert before.status_code == 200
+    assert before.json()["contacts"] == []
+    assert promoted.status_code == 200
+    assert len(promoted.json()["promoted"]) == 1
     assert response.status_code == 200
     assert response.json()["contacts"][0]["name"] == "Alice Park"
     assert session.query(Contact).filter_by(name="Alice Park").count() == 1
@@ -661,6 +667,83 @@ def test_routed_objects_api_returns_canonical_stores(
     assert bundle.json()["todos"][0]["title"] == "Draft partner follow-up"
     assert contacts.json()["contacts"][0]["name"] == "Jane Smith"
     assert todos.json()["todos"][0]["domain_key"] == "praxis"
+
+
+def test_routed_object_summary_lists_defer_nested_graphs(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    seed_default_domains(session)
+    praxis = DomainRepository(session).get_by_key("praxis")
+    assert praxis is not None
+    contact = Contact(
+        name="Jane Summary",
+        normalized_name="jane summary",
+        email="jane-summary@example.com",
+        summary="A contact with nested evidence.",
+        scheduled_event_ids=[],
+        source_refs=[{"system": "test"}],
+        provenance={"created_from": "test"},
+        metadata_={"large": "metadata"},
+    )
+    entity = Entity(
+        name="Summary Organization",
+        normalized_name="summary organization",
+        website="https://summary.example.com",
+        summary="An organization with identifiers.",
+        source_refs=[{"system": "test"}],
+        provenance={"created_from": "test"},
+        metadata_={"large": "metadata"},
+    )
+    todo = Todo(
+        domain_id=praxis.id,
+        title="Summary task",
+        description="A task used in a calendar selector.",
+        todo_type="task",
+        owner_type="user",
+        priority="normal",
+        status="open",
+        source_refs=[{"system": "test"}],
+        provenance={"created_from": "test"},
+        metadata_={"large": "metadata"},
+    )
+    session.add_all([contact, entity, todo])
+    session.flush()
+    session.add(ContactAlias(contact_id=contact.id, alias="J. Summary", normalized_alias="j summary"))
+    session.add(
+        OrganizationIdentifier(
+            entity_id=entity.id,
+            identifier_type="web_domain",
+            value="summary.example.com",
+            normalized_value="summary.example.com",
+        )
+    )
+    session.commit()
+    client = _client(session, tmp_path)
+
+    contacts = client.get("/memory/routed-objects/contacts?view=summary&limit=500")
+    entities = client.get("/memory/routed-objects/entities?view=summary&limit=500")
+    todos = client.get("/memory/routed-objects/todos?view=summary&limit=500")
+
+    assert contacts.status_code == 200
+    contact_summary = next(item for item in contacts.json()["contacts"] if item["id"] == str(contact.id))
+    assert contact_summary["aliases"] == []
+    assert contact_summary["source_refs"] == []
+    assert contact_summary["metadata"] == {}
+    contact_detail = client.get(f"/memory/routed-objects/contacts/{contact.id}")
+    assert contact_detail.json()["contact"]["aliases"] == ["J. Summary"]
+
+    assert entities.status_code == 200
+    entity_summary = next(item for item in entities.json()["entities"] if item["id"] == str(entity.id))
+    assert entity_summary["identifiers"] == []
+    assert entity_summary["source_refs"] == []
+    entity_detail = client.get(f"/memory/routed-objects/entities/{entity.id}")
+    assert entity_detail.json()["entity"]["identifiers"][0]["value"] == "summary.example.com"
+
+    assert todos.status_code == 200
+    todo_summary = next(item for item in todos.json()["todos"] if item["id"] == str(todo.id))
+    assert todo_summary["event_links"] == []
+    assert todo_summary["source_refs"] == []
 
 
 def test_routed_context_returns_recurring_event_for_requested_date(

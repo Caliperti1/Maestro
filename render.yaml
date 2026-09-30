@@ -1,0 +1,202 @@
+services:
+  - type: web
+    name: maestro-api
+    runtime: docker
+    region: virginia
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.operations.api
+    preDeployCommand: python -m app.operations.deployment_check && alembic upgrade head
+    healthCheckPath: /health/ready
+    maxShutdownDelaySeconds: 60
+    numInstances: 1
+    envVars:
+      - fromGroup: maestro-cloud-config
+      - key: DATABASE_URL
+        fromDatabase:
+          name: maestro-postgres
+          property: connectionString
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: CORS_ALLOW_ORIGINS
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OWNER_OIDC_ISSUER
+        sync: false
+      - key: OWNER_OIDC_CLIENT_ID
+        sync: false
+      - key: OWNER_OIDC_SUBJECT
+        sync: false
+      - key: OWNER_OIDC_REDIRECT_URI
+        sync: false
+      - key: OWNER_SESSION_SECRET
+        generateValue: true
+      - key: ARTIFACT_STORE_S3_BUCKET
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: MAESTRO_PROCESS_ROLE
+        value: web
+      - key: SCHEDULER_WORKER_AUTORUN
+        value: "false"
+      - key: GMAIL_TRIGGER_AUTORUN
+        value: "false"
+      - key: MEMORY_DROPBOX_AUTORUN
+        value: "false"
+
+  - type: worker
+    name: maestro-worker
+    runtime: docker
+    region: virginia
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.operations.worker
+    maxShutdownDelaySeconds: 120
+    numInstances: 1
+    envVars:
+      - fromGroup: maestro-cloud-config
+      - key: DATABASE_URL
+        fromDatabase:
+          name: maestro-postgres
+          property: connectionString
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: CORS_ALLOW_ORIGINS
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ARTIFACT_STORE_S3_BUCKET
+        fromService:
+          type: web
+          name: maestro-api
+          envVarKey: ARTIFACT_STORE_S3_BUCKET
+      - key: AWS_ACCESS_KEY_ID
+        fromService:
+          type: web
+          name: maestro-api
+          envVarKey: AWS_ACCESS_KEY_ID
+      - key: AWS_SECRET_ACCESS_KEY
+        fromService:
+          type: web
+          name: maestro-api
+          envVarKey: AWS_SECRET_ACCESS_KEY
+      - key: MAESTRO_PROCESS_ROLE
+        value: worker
+      - key: SCHEDULER_WORKER_AUTORUN
+        value: "true"
+      - key: MAESTRO_TURN_WORKER_AUTORUN
+        value: "true"
+      - key: CONTACT_HYDRATION_AUTORUN
+        value: "true"
+      - key: MEMORY_HYGIENE_AUTORUN
+        value: "true"
+      - key: FEDERATED_INDEX_AUTORUN
+        value: "true"
+      - key: GMAIL_TRIGGER_AUTORUN
+        value: "true"
+      - key: CALENDAR_TRIGGER_AUTORUN
+        value: "true"
+      - key: MEMORY_DROPBOX_AUTORUN
+        value: "true"
+      - key: CONTEXT_MAILBOX_AUTORUN
+        value: "true"
+      - key: TODO_AGENT_WORKER_AUTORUN
+        value: "true"
+      - key: PRODUCT_ISSUE_AGENT_WORKER_AUTORUN
+        value: "true"
+      - key: ROUTED_HYGIENE_AUTORUN
+        value: "true"
+      - key: REPOSITORY_INTELLIGENCE_AUTORUN
+        # Repository paths and the authenticated GitHub CLI belong on the personal
+        # node. The cloud worker must not repeatedly execute Mac-only paths.
+        value: "false"
+
+databases:
+  - name: maestro-postgres
+    region: virginia
+    plan: 0.5c-1g
+    databaseName: maestro
+    user: maestro
+    postgresMajorVersion: "16"
+    ipAllowList: []
+
+envVarGroups:
+  - name: maestro-cloud-config
+    envVars:
+      - key: APP_NAME
+        value: Maestro
+      - key: APP_HOST
+        value: 0.0.0.0
+      - key: LLM_PROVIDER
+        value: openrouter
+      - key: LLM_MODEL
+        value: openai/gpt-5.6-terra
+      - key: LLM_QWEN_MODEL_PROFILE
+        value: openrouter:openai/gpt-5.6-luna
+      - key: LLM_LUNA_MODEL_PROFILE
+        value: openrouter:openai/gpt-5.6-luna
+      - key: LLM_TERRA_MODEL_PROFILE
+        value: openrouter:openai/gpt-5.6-terra
+      - key: LLM_SOL_MODEL_PROFILE
+        value: openrouter:openai/gpt-5.6-sol
+      - key: OPENROUTER_HTTP_REFERER
+        value: https://maestro.invalid
+      - key: OPENROUTER_APP_TITLE
+        value: Maestro
+      - key: EMBEDDING_PROVIDER
+        value: openai
+      - key: EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: FEDERATED_INDEX_EMBEDDING_BATCH_SIZE
+        value: "25"
+      - key: ROUTED_RESOLVER_LLM_PROVIDER
+        value: openrouter
+      - key: ROUTED_RESOLVER_LLM_MODEL
+        value: openai/gpt-5.6-luna
+      - key: ROUTED_ENRICHER_LLM_PROVIDER
+        value: none
+      - key: MAESTRO_INTENT_CLASSIFIER_PROVIDER
+        value: openrouter
+      - key: MAESTRO_INTENT_CLASSIFIER_MODEL
+        value: openai/gpt-5.6-luna
+      - key: MAESTRO_TOPIC_RESOLVER_PROVIDER
+        value: openrouter
+      - key: MAESTRO_TOPIC_RESOLVER_MODEL
+        value: openai/gpt-5.6-luna
+      - key: RETRIEVAL_ROUTER_PROVIDER
+        value: openrouter
+      - key: RETRIEVAL_ROUTER_MODEL
+        value: openai/gpt-5.6-luna
+      - key: OWNER_AUTH_MODE
+        value: oidc
+      - key: INTEGRATION_CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: INTEGRATION_GOOGLE_CLIENT_ID
+        sync: false
+      - key: INTEGRATION_GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: INTEGRATION_GOOGLE_REDIRECT_URI
+        sync: false
+      - key: INTEGRATION_GITHUB_CLIENT_ID
+        sync: false
+      - key: INTEGRATION_GITHUB_CLIENT_SECRET
+        sync: false
+      - key: INTEGRATION_GITHUB_REDIRECT_URI
+        sync: false
+      - key: OWNER_COOKIE_SECURE
+        value: "true"
+      - key: OWNER_COOKIE_SAMESITE
+        value: none
+      - key: ARTIFACT_STORE_BACKEND
+        value: s3
+      - key: ARTIFACT_STORE_S3_REGION
+        value: us-west-2
+      - key: ARTIFACT_STORE_S3_PREFIX
+        value: maestro

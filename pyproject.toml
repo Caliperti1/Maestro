@@ -5,6 +5,9 @@ description = "Local chief-of-staff system for cross-domain agent orchestration.
 requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.14.0",
+    "authlib>=1.6.8",
+    "boto3>=1.40.0",
+    "cryptography>=43.0.0",
     "fastapi>=0.115.0",
     "httpx[http2]>=0.27.0",
     "openai>=2.0.0",
@@ -16,6 +19,7 @@ dependencies = [
     "PyJWT[crypto]>=2.9.0",
     "python-multipart>=0.0.20",
     "sqlalchemy>=2.0.36",
+    "itsdangerous>=2.2.0",
     "uvicorn[standard]>=0.32.0",
 ]
 

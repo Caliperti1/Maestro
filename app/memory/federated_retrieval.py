@@ -14,7 +14,7 @@ from urllib import error, request
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.core.config import get_settings
 from app.db.models import (
@@ -37,10 +37,12 @@ from app.db.models import (
     RecurringTodoSeries,
     Report,
     RetrievalDocument,
+    RuntimeSetting,
     Todo,
     WorkflowRunLogEntry,
 )
 from app.memory.embeddings import EmbeddingClient, build_embedding_client
+from app.llm.structured import hosted_structured_response
 from app.memory.ingestion import memory_allowed_for_target
 from app.prompts import load_prompt
 
@@ -48,6 +50,8 @@ STORE_NAMES = {
     "memory", "contacts", "organizations", "events", "todos", "decisions",
     "reports", "run_log", "artifacts", "identity", "issues",
 }
+RETRIEVAL_CANDIDATE_LIMIT = 500
+FEDERATED_INDEX_CURSOR_KEY = "federated_index_cursor"
 
 
 class RetrievalQueryPlan(BaseModel):
@@ -74,6 +78,7 @@ class FederatedRetrievalRequest:
     max_items: int = 12
     max_chars: int = 5000
     use_semantic: bool = True
+    sync_index: bool = True
 
 
 @dataclass(frozen=True)
@@ -130,6 +135,8 @@ class _Projection:
     provenance: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     embedding: list[float] | None = None
+    embedding_record: MemoryEmbedding | ContactEmbedding | OrganizationEmbedding | None = None
+    embedding_dimensions: int | None = None
     embedding_provider: str | None = None
     embedding_model: str | None = None
 
@@ -144,6 +151,29 @@ class RetrievalQueryRouter:
     ) -> RetrievalQueryPlan:
         settings = get_settings()
         fallback = self._fallback(query_text, available_domains, forced_domain)
+        if settings.retrieval_router_provider in {"openai", "openrouter"}:
+            payload = hosted_structured_response(
+                provider=settings.retrieval_router_provider,
+                model=settings.retrieval_router_model,
+                instructions=load_prompt("retrieval_query_router.md"),
+                input_payload={
+                    "query": query_text,
+                    "available_domains": available_domains,
+                    "forced_domain": forced_domain,
+                },
+                schema_name="retrieval_query_plan",
+                schema=RetrievalQueryPlan.model_json_schema(),
+            )
+            try:
+                plan = RetrievalQueryPlan.model_validate(payload)
+            except (ValidationError, ValueError, TypeError):
+                return fallback
+            return self._sanitize_plan(
+                plan,
+                fallback=fallback,
+                available_domains=available_domains,
+                forced_domain=forced_domain,
+            )
         if settings.retrieval_router_provider != "ollama":
             return fallback
         payload = {
@@ -172,6 +202,21 @@ class RetrievalQueryRouter:
             plan = RetrievalQueryPlan.model_validate_json(content)
         except (OSError, error.URLError, TimeoutError, json.JSONDecodeError, ValidationError, ValueError, TypeError):
             return fallback
+        return self._sanitize_plan(
+            plan,
+            fallback=fallback,
+            available_domains=available_domains,
+            forced_domain=forced_domain,
+        )
+
+    def _sanitize_plan(
+        self,
+        plan: RetrievalQueryPlan,
+        *,
+        fallback: RetrievalQueryPlan,
+        available_domains: list[str],
+        forced_domain: str | None,
+    ) -> RetrievalQueryPlan:
         allowed_domains = set(available_domains)
         plan.domains = [value for value in plan.domains if value in allowed_domains]
         plan.stores = [value for value in plan.stores if value in STORE_NAMES]
@@ -223,20 +268,47 @@ class FederatedIndexService:
         self.session = session
         self.embedding_client = embedding_client
 
-    def sync(self, *, embed_missing: bool = True) -> RetrievalIndexSyncResult:
-        projections = list(self._projections())
-        existing = {
-            document.document_key: document
-            for document in self.session.scalars(select(RetrievalDocument)).all()
-        }
-        seen: set[str] = set()
-        created = updated = unchanged = embedded = failures = 0
+    def sync(
+        self,
+        *,
+        embed_missing: bool = True,
+        source_limit_per_store: int | None = None,
+        embedding_limit: int | None = None,
+    ) -> RetrievalIndexSyncResult:
+        """Project source records into the retrieval index.
+
+        ``source_limit_per_store`` turns the former full-corpus rebuild into a durable cyclic
+        batch. Each source store keeps an offset cursor in Postgres, so repeated worker passes
+        eventually cover the corpus without materializing every source row and vector at once.
+        Missing-document archival remains a full-sync-only operation because a bounded pass does
+        not observe the complete source set.
+        """
         client = self.embedding_client
         if embed_missing and client is None:
             try:
                 client = build_embedding_client()
             except Exception:
                 client = None
+        projections = list(
+            self._projections(
+                source_limit_per_store=source_limit_per_store,
+                embedding_provider=client.provider if embed_missing and client is not None else None,
+                embedding_model=client.model if embed_missing and client is not None else None,
+            )
+        )
+        projection_keys = [projection.key for projection in projections]
+        # A vector is thousands of Python float objects after pgvector deserialization. The
+        # projection worker only needs provider/model/dimension metadata to decide whether an
+        # unchanged document is current, so do not materialize every existing vector each minute.
+        existing_query = select(RetrievalDocument).options(defer(RetrievalDocument.embedding))
+        if source_limit_per_store is not None:
+            existing_query = existing_query.where(RetrievalDocument.document_key.in_(projection_keys))
+        existing = {
+            document.document_key: document
+            for document in self.session.scalars(existing_query).all()
+        }
+        seen: set[str] = set()
+        created = updated = unchanged = embedded = failures = embedding_attempts = 0
         for projection in projections:
             seen.add(projection.key)
             content_hash = _hash(f"{projection.title}\n{projection.content}")
@@ -260,12 +332,44 @@ class FederatedIndexService:
                 ("metadata_", projection.metadata),
             ):
                 setattr(document, attr, value)
-            if projection.embedding is not None:
-                document.embedding = projection.embedding
-                document.embedding_provider = projection.embedding_provider
-                document.embedding_model = projection.embedding_model
-                document.embedding_dimensions = len(projection.embedding)
-            elif changed and client is not None and embed_missing:
+            projection_matches_client = (
+                client is not None
+                and projection.embedding_provider == client.provider
+                and projection.embedding_model == client.model
+            )
+            document_matches_client = (
+                client is not None
+                and document.embedding_provider == client.provider
+                and document.embedding_model == client.model
+                and document.embedding_dimensions is not None
+            )
+            projection_has_embedding = (
+                projection.embedding is not None or projection.embedding_record is not None
+            )
+            projection_is_usable = projection_has_embedding and (
+                not embed_missing or client is None or projection_matches_client
+            )
+            if projection_is_usable:
+                projection_dimensions = projection.embedding_dimensions
+                if projection_dimensions is None and projection.embedding is not None:
+                    projection_dimensions = len(projection.embedding)
+                projection_already_current = (
+                    document.embedding_provider == projection.embedding_provider
+                    and document.embedding_model == projection.embedding_model
+                    and document.embedding_dimensions == projection_dimensions
+                )
+                if changed or not projection_already_current:
+                    vector = projection.embedding
+                    if vector is None and projection.embedding_record is not None:
+                        vector = list(projection.embedding_record.embedding)
+                    document.embedding = vector
+                    document.embedding_provider = projection.embedding_provider
+                    document.embedding_model = projection.embedding_model
+                    document.embedding_dimensions = projection_dimensions or len(vector or [])
+            elif client is not None and embed_missing and (changed or not document_matches_client):
+                if embedding_limit is not None and embedding_attempts >= embedding_limit:
+                    continue
+                embedding_attempts += 1
                 try:
                     vector = client.embed(f"{projection.title}\n{projection.content}"[:12000])
                     document.embedding = vector
@@ -276,17 +380,46 @@ class FederatedIndexService:
                 except Exception:
                     failures += 1
         archived = 0
-        for key, document in existing.items():
-            if key not in seen and document.status != "inactive":
-                document.status = "inactive"
-                archived += 1
+        if source_limit_per_store is None:
+            for key, document in existing.items():
+                if key not in seen and document.status != "inactive":
+                    document.status = "inactive"
+                    archived += 1
         self.session.flush()
         return RetrievalIndexSyncResult(len(projections), created, updated, unchanged, archived, embedded, failures)
 
-    def _projections(self):
+    def _projections(
+        self,
+        *,
+        source_limit_per_store: int | None = None,
+        embedding_provider: str | None = None,
+        embedding_model: str | None = None,
+    ):
         domains = {domain.id: domain.key for domain in self.session.scalars(select(Domain)).all()}
-        memory_embeddings = {item.memory_item_id: item for item in self.session.scalars(select(MemoryEmbedding)).all()}
-        for item in self.session.scalars(select(MemoryItem)).all():
+        memories = self._source_rows(
+            MemoryItem,
+            "memory",
+            source_limit_per_store,
+            MemoryItem.created_at,
+            MemoryItem.id,
+        )
+        memory_ids = [item.id for item in memories]
+        memory_embedding_query = (
+            select(MemoryEmbedding).where(MemoryEmbedding.memory_item_id.in_(memory_ids))
+            if memory_ids
+            else select(MemoryEmbedding).where(False)
+        )
+        if embedding_provider is not None:
+            memory_embedding_query = memory_embedding_query.where(
+                MemoryEmbedding.provider == embedding_provider,
+                MemoryEmbedding.model == embedding_model,
+            )
+        memory_embedding_query = memory_embedding_query.options(defer(MemoryEmbedding.embedding))
+        memory_embeddings = {
+            item.memory_item_id: item
+            for item in self.session.scalars(memory_embedding_query).all()
+        }
+        for item in memories:
             metadata = item.metadata_ or {}
             embedding = memory_embeddings.get(item.id)
             yield _Projection(
@@ -297,18 +430,49 @@ class FederatedIndexService:
                 importance=item.importance, relationship_weight=0.2 if item.scope == "global" else 0.0,
                 policy=_policy(metadata), provenance={"source_refs": metadata.get("source_refs", []), **metadata},
                 metadata={"scope": item.scope, "memory_type": item.memory_type, "impact_level": item.impact_level, "domain_key": domains.get(item.domain_id)},
-                embedding=list(embedding.embedding) if embedding else None,
+                embedding_record=embedding,
+                embedding_dimensions=embedding.dimensions if embedding else None,
                 embedding_provider=embedding.provider if embedding else None,
                 embedding_model=embedding.model if embedding else None,
             )
+        contacts = self._source_rows(
+            Contact,
+            "contacts",
+            source_limit_per_store,
+            Contact.updated_at,
+            Contact.id,
+        )
+        contact_ids = [item.id for item in contacts]
         contact_aliases: dict[uuid.UUID, list[str]] = {}
-        for alias in self.session.scalars(select(ContactAlias)).all():
+        for alias in self.session.scalars(
+            select(ContactAlias).where(ContactAlias.contact_id.in_(contact_ids))
+            if contact_ids
+            else select(ContactAlias).where(False)
+        ).all():
             contact_aliases.setdefault(alias.contact_id, []).append(alias.alias)
-        contact_embeddings = {item.contact_id: item for item in self.session.scalars(select(ContactEmbedding)).all()}
+        contact_embedding_query = (
+            select(ContactEmbedding).where(ContactEmbedding.contact_id.in_(contact_ids))
+            if contact_ids
+            else select(ContactEmbedding).where(False)
+        )
+        if embedding_provider is not None:
+            contact_embedding_query = contact_embedding_query.where(
+                ContactEmbedding.provider == embedding_provider,
+                ContactEmbedding.model == embedding_model,
+            )
+        contact_embedding_query = contact_embedding_query.options(defer(ContactEmbedding.embedding))
+        contact_embeddings = {
+            item.contact_id: item
+            for item in self.session.scalars(contact_embedding_query).all()
+        }
         notes_by_contact: dict[uuid.UUID, list[ContactDomainNote]] = {}
-        for note in self.session.scalars(select(ContactDomainNote)).all():
+        for note in self.session.scalars(
+            select(ContactDomainNote).where(ContactDomainNote.contact_id.in_(contact_ids))
+            if contact_ids
+            else select(ContactDomainNote).where(False)
+        ).all():
             notes_by_contact.setdefault(note.contact_id, []).append(note)
-        for contact in self.session.scalars(select(Contact)).all():
+        for contact in contacts:
             notes = notes_by_contact.get(contact.id) or [None]
             for note in notes:
                 domain_id = note.domain_id if note else None
@@ -316,15 +480,47 @@ class FederatedIndexService:
                 aliases = ", ".join(contact_aliases.get(contact.id, []))
                 content = "\n".join(value for value in [contact.summary, note.notes if note else None, f"Email: {contact.email}" if contact.email else None, f"Phone: {contact.phone}" if contact.phone else None, f"Aliases: {aliases}" if aliases else None] if value)
                 embedding = contact_embeddings.get(contact.id)
-                yield _Projection(key=f"contact:{contact.id}{suffix}", store="contacts", source_id=str(contact.id), domain_id=domain_id, title=contact.name, content=content or contact.name, status=contact.status, source_timestamp=contact.last_contact_at or contact.updated_at, trust_score=_trust(contact.provenance), importance=0.65, relationship_weight=0.35, policy=_policy(contact.provenance), provenance={"source_refs": contact.source_refs, **contact.provenance}, metadata={"aliases": contact_aliases.get(contact.id, []), "email": contact.email, "domain_key": domains.get(domain_id)}, embedding=list(embedding.embedding) if embedding else None, embedding_provider=embedding.provider if embedding else None, embedding_model=embedding.model if embedding else None)
+                yield _Projection(key=f"contact:{contact.id}{suffix}", store="contacts", source_id=str(contact.id), domain_id=domain_id, title=contact.name, content=content or contact.name, status=contact.status, source_timestamp=contact.last_contact_at or contact.updated_at, trust_score=_trust(contact.provenance), importance=0.65, relationship_weight=0.35, policy=_policy(contact.provenance), provenance={"source_refs": contact.source_refs, **contact.provenance}, metadata={"aliases": contact_aliases.get(contact.id, []), "email": contact.email, "domain_key": domains.get(domain_id)}, embedding_record=embedding, embedding_dimensions=embedding.dimensions if embedding else None, embedding_provider=embedding.provider if embedding else None, embedding_model=embedding.model if embedding else None)
+        organizations = self._source_rows(
+            Entity,
+            "organizations",
+            source_limit_per_store,
+            Entity.updated_at,
+            Entity.id,
+        )
+        organization_ids = [item.id for item in organizations]
         org_aliases: dict[uuid.UUID, list[str]] = {}
-        for alias in self.session.scalars(select(OrganizationAlias)).all():
+        for alias in self.session.scalars(
+            select(OrganizationAlias).where(OrganizationAlias.entity_id.in_(organization_ids))
+            if organization_ids
+            else select(OrganizationAlias).where(False)
+        ).all():
             org_aliases.setdefault(alias.entity_id, []).append(alias.alias)
-        org_embeddings = {item.entity_id: item for item in self.session.scalars(select(OrganizationEmbedding)).all()}
+        organization_embedding_query = (
+            select(OrganizationEmbedding).where(OrganizationEmbedding.entity_id.in_(organization_ids))
+            if organization_ids
+            else select(OrganizationEmbedding).where(False)
+        )
+        if embedding_provider is not None:
+            organization_embedding_query = organization_embedding_query.where(
+                OrganizationEmbedding.provider == embedding_provider,
+                OrganizationEmbedding.model == embedding_model,
+            )
+        organization_embedding_query = organization_embedding_query.options(
+            defer(OrganizationEmbedding.embedding)
+        )
+        org_embeddings = {
+            item.entity_id: item
+            for item in self.session.scalars(organization_embedding_query).all()
+        }
         notes_by_org: dict[uuid.UUID, list[EntityDomainNote]] = {}
-        for note in self.session.scalars(select(EntityDomainNote)).all():
+        for note in self.session.scalars(
+            select(EntityDomainNote).where(EntityDomainNote.entity_id.in_(organization_ids))
+            if organization_ids
+            else select(EntityDomainNote).where(False)
+        ).all():
             notes_by_org.setdefault(note.entity_id, []).append(note)
-        for entity in self.session.scalars(select(Entity)).all():
+        for entity in organizations:
             notes = notes_by_org.get(entity.id) or [None]
             for note in notes:
                 domain_id = note.domain_id if note else None
@@ -332,7 +528,7 @@ class FederatedIndexService:
                 aliases = ", ".join(org_aliases.get(entity.id, []))
                 content = "\n".join(value for value in [entity.summary, note.notes if note else None, f"Website: {entity.website}" if entity.website else None, f"Aliases: {aliases}" if aliases else None] if value)
                 embedding = org_embeddings.get(entity.id)
-                yield _Projection(key=f"organization:{entity.id}{suffix}", store="organizations", source_id=str(entity.id), domain_id=domain_id, title=entity.name, content=content or entity.name, status=entity.status, source_timestamp=entity.updated_at, trust_score=_trust(entity.provenance), importance=0.65, relationship_weight=0.3, policy=_policy(entity.provenance), provenance={"source_refs": entity.source_refs, **entity.provenance}, metadata={"aliases": org_aliases.get(entity.id, []), "domain_key": domains.get(domain_id)}, embedding=list(embedding.embedding) if embedding else None, embedding_provider=embedding.provider if embedding else None, embedding_model=embedding.model if embedding else None)
+                yield _Projection(key=f"organization:{entity.id}{suffix}", store="organizations", source_id=str(entity.id), domain_id=domain_id, title=entity.name, content=content or entity.name, status=entity.status, source_timestamp=entity.updated_at, trust_score=_trust(entity.provenance), importance=0.65, relationship_weight=0.3, policy=_policy(entity.provenance), provenance={"source_refs": entity.source_refs, **entity.provenance}, metadata={"aliases": org_aliases.get(entity.id, []), "domain_key": domains.get(domain_id)}, embedding_record=embedding, embedding_dimensions=embedding.dimensions if embedding else None, embedding_provider=embedding.provider if embedding else None, embedding_model=embedding.model if embedding else None)
         yield from self._simple_projections(
             CalendarEvent,
             "events",
@@ -354,9 +550,23 @@ class FederatedIndexService:
             ),
             lambda item: item.start_at,
             domains,
+            source_limit_per_store,
         )
+        todos = self._source_rows(
+            Todo,
+            "todos",
+            source_limit_per_store,
+            Todo.updated_at,
+            Todo.id,
+        )
+        recurring_ids = [item.recurring_series_id for item in todos if item.recurring_series_id]
         recurring_series = {
-            item.id: item for item in self.session.scalars(select(RecurringTodoSeries)).all()
+            item.id: item
+            for item in self.session.scalars(
+                select(RecurringTodoSeries).where(RecurringTodoSeries.id.in_(recurring_ids))
+                if recurring_ids
+                else select(RecurringTodoSeries).where(False)
+            ).all()
         }
         yield from self._simple_projections(
             Todo,
@@ -379,8 +589,10 @@ class FederatedIndexService:
             ),
             lambda item: item.due_at or item.updated_at,
             domains,
+            source_limit_per_store,
+            rows=todos,
         )
-        yield from self._simple_projections(DecisionRecord, "decisions", lambda item: "\n".join(value for value in [item.decision, item.rationale] if value), lambda item: item.updated_at, domains)
+        yield from self._simple_projections(DecisionRecord, "decisions", lambda item: "\n".join(value for value in [item.decision, item.rationale] if value), lambda item: item.updated_at, domains, source_limit_per_store)
         yield from self._simple_projections(
             ProductIssue,
             "issues",
@@ -397,19 +609,55 @@ class FederatedIndexService:
             ),
             lambda item: item.updated_at,
             domains,
+            source_limit_per_store,
         )
-        for report in self.session.scalars(select(Report)).all():
+        for report in self._source_rows(Report, "reports", source_limit_per_store, Report.updated_at, Report.id):
             if not (report.structured_data or {}).get("archived"):
                 yield _Projection(key=f"report:{report.id}", store="reports", source_id=str(report.id), domain_id=report.domain_id, title=report.title, content="\n".join(value for value in [report.summary, report.body_markdown] if value), source_timestamp=report.created_at, trust_score=_trust(report.structured_data), importance=0.62, policy=_policy(report.structured_data), provenance=report.structured_data, metadata={"report_type": report.report_type, "domain_key": domains.get(report.domain_id)})
-        for entry in self.session.scalars(select(WorkflowRunLogEntry).where(WorkflowRunLogEntry.status != "archived")).all():
+        for entry in self._source_rows(
+            WorkflowRunLogEntry,
+            "run_log",
+            source_limit_per_store,
+            WorkflowRunLogEntry.updated_at,
+            WorkflowRunLogEntry.id,
+            where_clause=WorkflowRunLogEntry.status != "archived",
+        ):
             yield _Projection(key=f"run_log:{entry.id}", store="run_log", source_id=str(entry.id), domain_id=entry.domain_id, title=entry.title, content=entry.summary, status=entry.status, source_timestamp=entry.run_completed_at or entry.created_at, trust_score=_trust(entry.metadata_), importance=0.45, policy=_policy(entry.metadata_), provenance=entry.metadata_, metadata={"workflow_run_id": str(entry.workflow_run_id), "domain_key": domains.get(entry.domain_id)})
-        for artifact in self.session.scalars(select(Artifact)).all():
+        for artifact in self._source_rows(Artifact, "artifacts", source_limit_per_store, Artifact.created_at, Artifact.id):
             yield _Projection(key=f"artifact:{artifact.id}", store="artifacts", source_id=str(artifact.id), domain_id=None, title=artifact.name, content=f"{artifact.artifact_type}\n{artifact.uri}\n{artifact.mime_type or ''}", source_timestamp=artifact.created_at, trust_score=_trust(artifact.metadata_), importance=0.4, policy=_policy(artifact.metadata_), provenance=artifact.metadata_, metadata={"uri": artifact.uri, "artifact_type": artifact.artifact_type})
-        for node in self.session.scalars(select(IdentityNode).where(IdentityNode.is_authoritative.is_(True))).all():
+        for node in self._source_rows(
+            IdentityNode,
+            "identity",
+            source_limit_per_store,
+            IdentityNode.updated_at,
+            IdentityNode.id,
+            where_clause=IdentityNode.is_authoritative.is_(True),
+        ):
             yield _Projection(key=f"identity:{node.id}", store="identity", source_id=str(node.id), domain_id=node.domain_id, title=node.display_name, content="\n".join([node.description, f"Aliases: {', '.join(node.aliases)}"]), source_timestamp=node.updated_at, trust_score=1.0, importance=0.95, relationship_weight=1.0, policy={"egress_policy": "external_allowed"}, provenance={"authoritative": True}, metadata={"node_type": node.node_type, "domain_key": domains.get(node.domain_id)})
 
-    def _simple_projections(self, model, store: str, content_fn, timestamp_fn, domains):
-        for item in self.session.scalars(select(model)).all():
+    def _simple_projections(
+        self,
+        model,
+        store: str,
+        content_fn,
+        timestamp_fn,
+        domains,
+        source_limit_per_store: int | None,
+        *,
+        rows=None,
+    ):
+        source_rows = (
+            rows
+            if rows is not None
+            else self._source_rows(
+                model,
+                store,
+                source_limit_per_store,
+                model.updated_at,
+                model.id,
+            )
+        )
+        for item in source_rows:
             provenance = item.provenance or {}
             metadata = {"domain_key": domains.get(item.domain_id)}
             if isinstance(item, CalendarEvent):
@@ -423,6 +671,36 @@ class FederatedIndexService:
                 )
             yield _Projection(key=f"{store[:-1]}:{item.id}", store=store, source_id=str(item.id), domain_id=item.domain_id, title=item.title, content=content_fn(item) or item.title, status=item.status, source_timestamp=timestamp_fn(item), trust_score=_trust(provenance), importance=0.58, policy=_policy(provenance), provenance={"source_refs": item.source_refs, **provenance}, metadata=metadata)
 
+    def _source_rows(
+        self,
+        model,
+        store: str,
+        limit: int | None,
+        *order_columns,
+        where_clause=None,
+    ):
+        statement = select(model)
+        if where_clause is not None:
+            statement = statement.where(where_clause)
+        statement = statement.order_by(*order_columns)
+        if limit is None:
+            return list(self.session.scalars(statement).all())
+
+        cursor = self.session.get(RuntimeSetting, FEDERATED_INDEX_CURSOR_KEY)
+        if cursor is None:
+            cursor = RuntimeSetting(key=FEDERATED_INDEX_CURSOR_KEY, value={})
+            self.session.add(cursor)
+            self.session.flush()
+        offsets = dict(cursor.value or {})
+        offset = max(0, int(offsets.get(store) or 0))
+        rows = list(self.session.scalars(statement.offset(offset).limit(limit)).all())
+        if not rows and offset:
+            offset = 0
+            rows = list(self.session.scalars(statement.limit(limit)).all())
+        offsets[store] = 0 if len(rows) < limit else offset + len(rows)
+        cursor.value = offsets
+        return rows
+
 
 class FederatedRetrievalService:
     def __init__(self, session: Session, *, embedding_client: EmbeddingClient | None = None):
@@ -430,7 +708,11 @@ class FederatedRetrievalService:
         self.embedding_client = embedding_client
 
     def retrieve(self, request_data: FederatedRetrievalRequest) -> FederatedContextBundle:
-        FederatedIndexService(self.session, embedding_client=self.embedding_client).sync(embed_missing=request_data.use_semantic)
+        if request_data.sync_index:
+            FederatedIndexService(
+                self.session,
+                embedding_client=self.embedding_client,
+            ).sync(embed_missing=request_data.use_semantic)
         domains = self.session.scalars(select(Domain).where(Domain.is_active.is_(True))).all()
         by_key = {domain.key: domain for domain in domains}
         forced_domain = next((domain.key for domain in domains if domain.id == request_data.domain_id), None)
@@ -453,6 +735,15 @@ class FederatedRetrievalService:
             query = query.where(or_(RetrievalDocument.domain_id.in_(domain_ids), RetrievalDocument.domain_id.is_(None)))
         if stores:
             query = query.where(RetrievalDocument.store.in_(stores))
+        query = (
+            query.order_by(
+                RetrievalDocument.source_timestamp.desc().nullslast(),
+                RetrievalDocument.created_at.desc(),
+            )
+            .limit(RETRIEVAL_CANDIDATE_LIMIT)
+        )
+        if not request_data.use_semantic:
+            query = query.options(defer(RetrievalDocument.embedding))
         documents = self.session.scalars(query).all()
         now = datetime.now(UTC)
         policy_filtered = 0

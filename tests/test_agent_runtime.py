@@ -40,6 +40,7 @@ from app.db.models import (
 )
 from app.db.repositories import AgentRepository, DomainRepository
 from app.db.seed import seed_default_domains
+from app.memory.federated_retrieval import FederatedIndexService
 from app.tools.runtime import (
     CodexCliToolAdapter,
     GmailApiToolAdapter,
@@ -4848,6 +4849,8 @@ def test_run_agent_once_can_auto_execute_memory_context_bundle_tool(
             metadata_={},
         )
     )
+    session.commit()
+    FederatedIndexService(session).sync(embed_missing=False)
     session.commit()
 
     result = PromptAggregationService(

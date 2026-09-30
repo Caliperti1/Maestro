@@ -126,6 +126,9 @@ class MemoryDropboxProcessor:
         domain_key: str,
         domain: Domain | None,
         original_path: Path | None = None,
+        source_uri: str | None = None,
+        processed_uri: str | None = None,
+        failed_uri: str | None = None,
     ) -> DropboxProcessResult:
         seed_package: SeedPackage | None = None
         artifact: Artifact | None = None
@@ -152,6 +155,7 @@ class MemoryDropboxProcessor:
                 path,
                 domain,
                 original_path=original_path,
+                source_uri=source_uri,
                 envelope=envelope,
                 ingestion_record=ingestion_record,
             )
@@ -172,14 +176,14 @@ class MemoryDropboxProcessor:
                 source_id=artifact.id,
                 domain_id=domain.id if domain is not None else None,
                 title=path.name,
-                uri=str(path),
+                uri=source_uri or str(path),
                 content=content,
                 metadata={
                     "dropbox_domain": domain_key,
                     "seed_package_id": str(seed_package.id),
                     "artifact_id": str(artifact.id),
                     "ingestion_record_id": str(ingestion_record.id),
-                    "original_path": str(original_path),
+                    "original_path": source_uri or str(original_path),
                     "source_policy": envelope.policy.as_dict(),
                     "source_metadata": dict(envelope.metadata),
                     "structured_route_promoted": bool(
@@ -202,12 +206,13 @@ class MemoryDropboxProcessor:
             )
             batch = curator.write_candidates(source, preview.candidates, preview.routed_items)
             destination = self._move_file(path, domain_key=domain_key, status="processed")
+            canonical_processed_path = processed_uri or str(destination)
             self._finalize_provenance(
                 seed_package=seed_package,
                 artifact=artifact,
                 results=batch.results,
                 routed_items=preview.routed_items,
-                processed_path=destination,
+                processed_path=canonical_processed_path,
             )
             preview_path = self._write_preview(
                 original_path,
@@ -220,7 +225,7 @@ class MemoryDropboxProcessor:
             seed_package.status = "processed"
             seed_package.processed_at = datetime.now(UTC)
             self.session.commit()
-            ledger.mark_processed(ingestion_record, processed_path=destination)
+            ledger.mark_processed(ingestion_record, processed_path=canonical_processed_path)
             return DropboxProcessResult(
                 source_path=path,
                 destination_path=destination,
@@ -234,27 +239,28 @@ class MemoryDropboxProcessor:
         except Exception as exc:
             self.session.rollback()
             destination = self._move_file(path, domain_key=domain_key, status="failed")
+            canonical_failed_path = failed_uri or str(destination)
             if seed_package is not None:
                 seed_package.status = "failed"
                 seed_package.processed_at = datetime.now(UTC)
                 seed_package.metadata_ = {
                     **(seed_package.metadata_ or {}),
                     "error": str(exc),
-                    "failed_path": str(destination),
+                    "failed_path": canonical_failed_path,
                 }
                 if artifact is not None:
-                    artifact.uri = str(destination)
+                    artifact.uri = canonical_failed_path
                     artifact.metadata_ = {
                         **(artifact.metadata_ or {}),
                         "error": str(exc),
-                        "failed_path": str(destination),
+                        "failed_path": canonical_failed_path,
                     }
                 self.session.commit()
             if ingestion_record is not None:
                 IngestionLedgerService(self.session).mark_failed(
                     ingestion_record,
                     error=str(exc),
-                    failed_path=destination,
+                    failed_path=canonical_failed_path,
                 )
             self._write_failure(destination, str(exc))
             return DropboxProcessResult(
@@ -300,6 +306,7 @@ class MemoryDropboxProcessor:
         domain: Domain | None,
         *,
         original_path: Path | None = None,
+        source_uri: str | None = None,
         envelope: ContextEnvelope,
         ingestion_record: IngestionRecord,
         extraction_metadata: dict[str, Any] | None = None,
@@ -312,8 +319,8 @@ class MemoryDropboxProcessor:
             source_type="dropbox_file",
             status="processing",
             metadata_={
-                "original_path": str(original_path),
-                "processing_path": str(path),
+                "original_path": source_uri or str(original_path),
+                "processing_path": source_uri or str(path),
                 "suffix": path.suffix.lower(),
                 "ingestion_record_id": str(ingestion_record.id),
                 "source_policy": envelope.policy.as_dict(),
@@ -333,12 +340,12 @@ class MemoryDropboxProcessor:
             seed_package_id=seed_package.id,
             artifact_type="raw_file",
             name=path.name,
-            uri=str(path),
+            uri=source_uri or str(path),
             mime_type=self._mime_type(path),
             metadata_={
                 "dropbox": True,
-                "original_path": str(original_path),
-                "processing_path": str(path),
+                "original_path": source_uri or str(original_path),
+                "processing_path": source_uri or str(path),
                 "ingestion_record_id": str(ingestion_record.id),
                 "source_policy": envelope.policy.as_dict(),
                 "source_metadata": dict(envelope.metadata),
@@ -400,7 +407,7 @@ class MemoryDropboxProcessor:
         artifact: Artifact,
         results: list[MemoryWriteResult] | tuple[MemoryWriteResult, ...] | Any,
         routed_items: list[RoutedItem] | tuple[RoutedItem, ...] | Any,
-        processed_path: Path,
+        processed_path: Path | str,
     ) -> None:
         processed_path_text = str(processed_path)
         artifact.uri = processed_path_text

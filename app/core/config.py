@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +18,31 @@ class Settings(BaseSettings):
     user_email_aliases: str = (
         "chris@perti.io,christopher.aliperti@gmail.com,christopher.aliperti@westpoint.edu"
     )
+    maestro_process_role: str = "combined"
+    owner_auth_mode: str = "disabled"
+    owner_oidc_issuer: str | None = None
+    owner_oidc_client_id: str | None = None
+    owner_oidc_client_secret: str | None = None
+    owner_oidc_subject: str | None = None
+    owner_oidc_redirect_uri: str | None = None
+    owner_session_secret: str | None = None
+    owner_session_cookie_name: str = "maestro_owner_session"
+    owner_session_ttl_seconds: Annotated[int, Field(ge=300, le=2592000)] = 43200
+    owner_cookie_secure: bool = True
+    owner_cookie_samesite: str = "lax"
+    integration_credential_encryption_key: str | None = None
+    integration_google_client_id: str | None = None
+    integration_google_client_secret: str | None = None
+    integration_google_redirect_uri: str | None = None
+    integration_github_client_id: str | None = None
+    integration_github_client_secret: str | None = None
+    integration_github_redirect_uri: str | None = None
+    artifact_store_backend: str = "local"
+    artifact_store_local_root: str | None = None
+    artifact_store_s3_bucket: str | None = None
+    artifact_store_s3_region: str | None = None
+    artifact_store_s3_prefix: str = "maestro"
+    artifact_store_s3_kms_key_id: str | None = None
     app_host: str = "0.0.0.0"
     app_port: Annotated[int, Field(ge=1, le=65535)] = 8000
     frontend_origin: str = "http://localhost:5174"
@@ -27,6 +52,11 @@ class Settings(BaseSettings):
     )
     tailscale_frontend_origin: str | None = None
     database_url: str = "postgresql+psycopg://maestro:maestro@localhost:55432/maestro"
+    database_pool_size: Annotated[int, Field(ge=1, le=50)] = 5
+    database_max_overflow: Annotated[int, Field(ge=0, le=50)] = 5
+    database_pool_timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 30
+    database_pool_recycle_seconds: Annotated[int, Field(ge=30, le=3600)] = 300
+    database_connect_timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 10
     llm_provider: str = "openrouter"
     openai_api_key: str | None = None
     openai_live_enabled: bool = False
@@ -48,8 +78,10 @@ class Settings(BaseSettings):
     memory_dropbox_root: str = "maestro_dropbox"
     memory_dropbox_autorun: bool = True
     memory_dropbox_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 30
+    memory_dropbox_batch_size: Annotated[int, Field(ge=1, le=50)] = 5
     memory_extraction_chunk_chars: Annotated[int, Field(ge=5000, le=150000)] = 60000
     memory_extraction_max_source_chars: Annotated[int, Field(ge=10000, le=5000000)] = 500000
+    contact_hydration_autorun: bool = True
     contact_hydration_interval_seconds: Annotated[int, Field(ge=5, le=3600)] = 10
     home_timezone: str = "America/New_York"
     embedding_provider: str = "ollama"
@@ -60,6 +92,12 @@ class Settings(BaseSettings):
     memory_embedding_best_effort: bool = True
     memory_hygiene_autorun: bool = True
     memory_hygiene_interval_seconds: Annotated[int, Field(ge=300, le=604800)] = 21600
+    memory_hygiene_batch_size: Annotated[int, Field(ge=10, le=500)] = 100
+    memory_embedding_batch_size: Annotated[int, Field(ge=1, le=250)] = 25
+    federated_index_batch_size: Annotated[int, Field(ge=5, le=500)] = 50
+    federated_index_embedding_batch_size: Annotated[int, Field(ge=1, le=250)] = 25
+    federated_index_autorun: bool = True
+    federated_index_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     routed_resolver_llm_provider: str = "ollama"
     routed_resolver_llm_model: str = "llama3.1:8b"
     routed_resolver_llm_base_url: str = "http://localhost:11434"
@@ -86,10 +124,14 @@ class Settings(BaseSettings):
     scheduler_worker_claim_limit: int = 4
     scheduler_worker_execute_llm: bool = True
     scheduler_worker_auto_tool_loop: bool = True
+    maestro_turn_worker_autorun: bool = True
+    maestro_turn_worker_interval_seconds: Annotated[int, Field(ge=1, le=300)] = 5
+    maestro_turn_worker_stale_seconds: Annotated[int, Field(ge=30, le=3600)] = 600
     gmail_trigger_autorun: bool = False
     gmail_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 30
     gmail_trigger_page_size: Annotated[int, Field(ge=1, le=500)] = 100
     gmail_trigger_network_alert_seconds: Annotated[int, Field(ge=60, le=86400)] = 900
+    gmail_trigger_auth_retry_seconds: Annotated[int, Field(ge=300, le=86400)] = 900
     calendar_trigger_autorun: bool = False
     calendar_trigger_interval_seconds: Annotated[int, Field(ge=10, le=3600)] = 60
     calendar_trigger_page_size: Annotated[int, Field(ge=1, le=2500)] = 250
@@ -117,6 +159,62 @@ class Settings(BaseSettings):
     maestro_intake_google_client_secret: str | None = None
     maestro_intake_google_refresh_token: str | None = None
     maestro_intake_allowed_senders: str = ""
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_postgres_driver(cls, value: object) -> object:
+        """Use the installed psycopg 3 driver for provider-issued Postgres URLs."""
+        if not isinstance(value, str):
+            return value
+        if value.startswith("postgres://"):
+            return f"postgresql+psycopg://{value.removeprefix('postgres://')}"
+        if value.startswith("postgresql://"):
+            return f"postgresql+psycopg://{value.removeprefix('postgresql://')}"
+        return value
+
+    @field_validator("maestro_process_role")
+    @classmethod
+    def validate_process_role(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"combined", "web", "worker"}:
+            raise ValueError("MAESTRO_PROCESS_ROLE must be combined, web, or worker.")
+        return normalized
+
+    @field_validator("owner_auth_mode")
+    @classmethod
+    def validate_owner_auth_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"disabled", "oidc"}:
+            raise ValueError("OWNER_AUTH_MODE must be disabled or oidc.")
+        return normalized
+
+    @field_validator("owner_cookie_samesite")
+    @classmethod
+    def validate_owner_cookie_samesite(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"lax", "strict", "none"}:
+            raise ValueError("OWNER_COOKIE_SAMESITE must be lax, strict, or none.")
+        return normalized
+
+    @field_validator("artifact_store_backend")
+    @classmethod
+    def validate_artifact_store_backend(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"local", "s3"}:
+            raise ValueError("ARTIFACT_STORE_BACKEND must be local or s3.")
+        return normalized
+
+    @property
+    def owner_oidc_configured(self) -> bool:
+        return all(
+            (
+                self.owner_oidc_issuer,
+                self.owner_oidc_client_id,
+                self.owner_oidc_subject,
+                self.owner_oidc_redirect_uri,
+                self.owner_session_secret,
+            )
+        )
 
     @property
     def context_mailbox_configured(self) -> bool:

@@ -18,11 +18,10 @@ Enable these APIs in the Google Cloud project:
 
 ## OAuth Client
 
-Use a Web application OAuth client so Google OAuth Playground can mint a durable refresh token.
+Use a Web application OAuth client for Maestro's one-click Tools flow.
 
-- Authorized redirect URI: `https://developers.google.com/oauthplayground`
-- Authorized JavaScript origin: leave blank unless Google requires it. If required, use
-  `https://developers.google.com`.
+- Authorized redirect URI: `https://<maestro-api-host>/integrations/google/callback`
+- Authorized JavaScript origin: the Maestro frontend origin.
 
 ## Scopes
 
@@ -57,41 +56,26 @@ Scope intent:
 - `spreadsheets`: create and edit Google Sheets.
 - `meetings.space.readonly`: read Google Meet conference records.
 
-## Environment Variables
+## Deployment Environment Variables
 
-Use domain-prefixed env vars so each domain can have separate credentials:
+Configure the OAuth app once. Maestro creates a separate encrypted account connection for each
+domain from the Tools page:
 
 ```env
-PRAXIS_GOOGLE_CLIENT_ID=
-PRAXIS_GOOGLE_CLIENT_SECRET=
-PRAXIS_GOOGLE_CLIENT_REFRESH_TOKEN=
-PERSONAL_GOOGLE_CLIENT_ID=
-PERSONAL_GOOGLE_CLIENT_SECRET=
-PERSONAL_GOOGLE_CLIENT_REFRESH_TOKEN=
-PERTI_GOOGLE_CLIENT_ID=
-PERTI_GOOGLE_CLIENT_SECRET=
-PERTI_GOOGLE_CLIENT_REFRESH_TOKEN=
+INTEGRATION_CREDENTIAL_ENCRYPTION_KEY=
+INTEGRATION_GOOGLE_CLIENT_ID=
+INTEGRATION_GOOGLE_CLIENT_SECRET=
+INTEGRATION_GOOGLE_REDIRECT_URI=https://<maestro-api-host>/integrations/google/callback
 ```
 
 ## Maestro Tool Connection
 
-In the Tools tab, select `Google Workspace`, choose the domain, set auth type to `oauth`, and use:
+In Tools, select Google Workspace, select the domain, and choose **Connect Google Workspace**.
+Sign into the account for that domain and approve the consent screen. The page returns with the
+account email and `connected` status. No token copying or credential JSON is required.
 
-```json
-{
-  "user_id": "me",
-  "client_id_env": "PRAXIS_GOOGLE_CLIENT_ID",
-  "client_secret_env": "PRAXIS_GOOGLE_CLIENT_SECRET",
-  "refresh_token_env": "PRAXIS_GOOGLE_CLIENT_REFRESH_TOKEN",
-  "default_query": ""
-}
-```
-
-Restart the backend after changing `.env`.
-
-Personal and Perti Laboratories connections are seeded automatically with these environment
-variable names. They remain separate OAuth identities even if the same Google Cloud OAuth client
-ID/secret is reused. Generate one refresh token while signed into each intended Google account.
+The older domain-prefixed environment variables remain supported for rollback and show as
+`legacy` connections until they are replaced through this flow.
 
 ## Current Tools
 

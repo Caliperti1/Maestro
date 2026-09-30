@@ -126,13 +126,28 @@ def list_reports(
     include_archived: bool = False,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    candidates = db.scalars(
-        select(Report).order_by(Report.created_at.desc()).limit(limit * 3)
-    ).all()
-    reports = [
-        report for report in candidates if include_archived or not _report_is_archived(report)
-    ][:limit]
-    return {"reports": [_report_payload(db, report, include_body=False) for report in reports]}
+    archived = func.coalesce(Report.structured_data["archived"].as_boolean(), False)
+    statement = (
+        select(
+            Report.id,
+            Report.task_id,
+            Report.domain_id,
+            Domain.key.label("domain_key"),
+            Report.title,
+            Report.summary,
+            Report.report_type,
+            archived.label("archived"),
+            Report.created_at,
+            Report.updated_at,
+        )
+        .outerjoin(Domain, Report.domain_id == Domain.id)
+        .order_by(Report.created_at.desc())
+        .limit(limit)
+    )
+    if not include_archived:
+        statement = statement.where(archived.is_(False))
+    reports = db.execute(statement).mappings().all()
+    return {"reports": [_report_summary_payload(report) for report in reports]}
 
 
 @router.get("/reports/{report_id}")
@@ -274,6 +289,22 @@ def _report_payload(db: Session, report: Report, *, include_body: bool) -> dict[
     if include_body:
         payload["body_markdown"] = report.body_markdown
     return payload
+
+
+def _report_summary_payload(report: Any) -> dict[str, Any]:
+    return {
+        "id": str(report["id"]),
+        "task_id": str(report["task_id"]),
+        "domain_id": str(report["domain_id"]) if report["domain_id"] else None,
+        "domain_key": report["domain_key"],
+        "title": report["title"],
+        "summary": report["summary"],
+        "source_type": report["report_type"],
+        "report_type": report["report_type"],
+        "archived": bool(report["archived"]),
+        "created_at": report["created_at"].isoformat(),
+        "updated_at": report["updated_at"].isoformat(),
+    }
 
 
 def _report_is_archived(report: Report) -> bool:

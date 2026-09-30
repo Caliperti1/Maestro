@@ -104,18 +104,45 @@ class OrganizationIntelligenceService:
         domain_id: uuid.UUID | None = None,
         limit: int = 10,
         use_semantic: bool = True,
+        summary: bool = False,
     ) -> list[OrganizationSearchResult]:
         query = query_text.strip()
         organizations = self._visible_organizations(domain_id)
         semantic_scores = self._semantic_scores(organizations, query) if query and use_semantic else {}
         results = [
-            self._score(organization, query, domain_id, semantic_scores.get(organization.id))
+            (
+                self._score_summary(organization, query, semantic_scores.get(organization.id))
+                if summary
+                else self._score(organization, query, domain_id, semantic_scores.get(organization.id))
+            )
             for organization in organizations
         ]
         if query:
             results = [result for result in results if result.score >= 0.12]
         results.sort(key=lambda result: (result.score, result.organization.updated_at), reverse=True)
         return results[:limit]
+
+    def organization_summary_payload(self, organization: Entity) -> dict[str, Any]:
+        """Return list fields without hydrating the organization's relationship graph."""
+        return {
+            "id": str(organization.id),
+            "name": organization.name,
+            "website": organization.website,
+            "summary": organization.summary,
+            "source_refs": [],
+            "provenance": {},
+            "status": organization.status,
+            "metadata": {},
+            "aliases": [],
+            "identifiers": [],
+            "alias_records": [],
+            "domain_notes": [],
+            "contacts": [],
+            "relationships": [],
+            "events": [],
+            "interactions": [],
+            "created_at": organization.created_at.isoformat() if organization.created_at else None,
+        }
 
     def get(self, organization_id: uuid.UUID, *, domain_id: uuid.UUID | None = None) -> dict[str, Any]:
         organization = self.session.get(Entity, organization_id)
@@ -395,6 +422,46 @@ class OrganizationIntelligenceService:
             ]
         )
         lexical = _token_overlap(_tokens(query), _tokens(profile_text))
+        if lexical:
+            score += lexical * 0.7
+            reasons.append(f"profile overlap {lexical:.2f}")
+        if semantic_similarity is not None:
+            score += max(0.0, semantic_similarity) * 0.55
+            reasons.append(f"semantic similarity {semantic_similarity:.2f}")
+        return OrganizationSearchResult(
+            organization=organization,
+            score=round(score, 4),
+            match_reasons=reasons or ["weak organization match"],
+            semantic_similarity=None if semantic_similarity is None else round(semantic_similarity, 4),
+            payload=payload,
+        )
+
+    def _score_summary(
+        self,
+        organization: Entity,
+        query: str,
+        semantic_similarity: float | None,
+    ) -> OrganizationSearchResult:
+        payload = self.organization_summary_payload(organization)
+        if not query:
+            return OrganizationSearchResult(
+                organization, 0.5, ["recent organization"], semantic_similarity, payload
+            )
+        normalized_query = _normalize(query)
+        identities = [organization.name, organization.website or ""]
+        normalized_identities = {_normalize(value) for value in identities if value}
+        reasons: list[str] = []
+        score = 0.0
+        if normalized_query in normalized_identities:
+            score += 1.0
+            reasons.append("exact name or website match")
+        elif any(normalized_query and normalized_query in value for value in normalized_identities):
+            score += 0.65
+            reasons.append("partial organization identity match")
+        lexical = _token_overlap(
+            _tokens(query),
+            _tokens(" ".join([organization.name, organization.website or "", organization.summary or ""])),
+        )
         if lexical:
             score += lexical * 0.7
             reasons.append(f"profile overlap {lexical:.2f}")

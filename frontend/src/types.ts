@@ -673,9 +673,40 @@ export type ActiveSurface =
   | "domain"
   | "memory"
   | "issues"
+  | "nodes"
   | "tools"
   | RoutedObjectSurface;
 export type RoutedObjectRecord = RoutedEvent | RoutedTodo | RoutedContact | RoutedEntity;
+
+export type ExecutionNodeCapability = {
+  key: string;
+  version: string | null;
+  status: string;
+  details: Record<string, unknown>;
+  last_seen_at: string | null;
+};
+
+export type ExecutionNode = {
+  id: string;
+  display_name: string;
+  platform: string;
+  status: string;
+  effective_status: string;
+  client_version: string | null;
+  last_seen_at: string | null;
+  last_heartbeat_at: string | null;
+  enrolled_at: string | null;
+  revoked_at: string | null;
+  capabilities: ExecutionNodeCapability[];
+  pending_job_count: number;
+  active_job_count: number;
+};
+
+export type NodeEnrollmentToken = {
+  enrollment_code: string;
+  expires_at: string;
+  token_id: string;
+};
 
 export type ProductRepository = {
   id: string;
@@ -915,6 +946,19 @@ export type ToolConnection = {
   auth_type: string;
   config: Record<string, unknown>;
   is_active: boolean;
+  connection_status: "connected" | "legacy" | "configured" | "disconnected" | "error";
+  account_label: string | null;
+  oauth_scopes: string[];
+  oauth_provider: "google" | "github" | null;
+};
+
+export type IntegrationProvider = {
+  key: "google" | "github";
+  name: string;
+  configured: boolean;
+  callback_url: string;
+  scope_count: number;
+  setup_message: string | null;
 };
 
 export type SkillRegistryItem = {

@@ -24,6 +24,7 @@ from app.db.models import (
     RoutedItem,
     Todo,
 )
+from app.llm.structured import hosted_structured_response
 from app.memory.organization_intelligence import OrganizationIntelligenceService
 from app.prompts import load_prompt
 
@@ -129,6 +130,35 @@ class OllamaRoutedResolverLLM:
             return None
 
 
+class HostedRoutedResolverLLM:
+    def choose_match(
+        self,
+        *,
+        item: RoutedItem,
+        object_type: str,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        settings = get_settings()
+        return hosted_structured_response(
+            provider=settings.routed_resolver_llm_provider,
+            model=settings.routed_resolver_llm_model,
+            instructions=load_prompt("routed_item_resolution.md"),
+            input_payload={
+                "object_type": object_type,
+                "new_item": {
+                    "route_type": item.route_type,
+                    "title": item.title,
+                    "content": item.content,
+                    "domain_id": str(item.domain_id) if item.domain_id else None,
+                    "metadata": item.metadata_ or {},
+                },
+                "candidates": candidates,
+            },
+            schema_name="routed_item_resolution",
+            schema=LLMResolverResponse.model_json_schema(),
+        )
+
+
 class LLMResolverResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -153,6 +183,12 @@ class RoutedObjectResolver:
         self.llm = llm
         if enable_llm and self.llm is None and settings.routed_resolver_llm_provider == "ollama":
             self.llm = OllamaRoutedResolverLLM()
+        elif (
+            enable_llm
+            and self.llm is None
+            and settings.routed_resolver_llm_provider in {"openai", "openrouter"}
+        ):
+            self.llm = HostedRoutedResolverLLM()
 
     def resolve_contact(
         self,

@@ -82,6 +82,7 @@ from app.memory.routed_retrieval import (
 )
 from app.memory.routed_service import RoutedMemoryService
 from app.memory.service import MemoryAccessError, MemoryService
+from app.storage import get_artifact_store
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 CALENDAR_EVENT_STATUSES = {"scheduled", "tentative", "cancelled", "archived"}
@@ -417,14 +418,17 @@ async def upload_dropbox_file(
         supported = ", ".join(sorted(SUPPORTED_DROPBOX_SUFFIXES))
         raise HTTPException(status_code=400, detail=f"Supported file types: {supported}.")
 
-    inbox = _dropbox_root() / domain_key / "inbox"
-    inbox.mkdir(parents=True, exist_ok=True)
-    destination = _available_destination(inbox / filename)
-    destination.write_bytes(await file.read())
+    data = await file.read()
+    store = get_artifact_store()
+    storage_key = f"{domain_key}/inbox/{filename}"
+    stored = store.put_bytes(storage_key, data, content_type=file.content_type)
     return {
         "domain_key": domain_key,
-        "filename": destination.name,
-        "path": str(destination),
+        "filename": filename,
+        "path": stored.uri,
+        "storage_key": stored.key,
+        "sha256": stored.sha256,
+        "size": stored.size,
         "status": "uploaded",
     }
 
@@ -553,7 +557,6 @@ def list_routed_objects(
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     return RoutedMemoryService(db).build_context_bundle(
         domain_id=domain_id,
@@ -570,7 +573,6 @@ def routed_context_bundle(
     max_chars: int = 3000,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     bundle = RoutedRetrievalService(db).build_context_bundle(
         domain_id=domain_id,
@@ -611,8 +613,6 @@ def list_calendar_events(
     limit: int = Query(default=500, ge=1, le=2000),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    if view == "full":
-        RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(CalendarEvent)
     if domain_id is not None:
@@ -818,10 +818,9 @@ def list_todos(
     domain_key: str | None = None,
     status: str | None = None,
     limit: int = 50,
+    view: Literal["full", "summary"] = "full",
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RecurringTodoService(db).materialize_all()
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     query = select(Todo)
     if domain_id is not None:
@@ -829,7 +828,8 @@ def list_todos(
     if status is not None:
         query = query.where(Todo.status == status)
     todos = db.scalars(query.order_by(Todo.due_at, Todo.created_at.desc()).limit(limit)).all()
-    return {"todos": [_todo_payload(db, todo) for todo in todos]}
+    payload = _todo_summary_payload if view == "summary" else _todo_payload
+    return {"todos": [payload(db, todo) for todo in todos]}
 
 
 @router.post("/routed-objects/todos")
@@ -948,9 +948,9 @@ def list_contacts(
     query_text: str | None = None,
     domain_key: str | None = None,
     use_semantic: bool = True,
+    view: Literal["full", "summary"] = "full",
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = None
     if domain_key:
         domain = DomainRepository(db).get_by_key(domain_key)
@@ -964,6 +964,7 @@ def list_contacts(
             domain_id=domain_id,
             limit=limit,
             use_semantic=use_semantic,
+            summary=view == "summary",
         )
         return {
             "contacts": [
@@ -976,7 +977,13 @@ def list_contacts(
                 for result in results
             ]
         }
-    contacts = service.search("", domain_id=domain_id, limit=limit, use_semantic=False)
+    contacts = service.search(
+        "",
+        domain_id=domain_id,
+        limit=limit,
+        use_semantic=False,
+        summary=view == "summary",
+    )
     return {"contacts": [result.payload for result in contacts]}
 
 
@@ -1188,9 +1195,9 @@ def list_entities(
     domain_key: str | None = None,
     use_semantic: bool = True,
     limit: int = 50,
+    view: Literal["full", "summary"] = "full",
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    RoutedMemoryService(db, enable_llm_resolver=False).process_pending(limit=100)
     domain_id = _domain_id_for_key(db, domain_key) if domain_key else None
     service = OrganizationIntelligenceService(db)
     results = service.search(
@@ -1198,6 +1205,7 @@ def list_entities(
         domain_id=domain_id,
         limit=limit,
         use_semantic=use_semantic,
+        summary=view == "summary",
     )
     return {
         "entities": [
@@ -1485,6 +1493,7 @@ def retrieve_federated_context(
                 use_semantic=use_semantic,
                 max_items=max_items,
                 max_chars=max_chars,
+                sync_index=False,
             )
         )
     except (ValueError, TypeError) as exc:
@@ -1929,6 +1938,37 @@ def _todo_payload(db: Session, todo: Todo) -> dict[str, Any]:
         "provenance": todo.provenance,
         "metadata": todo.metadata_,
         "event_links": EventWorkLinkService(db).for_todo(todo.id),
+        "created_at": todo.created_at.isoformat() if todo.created_at else None,
+    }
+
+
+def _todo_summary_payload(db: Session, todo: Todo) -> dict[str, Any]:
+    """Return fields used by selectors without loading series or event-link details."""
+    return {
+        "id": str(todo.id),
+        "domain_key": _domain_key_for_id(db, todo.domain_id),
+        "title": todo.title,
+        "description": todo.description,
+        "todo_type": todo.todo_type,
+        "owner_type": todo.owner_type,
+        "owner_ref": todo.owner_ref,
+        "due_at": todo.due_at.isoformat() if todo.due_at else None,
+        "estimated_minutes": todo.estimated_minutes,
+        "scheduled_start_at": home_isoformat(todo.scheduled_start_at),
+        "recurring_series_id": str(todo.recurring_series_id) if todo.recurring_series_id else None,
+        "recurrence_original_at": home_isoformat(todo.recurrence_original_at),
+        "recurring_series": None,
+        "agent_task": todo.agent_task,
+        "agent_task_status": todo.agent_task_status,
+        "workflow_task_id": str(todo.workflow_task_id) if todo.workflow_task_id else None,
+        "workflow_run_id": str(todo.workflow_run_id) if todo.workflow_run_id else None,
+        "agent_task_error": todo.agent_task_error,
+        "priority": todo.priority,
+        "status": todo.status,
+        "source_refs": [],
+        "provenance": {},
+        "metadata": {},
+        "event_links": [],
         "created_at": todo.created_at.isoformat() if todo.created_at else None,
     }
 

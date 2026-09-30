@@ -17,6 +17,7 @@ dist/
 build/
 .next/
 .vite/
+.vercel/
 coverage/
 *.tsbuildinfo
 

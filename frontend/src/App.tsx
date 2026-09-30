@@ -8,6 +8,7 @@ import {
   ChevronRight,
   CircleAlert,
   Clock3,
+  Copy,
   Database,
   ExternalLink,
   FileText,
@@ -42,7 +43,7 @@ import rrulePlugin from "@fullcalendar/rrule";
 import type { DatesSetArg, DateSelectArg, EventDropArg, EventInput } from "@fullcalendar/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { API_BASE_URL, apiJson, websocketUrl } from "./api";
+import { API_BASE_URL, apiJson } from "./api";
 import { CalendarErrorBoundary } from "./CalendarErrorBoundary";
 import {
   domainKeysByLabel,
@@ -62,6 +63,7 @@ import type {
   ContactHydrationJob,
   DomainContext,
   DropboxDomain,
+  ExecutionNode,
   GmailTriggerStatus,
   IngestionHealth,
   MaestroPlan,
@@ -75,6 +77,7 @@ import type {
   MemoryItem,
   MemoryPreview,
   MemorySource,
+  NodeEnrollmentToken,
   PendingProposal,
   ProductIssue,
   ProductProject,
@@ -98,6 +101,7 @@ import type {
   WorkflowTemplate,
   SkillRegistryItem,
   ToolConnection,
+  IntegrationProvider,
   ToolRegistryItem,
   WorkflowReport,
   WorkflowRunLogEntry,
@@ -965,6 +969,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const [items, setItems] = useState<RoutedObjectRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [calendarDetail, setCalendarDetail] = useState<RoutedEvent | null>(null);
+  const [objectDetail, setObjectDetail] = useState<RoutedContact | RoutedEntity | null>(null);
   const [calendarRange, setCalendarRange] = useState<{ start: string; end: string } | null>(null);
   const [calendarHealth, setCalendarHealth] = useState<CalendarTriggerStatus | null>(null);
   const [domainFilter, setDomainFilter] = useState("all");
@@ -1026,10 +1031,11 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const listedSelectedItem = creatingEvent || creatingTodo
     ? null
     : visibleItems.find((item) => item.id === selectedId) ?? null;
-  const selectedItem = (
-    surface === "calendar"
-    && calendarDetail?.id === selectedId
-  ) ? calendarDetail : listedSelectedItem;
+  const selectedItem = surface === "calendar" && calendarDetail?.id === selectedId
+    ? calendarDetail
+    : (surface === "contacts" || surface === "organizations") && objectDetail?.id === selectedId
+      ? objectDetail
+      : listedSelectedItem;
   const calendarItems = useMemo(
     () =>
       visibleItems
@@ -1071,9 +1077,20 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   const unscheduledCalendarItems = visibleItems.filter(
     (item): item is RoutedEvent => "start_at" in item && !item.start_at,
   );
+  const shouldLoadCalendarOptions = surface === "calendar" && (Boolean(selectedId) || creatingEvent);
 
   const refreshItems = useCallback(async () => {
-    const params = new URLSearchParams({ limit: surface === "calendar" ? "500" : "100" });
+    if (surface === "calendar" && !calendarRange) {
+      setStatusMessage("Loading calendar range...");
+      return;
+    }
+    const params = new URLSearchParams({
+      limit: surface === "calendar"
+        ? "250"
+        : surface === "contacts" || surface === "organizations"
+          ? "500"
+          : "100",
+    });
     if (surface === "calendar") {
       params.set("view", "calendar");
       if (calendarRange) {
@@ -1086,6 +1103,9 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
     }
     if ((surface === "contacts" || surface === "organizations") && contactQuery.trim()) {
       params.set("query_text", contactQuery.trim());
+    }
+    if (surface === "contacts" || surface === "organizations") {
+      params.set("view", "summary");
     }
     const response = await apiJson<Record<string, RoutedObjectRecord[]>>(
       `${config.endpoint}?${params.toString()}`,
@@ -1131,6 +1151,28 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   }, [creatingEvent, selectedId, surface]);
 
   useEffect(() => {
+    if ((surface !== "contacts" && surface !== "organizations") || !selectedId) {
+      setObjectDetail(null);
+      return;
+    }
+    let active = true;
+    setObjectDetail(null);
+    const responseKey = surface === "contacts" ? "contact" : "entity";
+    apiJson<Record<string, RoutedContact | RoutedEntity>>(`${config.endpoint}/${selectedId}`)
+      .then((response) => {
+        if (active) setObjectDetail(response[responseKey] ?? null);
+      })
+      .catch((error) => {
+        if (active) {
+          setStatusMessage(error instanceof Error ? error.message : `Unable to load ${surface} details.`);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [config.endpoint, selectedId, surface]);
+
+  useEffect(() => {
     if (creatingEvent || creatingTodo) return;
     const nextDraft = routedDraftFor(selectedItem);
     if (
@@ -1153,11 +1195,11 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
   }, [creatingEvent, creatingTodo, selectedItem, selectedOccurrence]);
 
   useEffect(() => {
-    if (surface !== "calendar") return;
+    if (!shouldLoadCalendarOptions) return;
     Promise.all([
-      apiJson<{ contacts: RoutedContact[] }>("/memory/routed-objects/contacts?limit=500"),
-      apiJson<{ entities: RoutedEntity[] }>("/memory/routed-objects/entities?limit=500"),
-      apiJson<{ todos: RoutedTodo[] }>("/memory/routed-objects/todos?limit=500"),
+      apiJson<{ contacts: RoutedContact[] }>("/memory/routed-objects/contacts?view=summary&limit=500"),
+      apiJson<{ entities: RoutedEntity[] }>("/memory/routed-objects/entities?view=summary&limit=500"),
+      apiJson<{ todos: RoutedTodo[] }>("/memory/routed-objects/todos?view=summary&limit=500"),
       apiJson<{ issues: ProductIssue[] }>("/issues?status=open&limit=250"),
     ])
       .then(([contacts, organizations, todos, issues]) => {
@@ -1167,7 +1209,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
         setIssueOptions(issues.issues);
       })
       .catch(() => undefined);
-  }, [surface]);
+  }, [shouldLoadCalendarOptions]);
 
   const updateDraft = (key: string, value: string) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -1940,7 +1982,7 @@ function RoutedObjectsWorkspace({ surface }: { surface: RoutedObjectSurface }) {
                 </small>
               </span>
             </button>
-            {item.id === selectedItem?.id && mobileInlineDetail(item)}
+            {item.id === selectedItem?.id && mobileInlineDetail(selectedItem)}
             </div>
           ))}
           {visibleItems.length === 0 && <p className="empty-state">{config.empty}</p>}
@@ -2872,7 +2914,9 @@ function IssuesWorkspace() {
 export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeDomain, setActiveDomain] = useState("Maestro");
-  const [activeSurface, setActiveSurface] = useState<ActiveSurface>("dashboard");
+  const [activeSurface, setActiveSurface] = useState<ActiveSurface>(() =>
+    new URLSearchParams(window.location.search).get("surface") === "tools" ? "tools" : "dashboard",
+  );
   const [maestroNavOpen, setMaestroNavOpen] = useState(false);
   const [memoryNavOpen, setMemoryNavOpen] = useState(false);
   const [domainsNavOpen, setDomainsNavOpen] = useState(false);
@@ -3118,31 +3162,43 @@ export function App() {
   }, []);
 
   const applyConversation = useCallback((conversation: MaestroSessionSummary) => {
-    const receivedAt = new Date().toISOString();
-    const newlySeen = document.visibilityState === "visible" && activeSurface === "dashboard"
-      ? (conversation.messages ?? []).filter(
-          (message) =>
-            message.sender === "maestro" &&
-            message.metadata?.mobile_update === true &&
-            !message.seen_at,
-        )
-      : [];
-    const messages = (conversation.messages ?? []).map((message) =>
-      newlySeen.some((candidate) => candidate.id === message.id)
-        ? { ...message, seen_at: receivedAt, seen_via: "web" }
-        : message,
-    );
     setActiveConversationId(conversation.id);
-    setChatMessages(messages);
+    setChatMessages(conversation.messages ?? []);
     setMaestroPlan(shouldShowPlanPreview(conversation.active_plan ?? null) ? conversation.active_plan ?? null : null);
-    for (const message of newlySeen) {
-      apiJson(`/maestro/mobile/updates/${message.id}/seen`, {
+  }, []);
+
+  const acknowledgeMessage = useCallback(async (messageId: string) => {
+    const response = await apiJson<{ conversation: MaestroSessionSummary | null }>(
+      `/maestro/messages/${messageId}/acknowledge`,
+      {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ via: "web", detail: "Visible in Maestro chat" }),
-      }).catch(() => undefined);
-    }
-  }, [activeSurface]);
+        body: JSON.stringify({ via: "web", detail: "Acknowledged in Maestro chat" }),
+      },
+    );
+    if (response.conversation) applyConversation(response.conversation);
+  }, [applyConversation]);
+
+  const acknowledgeAllMessages = useCallback(async () => {
+    const messageIds = chatMessages
+      .filter((message) => message.sender === "maestro")
+      .map((message) => message.id);
+    if (!activeConversationId || messageIds.length === 0) return;
+    const response = await apiJson<{ conversation: MaestroSessionSummary | null }>(
+      "/maestro/messages/acknowledge",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: activeConversationId,
+          message_ids: messageIds,
+          via: "web",
+          detail: "Acknowledged together in Maestro chat",
+        }),
+      },
+    );
+    if (response.conversation) applyConversation(response.conversation);
+  }, [activeConversationId, applyConversation, chatMessages]);
 
   const pollActiveChannel = useCallback(async () => {
     const response = await apiJson<{ conversation: MaestroSessionSummary }>(
@@ -3580,69 +3636,44 @@ export function App() {
       setMaestroStatus("Could not restore active Maestro session.");
     });
     loadSessionHistory().catch(() => undefined);
-    loadSchedulerDashboard().catch(() => undefined);
-    loadSchedulerWorkerStatus().catch(() => undefined);
-    loadGmailTriggerStatus().catch(() => undefined);
-    loadCalendarTriggerStatus().catch(() => undefined);
-    loadWorkflowOutputs().catch(() => undefined);
   }, [
     loadActiveSession,
+    loadSessionHistory,
+  ]);
+
+  useEffect(() => {
+    if (!["workflows", "run-log", "reports"].includes(activeSurface)) return;
+    const refreshWorkflowSurface = () => {
+      if (activeSurface === "workflows") {
+        loadSchedulerDashboard().catch(() => undefined);
+        loadSchedulerWorkerStatus().catch(() => undefined);
+        loadGmailTriggerStatus().catch(() => undefined);
+        loadCalendarTriggerStatus().catch(() => undefined);
+      }
+      loadWorkflowOutputs().catch(() => undefined);
+    };
+    refreshWorkflowSurface();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refreshWorkflowSurface();
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, [
+    activeSurface,
+    loadCalendarTriggerStatus,
+    loadGmailTriggerStatus,
     loadSchedulerDashboard,
     loadSchedulerWorkerStatus,
-    loadGmailTriggerStatus,
-    loadCalendarTriggerStatus,
-    loadSessionHistory,
     loadWorkflowOutputs,
   ]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      loadSchedulerDashboard().catch(() => undefined);
-      loadSchedulerWorkerStatus().catch(() => undefined);
-      loadGmailTriggerStatus().catch(() => undefined);
-      loadCalendarTriggerStatus().catch(() => undefined);
-      loadWorkflowOutputs().catch(() => undefined);
-    }, 3000);
+      if (document.visibilityState === "visible") {
+        pollActiveChannel().catch(() => undefined);
+      }
+    }, 10_000);
     return () => window.clearInterval(interval);
-  }, [loadCalendarTriggerStatus, loadGmailTriggerStatus, loadSchedulerDashboard, loadSchedulerWorkerStatus, loadWorkflowOutputs]);
-
-  useEffect(() => {
-    let closed = false;
-    let socket: WebSocket | null = null;
-    let reconnectTimer: number | undefined;
-
-    const connect = () => {
-      socket = new WebSocket(websocketUrl("/maestro/channel/ws"));
-      socket.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data) as {
-            type?: string;
-            conversation?: MaestroSessionSummary;
-          };
-          if (payload.type === "conversation" && payload.conversation) {
-            applyConversation(payload.conversation);
-          }
-        } catch {
-          setMaestroStatus("Could not parse Maestro channel update.");
-        }
-      };
-      socket.onclose = () => {
-        if (!closed) {
-          reconnectTimer = window.setTimeout(connect, 2000);
-        }
-      };
-      socket.onerror = () => {
-        socket?.close();
-      };
-    };
-
-    connect();
-    return () => {
-      closed = true;
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      socket?.close();
-    };
-  }, [applyConversation]);
+  }, [pollActiveChannel]);
 
   useEffect(() => {
     const acknowledgeVisibleUpdates = () => {
@@ -3902,12 +3933,16 @@ export function App() {
     try {
       const response = await apiJson<MaestroRespond>("/maestro/respond", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Maestro-Async": "true",
+        },
         body: JSON.stringify({
           message: outgoingMessage.content,
           active_plan_id: activePlanId,
           conversation_id: activeConversationId,
           interaction_mode: maestroInteractionMode,
+          client_turn_id: outgoingMessage.id,
         }),
       });
       if (response.kind === "pending") {
@@ -3930,7 +3965,9 @@ export function App() {
           {
             id: createClientId(),
             sender: "maestro",
-            content: response.message,
+            content:
+              response.message?.trim()
+              || "Maestro could not complete that response. Please try again.",
           },
         ]);
       }
@@ -4251,6 +4288,13 @@ export function App() {
             )}
           </div>
           <button
+            className={activeSurface === "nodes" ? "domain-button active" : "domain-button"}
+            onClick={() => setActiveSurface("nodes")}
+          >
+            <Database size={17} />
+            <span>Nodes</span>
+          </button>
+          <button
             className={activeSurface === "tools" ? "domain-button active" : "domain-button"}
             onClick={() => setActiveSurface("tools")}
           >
@@ -4322,6 +4366,8 @@ export function App() {
                   ? "Workflows"
                 : activeSurface === "reports"
                   ? "Reports"
+                : activeSurface === "nodes"
+                  ? "Nodes"
                 : activeSurface === "tools"
                   ? "Tools"
                 : activeSurface === "skills"
@@ -4356,6 +4402,11 @@ export function App() {
               <span>
                 <Wrench size={16} />
                 Shared tool suite
+              </span>
+            ) : activeSurface === "nodes" ? (
+              <span>
+                <Database size={16} />
+                Execution fabric
               </span>
             ) : activeSurface === "skills" ? (
               <span>
@@ -4436,6 +4487,8 @@ export function App() {
           <RoutedObjectsWorkspace surface={activeSurface as RoutedObjectSurface} />
         ) : activeSurface === "tools" ? (
           <ToolsWorkspace />
+        ) : activeSurface === "nodes" ? (
+          <NodesWorkspace />
         ) : activeSurface === "skills" ? (
           <SkillsWorkspace />
         ) : activeSurface === "domain" ? (
@@ -4449,6 +4502,17 @@ export function App() {
                   <h3 id="chat-heading">Command thread</h3>
                 </div>
                 <div className="chat-actions">
+                  {chatMessages.some((message) => message.sender === "maestro") ? (
+                    <button
+                      className="acknowledge-all-button"
+                      type="button"
+                      onClick={() => acknowledgeAllMessages().catch(() => {
+                        setMaestroStatus("Could not acknowledge these messages.");
+                      })}
+                    >
+                      Acknowledge all
+                    </button>
+                  ) : null}
                   <button
                     className="icon-button"
                     aria-label="Previous sessions"
@@ -4473,7 +4537,9 @@ export function App() {
 
               <div className="thread" ref={chatThreadRef}>
                 {chatMessages.length > 0 ? (
-                  chatMessages.map((message) => (
+                  chatMessages
+                    .filter((message) => message.content?.trim())
+                    .map((message) => (
                     <div
                       className={`message ${
                         message.sender === "user" ? "user-message" : "maestro-message"
@@ -4493,15 +4559,26 @@ export function App() {
                           ) : null}
                       </span>
                       {message.sender === "maestro" ? (
-                        <MarkdownMessage content={message.content} />
+                        <>
+                          <MarkdownMessage content={message.content} />
+                          <button
+                            className="message-acknowledge-button"
+                            type="button"
+                            onClick={() => acknowledgeMessage(message.id).catch(() => {
+                              setMaestroStatus("Could not acknowledge this message.");
+                            })}
+                          >
+                            Acknowledge
+                          </button>
+                        </>
                       ) : (
                         <p className="plain-message">{message.content}</p>
                       )}
                     </div>
-                  ))
+                    ))
                 ) : (
                   <p className="empty-state">
-                    No active Maestro session yet. Send a request to start a plan or conversation.
+                    You’re caught up. Send a request to start a plan or conversation.
                   </p>
                 )}
                 {maestroBusy && (
@@ -6630,18 +6707,186 @@ function DomainWorkspace({ domainLabel }: { domainLabel: string }) {
   );
 }
 
+function NodesWorkspace() {
+  const [nodes, setNodes] = useState<ExecutionNode[]>([]);
+  const [enrollment, setEnrollment] = useState<NodeEnrollmentToken | null>(null);
+  const [statusMessage, setStatusMessage] = useState("Loading node health…");
+  const [busy, setBusy] = useState(false);
+
+  const refreshNodes = useCallback(async () => {
+    try {
+      const payload = await apiJson<{ nodes: ExecutionNode[] }>("/nodes");
+      setNodes(payload.nodes);
+      setStatusMessage(
+        payload.nodes.length
+          ? `${payload.nodes.filter((node) => node.effective_status === "online").length} of ${payload.nodes.length} nodes online.`
+          : "No nodes enrolled yet.",
+      );
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not load nodes.");
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshNodes();
+    const interval = window.setInterval(refreshNodes, 15_000);
+    return () => window.clearInterval(interval);
+  }, [refreshNodes]);
+
+  const createEnrollment = async () => {
+    setBusy(true);
+    try {
+      const payload = await apiJson<NodeEnrollmentToken>("/nodes/enrollment-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expires_in_seconds: 600,
+          allowed_capabilities: ["diagnostic.echo"],
+          metadata: { trust_zone: "personal" },
+        }),
+      });
+      setEnrollment(payload);
+      setStatusMessage("Enrollment code created. It expires in 10 minutes.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not create enrollment code.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyEnrollment = async () => {
+    if (!enrollment) return;
+    await navigator.clipboard.writeText(enrollment.enrollment_code);
+    setStatusMessage("Enrollment code copied.");
+  };
+
+  const sendDiagnostic = async (node: ExecutionNode) => {
+    setBusy(true);
+    try {
+      await apiJson(`/nodes/${node.id}/diagnostic-jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: `Hello ${node.display_name} from Maestro.` }),
+      });
+      setStatusMessage(`Diagnostic job queued for ${node.display_name}.`);
+      await refreshNodes();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not queue diagnostic job.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="admin-grid" aria-labelledby="nodes-heading">
+      <article className="domain-panel admin-panel">
+        <div className="section-heading-row">
+          <div>
+            <p className="eyebrow">Capability providers</p>
+            <h3 id="nodes-heading">Nodes</h3>
+          </div>
+          <button className="icon-button" onClick={refreshNodes} title="Refresh nodes" type="button">
+            <RefreshCw size={17} />
+          </button>
+        </div>
+        <p className="muted-copy">
+          Nodes connect outbound to Maestro and execute only the capabilities approved for that device.
+        </p>
+        <div className="node-list">
+          {nodes.map((node) => (
+            <article className="node-card" key={node.id}>
+              <div className="node-card-heading">
+                <div>
+                  <h4>{node.display_name}</h4>
+                  <p>{node.platform} · client {node.client_version || "unknown"}</p>
+                </div>
+                <span className={`node-health node-health-${node.effective_status}`}>
+                  {node.effective_status}
+                </span>
+              </div>
+              <dl className="node-facts">
+                <div>
+                  <dt>Last seen</dt>
+                  <dd>{node.last_seen_at ? formatDateTime(node.last_seen_at) : "Never"}</dd>
+                </div>
+                <div>
+                  <dt>Work</dt>
+                  <dd>{node.active_job_count} active · {node.pending_job_count} waiting</dd>
+                </div>
+              </dl>
+              <div className="node-capabilities">
+                {node.capabilities.map((capability) => (
+                  <span key={`${node.id}-${capability.key}`}>
+                    {capability.key} · {capability.status}
+                  </span>
+                ))}
+                {node.capabilities.length === 0 && <span>No capabilities advertised</span>}
+              </div>
+              <button
+                className="planner-action"
+                disabled={busy || !node.capabilities.some((capability) => capability.key === "diagnostic.echo")}
+                onClick={() => sendDiagnostic(node)}
+                type="button"
+              >
+                Send diagnostic
+              </button>
+            </article>
+          ))}
+          {nodes.length === 0 && <p className="empty-state">Create an enrollment code to connect the first Mac node.</p>}
+        </div>
+      </article>
+
+      <article className="domain-panel admin-panel">
+        <div>
+          <p className="eyebrow">Personal Mac</p>
+          <h3>Enroll a node</h3>
+        </div>
+        <p className="muted-copy">
+          This one-time code authorizes only the diagnostic capability. Device credentials are created during enrollment.
+        </p>
+        <button className="planner-action" disabled={busy} onClick={createEnrollment} type="button">
+          <Plus size={16} />
+          Create 10-minute code
+        </button>
+        {enrollment && (
+          <div className="enrollment-code" role="status">
+            <div>
+              <span>Enrollment code</span>
+              <strong>{enrollment.enrollment_code}</strong>
+              <small>Expires {formatDateTime(enrollment.expires_at)}</small>
+            </div>
+            <button className="icon-button" onClick={copyEnrollment} title="Copy enrollment code" type="button">
+              <Copy size={17} />
+            </button>
+          </div>
+        )}
+        <div className="node-run-hint">
+          <strong>Development flow</strong>
+          <code>maestro-node enroll --url {API_BASE_URL} --code &lt;code&gt;</code>
+          <code>maestro-node run</code>
+        </div>
+        <p className="memory-status">{statusMessage}</p>
+      </article>
+    </section>
+  );
+}
+
 function ToolsWorkspace() {
   const [tools, setTools] = useState<ToolRegistryItem[]>([]);
   const [connections, setConnections] = useState<ToolConnection[]>([]);
-  const [selectedToolKey, setSelectedToolKey] = useState("github");
+  const [providers, setProviders] = useState<IntegrationProvider[]>([]);
+  const [selectedToolKey, setSelectedToolKey] = useState(
+    () => new URLSearchParams(window.location.search).get("provider") ?? "github",
+  );
   const [expandedToolFamilies, setExpandedToolFamilies] = useState<Record<string, boolean>>({
     github: true,
     google: true,
   });
-  const [connectionDomain, setConnectionDomain] = useState("praxis");
-  const [connectionName, setConnectionName] = useState("Praxis memory retrieval");
-  const [connectionAuthType, setConnectionAuthType] = useState("service");
-  const [connectionConfig, setConnectionConfig] = useState("{}");
+  const [connectionDomain, setConnectionDomain] = useState(
+    () => new URLSearchParams(window.location.search).get("domain") ?? "praxis",
+  );
+  const [defaultRepository, setDefaultRepository] = useState("");
+  const [connectionBusy, setConnectionBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Ready");
 
   const selectedTool = tools.find((tool) => tool.key === selectedToolKey) ?? tools[0] ?? null;
@@ -6708,14 +6953,22 @@ function ToolsWorkspace() {
   const selectedConnection = selectedToolConnections.find(
     (connection) => connection.domain_key === connectionDomain,
   );
+  const oauthProvider = ["google", "github"].includes(selectedConnectionToolKey)
+    ? (selectedConnectionToolKey as "google" | "github")
+    : null;
+  const providerStatus = providers.find((provider) => provider.key === oauthProvider);
 
   const refreshTools = useCallback(async () => {
-    const [toolResponse, connectionResponse] = await Promise.all([
+    const [toolResponse, connectionResponse, providerResponse] = await Promise.all([
       apiJson<{ tools: ToolRegistryItem[] }>("/agents/tools"),
       apiJson<{ connections: ToolConnection[] }>("/agents/tools/connections"),
+      apiJson<{ providers: IntegrationProvider[] }>("/integrations/providers").catch(() => ({
+        providers: [],
+      })),
     ]);
     setTools(toolResponse.tools);
     setConnections(connectionResponse.connections);
+    setProviders(providerResponse.providers);
     if (!toolResponse.tools.some((tool) => tool.key === selectedToolKey)) {
       setSelectedToolKey(
         toolResponse.tools.some((tool) => tool.key === "github")
@@ -6726,55 +6979,16 @@ function ToolsWorkspace() {
   }, [selectedToolKey]);
 
   useEffect(() => {
-    if (!selectedTool) return;
-    const existing = connections.find(
-      (connection) =>
-        connection.tool_key === selectedConnectionToolKey &&
-        connection.domain_key === connectionDomain,
-    );
-    if (existing) {
-      setConnectionName(existing.display_name);
-      setConnectionAuthType(existing.auth_type);
-      setConnectionConfig(JSON.stringify(existing.config, null, 2));
-      return;
-    }
-    const isGitHub = selectedConnectionToolKey === "github";
-    const isGoogle = selectedConnectionToolKey === "google";
-    setConnectionName(
-      `${domainLabels[connectionDomain] ?? connectionDomain} ${
-        isGitHub ? "GitHub" : isGoogle ? "Google Workspace" : selectedTool.name
-      }`,
-    );
-    setConnectionAuthType(isGitHub ? "gh_cli" : isGoogle ? "oauth" : "service");
-    setConnectionConfig(
-      isGitHub
-        ? JSON.stringify(
-            {
-              repo: "Caliperti1/Maestro",
-              env_token_name: "",
-            },
-            null,
-            2,
-          )
-        : isGoogle
-          ? JSON.stringify(
-              {
-                user_id: "me",
-                client_id_env: "",
-                client_secret_env: "",
-                refresh_token_env: "",
-                default_query: "",
-              },
-              null,
-              2,
-            )
-        : "{}",
-    );
-  }, [connectionDomain, connections, selectedConnectionToolKey, selectedTool?.key]);
+    setDefaultRepository(String(selectedConnection?.config.repo ?? ""));
+  }, [selectedConnection]);
 
   useEffect(() => {
     if (!selectedTool) return;
-    setConnectionDomain(selectedToolConnections[0]?.domain_key ?? "praxis");
+    setConnectionDomain((current) =>
+      selectedToolConnections.some((connection) => connection.domain_key === current)
+        ? current
+        : (selectedToolConnections[0]?.domain_key ?? "praxis"),
+    );
   }, [selectedTool?.key]);
 
   const selectConnection = (domainKey: string) => {
@@ -6794,25 +7008,82 @@ function ToolsWorkspace() {
     );
   }, [refreshTools]);
 
-  const saveConnection = async () => {
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const integrationStatus = params.get("integration");
+    if (!integrationStatus) return;
+    const provider = params.get("provider");
+    const domain = params.get("domain");
+    if (provider === "google" || provider === "github") setSelectedToolKey(provider);
+    if (domain) setConnectionDomain(domain);
+    setStatusMessage(
+      params.get("message") ??
+        (integrationStatus === "connected" ? "Account connected." : "Connection failed."),
+    );
+    params.delete("integration");
+    params.delete("provider");
+    params.delete("domain");
+    params.delete("message");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+  }, []);
+
+  const connectProvider = async () => {
+    if (!oauthProvider) return;
+    setConnectionBusy(true);
     try {
-      const config = JSON.parse(connectionConfig) as Record<string, unknown>;
+      const response = await apiJson<{ authorization_url: string }>(
+        `/integrations/${oauthProvider}/${connectionDomain}/authorize`,
+        { method: "POST" },
+      );
+      window.location.assign(response.authorization_url);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Unable to start connection.");
+      setConnectionBusy(false);
+    }
+  };
+
+  const disconnectProvider = async () => {
+    if (!oauthProvider) return;
+    if (!window.confirm(`Disconnect ${providerStatus?.name ?? oauthProvider} from this domain?`)) {
+      return;
+    }
+    setConnectionBusy(true);
+    try {
+      await apiJson(`/integrations/${oauthProvider}/${connectionDomain}`, { method: "DELETE" });
+      setStatusMessage(`${providerStatus?.name ?? oauthProvider} disconnected.`);
+      await refreshTools();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Unable to disconnect account.");
+    } finally {
+      setConnectionBusy(false);
+    }
+  };
+
+  const saveProviderSettings = async () => {
+    if (oauthProvider !== "github") return;
+    setConnectionBusy(true);
+    try {
       await apiJson("/agents/tools/connections", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           domain_key: connectionDomain,
-          tool_key: selectedConnectionToolKey,
-          display_name: connectionName,
-          auth_type: connectionAuthType,
-          config,
-          is_active: true,
+          tool_key: "github",
+          display_name:
+            selectedConnection?.display_name ??
+            `${domainLabels[connectionDomain] ?? connectionDomain} GitHub`,
+          auth_type: selectedConnection?.auth_type ?? "oauth",
+          config: { repo: defaultRepository.trim() },
+          is_active: selectedConnection?.is_active ?? true,
         }),
       });
-      setStatusMessage("Tool connection saved.");
+      setStatusMessage("GitHub settings saved.");
       await refreshTools();
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Tool connection save failed.");
+      setStatusMessage(error instanceof Error ? error.message : "Unable to save settings.");
+    } finally {
+      setConnectionBusy(false);
     }
   };
 
@@ -6927,43 +7198,10 @@ function ToolsWorkspace() {
         {selectedTool ? (
           <>
             <p className="empty-state">{selectedTool.description}</p>
-            {selectedTool.key === "github" && (
+            {oauthProvider && (
               <p className="memory-status">
-                Edit the shared GitHub repo and credential config here. Every GitHub child tool in
-                this domain inherits it unless a more specific override is added later.
-              </p>
-            )}
-            {selectedTool.key.startsWith("github.") && (
-              <p className="memory-status">
-                GitHub tools share one domain connection named <strong>GitHub</strong>. Save repo
-                and token env config once here, then every GitHub tool can inherit it.
-              </p>
-            )}
-            {selectedTool.key === "gmail" && (
-              <p className="memory-status">
-                Gmail now uses the shared Google Workspace OAuth config. Select the Google family
-                to edit the domain connection used by Gmail, Drive, Docs, and Slides tools.
-              </p>
-            )}
-            {selectedTool.key.startsWith("gmail.") && (
-              <p className="memory-status">
-                Gmail tools inherit the domain <strong>Google Workspace</strong> connection. Save
-                user id plus refresh-token OAuth env config once on the Google family, then Gmail,
-                Drive, Docs, and Slides tools can use it.
-              </p>
-            )}
-            {selectedTool.key === "google" && (
-              <p className="memory-status">
-                Edit the shared Google Workspace OAuth config here. Drive, Docs, Slides, and related
-                child tools inherit this domain connection. Use refresh-token OAuth env vars for
-                durable scheduled workflows.
-              </p>
-            )}
-            {selectedTool.key.startsWith("google.") && (
-              <p className="memory-status">
-                Google Workspace tools share one domain connection named{" "}
-                <strong>Google Workspace</strong>. Save refresh-token OAuth env config once here,
-                then every Google child tool can inherit it.
+                One account connection is shared by every {providerStatus?.name ?? oauthProvider} tool
+                in the selected domain. Each domain can connect a different account.
               </p>
             )}
             <div className="connection-list">
@@ -6987,8 +7225,8 @@ function ToolsWorkspace() {
                       onClick={() => selectConnection(domainKey)}
                     >
                       <span>{label}</span>
-                      <strong>{connection?.display_name ?? "No credentials stored"}</strong>
-                      <span>{connection?.auth_type ?? "not connected"}</span>
+                      <strong>{connection?.account_label ?? connection?.display_name ?? "Not connected"}</strong>
+                      <span>{connection?.connection_status ?? "not connected"}</span>
                       <span>{domainAgents.length} agents</span>
                     </button>
                   );
@@ -7021,43 +7259,78 @@ function ToolsWorkspace() {
                     ))}
                 </select>
               </label>
-              <label>
-                Display name
-                <input
-                  value={connectionName}
-                  onChange={(event) => setConnectionName(event.target.value)}
-                />
-              </label>
-              <label>
-                Auth type
-                <select
-                  value={connectionAuthType}
-                  onChange={(event) => setConnectionAuthType(event.target.value)}
-                >
-                  <option value="service">Service</option>
-                  <option value="gh_cli">GitHub CLI</option>
-                  <option value="api_key">API key</option>
-                  <option value="oauth">OAuth</option>
-                  <option value="login_password">Login + password</option>
-                  <option value="manual">Manual</option>
-                </select>
-              </label>
-              <label>
-                Credential/config JSON
-                <textarea
-                  value={connectionConfig}
-                  onChange={(event) => setConnectionConfig(event.target.value)}
-                  placeholder='{"user_id":"me","client_id_env":"GOOGLE_CLIENT_ID","client_secret_env":"GOOGLE_CLIENT_SECRET","refresh_token_env":"PRAXIS_GMAIL_REFRESH_TOKEN"}'
-                />
-              </label>
-              {selectedConnection && (
-                <p className="memory-status">
-                  Existing secret-like values are redacted. Replace them here to update.
-                </p>
+              {oauthProvider ? (
+                <div className="integration-connect-card">
+                  <div className="integration-connect-heading">
+                    <div>
+                      <span className={`connection-status connection-status-${selectedConnection?.connection_status ?? "disconnected"}`}>
+                        {selectedConnection?.connection_status ?? "not connected"}
+                      </span>
+                      <h4>{providerStatus?.name ?? oauthProvider}</h4>
+                      <p>
+                        {selectedConnection?.account_label
+                          ? `Account: ${selectedConnection.account_label}`
+                          : `Connect an account for ${domainLabels[connectionDomain] ?? connectionDomain}.`}
+                      </p>
+                    </div>
+                    <ExternalLink size={18} />
+                  </div>
+                  {providerStatus?.setup_message && (
+                    <p className="integration-setup-message">{providerStatus.setup_message}</p>
+                  )}
+                  {oauthProvider === "google" && (
+                    <p className="muted-copy">
+                      Grants Maestro durable access to Gmail, Calendar, Drive, Docs, Sheets, Slides,
+                      and Meet for this domain. Google displays the exact permissions before approval.
+                    </p>
+                  )}
+                  {oauthProvider === "github" && (
+                    <label>
+                      Default repository (optional)
+                      <input
+                        value={defaultRepository}
+                        onChange={(event) => setDefaultRepository(event.target.value)}
+                        placeholder="owner/repository"
+                      />
+                    </label>
+                  )}
+                  <div className="integration-actions">
+                    <button
+                      className="planner-action"
+                      disabled={connectionBusy || !providerStatus?.configured}
+                      onClick={connectProvider}
+                      type="button"
+                    >
+                      <ExternalLink size={16} />
+                      {selectedConnection?.connection_status === "connected" ? "Reauthorize" : "Connect"}{" "}
+                      {providerStatus?.name ?? oauthProvider}
+                    </button>
+                    {oauthProvider === "github" && selectedConnection && (
+                      <button disabled={connectionBusy} onClick={saveProviderSettings} type="button">
+                        Save repository
+                      </button>
+                    )}
+                    {selectedConnection?.connection_status === "connected" && (
+                      <button disabled={connectionBusy} onClick={disconnectProvider} type="button">
+                        Disconnect
+                      </button>
+                    )}
+                  </div>
+                  {providerStatus?.callback_url && (
+                    <small className="integration-callback">
+                      OAuth callback: {providerStatus.callback_url}
+                    </small>
+                  )}
+                </div>
+              ) : (
+                <div className="integration-connect-card">
+                  <h4>No account login required</h4>
+                  <p className="muted-copy">
+                    This tool runs inside Maestro or on an authorized node. Its availability is
+                    controlled by the agent and node permissions shown above.
+                  </p>
+                </div>
               )}
-              <button className="planner-action" onClick={saveConnection}>
-                Save {domainLabels[connectionDomain] ?? connectionDomain} credentials
-              </button>
             </div>
           </>
         ) : (

@@ -4,38 +4,46 @@ Maestro seeds one domain operator and shared Google/GitHub connection for both `
 `perti-laboratories`. Child tools inherit the domain connection; credentials never travel between
 domains and are never committed.
 
-## Google
+## One-click account connections
 
-Follow [GOOGLE_WORKSPACE_SETUP.md](GOOGLE_WORKSPACE_SETUP.md) once per Google account. You may
-reuse one Google Cloud OAuth client ID and secret, but create a distinct refresh token while signed
-into each account.
+The Tools page owns account setup. Select Google Workspace or GitHub, select a domain, and choose
+**Connect**. Maestro redirects to the provider, stores the resulting token encrypted, and shares
+that domain connection with the provider's child tools. Reauthorize and Disconnect are available
+in the same panel.
 
-Add these values to `.env`:
+The deployment itself needs one OAuth application per provider plus one stable encryption key:
+
+```env
+INTEGRATION_CREDENTIAL_ENCRYPTION_KEY=
+INTEGRATION_GOOGLE_CLIENT_ID=
+INTEGRATION_GOOGLE_CLIENT_SECRET=
+INTEGRATION_GOOGLE_REDIRECT_URI=https://<api-host>/integrations/google/callback
+INTEGRATION_GITHUB_CLIENT_ID=
+INTEGRATION_GITHUB_CLIENT_SECRET=
+INTEGRATION_GITHUB_REDIRECT_URI=https://<api-host>/integrations/github/callback
+```
+
+The callback URLs are also displayed on the Tools page so they can be copied into Google Cloud and
+GitHub. Provider client secrets and account tokens are never sent to the browser.
+
+## Legacy environment connections
+
+Existing per-domain environment credentials remain supported during migration:
 
 ```env
 PERSONAL_GOOGLE_CLIENT_ID=
 PERSONAL_GOOGLE_CLIENT_SECRET=
 PERSONAL_GOOGLE_CLIENT_REFRESH_TOKEN=
+PERSONAL_GITHUB_TOKEN=
 PERTI_GOOGLE_CLIENT_ID=
 PERTI_GOOGLE_CLIENT_SECRET=
 PERTI_GOOGLE_CLIENT_REFRESH_TOKEN=
-```
-
-## GitHub
-
-Create a fine-grained token for each GitHub identity. Grant only the repositories that domain
-should access. Read-only repository metadata/contents/issues/PRs need Contents, Issues, Pull
-requests, and Metadata read access. Repository creation, issue changes, comments, and PR merges
-need the corresponding write permissions.
-
-```env
-PERSONAL_GITHUB_TOKEN=
 PERTI_GITHUB_TOKEN=
 ```
 
-The seeded shared GitHub connection intentionally has no default repository. Select a repository
-in the tool request or set the domain's default owner/repository from Tools > GitHub. Restart the
-backend after `.env` changes.
+These show as `legacy` connections in Tools and can be replaced by choosing Connect. The seeded
+shared GitHub connection intentionally has no default repository; its structured repository field
+remains available in Tools without exposing credential JSON.
 
 ## Smoke Test
 

@@ -5,6 +5,7 @@ from urllib import error, request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.config import get_settings
+from app.llm.structured import hosted_structured_response
 from app.prompts import load_prompt
 
 MaestroMessageIntent = Literal[
@@ -274,6 +275,92 @@ class OllamaMaestroTopicResolver:
         return resolved
 
 
+class HostedMaestroIntentClassifier:
+    def understand(
+        self,
+        *,
+        message: str,
+        active_plan: dict[str, Any],
+        has_blocking_rfi: bool,
+    ) -> MaestroMessageUnderstandingResponse | None:
+        settings = get_settings()
+        payload = hosted_structured_response(
+            provider=settings.maestro_intent_classifier_provider,
+            model=settings.maestro_intent_classifier_model,
+            instructions=load_prompt("maestro_message_understanding.md"),
+            input_payload={
+                "message": message,
+                "has_blocking_rfi": has_blocking_rfi,
+                "active_plan": active_plan,
+            },
+            schema_name="maestro_message_understanding",
+            schema=MaestroMessageUnderstandingResponse.model_json_schema(),
+        )
+        if payload is None:
+            return None
+        try:
+            return MaestroMessageUnderstandingResponse.model_validate(payload)
+        except (ValidationError, ValueError, TypeError):
+            return None
+
+    def classify(
+        self,
+        *,
+        message: str,
+        active_plan: dict[str, Any],
+        has_blocking_rfi: bool,
+    ) -> MaestroIntentClassifierResponse | None:
+        understood = self.understand(
+            message=message,
+            active_plan=active_plan,
+            has_blocking_rfi=has_blocking_rfi,
+        )
+        if understood is None:
+            return None
+        return MaestroIntentClassifierResponse(
+            intent=understood.legacy_intent(),
+            confidence=understood.confidence,
+            reason=understood.reason,
+        )
+
+
+class HostedMaestroTopicResolver:
+    def resolve(
+        self,
+        *,
+        message: str,
+        active_topic: dict[str, Any] | None,
+        recent_topics: list[dict[str, Any]],
+    ) -> MaestroTopicResolverResponse | None:
+        settings = get_settings()
+        payload = hosted_structured_response(
+            provider=settings.maestro_topic_resolver_provider,
+            model=settings.maestro_topic_resolver_model,
+            instructions=load_prompt("maestro_topic_resolver.md"),
+            input_payload={
+                "message": message,
+                "active_topic": active_topic,
+                "recent_topics": recent_topics[:8],
+            },
+            schema_name="maestro_topic_resolution",
+            schema=MaestroTopicResolverResponse.model_json_schema(),
+        )
+        if payload is None:
+            return None
+        try:
+            resolved = MaestroTopicResolverResponse.model_validate(payload)
+        except (ValidationError, ValueError, TypeError):
+            return None
+        topic_ids = {
+            str(topic.get("id"))
+            for topic in [active_topic or {}, *recent_topics]
+            if topic.get("id")
+        }
+        if resolved.scope == "existing_topic" and str(resolved.topic_id or "") not in topic_ids:
+            return None
+        return resolved
+
+
 def classify_active_message_with_local_llm(
     *,
     message: str,
@@ -281,9 +368,13 @@ def classify_active_message_with_local_llm(
     has_blocking_rfi: bool,
 ) -> str | None:
     settings = get_settings()
-    if settings.maestro_intent_classifier_provider != "ollama":
+    if settings.maestro_intent_classifier_provider == "ollama":
+        classifier = OllamaMaestroIntentClassifier()
+    elif settings.maestro_intent_classifier_provider in {"openai", "openrouter"}:
+        classifier = HostedMaestroIntentClassifier()
+    else:
         return None
-    response = OllamaMaestroIntentClassifier().classify(
+    response = classifier.classify(
         message=message,
         active_plan=active_plan,
         has_blocking_rfi=has_blocking_rfi,
@@ -300,9 +391,13 @@ def understand_message_with_local_llm(
     has_blocking_rfi: bool,
 ) -> MaestroMessageUnderstandingResponse | None:
     settings = get_settings()
-    if settings.maestro_intent_classifier_provider != "ollama":
+    if settings.maestro_intent_classifier_provider == "ollama":
+        classifier = OllamaMaestroIntentClassifier()
+    elif settings.maestro_intent_classifier_provider in {"openai", "openrouter"}:
+        classifier = HostedMaestroIntentClassifier()
+    else:
         return None
-    response = OllamaMaestroIntentClassifier().understand(
+    response = classifier.understand(
         message=message,
         active_plan=active_plan,
         has_blocking_rfi=has_blocking_rfi,
@@ -319,9 +414,13 @@ def resolve_topic_with_local_llm(
     recent_topics: list[dict[str, Any]],
 ) -> MaestroTopicResolverResponse | None:
     settings = get_settings()
-    if settings.maestro_topic_resolver_provider != "ollama":
+    if settings.maestro_topic_resolver_provider == "ollama":
+        resolver = OllamaMaestroTopicResolver()
+    elif settings.maestro_topic_resolver_provider in {"openai", "openrouter"}:
+        resolver = HostedMaestroTopicResolver()
+    else:
         return None
-    response = OllamaMaestroTopicResolver().resolve(
+    response = resolver.resolve(
         message=message,
         active_topic=active_topic,
         recent_topics=recent_topics,

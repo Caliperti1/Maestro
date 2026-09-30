@@ -180,7 +180,8 @@ class KnowledgeReadToolService:
                     stores=federated_requested,
                     max_items=limit,
                     max_chars=max_chars,
-                    use_semantic=True,
+                    use_semantic=False,
+                    sync_index=False,
                 )
             )
             semantic_status = bundle.semantic_status

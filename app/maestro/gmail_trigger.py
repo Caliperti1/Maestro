@@ -9,8 +9,9 @@ cursor so enabling the worker never processes an old inbox unexpectedly.
 from __future__ import annotations
 
 import errno
+import os
 import socket
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -269,9 +270,24 @@ class GmailTriggerService:
         )
 
     def _poll_domain(self, domain: Domain, *, page_size: int) -> dict[str, Any]:
-        connection = self._connection_for(domain)
         cursor = self._cursor_setting(domain)
         cursor_payload = dict(cursor.value or {}) if cursor else {}
+        retry_at = _parse_timestamp(cursor_payload.get("next_retry_at"))
+        missing_env_key = _missing_oauth_env_key(cursor_payload.get("last_error"))
+        if (
+            retry_at is not None
+            and retry_at > datetime.now(UTC)
+            and bool(cursor_payload.get("auth_required"))
+            and (not missing_env_key or not os.environ.get(missing_env_key))
+        ):
+            return {
+                "domain_key": domain.key,
+                "status": "auth_backoff",
+                "emitted_count": 0,
+                "retry_at": retry_at.isoformat(),
+                "auth_required": True,
+            }
+        connection = self._connection_for(domain)
         start_history_id = str(cursor_payload.get("history_id") or "").strip()
         if not start_history_id:
             return self._bootstrap_domain(domain, connection, status="initialized")
@@ -364,6 +380,8 @@ class GmailTriggerService:
                 "last_missing_count": len(missing),
                 "error_count": 0,
                 "failure_kind": None,
+                "auth_required": False,
+                "next_retry_at": None,
                 "outage_started_at": None,
                 "health_alert_active": False,
                 "last_recovered_at": now if prior_was_unhealthy else cursor_payload.get("last_recovered_at"),
@@ -426,6 +444,8 @@ class GmailTriggerService:
                 "last_reset_reason": reason or prior_payload.get("last_reset_reason"),
                 "cursor_reset_at": now if status in {"reset", "cursor_reset"} else prior_payload.get("cursor_reset_at"),
                 "error_count": 0,
+                "auth_required": False,
+                "next_retry_at": None,
             },
         )
         return {
@@ -443,6 +463,7 @@ class GmailTriggerService:
         now = now_datetime.isoformat()
         message = str(error)
         transient_network = _is_transient_network_failure(error)
+        auth_required = _is_oauth_authorization_failure(message)
         error_count = int(payload.get("error_count") or 0) + 1
         prior_status = str(payload.get("status") or "")
         outage_started_at = (
@@ -467,6 +488,13 @@ class GmailTriggerService:
             "last_error": message,
             "error_count": error_count,
             "failure_kind": "transient_network" if transient_network else "poll_error",
+            "auth_required": auth_required,
+            "next_retry_at": (
+                now_datetime
+                + timedelta(seconds=get_settings().gmail_trigger_auth_retry_seconds)
+            ).isoformat()
+            if auth_required
+            else None,
             "outage_started_at": outage_started_at.isoformat(),
             "health_alert_active": health_alert_active or should_alert,
             "health_alerted_at": now if should_alert else payload.get("health_alerted_at"),
@@ -491,6 +519,8 @@ class GmailTriggerService:
             "error": message,
             "error_count": error_count,
             "failure_kind": "transient_network" if transient_network else "poll_error",
+            "auth_required": auth_required,
+            "retry_at": updated.get("next_retry_at"),
             "outage_seconds": outage_seconds,
             "alerted": should_alert,
         }
@@ -693,6 +723,28 @@ _TRANSIENT_NETWORK_MARKERS = (
     "connection aborted",
     "connection refused",
 )
+
+
+def _missing_oauth_env_key(value: object) -> str | None:
+    marker = "Gmail OAuth env var is not set:"
+    message = str(value or "")
+    if marker not in message:
+        return None
+    key = message.split(marker, 1)[1].strip().split()[0] if message.split(marker, 1)[1].strip() else ""
+    return key if key.replace("_", "").isalnum() else None
+
+
+def _is_oauth_authorization_failure(value: object) -> bool:
+    message = str(value or "").lower()
+    return _missing_oauth_env_key(value) is not None or any(
+        marker in message
+        for marker in (
+            '"invalid_grant"',
+            '"unauthorized_client"',
+            "oauth refresh failed: 400",
+            "oauth refresh failed: 401",
+        )
+    )
 
 
 def _is_transient_network_failure(error: BaseException) -> bool:

@@ -524,6 +524,22 @@ h4 {
   gap: 8px;
 }
 
+.acknowledge-all-button,
+.message-acknowledge-button {
+  padding: 6px 9px;
+  color: var(--color-primary-strong);
+  font-size: 0.74rem;
+  font-weight: 800;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.message-acknowledge-button {
+  justify-self: start;
+  margin-top: 8px;
+}
+
 .session-history span {
   color: var(--color-muted);
   font-size: 0.74rem;
@@ -1725,6 +1741,56 @@ h4 {
 
 .connection-row strong {
   color: var(--color-heading);
+}
+
+.integration-connect-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: var(--color-surface-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+}
+
+.integration-connect-card h4,
+.integration-connect-card p {
+  margin: 0;
+}
+
+.integration-connect-heading,
+.integration-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.integration-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.connection-status {
+  display: inline-flex;
+  margin-bottom: 5px;
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.connection-status-connected {
+  color: var(--color-success, #238636);
+}
+
+.connection-status-error,
+.integration-setup-message {
+  color: var(--color-danger, #b42318);
+}
+
+.integration-callback {
+  overflow-wrap: anywhere;
+  color: var(--color-muted);
 }
 
 .task-list {
@@ -3339,4 +3405,121 @@ h4 {
   .status-pill {
     width: 100%;
   }
+}
+
+.node-list,
+.admin-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.node-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.node-card-heading,
+.enrollment-code {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.node-card-heading p,
+.node-card-heading h4 {
+  margin: 0;
+}
+
+.node-card-heading p {
+  margin-top: 4px;
+  color: var(--color-muted);
+  font-size: 0.82rem;
+}
+
+.node-health {
+  padding: 4px 8px;
+  color: var(--color-muted-strong);
+  background: var(--color-surface-soft);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.node-health-online { color: var(--color-success); }
+.node-health-offline,
+.node-health-revoked { color: var(--color-danger); }
+.node-health-degraded,
+.node-health-paused { color: var(--color-warning); }
+
+.node-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.node-facts div,
+.enrollment-code div,
+.node-run-hint {
+  display: grid;
+  gap: 6px;
+}
+
+.node-facts dt,
+.enrollment-code span {
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.node-facts dd {
+  margin: 0;
+  color: var(--color-ink);
+  font-size: 0.86rem;
+}
+
+.node-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.node-capabilities span {
+  padding: 5px 7px;
+  color: var(--color-muted-strong);
+  background: var(--color-surface-soft);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.75rem;
+}
+
+.enrollment-code,
+.node-run-hint {
+  padding: 12px;
+  background: var(--color-surface-soft);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.enrollment-code strong {
+  color: var(--color-heading);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 1.08rem;
+  letter-spacing: 0.08em;
+}
+
+.enrollment-code small { color: var(--color-muted); }
+
+.node-run-hint code {
+  overflow-wrap: anywhere;
+  color: var(--color-muted-strong);
 }

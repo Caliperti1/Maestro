@@ -1,5 +1,6 @@
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, Generic, TypeVar
 
 from sqlalchemy import select
@@ -10,10 +11,15 @@ from app.db.models import (
     Artifact,
     Conversation,
     Domain,
+    ExecutionNode,
     MemoryItem,
     MemoryLink,
     MemoryProposal,
     Message,
+    NodeCapability,
+    NodeEnrollmentToken,
+    NodeJob,
+    NodeJobEvent,
     Report,
     ScheduledRun,
     SeedPackage,
@@ -196,6 +202,110 @@ class ToolCallRepository(Repository[ToolCall]):
 
     def list_by_task(self, task_id: uuid.UUID) -> Sequence[ToolCall]:
         return self.session.scalars(select(ToolCall).where(ToolCall.task_id == task_id)).all()
+
+
+class ExecutionNodeRepository(Repository[ExecutionNode]):
+    def __init__(self, session: Session):
+        super().__init__(session, ExecutionNode)
+
+    def list_recent(self) -> Sequence[ExecutionNode]:
+        return self.session.scalars(
+            select(ExecutionNode).order_by(ExecutionNode.created_at.desc())
+        ).all()
+
+
+class NodeCapabilityRepository(Repository[NodeCapability]):
+    def __init__(self, session: Session):
+        super().__init__(session, NodeCapability)
+
+    def list_by_node(self, node_id: uuid.UUID) -> Sequence[NodeCapability]:
+        return self.session.scalars(
+            select(NodeCapability)
+            .where(NodeCapability.node_id == node_id)
+            .order_by(NodeCapability.capability_key)
+        ).all()
+
+    def get_by_node_and_key(
+        self, node_id: uuid.UUID, capability_key: str
+    ) -> NodeCapability | None:
+        return self.session.scalar(
+            select(NodeCapability).where(
+                NodeCapability.node_id == node_id,
+                NodeCapability.capability_key == capability_key,
+            )
+        )
+
+
+class NodeEnrollmentTokenRepository(Repository[NodeEnrollmentToken]):
+    def __init__(self, session: Session):
+        super().__init__(session, NodeEnrollmentToken)
+
+    def get_for_update(self, token_id: uuid.UUID) -> NodeEnrollmentToken | None:
+        return self.session.scalar(
+            select(NodeEnrollmentToken)
+            .where(NodeEnrollmentToken.id == token_id)
+            .with_for_update()
+        )
+
+
+class NodeJobRepository(Repository[NodeJob]):
+    def __init__(self, session: Session):
+        super().__init__(session, NodeJob)
+
+    def list_by_node(self, node_id: uuid.UUID, *, limit: int = 100) -> Sequence[NodeJob]:
+        return self.session.scalars(
+            select(NodeJob)
+            .where(NodeJob.node_id == node_id)
+            .order_by(NodeJob.created_at.desc())
+            .limit(limit)
+        ).all()
+
+    def claim_candidate(
+        self,
+        *,
+        node_id: uuid.UUID,
+        capabilities: list[str],
+        now: datetime,
+    ) -> NodeJob | None:
+        if not capabilities:
+            return None
+        return self.session.scalar(
+            select(NodeJob)
+            .where(
+                NodeJob.node_id == node_id,
+                NodeJob.status.in_(["queued", "waiting_for_node"]),
+                NodeJob.available_at <= now,
+                NodeJob.capability_key.in_(capabilities),
+                NodeJob.attempt_count < NodeJob.max_attempts,
+            )
+            .order_by(NodeJob.priority.asc(), NodeJob.created_at.asc())
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+
+    def expired_leases(self, node_id: uuid.UUID, *, now: datetime) -> Sequence[NodeJob]:
+        return self.session.scalars(
+            select(NodeJob)
+            .where(
+                NodeJob.node_id == node_id,
+                NodeJob.status == "leased",
+                NodeJob.lease_expires_at <= now,
+            )
+            .with_for_update(skip_locked=True)
+        ).all()
+
+
+class NodeJobEventRepository(Repository[NodeJobEvent]):
+    def __init__(self, session: Session):
+        super().__init__(session, NodeJobEvent)
+
+    def list_by_node(self, node_id: uuid.UUID, *, limit: int = 100) -> Sequence[NodeJobEvent]:
+        return self.session.scalars(
+            select(NodeJobEvent)
+            .where(NodeJobEvent.node_id == node_id)
+            .order_by(NodeJobEvent.created_at.desc())
+            .limit(limit)
+        ).all()
 
 
 class ArtifactRepository(Repository[Artifact]):
