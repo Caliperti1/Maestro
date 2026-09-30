@@ -1743,6 +1743,56 @@ h4 {
   color: var(--color-heading);
 }
 
+.integration-connect-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: var(--color-surface-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+}
+
+.integration-connect-card h4,
+.integration-connect-card p {
+  margin: 0;
+}
+
+.integration-connect-heading,
+.integration-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.integration-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.connection-status {
+  display: inline-flex;
+  margin-bottom: 5px;
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.connection-status-connected {
+  color: var(--color-success, #238636);
+}
+
+.connection-status-error,
+.integration-setup-message {
+  color: var(--color-danger, #b42318);
+}
+
+.integration-callback {
+  overflow-wrap: anywhere;
+  color: var(--color-muted);
+}
+
 .task-list {
   display: grid;
   gap: 8px;

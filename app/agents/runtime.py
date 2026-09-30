@@ -32,6 +32,7 @@ from app.db.models import (
 )
 from app.db.repositories import AgentRepository, DomainRepository, SkillRepository
 from app.db.seed import seed_default_domains
+from app.integrations.credentials import CredentialEncryptionError, encrypted_credentials
 from app.llm.client import LLMClient, OllamaLLMClient, OpenAILLMClient
 from app.llm.telemetry import record_llm_call
 from app.maestro.identity_grounding import IdentityGroundingService
@@ -140,6 +141,10 @@ class ToolConnectionSpec:
     auth_type: str
     config: dict[str, Any]
     is_active: bool
+    connection_status: str
+    account_label: str | None
+    oauth_scopes: list[str]
+    oauth_provider: str | None
 
 
 @dataclass(frozen=True)
@@ -825,6 +830,12 @@ class AgentRegistryService:
                     auth_type=connection.auth_type,
                     config=_redact_config(connection.config or {}),
                     is_active=connection.is_active,
+                    connection_status=_tool_connection_status(connection),
+                    account_label=str((connection.config or {}).get("account_label") or "") or None,
+                    oauth_scopes=list((connection.config or {}).get("oauth_scopes") or []),
+                    oauth_provider=(
+                        connection.tool_key if connection.tool_key in {"google", "github"} else None
+                    ),
                 )
             )
         return specs
@@ -878,6 +889,10 @@ class AgentRegistryService:
             auth_type=existing.auth_type,
             config=_redact_config(existing.config or {}),
             is_active=existing.is_active,
+            connection_status=_tool_connection_status(existing),
+            account_label=str((existing.config or {}).get("account_label") or "") or None,
+            oauth_scopes=list((existing.config or {}).get("oauth_scopes") or []),
+            oauth_provider=(existing.tool_key if existing.tool_key in {"google", "github"} else None),
         )
 
     def _spec_for_agent(self, agent: Agent, *, domain: Domain | None) -> AgentSpec:
@@ -2231,7 +2246,25 @@ def _merge_secret_config(
 
 def _is_secret_key(key: str) -> bool:
     lowered = key.lower()
-    return any(token in lowered for token in ("secret", "token", "api_key", "apikey", "password"))
+    return any(
+        token in lowered
+        for token in ("secret", "token", "credential", "api_key", "apikey", "password")
+    )
+
+
+def _tool_connection_status(connection: ToolConnection) -> str:
+    if not connection.is_active:
+        return "disconnected"
+    config = connection.config or {}
+    if config.get("oauth_credential_ciphertext"):
+        try:
+            encrypted_credentials(config)
+        except CredentialEncryptionError:
+            return "error"
+        return "connected"
+    if connection.tool_key in {"google", "github"}:
+        return "legacy"
+    return "configured"
 
 
 def _normalize_tool_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:

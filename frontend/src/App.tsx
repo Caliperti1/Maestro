@@ -101,6 +101,7 @@ import type {
   WorkflowTemplate,
   SkillRegistryItem,
   ToolConnection,
+  IntegrationProvider,
   ToolRegistryItem,
   WorkflowReport,
   WorkflowRunLogEntry,
@@ -2913,7 +2914,9 @@ function IssuesWorkspace() {
 export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeDomain, setActiveDomain] = useState("Maestro");
-  const [activeSurface, setActiveSurface] = useState<ActiveSurface>("dashboard");
+  const [activeSurface, setActiveSurface] = useState<ActiveSurface>(() =>
+    new URLSearchParams(window.location.search).get("surface") === "tools" ? "tools" : "dashboard",
+  );
   const [maestroNavOpen, setMaestroNavOpen] = useState(false);
   const [memoryNavOpen, setMemoryNavOpen] = useState(false);
   const [domainsNavOpen, setDomainsNavOpen] = useState(false);
@@ -6871,15 +6874,19 @@ function NodesWorkspace() {
 function ToolsWorkspace() {
   const [tools, setTools] = useState<ToolRegistryItem[]>([]);
   const [connections, setConnections] = useState<ToolConnection[]>([]);
-  const [selectedToolKey, setSelectedToolKey] = useState("github");
+  const [providers, setProviders] = useState<IntegrationProvider[]>([]);
+  const [selectedToolKey, setSelectedToolKey] = useState(
+    () => new URLSearchParams(window.location.search).get("provider") ?? "github",
+  );
   const [expandedToolFamilies, setExpandedToolFamilies] = useState<Record<string, boolean>>({
     github: true,
     google: true,
   });
-  const [connectionDomain, setConnectionDomain] = useState("praxis");
-  const [connectionName, setConnectionName] = useState("Praxis memory retrieval");
-  const [connectionAuthType, setConnectionAuthType] = useState("service");
-  const [connectionConfig, setConnectionConfig] = useState("{}");
+  const [connectionDomain, setConnectionDomain] = useState(
+    () => new URLSearchParams(window.location.search).get("domain") ?? "praxis",
+  );
+  const [defaultRepository, setDefaultRepository] = useState("");
+  const [connectionBusy, setConnectionBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Ready");
 
   const selectedTool = tools.find((tool) => tool.key === selectedToolKey) ?? tools[0] ?? null;
@@ -6946,14 +6953,22 @@ function ToolsWorkspace() {
   const selectedConnection = selectedToolConnections.find(
     (connection) => connection.domain_key === connectionDomain,
   );
+  const oauthProvider = ["google", "github"].includes(selectedConnectionToolKey)
+    ? (selectedConnectionToolKey as "google" | "github")
+    : null;
+  const providerStatus = providers.find((provider) => provider.key === oauthProvider);
 
   const refreshTools = useCallback(async () => {
-    const [toolResponse, connectionResponse] = await Promise.all([
+    const [toolResponse, connectionResponse, providerResponse] = await Promise.all([
       apiJson<{ tools: ToolRegistryItem[] }>("/agents/tools"),
       apiJson<{ connections: ToolConnection[] }>("/agents/tools/connections"),
+      apiJson<{ providers: IntegrationProvider[] }>("/integrations/providers").catch(() => ({
+        providers: [],
+      })),
     ]);
     setTools(toolResponse.tools);
     setConnections(connectionResponse.connections);
+    setProviders(providerResponse.providers);
     if (!toolResponse.tools.some((tool) => tool.key === selectedToolKey)) {
       setSelectedToolKey(
         toolResponse.tools.some((tool) => tool.key === "github")
@@ -6964,55 +6979,16 @@ function ToolsWorkspace() {
   }, [selectedToolKey]);
 
   useEffect(() => {
-    if (!selectedTool) return;
-    const existing = connections.find(
-      (connection) =>
-        connection.tool_key === selectedConnectionToolKey &&
-        connection.domain_key === connectionDomain,
-    );
-    if (existing) {
-      setConnectionName(existing.display_name);
-      setConnectionAuthType(existing.auth_type);
-      setConnectionConfig(JSON.stringify(existing.config, null, 2));
-      return;
-    }
-    const isGitHub = selectedConnectionToolKey === "github";
-    const isGoogle = selectedConnectionToolKey === "google";
-    setConnectionName(
-      `${domainLabels[connectionDomain] ?? connectionDomain} ${
-        isGitHub ? "GitHub" : isGoogle ? "Google Workspace" : selectedTool.name
-      }`,
-    );
-    setConnectionAuthType(isGitHub ? "gh_cli" : isGoogle ? "oauth" : "service");
-    setConnectionConfig(
-      isGitHub
-        ? JSON.stringify(
-            {
-              repo: "Caliperti1/Maestro",
-              env_token_name: "",
-            },
-            null,
-            2,
-          )
-        : isGoogle
-          ? JSON.stringify(
-              {
-                user_id: "me",
-                client_id_env: "",
-                client_secret_env: "",
-                refresh_token_env: "",
-                default_query: "",
-              },
-              null,
-              2,
-            )
-        : "{}",
-    );
-  }, [connectionDomain, connections, selectedConnectionToolKey, selectedTool?.key]);
+    setDefaultRepository(String(selectedConnection?.config.repo ?? ""));
+  }, [selectedConnection]);
 
   useEffect(() => {
     if (!selectedTool) return;
-    setConnectionDomain(selectedToolConnections[0]?.domain_key ?? "praxis");
+    setConnectionDomain((current) =>
+      selectedToolConnections.some((connection) => connection.domain_key === current)
+        ? current
+        : (selectedToolConnections[0]?.domain_key ?? "praxis"),
+    );
   }, [selectedTool?.key]);
 
   const selectConnection = (domainKey: string) => {
@@ -7032,25 +7008,82 @@ function ToolsWorkspace() {
     );
   }, [refreshTools]);
 
-  const saveConnection = async () => {
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const integrationStatus = params.get("integration");
+    if (!integrationStatus) return;
+    const provider = params.get("provider");
+    const domain = params.get("domain");
+    if (provider === "google" || provider === "github") setSelectedToolKey(provider);
+    if (domain) setConnectionDomain(domain);
+    setStatusMessage(
+      params.get("message") ??
+        (integrationStatus === "connected" ? "Account connected." : "Connection failed."),
+    );
+    params.delete("integration");
+    params.delete("provider");
+    params.delete("domain");
+    params.delete("message");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+  }, []);
+
+  const connectProvider = async () => {
+    if (!oauthProvider) return;
+    setConnectionBusy(true);
     try {
-      const config = JSON.parse(connectionConfig) as Record<string, unknown>;
+      const response = await apiJson<{ authorization_url: string }>(
+        `/integrations/${oauthProvider}/${connectionDomain}/authorize`,
+        { method: "POST" },
+      );
+      window.location.assign(response.authorization_url);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Unable to start connection.");
+      setConnectionBusy(false);
+    }
+  };
+
+  const disconnectProvider = async () => {
+    if (!oauthProvider) return;
+    if (!window.confirm(`Disconnect ${providerStatus?.name ?? oauthProvider} from this domain?`)) {
+      return;
+    }
+    setConnectionBusy(true);
+    try {
+      await apiJson(`/integrations/${oauthProvider}/${connectionDomain}`, { method: "DELETE" });
+      setStatusMessage(`${providerStatus?.name ?? oauthProvider} disconnected.`);
+      await refreshTools();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Unable to disconnect account.");
+    } finally {
+      setConnectionBusy(false);
+    }
+  };
+
+  const saveProviderSettings = async () => {
+    if (oauthProvider !== "github") return;
+    setConnectionBusy(true);
+    try {
       await apiJson("/agents/tools/connections", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           domain_key: connectionDomain,
-          tool_key: selectedConnectionToolKey,
-          display_name: connectionName,
-          auth_type: connectionAuthType,
-          config,
-          is_active: true,
+          tool_key: "github",
+          display_name:
+            selectedConnection?.display_name ??
+            `${domainLabels[connectionDomain] ?? connectionDomain} GitHub`,
+          auth_type: selectedConnection?.auth_type ?? "oauth",
+          config: { repo: defaultRepository.trim() },
+          is_active: selectedConnection?.is_active ?? true,
         }),
       });
-      setStatusMessage("Tool connection saved.");
+      setStatusMessage("GitHub settings saved.");
       await refreshTools();
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Tool connection save failed.");
+      setStatusMessage(error instanceof Error ? error.message : "Unable to save settings.");
+    } finally {
+      setConnectionBusy(false);
     }
   };
 
@@ -7165,43 +7198,10 @@ function ToolsWorkspace() {
         {selectedTool ? (
           <>
             <p className="empty-state">{selectedTool.description}</p>
-            {selectedTool.key === "github" && (
+            {oauthProvider && (
               <p className="memory-status">
-                Edit the shared GitHub repo and credential config here. Every GitHub child tool in
-                this domain inherits it unless a more specific override is added later.
-              </p>
-            )}
-            {selectedTool.key.startsWith("github.") && (
-              <p className="memory-status">
-                GitHub tools share one domain connection named <strong>GitHub</strong>. Save repo
-                and token env config once here, then every GitHub tool can inherit it.
-              </p>
-            )}
-            {selectedTool.key === "gmail" && (
-              <p className="memory-status">
-                Gmail now uses the shared Google Workspace OAuth config. Select the Google family
-                to edit the domain connection used by Gmail, Drive, Docs, and Slides tools.
-              </p>
-            )}
-            {selectedTool.key.startsWith("gmail.") && (
-              <p className="memory-status">
-                Gmail tools inherit the domain <strong>Google Workspace</strong> connection. Save
-                user id plus refresh-token OAuth env config once on the Google family, then Gmail,
-                Drive, Docs, and Slides tools can use it.
-              </p>
-            )}
-            {selectedTool.key === "google" && (
-              <p className="memory-status">
-                Edit the shared Google Workspace OAuth config here. Drive, Docs, Slides, and related
-                child tools inherit this domain connection. Use refresh-token OAuth env vars for
-                durable scheduled workflows.
-              </p>
-            )}
-            {selectedTool.key.startsWith("google.") && (
-              <p className="memory-status">
-                Google Workspace tools share one domain connection named{" "}
-                <strong>Google Workspace</strong>. Save refresh-token OAuth env config once here,
-                then every Google child tool can inherit it.
+                One account connection is shared by every {providerStatus?.name ?? oauthProvider} tool
+                in the selected domain. Each domain can connect a different account.
               </p>
             )}
             <div className="connection-list">
@@ -7225,8 +7225,8 @@ function ToolsWorkspace() {
                       onClick={() => selectConnection(domainKey)}
                     >
                       <span>{label}</span>
-                      <strong>{connection?.display_name ?? "No credentials stored"}</strong>
-                      <span>{connection?.auth_type ?? "not connected"}</span>
+                      <strong>{connection?.account_label ?? connection?.display_name ?? "Not connected"}</strong>
+                      <span>{connection?.connection_status ?? "not connected"}</span>
                       <span>{domainAgents.length} agents</span>
                     </button>
                   );
@@ -7259,43 +7259,78 @@ function ToolsWorkspace() {
                     ))}
                 </select>
               </label>
-              <label>
-                Display name
-                <input
-                  value={connectionName}
-                  onChange={(event) => setConnectionName(event.target.value)}
-                />
-              </label>
-              <label>
-                Auth type
-                <select
-                  value={connectionAuthType}
-                  onChange={(event) => setConnectionAuthType(event.target.value)}
-                >
-                  <option value="service">Service</option>
-                  <option value="gh_cli">GitHub CLI</option>
-                  <option value="api_key">API key</option>
-                  <option value="oauth">OAuth</option>
-                  <option value="login_password">Login + password</option>
-                  <option value="manual">Manual</option>
-                </select>
-              </label>
-              <label>
-                Credential/config JSON
-                <textarea
-                  value={connectionConfig}
-                  onChange={(event) => setConnectionConfig(event.target.value)}
-                  placeholder='{"user_id":"me","client_id_env":"GOOGLE_CLIENT_ID","client_secret_env":"GOOGLE_CLIENT_SECRET","refresh_token_env":"PRAXIS_GMAIL_REFRESH_TOKEN"}'
-                />
-              </label>
-              {selectedConnection && (
-                <p className="memory-status">
-                  Existing secret-like values are redacted. Replace them here to update.
-                </p>
+              {oauthProvider ? (
+                <div className="integration-connect-card">
+                  <div className="integration-connect-heading">
+                    <div>
+                      <span className={`connection-status connection-status-${selectedConnection?.connection_status ?? "disconnected"}`}>
+                        {selectedConnection?.connection_status ?? "not connected"}
+                      </span>
+                      <h4>{providerStatus?.name ?? oauthProvider}</h4>
+                      <p>
+                        {selectedConnection?.account_label
+                          ? `Account: ${selectedConnection.account_label}`
+                          : `Connect an account for ${domainLabels[connectionDomain] ?? connectionDomain}.`}
+                      </p>
+                    </div>
+                    <ExternalLink size={18} />
+                  </div>
+                  {providerStatus?.setup_message && (
+                    <p className="integration-setup-message">{providerStatus.setup_message}</p>
+                  )}
+                  {oauthProvider === "google" && (
+                    <p className="muted-copy">
+                      Grants Maestro durable access to Gmail, Calendar, Drive, Docs, Sheets, Slides,
+                      and Meet for this domain. Google displays the exact permissions before approval.
+                    </p>
+                  )}
+                  {oauthProvider === "github" && (
+                    <label>
+                      Default repository (optional)
+                      <input
+                        value={defaultRepository}
+                        onChange={(event) => setDefaultRepository(event.target.value)}
+                        placeholder="owner/repository"
+                      />
+                    </label>
+                  )}
+                  <div className="integration-actions">
+                    <button
+                      className="planner-action"
+                      disabled={connectionBusy || !providerStatus?.configured}
+                      onClick={connectProvider}
+                      type="button"
+                    >
+                      <ExternalLink size={16} />
+                      {selectedConnection?.connection_status === "connected" ? "Reauthorize" : "Connect"}{" "}
+                      {providerStatus?.name ?? oauthProvider}
+                    </button>
+                    {oauthProvider === "github" && selectedConnection && (
+                      <button disabled={connectionBusy} onClick={saveProviderSettings} type="button">
+                        Save repository
+                      </button>
+                    )}
+                    {selectedConnection?.connection_status === "connected" && (
+                      <button disabled={connectionBusy} onClick={disconnectProvider} type="button">
+                        Disconnect
+                      </button>
+                    )}
+                  </div>
+                  {providerStatus?.callback_url && (
+                    <small className="integration-callback">
+                      OAuth callback: {providerStatus.callback_url}
+                    </small>
+                  )}
+                </div>
+              ) : (
+                <div className="integration-connect-card">
+                  <h4>No account login required</h4>
+                  <p className="muted-copy">
+                    This tool runs inside Maestro or on an authorized node. Its availability is
+                    controlled by the agent and node permissions shown above.
+                  </p>
+                </div>
               )}
-              <button className="planner-action" onClick={saveConnection}>
-                Save {domainLabels[connectionDomain] ?? connectionDomain} credentials
-              </button>
             </div>
           </>
         ) : (

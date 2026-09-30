@@ -946,6 +946,19 @@ export type ToolConnection = {
   auth_type: string;
   config: Record<string, unknown>;
   is_active: boolean;
+  connection_status: "connected" | "legacy" | "configured" | "disconnected" | "error";
+  account_label: string | null;
+  oauth_scopes: string[];
+  oauth_provider: "google" | "github" | null;
+};
+
+export type IntegrationProvider = {
+  key: "google" | "github";
+  name: string;
+  configured: boolean;
+  callback_url: string;
+  scope_count: number;
+  setup_message: string | null;
 };
 
 export type SkillRegistryItem = {

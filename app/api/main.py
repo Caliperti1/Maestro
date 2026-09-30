@@ -20,6 +20,7 @@ from app.agents.runtime import AgentRegistryService
 from app.api.agents import router as agents_router
 from app.api.auth import router as auth_router
 from app.api.issues import router as issues_router
+from app.api.integrations import router as integrations_router
 from app.api.maestro import router as maestro_router
 from app.api.memory import router as memory_router
 from app.api.mobile_updates import router as mobile_updates_router
@@ -131,6 +132,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_router)
     app.include_router(auth_router)
     app.include_router(issues_router)
+    app.include_router(integrations_router)
     app.include_router(agents_router)
     app.include_router(maestro_router)
     app.include_router(mobile_updates_router)

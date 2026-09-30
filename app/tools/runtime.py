@@ -49,6 +49,7 @@ from app.db.models import (
     WorkflowRun,
 )
 from app.db.repositories import AgentRepository, DomainRepository
+from app.integrations.credentials import CredentialEncryptionError, encrypted_credentials
 from app.llm.client import LLMClientError, OpenAILLMClient
 from app.llm.telemetry import record_llm_call
 from app.maestro.channel import record_channel_message
@@ -4414,6 +4415,10 @@ def _github_env(connection: ToolConnection | None) -> dict[str, str]:
     if connection is None:
         return env
     config = connection.config or {}
+    oauth_token = str(_oauth_credentials(config).get("access_token") or "").strip()
+    if oauth_token:
+        env["GH_TOKEN"] = oauth_token
+        return env
     token_env_name = str(config.get("env_token_name") or "").strip()
     if token_env_name:
         token = os.environ.get(token_env_name) or _dotenv_value(token_env_name)
@@ -4428,21 +4433,18 @@ def _github_env(connection: ToolConnection | None) -> dict[str, str]:
 
 def _gmail_access_token(connection: ToolConnection | None) -> str:
     config = _connection_config(connection)
-    refresh_token = _secret_config_value(
-        config,
-        "refresh_token",
-        env_keys=("refresh_token_env", "env_refresh_token_name"),
+    oauth_credentials = _oauth_credentials(config)
+    refresh_token = str(oauth_credentials.get("refresh_token") or "").strip() or _secret_config_value(
+        config, "refresh_token", env_keys=("refresh_token_env", "env_refresh_token_name")
     )
     if refresh_token:
-        client_id = _secret_config_value(
-            config,
-            "client_id",
-            env_keys=("client_id_env", "env_client_id_name"),
+        client_id = str(oauth_credentials.get("client_id") or "").strip() or _secret_config_value(
+            config, "client_id", env_keys=("client_id_env", "env_client_id_name")
         )
-        client_secret = _secret_config_value(
-            config,
-            "client_secret",
-            env_keys=("client_secret_env", "env_client_secret_name"),
+        client_secret = str(
+            oauth_credentials.get("client_secret") or ""
+        ).strip() or _secret_config_value(
+            config, "client_secret", env_keys=("client_secret_env", "env_client_secret_name")
         )
         if not client_id:
             raise ToolExecutionError("Gmail refresh-token OAuth requires client_id or client_id_env.")
@@ -4534,6 +4536,15 @@ def _secret_config_value(
         raise ToolExecutionError(f"Gmail OAuth env var is not set: {env_name}")
     value = str(config.get(key) or "").strip()
     return value or None
+
+
+def _oauth_credentials(config: dict[str, Any]) -> dict[str, Any]:
+    if not config.get("oauth_credential_ciphertext"):
+        return {}
+    try:
+        return encrypted_credentials(config)
+    except CredentialEncryptionError as exc:
+        raise ToolExecutionError(str(exc)) from exc
 
 
 def _google_oauth_refresh_access_token(

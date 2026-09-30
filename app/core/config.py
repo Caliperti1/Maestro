@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     owner_session_ttl_seconds: Annotated[int, Field(ge=300, le=2592000)] = 43200
     owner_cookie_secure: bool = True
     owner_cookie_samesite: str = "lax"
+    integration_credential_encryption_key: str | None = None
+    integration_google_client_id: str | None = None
+    integration_google_client_secret: str | None = None
+    integration_google_redirect_uri: str | None = None
+    integration_github_client_id: str | None = None
+    integration_github_client_secret: str | None = None
+    integration_github_redirect_uri: str | None = None
     artifact_store_backend: str = "local"
     artifact_store_local_root: str | None = None
     artifact_store_s3_bucket: str | None = None

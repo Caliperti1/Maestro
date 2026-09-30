@@ -494,6 +494,10 @@ def _tool_connection_payload(connection) -> dict[str, Any]:
         "auth_type": connection.auth_type,
         "config": connection.config,
         "is_active": connection.is_active,
+        "connection_status": connection.connection_status,
+        "account_label": connection.account_label,
+        "oauth_scopes": connection.oauth_scopes,
+        "oauth_provider": connection.oauth_provider,
     }
 
 

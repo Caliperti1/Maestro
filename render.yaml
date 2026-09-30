@@ -176,6 +176,20 @@ envVarGroups:
         value: openai/gpt-5.6-luna
       - key: OWNER_AUTH_MODE
         value: oidc
+      - key: INTEGRATION_CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: INTEGRATION_GOOGLE_CLIENT_ID
+        sync: false
+      - key: INTEGRATION_GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: INTEGRATION_GOOGLE_REDIRECT_URI
+        sync: false
+      - key: INTEGRATION_GITHUB_CLIENT_ID
+        sync: false
+      - key: INTEGRATION_GITHUB_CLIENT_SECRET
+        sync: false
+      - key: INTEGRATION_GITHUB_REDIRECT_URI
+        sync: false
       - key: OWNER_COOKIE_SECURE
         value: "true"
       - key: OWNER_COOKIE_SAMESITE

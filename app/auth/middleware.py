@@ -19,6 +19,8 @@ _PUBLIC_EXACT = {
     "/auth/login",
     "/auth/callback",
     "/auth/bridge",
+    "/integrations/google/callback",
+    "/integrations/github/callback",
     "/nodes/enroll",
 }
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
