@@ -358,7 +358,26 @@ class IntegrationOAuthService:
             connection.auth_type = "oauth"
             connection.config = config
             connection.is_active = True
+        if provider == "google":
+            self._clear_google_source_backoff(domain_key)
         self.session.commit()
+
+    def _clear_google_source_backoff(self, domain_key: str) -> None:
+        """Let the background ingestors retry immediately after credentials change."""
+        now = datetime.now(UTC).isoformat()
+        for prefix in ("gmail_trigger_cursor:", "calendar_trigger_cursor:"):
+            setting = self.session.get(RuntimeSetting, f"{prefix}{domain_key}")
+            if setting is None:
+                continue
+            setting.value = {
+                **dict(setting.value or {}),
+                "status": "reauthorizing",
+                "last_error": None,
+                "error_count": 0,
+                "auth_required": False,
+                "next_retry_at": None,
+                "credentials_updated_at": now,
+            }
 
 
 def _state_key(state: str) -> str:

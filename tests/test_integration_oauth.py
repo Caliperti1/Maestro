@@ -52,6 +52,22 @@ def test_google_one_click_connection_encrypts_and_runtime_can_use_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed_default_domains(session)
+    session.add_all(
+        [
+            RuntimeSetting(
+                key=f"{prefix}personal",
+                value={
+                    "status": "error",
+                    "last_error": "invalid_grant",
+                    "error_count": 3,
+                    "auth_required": True,
+                    "next_retry_at": "2099-01-01T00:00:00+00:00",
+                },
+            )
+            for prefix in ("gmail_trigger_cursor:", "calendar_trigger_cursor:")
+        ]
+    )
+    session.commit()
     settings = _settings()
     service = IntegrationOAuthService(
         session,
@@ -125,6 +141,11 @@ def test_google_one_click_connection_encrypts_and_runtime_can_use_credentials(
         if item.domain_key == "personal" and item.tool_key == "google"
     )
     assert listed.config["oauth_credential_ciphertext"] == "********"
+    for prefix in ("gmail_trigger_cursor:", "calendar_trigger_cursor:"):
+        cursor = session.get(RuntimeSetting, f"{prefix}personal")
+        assert cursor.value["status"] == "reauthorizing"
+        assert cursor.value["next_retry_at"] is None
+        assert cursor.value["auth_required"] is False
 
 
 def test_github_one_click_connection_supplies_token_to_existing_runtime(
